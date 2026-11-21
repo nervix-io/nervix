@@ -281,6 +281,7 @@ pub fn expression_to_plexus(
                 FieldScope::Payload => Some("payload".to_string()),
                 FieldScope::PartialOutput => Some("partial_output".to_string()),
                 FieldScope::Error => Some("error".to_string()),
+                FieldScope::Node => Some(crate::NODE_SCOPE.to_string()),
             };
             let field = reference.field.as_str();
             Ok(match prefix {
@@ -844,7 +845,10 @@ impl Statement {
                     string_literal(&timestamp.as_datetime().to_rfc3339())
                 ),
             }),
-            Self::StopDomain(_) => Ok("STOP;".to_string()),
+            Self::StopDomain(stop) => Ok(match stop.wait_limit {
+                None => "STOP;".to_string(),
+                Some(limit) => format!("STOP {};", wait_limit_clause(limit)),
+            }),
             Self::AlterSchema(alter) => alter.to_canonical_plexus(),
             Self::AlterWireJsonSchema(alter) => alter_json_wire_schema_to_canonical_plexus(alter),
             Self::AlterWireCborSchema(alter) => alter_cbor_wire_schema_to_canonical_plexus(alter),
@@ -1009,6 +1013,17 @@ impl Statement {
                 show.format,
             ),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
+            Self::ShowNodes(show) => {
+                let mut text = "SHOW NODES".to_string();
+                if let Some(selector) = &show.selector {
+                    text.push_str(" WHERE ");
+                    text.push_str(&expression_to_plexus(selector)?);
+                }
+                text.push_str(" FORMAT ");
+                text.push_str(show.format.as_ref());
+                text.push(';');
+                Ok(text)
+            }
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ActivateLicense(activate) => {
                 let kind = match activate.kind {
@@ -3654,6 +3669,18 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
         Ok(rendered)
     } else {
         Ok(format!("{rendered}.0"))
+    }
+}
+
+/// Renders a wait limit as the clause that reads back to it.
+pub(crate) fn wait_limit_clause(limit: crate::WaitLimit) -> String {
+    match limit {
+        crate::WaitLimit::Enforce { after } => {
+            format!("ENFORCE AFTER {}", duration_literal(after.as_nanos()))
+        }
+        crate::WaitLimit::Cancel { after } => {
+            format!("CANCEL AFTER {}", duration_literal(after.as_nanos()))
+        }
     }
 }
 

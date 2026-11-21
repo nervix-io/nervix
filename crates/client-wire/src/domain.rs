@@ -19,7 +19,7 @@ use crate::{
     wire,
 };
 
-wire_enum!(ALL_DOMAIN_STATUSES: DomainStatus => wire::DomainStatus { Stopped, Running, Paused });
+wire_enum!(ALL_DOMAIN_STATUSES: DomainStatus => wire::DomainStatus { Stopped, Running, Paused, Stopping });
 
 /// One domain as the cluster currently describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]

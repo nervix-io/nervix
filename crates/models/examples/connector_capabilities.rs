@@ -289,6 +289,7 @@ fn buffer_bound(bound: BufferBound) -> String {
         BufferCapacity::Items { count, unit } => format!("at most {count} {unit}"),
         BufferCapacity::Bytes(bytes) => format!("at most {bytes} bytes"),
         BufferCapacity::Setting(setting) => format!("set by {setting}"),
+        BufferCapacity::NodeSetting(setting) => format!("set by node setting `--{setting}`"),
         BufferCapacity::Driver(default) => format!("driver default, {default}"),
     };
     let overflow = match overflow {
@@ -303,10 +304,15 @@ fn buffer_bound(bound: BufferBound) -> String {
         BufferOverflow::RefuseRequest => {
             "when full, immediately refuses the request for its sender to retry"
         }
+        BufferOverflow::RefuseOversized => {
+            "when exceeded, refuses the request as too large; the same request sent again is \
+             refused again"
+        }
         BufferOverflow::FailPoll => "when exceeded, fails the poll; the next poll reads again",
         BufferOverflow::FailRead => {
             "when exceeded, fails the read and reconnects on the retry policy"
         }
+        BufferOverflow::CloseSession => "when exceeded, closes only that peer's session",
     };
     format!("{capacity}; {overflow}")
 }
@@ -327,6 +333,9 @@ fn wait_bound(bound: WaitBound) -> String {
         WaitBound::Clause(clause) => format!("`{clause}`"),
         WaitBound::ClientKey { key, rule } => format!("client key `{key}`; {rule}"),
         WaitBound::Fixed(bound) => format!("fixed {}", humantime::format_duration(bound)),
+        WaitBound::NodeSetting { setting, expiry } => {
+            format!("node setting `--{setting}`; at the bound, {expiry}")
+        }
         WaitBound::Driver(default) => format!("driver default, {default}"),
         WaitBound::Unbounded => "unbounded".to_owned(),
     }

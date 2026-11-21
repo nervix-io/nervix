@@ -34,37 +34,28 @@ impl ForcedRuntimeStateRecoveryAuthorization {
             ));
         }
 
-        match transition.state_recovery {
-            OwnershipStateRecoveryOutcome::Complete => {
-                if reset_components.is_empty() {
-                    Ok(None)
-                } else {
-                    Err(Report::new(
-                        RuntimePersistenceError::InvalidForcedRecoveryDecision,
-                    ))
-                }
+        let allows_empty_inventory = match transition.state_recovery {
+            OwnershipStateRecoveryOutcome::Complete if reset_components.is_empty() => {
+                return Ok(None);
             }
-            OwnershipStateRecoveryOutcome::Unverified => {
-                if reset_components.is_empty() {
-                    Ok(Some(Self::PreparedCheckpoints))
-                } else {
-                    Err(Report::new(
-                        RuntimePersistenceError::InvalidForcedRecoveryDecision,
-                    ))
-                }
+            OwnershipStateRecoveryOutcome::Unverified if reset_components.is_empty() => {
+                expected.is_empty()
             }
-            OwnershipStateRecoveryOutcome::Reset => {
-                if reset_components.is_empty() && !expected.is_empty() {
-                    return Err(Report::new(
-                        RuntimePersistenceError::InvalidForcedRecoveryDecision,
-                    ));
-                }
-                if reset_components == expected {
-                    Ok(Some(Self::RecreateState))
-                } else {
-                    Ok(Some(Self::PreparedCheckpoints))
-                }
+            OwnershipStateRecoveryOutcome::Reset
+                if !reset_components.is_empty() || expected.is_empty() =>
+            {
+                reset_components == expected
             }
-        }
+            _ => {
+                return Err(Report::new(
+                    RuntimePersistenceError::InvalidForcedRecoveryDecision,
+                ));
+            }
+        };
+        Ok(Some(if allows_empty_inventory {
+            Self::AllowEmptyInventory
+        } else {
+            Self::PreparedCheckpoints
+        }))
     }
 }

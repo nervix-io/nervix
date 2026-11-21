@@ -289,6 +289,7 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
+          sudo apt-get update --allow-releaseinfo-change
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
@@ -306,7 +307,7 @@ jobs:
 
       - name: Install benchmark build dependencies
         run: |
-          sudo apt-get update
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install --yes --no-install-recommends \
             libcurl4-openssl-dev \
             protobuf-compiler
@@ -762,7 +763,7 @@ jobs:
 
       - name: Install Pandoc and PDF engine
         run: |
-          sudo apt-get update
+          sudo apt-get update --allow-releaseinfo-change
           sudo apt-get install --yes --no-install-recommends \
             fonts-noto-cjk \
             fonts-noto-core \

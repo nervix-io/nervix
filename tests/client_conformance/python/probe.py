@@ -1144,15 +1144,20 @@ def run_upload(session, report):
 def run_inspection(session, report):
     import gc
 
+    nodes = execute(session, "SHOW NODES WHERE node.name = 'node-1';").node_inspection
+    assert isinstance(nodes, nx.NodeInspection) and nodes.names == ["node-1"]
+    row, = json.loads(nodes.json)["nodes"]
+    assert row["name"] == "node-1" and row["record"]["properties"]["architecture"]
+    report("INSPECTION nodes names=node-1")
     license_outcome = execute(session, "DESCRIBE LICENSE;")
     license = license_outcome.state_inspection
     assert license is not None and license.domain is None and license.entity_name is None
-    assert license.entity_kind == "LICENSE" and license.counts.rows == 3 and license.counts.branches == 0
+    assert license.entity_kind == "LICENSE" and license.counts.rows == 4 and license.counts.branches == 0
     assert len(license.units) == 1
-    assert [part.name for part in license.units[0].sections] == ["summary", "quotas", "transitions"]
-    transitions = license.units[0].sections[2]
+    assert [part.name for part in license.units[0].sections] == ["summary", "quotas", "capabilities", "transitions"]
+    transitions = license.units[0].sections[3]
     assert transitions.frames == [] and transitions.omitted_rows == 0
-    report("INSPECTION license rows=3")
+    report("INSPECTION license rows=4")
     outcome = execute(session, "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;")
     inspection = outcome.state_inspection
     assert inspection is not None

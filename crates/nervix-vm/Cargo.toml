@@ -57,6 +57,7 @@ xxhash-rust = { workspace = true }
 bolero = { workspace = true }
 criterion = { workspace = true }
 fastrand = { workspace = true }
+nervix-arbitrary = { workspace = true }
 nervix-plexus = { workspace = true }
 nonzero_ext = { workspace = true }
 rstest = { workspace = true }

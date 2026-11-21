@@ -74,12 +74,17 @@ conversion outcomes; their callers establish the operation report when a whole b
 fails. [Errors And Diagnostics](errors-and-diagnostics.md) owns those compiler contracts.
 
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
-builtin spellings, including datetime names and accepted aliases. That list excludes injected
-calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation
+builtin spellings, including the list families, datetime names and accepted aliases. That list
+excludes injected calls and `write_header`. VM lowering and registry validation
 still decide whether a call is valid for its arguments. The parser carries the ingestor or emitter kind
 with header-function expectations. The resolver adds `read_header` and `read_headers` only for a
 ingestor that can read headers, and `write_header` only for an emitter that can write them. UDF candidates
-come from the selected domain's Models after the session's queued transaction changes.
+come from the selected domain's Models after the session's queued transaction changes. In a window
+route's `SET` value, the parser carries the window's `WIDTH` and `MAX STATE SIZE` and the builtin
+calls the position is written inside. The resolver adds each collection aggregate whose
+`WindowCollectionBound` the window declares, spelled as the `WindowAggregateFunction` declaration
+spells it, unless one of those calls is itself a window aggregate, whose argument admits none.
+Registry validation refuses an undeclared bound through the same `WindowCollectionBound`.
 
 Registry planning converts the validated scheduled Models into typed processor specifications.
 Before a node revision is installed, runtime plan binding lowers every processor expression against
@@ -1106,6 +1111,18 @@ The reference owns each family's contract. These notes describe its implementati
 
 ## Context, Determinism, And Extension Boundaries
 
+### Node Selectors
+
+The node selector uses the shared semantic compiler with the vocabulary's fixed `node` schema.
+The frontend exposes that scope and `tag` in selector expressions. It resolves each literal tag
+key to a nullable string column filled from the committed node records. Pure, immutable builtins
+and ordinary constant folding apply. The selector's scalar result must be Boolean.
+
+A selector evaluates one typed batch whose rows keep the decisions layer's order of node names.
+Only a successful true result includes a node. The VM preserves error indices from the original
+batch so the caller can identify the node whose predicate failed. See
+[Selecting nodes](placement.md#selecting-nodes).
+
 ### Domain Time
 
 The one timestamp an execution sees is `ExecutionContext::now`. The host takes it from the
@@ -1208,8 +1225,9 @@ and diagnostics.
   scalar operand.
 
 Registry validation compiles the same route with the same compiler when the processor is applied.
-It also rejects arguments containing `BYTES`, checks the sketch budget, and requires a message
-`WIDTH` or `MAX STATE SIZE` for `COLLECT_VEC`. Collection refuses a nullable argument with a typed
+It also rejects arguments containing `BYTES`, checks the sketch budget, and requires the bound the
+declaration's `WindowCollectionBound` names for each collection: a message `WIDTH` or
+`MAX STATE SIZE` for `COLLECT_VEC`, and a count-only `WIDTH` for `COLLECT_ARRAY`. Collection refuses a nullable argument with a typed
 route error and a `coalesce` instruction. `COLLECT_VEC` injects a required `VEC` whose non-null
 item has the argument's exact type, including a nested array or vector. For `COLLECT_ARRAY`, the
 vocabulary projects a positive message width only from a count-only bound. Validation refuses
@@ -1255,36 +1273,6 @@ For each batch, the task works through these steps:
 
 Tumbling and sliding windows use this same path, with different `WIDTH` and `STEP`.
 
-Collection captures immutable Arrow row addresses cooperatively. It first checks cumulative string and nested
-list offsets and reserves the complete gather payload and metadata together from relay memory;
-no queued gather holds a partial grant while asking for the rest. The bounded data worker sorts
-addresses by the same `(timestamp, sequence)` key that `FIRST` and `LAST` use and copies contiguous
-runs directly from their Arrow columns, with exact selected child capacities so an empty vector
-cannot reserve its fixed element width in absent children. It does not materialize a scalar value
-for each row.
-Gathering checks cancellation between runs and preserves nested types and floating-point bits.
-Accepted retained work waits for a worker place under the branch task's existing lifetime.
-
-The fixed form checks the retained count against its compiled width before capturing or charging
-the gather. Both forms gather the same child column; only the final Arrow container differs.
-The vector adds two offsets, while the fixed array has no outer offset buffer. Neither form adds
-an accumulator, retained column, snapshot field or publication protocol.
-
-Before a collection route publishes, its final output is checked against the relay decoded limit
-and qualified by the bounded IPC encoder against the encoded limit. That qualification has a cost
-separate from destination encoding; `window_collection` benchmarks the complete route emission,
-including this check. A typed build, admission or size failure reaches the existing window
-emission-failure owner: every retained acknowledgement fails, the window clears, and earlier
-routes keep their output. Snapshots and archives still carry only the existing input and evaluated
-argument columns; restore rebuilds the shared sequence from those rows.
-
-The relay IPC limit is also the interconnect relay payload limit; stream metadata is carried
-separately. A session subscription has its own negotiated row/frame contract. Its row encoder
-reports `RowsSkippedCause::EncodingFailed` when a row cannot fit that client's limits, rather than
-passing an oversized frame to the transport. That consumer-specific contract does not change a
-window's relay emission or couple branch execution to a subscribing client's settings.
-
-
 | Structure | Functions | Algorithm | Retraction when the window steps |
 | --- | --- | --- | --- |
 | `counter` | `COUNT` | Exact 64-bit count | Subtract |
@@ -1314,6 +1302,66 @@ constant cost per row.
 Run boundaries and SIMD lane order determine the association of floating-point additions and Chan
 merges. Their results are associative up to floating-point rounding and can differ slightly when
 batching changes. Integer sums and counts remain bit-identical regardless of run boundaries.
+
+### Retained Sequences
+
+A relay carries a record as one unit. Batches group records for execution and can be split by
+buffering, transport or routing. A window therefore emits its sequence in one `ARRAY` or `VEC`
+field of one record, so every value travels with the rest of that sequence.
+
+The window already owns retention, step decisions and durable state for its branch. A generator
+samples the latest materialized record at each occurrence. Accumulating samples in the generator
+would require another owner for retention and its recovery. A count window fills after the
+configured number of samples arrives. If the generator coalesces a missed occurrence, that same
+count can span more domain time. A generator can record `now()` with each sample so a collecting
+window can carry the timestamps beside the values and downstream code can observe the gaps.
+A series of per-interval totals, including intervals with no input, would need a window that
+emits for every interval. Sampling a materialized aggregate can repeat the last available value
+across several generator occurrences. [Generators quickstart](quickstart-generators.md#collect-samples-for-a-fixed-tensor).
+
+Both collection aggregates use the `sequence` storage kind. The planner shares an argument
+evaluation and demand with `FIRST` and `LAST` when the argument is identical within a route.
+The endpoint calls read a single endpoint. A collection gathers every retained argument in
+low-watermark order, with the admission sequence breaking ties. A `COLLECT_VEC` result keeps its
+variable-length type for every supported bound. The count-only width of `COLLECT_ARRAY` supplies
+its outer dimension, with the full argument type inside it. Shaping or explicitly converting
+the resulting list happens in an expression. Nervix's inferencer binds required `F32` tensors,
+with fixed axes mapped to the corresponding fixed dimensions. [Inferencer](processors.md#inferencer).
+
+`CollectedSequence` measures selected Arrow slices and reserves their complete gather payload
+and metadata together from relay memory. It captures immutable row addresses cooperatively
+and waits for a place on the bounded data workers under the branch task's lifetime. The worker
+sorts the addresses by `(timestamp, sequence)`, gathers consecutive runs from their Arrow columns
+and checks cancellation between runs. Exact child capacities keep a selected empty vector from
+allocating space for absent values. The gather preserves nested types and floating-point bits.
+The fixed form checks the retained count against its compiled width before capture and charging.
+Both forms gather the same child column. The vector adds two outer offsets, and the fixed array
+uses a fixed-size Arrow list.
+
+| Boundary | Owner and bound |
+| --- | --- |
+| Retained rows and bytes | The declared window `WIDTH` and `WindowStateLimit` govern retention. `WindowProcessorState::check_admission` charges retained storage against `MAX STATE SIZE` when present. |
+| Fixed shape | Arrow's `i32::MAX` bounds each fixed width and the product of the necessarily present consecutive fixed levels in a fixed collection. `ArrayDimensions` checks the positive literal widths and addressable product of a reshape, which must equal the input element count. Flattening two fixed levels checks their product against the same fixed-width limit. |
+| Collected values | `CollectedSequence` requires the retained count to fit `i32`. During measurement, `SelectionShape` checks cumulative string bytes and variable-list offsets at each represented level against `i32::MAX`. Child capacities and byte charges use checked arithmetic. |
+| List statistic arguments | `ListPercentile` accepts literal percentiles in the inclusive range 0–100. Numeric elements and results follow the exact type and finite-result rules of the respective list functions. |
+| Expression execution and gather admission | `VmInlineRowLimit` defaults to 1,024 rows for inline VM execution. The gather reserves from `RelayMemory` and runs in the executor's data class, whose queue is bounded by `DataCpuPendingJobs`. |
+| Emitted batch | `RelayDecodedBytes` bounds the final decoded output. A bounded Arrow IPC writer applies `RelayEncodedBytes`. Both defaults take a sixth of the resolved relay memory, capped at 32 MiB. [Node Settings](node-settings.md#execution-capabilities). |
+
+The `window_collection` benchmark measures full emission, including IPC size qualification.
+A typed gather, admission or output-size failure uses the window emission failure path. It fails
+every retained acknowledgement and clears the window. Routes that already emitted keep their
+output. A session subscription independently checks its negotiated row and frame limits, and
+reports `RowsSkippedCause::EncodingFailed` if a qualifying relay record cannot fit them.
+
+Collection derives its output from the same retained input and evaluated argument columns the
+window already publishes. Those columns, their watermarks and admission order are sufficient to
+rebuild the sequence. The snapshot and archive require no collection-specific state or field.
+The Sequence Values recovery scenarios check exact scalar, vector and nested fixed outputs across
+stop and start, restart, handoff, replica promotion and backup restore, and verify the empty
+window after a restore without state. The partition simulation checks the collected values
+through owner replacement, and the external stateful chaos verifier checks the order of both
+list containers through recovery. [Sequence Values 07](https://app.clickup.com/t/86bd0xgrg),
+[recovery scenarios](https://github.com/nervix-io/nervix/blob/main/tests/features/cluster/window_collection_recovery.feature).
 
 ### Sketch Panes, Merge, And Expiry
 
@@ -1496,10 +1544,13 @@ Treat this as the checklist for a new builtin, or for a new family.
    - a public Cucumber scenario outline on one and three nodes that proves values and failures
      through a graph and a session subscription, run with `just test-scenarios --input <feature>`
    - a row in the [qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/vm-function-qualification.md)
-   - for a kernel with an independent reference, a registered Bolero property over its column
-     kernel, as `round(value, digits)` has in `vm-decimal-rounding-floats` and
-     `vm-decimal-rounding-integers`; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
-   - window structures also need interleaved branches, eviction, and snapshot restore
+   - a registered Bolero property over the production kernel's invariant, using the complete
+     outcome of an independent reference where available, as `round(value, digits)` has in
+     `vm-decimal-rounding-floats` and `vm-decimal-rounding-integers`.
+     [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
+   - for a window aggregate, interleaved branches and eviction, its structure in
+     `DESCRIBE WINDOW PROCESSOR`, evaluated argument columns in `SHOW WINDOW PROCESSOR STATE`,
+     and snapshot and archive coverage
 10. **Measure it.** Add a Criterion case to `crates/nervix-vm/benches/vm.rs` or its workload
     shapes, and run it with `just bench-vm`. Use `just bench-vm-alloc` for allocation evidence, and
     the serialized `just benchmark-ab` for any end-to-end claim.

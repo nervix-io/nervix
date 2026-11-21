@@ -419,6 +419,11 @@ test-window-collection-arrays *args: build-deps build-plexus-format build-test-c
 test-reference-completion *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_reference_completion{,}.feature") }} {{ quote(args) }}
 
+# Complete the collection aggregates of window routes through the public CLI, against each window
+# bound and expression position.
+test-window-collection-completion *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/tools/cli_window_collection_completion{,}.feature") }} {{ quote(args) }}
+
 # Observe released and installed processor keys through bounded public inspection pages.
 test-partition-state-inspection *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/partition_state_inspection{,}.feature") }} {{ quote(args) }}
@@ -667,6 +672,13 @@ test-licensing-expiry *args: build-deps build-plexus-format build-test-cli build
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/ephemeral_expiry{,}.feature") }} {{ quote(args) }}
 
+# DESCRIBE LICENSE lists every catalog capability; a license can enable licensing.dummy.
+test-licensing-capabilities *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/capabilities{,}.feature") }} {{ quote(args) }}
+
 # Verify a maintained SSE parser source tree with its dependency-owner regressions.
 test-licensing-parser-source source *args:
     cargo test --manifest-path {{ quote(source / "Cargo.toml") }} --lib {{ quote(args) }}
@@ -689,6 +701,14 @@ test-cluster-identity *args: build-deps build-plexus-format build-test-cli build
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     # Absolute globs keep Cucumber's file walk within the feature directory.
     cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/runtime/cluster_identity*.feature" {{ quote(args) }}
+
+# Node prerequisite scenarios: join refusals and the leader's judgment of every run, including the
+# refusals it keeps while a stopped run stays in gossip, on native nodes and the session client.
+test-node-prerequisites *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input "$(pwd)/tests/features/cluster/node_prerequisites.feature" {{ quote(args) }}
 
 # Verify infrastructure capacities and derived liveness through native nodes and public clients.
 test-infrastructure-settings *args: build-deps build-plexus-format build-test-cli build-deadlock-report
@@ -1465,6 +1485,11 @@ coverage-partitioning output *args: download-onnxruntime
 # compiler cache.
 coverage-client-core output *args:
     cargo llvm-cov --no-clean --package nervix-client-core --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure the session wire codec's unit tests and the gRPC and WebSocket sessions that carry its
+# frames, for a patch confined to it, through the configured compiler cache.
+coverage-client-wire output *args:
+    cargo llvm-cov --no-clean --package nervix-client-wire --all-features --all-targets --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure selected console request-owner regressions without running unrelated browser tests.
 coverage-web-console output *args:
@@ -3902,6 +3927,10 @@ bench-admitted-work-executable executable *args:
 bench-inferencer *args: build-web-console download-onnxruntime generate-test-onnx
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo bench --package nervix-server --bench inferencer --features benchmarks -- {{ args }}
 
+# Compare one running-sum ONNX model with and without STATE on one and three loopback nodes.
+bench-inferencer-state-cluster: build-deps
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "benches/inferencer-state.feature") }} --concurrency 1 --retry 0 --suite-budget 15m
+
 # Measure retained full emitter flushes; every iteration checks the delivered-row count.
 bench-emitter-flush *args: build-web-console
     cargo bench --package nervix-server --bench emitter_flush --features benchmarks -- {{ quote(args) }}
@@ -5514,6 +5543,11 @@ test-chaos-correctness-harness:
 # alteration answer and the node logs without the other external harness checks.
 test-chaos-alteration-handover:
     exec bash scripts/chaos/tests/alteration-handover-self-test.sh
+
+# Run the graceful-stop option checks, its fixture generator and its STOP answer verdict without the
+# other external harness checks.
+test-chaos-graceful-stop:
+    exec bash scripts/chaos/tests/graceful-stop-self-test.sh
 
 # Retain shell coverage of the lifetimes verifier controls.
 coverage-chaos-lifetimes-verifiers:

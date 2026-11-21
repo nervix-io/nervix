@@ -414,10 +414,11 @@ reassignment rebinds the replicated state of every node it names, so a Kafka ing
 takes the originator its domain offsets' new binding issued: a change that only replaces a replica
 of those offsets never refuses the ingestor's commits. An ingestor instance the schedule stopped
 keeps the originator it last held, which every later binding refuses. An ingestor whose instance layout
-changes, such as an `INSTANCES` alteration of a domain-offset Kafka ingestor, rebinds every unit,
-those whose owner stays included: the planned handoff captured each unit's offsets, and only a new
-binding issues their originator again, so every unit reads under the new layout with authority
-over its offsets.
+changes, such as an `INSTANCES` alteration of a domain-offset Kafka ingestor, retires the placement
+tasks of every unit it had, those a shrink removes included, and rebinds every unit it has, those
+whose owner stays included: the planned handoff captured each unit's offsets, and only a new binding
+issues their originator again, so every unit reads under the new layout with authority over its
+offsets.
 
 The affected relay gates remain closed through publication. An already buffered owner batch takes
 its permit before fan-out: it finishes under the prior consumer set if admitted before the fence,
@@ -545,8 +546,9 @@ after it starts the tasks. The restore installs every branch its lifecycle names
 task takes no input until it has; [Restoring Processor Branches](./shutdown.md#restoring-processor-branches)
 owns its retry and its failure semantics. A stopped domain reconstructs
 passive surfaces; a running or paused domain reconstructs the applicable execution and intake
-state. [Shutdown And Recovery](./shutdown.md) and [WASM State And Recovery](./wasm-state.md) own
-the detailed handoff, checkpoint, duplicate-window, and restart guarantees.
+state. [Shutdown And Recovery](./shutdown.md), [WASM State And Recovery](./wasm-state.md) and
+[Inferencer State And Recovery](./inferencer-state.md) own the detailed handoff, checkpoint,
+duplicate-window, and restart guarantees.
 
 An archive restore first publishes the restored models as a stopped domain and recomputes its
 schedule. Archived node assignments are never installation authority. The coordinator requires

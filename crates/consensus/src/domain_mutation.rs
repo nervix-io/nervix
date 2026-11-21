@@ -145,6 +145,9 @@ pub enum DomainMutationError {
         domain: DomainName,
         owner: DomainMutationOwner,
     },
+    /// A stopping domain admits no other mutation until its stop ends or is called off.
+    #[error("domain '{domain}' is stopping")]
+    Stopping { domain: DomainName },
 }
 
 impl DomainMutationAdmission {

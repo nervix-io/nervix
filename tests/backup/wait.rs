@@ -384,6 +384,12 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_c
     };
     first.gate.hold_each_cut_for(first.hold);
     let second = CaptureGate::of(world, "{{backup_base}}_b");
+    // The leader still serves the backup, so it would keep the client's wait alive with progress
+    // reports. Withholding them makes the leader silent, which is what ends a bounded wait; the
+    // recovery client hears them again.
+    let leader_node = crate::common::cluster::node_name(&leader);
+    let faults = world.fault_injection.clone();
+    faults.withhold_request_progress_on(leader_node.clone());
     let recovered = observe_off_the_runner(async move {
         let client = Client::connect_with_options(&uri, domain.clone(), options.clone())
             .await
@@ -432,6 +438,7 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_c
         );
 
         options.backup_wait_timeout = Duration::from_secs(60);
+        faults.restore_request_progress_on(&leader_node);
         let recovery_client = Client::connect_with_options(&uri, domain, options)
             .await
             .assured("a fresh native client connects for recovery");

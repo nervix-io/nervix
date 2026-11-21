@@ -105,7 +105,11 @@ Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
 call with all of its retries and redirects (120 seconds). `BACKUP` uses `backup_wait_timeout`
 instead for its command wait and reply (ten minutes), shared across every domain cut, redirect and
-reconnect. All deadline and retry-backoff durations must be between one millisecond and 24 hours. A call whose deadline passes before a
+reconnect. Every request asks the server for progress reports while it serves the request, and
+each report starts the request's and its call's deadlines again, so these deadlines bound how long a
+wait goes without its answer or a report rather than how long the command may run: a `STOP` that
+waits for the domain's work in motion is answered however long it takes. All deadline and
+retry-backoff durations must be between one millisecond and 24 hours. A call whose deadline passes before a
 command's outcome is known fails with `ClientError::UncertainCommand`, which names the execution
 reference. An `https://` server is verified only against `ca_certificate_pem`: the client loads no
 system roots, so a TLS connection needs the certificate authority that signed the server's
@@ -592,6 +596,15 @@ C and C++ endpoint accessors, credit and ownership are described in the
 [C and C++ Client Library](client-library-c.md#publish-through-a-client-ingestor).
 
 
+## Inspect Cluster Nodes
+
+Read `CommandOutcome::node_inspection` after `SHOW NODES` to get the typed result in either
+presentation format. Each row includes a `ClusterNodeName`, the four membership flags and an
+optional committed record. The record preserves exact tags and the typed detections, including
+reasons when a value is undetected. A selector that matches no nodes returns an empty report. A
+selector error on an individual node leaves its diagnostic on the outcome. See
+[Selecting nodes](placement.md#selecting-nodes).
+
 ## Transaction Handles And Attach
 
 `SHOW LABELS ON <entity> FORMAT TEXT|JSON` also returns
@@ -734,8 +747,10 @@ order. Each branch entry names its opaque fingerprint, absent for the unbranched
 carries its current-lifetime checkpoint, its recorded recovery, or both.
 
 `DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
-and summary/quota sections, including when no domain is selected. Match `StateInspectionEntity::DomainNode`
-to access the domain and graph-node reference of a materialized-state observation.
+and its `summary`, `quotas`, `capabilities` and `transitions` sections, including when no domain
+is selected.
+Match `StateInspectionEntity::DomainNode` to access the domain and graph-node reference of a
+materialized-state observation.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

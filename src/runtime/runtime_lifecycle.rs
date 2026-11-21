@@ -172,6 +172,7 @@ impl Runtime {
                 in_flight_by_domain: DashMap::default(),
                 in_flight_by_ingestor: DashMap::default(),
                 generator_activity_by_domain: DashMap::default(),
+                stop_ledgers: DashMap::default(),
                 emitter_buffers: DashMap::default(),
                 force_flush_by_domain: DashMap::default(),
                 node_quiesce_counters: DashMap::default(),
@@ -209,6 +210,7 @@ impl Runtime {
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
                 prepared_forced_runtime_state_recoveries: DashMap::default(),
+                rejected_forced_recovery_round: watch::channel((0, 0)).0,
                 prepared_runtime_state_snapshots: DashMap::default(),
                 relay_branch_presences: DashMap::default(),
                 partition_holdings: Default::default(),
@@ -688,6 +690,18 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_runtime_readiness_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        domains: &std::collections::BTreeMap<DomainName, nervix_models::DomainState>,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_runtime_readiness_if_armed(node_id, domains)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection
@@ -848,6 +862,19 @@ impl Runtime {
         execution: DomainExecution,
         emitter_finish_deadline: Instant,
     ) {
+        // An enforced stop ends the domain's tasks at once and leaves the last snapshot of every
+        // branch state as it was.
+        let enforced = self
+            .stop_teardown(domain)
+            .is_some_and(|teardown| teardown.enforced);
+        let emitter_finish_deadline = if enforced {
+            Instant::now()
+        } else {
+            emitter_finish_deadline
+        };
+        if enforced {
+            self.inner.state_snapshot_tasks.abandon_last_writes(domain);
+        }
         self.inner.endpoint_intake_routes.withdraw_domain(domain);
         for emitter_task in execution.emitter_tasks.values() {
             emitter_task.finish_by(emitter_finish_deadline);
@@ -958,6 +985,7 @@ impl Runtime {
             .state_snapshot_tasks
             .wait_for_domain(domain)
             .await;
+        self.inner.state_snapshot_tasks.keep_last_writes(domain);
         let quiesce_keys = self
             .inner
             .node_quiesce_counters
@@ -981,6 +1009,12 @@ impl Runtime {
         self.stop_message_error_routes_for_domain(domain).await;
         for services in execution.routing.relay_services.values() {
             services.retire_channels();
+        }
+        // The teardown of a stopped domain ended: every task ended, each emitter finished what its
+        // client held and the final snapshot is written. Only now does this node report what the
+        // stop cut, so the stop answers after every node's teardown.
+        if let Some(teardown) = self.stop_teardown(domain) {
+            self.complete_stop_ledger(domain, teardown);
         }
         if !self.inner.domains.contains_key(domain) {
             self.clear_runtime_state_for_domain(domain);

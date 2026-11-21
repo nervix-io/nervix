@@ -1221,12 +1221,13 @@ pub(in crate::runtime) struct ForcedRuntimeStateRecoveryIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum ForcedRuntimeStateRecoveryAuthorization {
     PreparedCheckpoints,
-    RecreateState,
+    /// The node owns zero checkpoint components or the schedule authorizes recreating them all.
+    AllowEmptyInventory,
 }
 
 impl ForcedRuntimeStateRecoveryAuthorization {
-    pub(in crate::runtime) fn recreates_without_preparation(self) -> bool {
-        self == Self::RecreateState
+    pub(in crate::runtime) fn allows_empty_inventory(self) -> bool {
+        self == Self::AllowEmptyInventory
     }
 }
 
@@ -1608,7 +1609,7 @@ impl RuntimeStateStore {
         })
     }
 
-    fn encode_forced_recovery_preparation(
+    pub(in crate::runtime) fn encode_forced_recovery_preparation(
         transition: &ForcedRuntimeStateRecoveryTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<Vec<u8>, Report<RuntimePersistenceError>> {
@@ -1732,11 +1733,11 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    pub(in crate::runtime) fn persist_forced_recovery_preparation(
+    pub(in crate::runtime) fn write_forced_recovery_preparation(
         &self,
         transition: &ForcedRuntimeStateRecoveryTransition<'_>,
-        checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
-    ) -> Result<(), Report<RuntimePersistenceError>> {
+        encoded: Vec<u8>,
+    ) -> Result<bool, Report<RuntimePersistenceError>> {
         let key = Self::forced_recovery_key(
             &transition.entity.domain,
             transition.entity.kind(),
@@ -1752,19 +1753,95 @@ impl RuntimeStateStore {
         {
             let completed = Self::decode_forced_recovery_completion(raw.as_ref())?;
             if completed.matches(transition) {
-                return Ok(());
+                return Ok(false);
             }
         }
-        let encoded = Self::encode_forced_recovery_preparation(transition, checkpoints)?;
         let mut batch = self.db.batch();
         batch.remove(&self.forced_recovery_completions, key.clone());
         batch.insert(&self.forced_recovery_preparations, key, encoded);
         batch.commit().map_err(|cause| {
             Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
         })?;
-        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
-            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
-        })?;
+        Ok(true)
+    }
+
+    pub(in crate::runtime) fn synchronize_forced_recovery(
+        &self,
+    ) -> Result<(), Report<RuntimePersistenceError>> {
+        self.db
+            .persist(PersistMode::SyncAll)
+            .change_context(RuntimePersistenceError::WriteValue)
+    }
+
+    #[cfg(test)]
+    pub(in crate::runtime) fn persist_forced_recovery_preparation(
+        &self,
+        transition: &ForcedRuntimeStateRecoveryTransition<'_>,
+        checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
+    ) -> Result<(), Report<RuntimePersistenceError>> {
+        let encoded = Self::encode_forced_recovery_preparation(transition, checkpoints)?;
+        if self.write_forced_recovery_preparation(transition, encoded)? {
+            self.synchronize_forced_recovery()?;
+        }
+        Ok(())
+    }
+
+    /// The runtime holds the unit's preparation slot while comparing and removing its record.
+    /// Only staging data for this exact attempt is removed. A different preparation and all
+    /// activated state and completion receipts remain available.
+    pub(in crate::runtime) fn delete_forced_recovery_preparation(
+        &self,
+        transition: &ForcedRuntimeStateRecoveryTransition<'_>,
+    ) -> Result<bool, Report<RuntimePersistenceError>> {
+        let key = Self::forced_recovery_key(
+            &transition.entity.domain,
+            transition.entity.kind(),
+            transition.entity.identifier(),
+            transition.unit,
+        );
+        let raw = self
+            .forced_recovery_preparations
+            .get(&key)
+            .change_context(RuntimePersistenceError::ReadValue)?;
+        if let Some(raw) = raw {
+            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
+            aligned.extend_from_slice(&raw);
+            let prepared = rkyv::access::<
+                ArchivedStoredForcedRecoveryPreparation,
+                rkyv::rancor::Error,
+            >(&aligned)
+            .change_context(RuntimePersistenceError::DecodeState)?;
+            let recovery = rkyv::deserialize::<
+                ForcedRuntimeStateRecoveryIdentity,
+                rkyv::rancor::Error,
+            >(&prepared.recovery)
+            .change_context(RuntimePersistenceError::DecodeState)?;
+            let incarnation = rkyv::deserialize::<ClusterNodeIncarnation, rkyv::rancor::Error>(
+                &prepared.destination_incarnation,
+            )
+            .change_context(RuntimePersistenceError::DecodeState)?;
+            if !recovery.matches(transition)
+                || incarnation != transition.destination_incarnation
+                || prepared.target_schedule_fingerprint != transition.target_schedule_fingerprint
+            {
+                return Ok(false);
+            }
+            self.forced_recovery_preparations
+                .remove(key)
+                .change_context(RuntimePersistenceError::WriteValue)?;
+        }
+        // Absence can also be the retry of a delete that wrote but did not synchronize.
+        Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(in crate::runtime) fn discard_forced_recovery_preparation(
+        &self,
+        transition: &ForcedRuntimeStateRecoveryTransition<'_>,
+    ) -> Result<(), Report<RuntimePersistenceError>> {
+        if self.delete_forced_recovery_preparation(transition)? {
+            self.synchronize_forced_recovery()?;
+        }
         Ok(())
     }
 
@@ -1809,7 +1886,7 @@ impl RuntimeStateStore {
                 let prepared = Self::decode_forced_recovery_preparation(prepared.as_ref())?;
                 if prepared.accepts(transition) {
                     prepared.checkpoints
-                } else if authorization.recreates_without_preparation() {
+                } else if authorization.allows_empty_inventory() {
                     Vec::new()
                 } else {
                     return Err(Report::new(
@@ -1817,7 +1894,7 @@ impl RuntimeStateStore {
                     ));
                 }
             }
-            None if authorization.recreates_without_preparation() => Vec::new(),
+            None if authorization.allows_empty_inventory() => Vec::new(),
             None => {
                 return Err(Report::new(
                     RuntimePersistenceError::MissingForcedRecoveryPreparation,

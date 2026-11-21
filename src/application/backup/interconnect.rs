@@ -41,8 +41,8 @@ use super::{
 use crate::{
     application::session_service::SessionServiceImpl,
     runtime::{
-        CapturedDomainState, CapturedMaterializedState, RestoredRuntimeState, StagedArtifact,
-        StagedSnapshotWriter,
+        CapturedDomainState, CapturedMaterializedState, RESTORE_STATE_CHUNK_BYTES,
+        RestoredRuntimeState, StagedArtifact, StagedSnapshotWriter,
     },
 };
 
@@ -62,6 +62,14 @@ pub(in crate::application) struct RestoreUploadStage {
     digest: [u8; 32],
     next_offset: u64,
     writer: Option<StagedSnapshotWriter>,
+}
+
+impl RestoreUploadStage {
+    /// Whether a chunk has a length the stage accepts: it carries bytes, and no more than one
+    /// persisted checkpoint segment, the size the restoring leader cuts its chunks at.
+    fn accepts_chunk_length(payload: &[u8]) -> bool {
+        !payload.is_empty() && payload.len() <= RESTORE_STATE_CHUNK_BYTES
+    }
 }
 
 use nervix_interconnect::backup::CapturedStateSectionKind;
@@ -649,7 +657,7 @@ impl SessionServiceImpl {
                     Ok(())
                 }
                 InstallRestoredStateAction::Chunk { offset, payload } => {
-                    if payload.is_empty() || payload.len() > 64 * 1024 {
+                    if !RestoreUploadStage::accepts_chunk_length(&payload) {
                         return Err(failed(
                             &request.domain,
                             "restored state chunk has an invalid length",
@@ -865,6 +873,15 @@ mod tests {
     use meticulous::ResultExt as _;
 
     use super::*;
+
+    #[test]
+    fn a_restored_state_chunk_one_byte_over_a_checkpoint_segment_is_refused() {
+        let one_segment = vec![1; RESTORE_STATE_CHUNK_BYTES];
+        let one_byte_over = vec![1; RESTORE_STATE_CHUNK_BYTES + 1];
+        assert!(RestoreUploadStage::accepts_chunk_length(&one_segment));
+        assert!(!RestoreUploadStage::accepts_chunk_length(&one_byte_over));
+        assert!(!RestoreUploadStage::accepts_chunk_length(&[]));
+    }
 
     #[test]
     fn a_capture_failure_keeps_its_typed_cause_until_the_wire_projection() {

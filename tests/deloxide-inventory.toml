@@ -851,6 +851,7 @@ tags = [
   "@execution_class_drain",
   "@kafka_start_generation",
   "@kafka_start_generation_restore",
+  "@kafka_allowance_rebalance",
   "@wasm_reset_authority_recovery",
   "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
@@ -4120,6 +4121,37 @@ workloads = [
 ]
 
 [[owner]]
+gap = "The listed workloads reach the call deadline's lock through every bounded call's wait, which reads the deadline whenever it wakes. A progress report restarts a deadline only once a request outlasts a quarter of its silence budget, which no lane workload does, so the restart's acquisition is exercised only by the client-core unit tests and Shuttle checks and by request_progress.feature, outside the lane."
+path = "crates/client-core/src/call_deadline.rs"
+workloads = [
+  "scenario.restore-attempt-history",
+  "stress.restore-attempt-history",
+  "stress.restore-attempt-history-restore",
+  "scenario.client-restore-reply-validation",
+  "stress.client-restore-reply-validation",
+  "stress.client-restore-reply-validation-restore",
+  "scenario.client-foreign-execution",
+  "stress.client-foreign-execution",
+  "scenario.client-reply-kind",
+  "stress.client-reply-kind",
+  "scenario.restore-codec-rejection",
+  "stress.restore-codec-rejection",
+  "stress.restore-codec-rejection-restore",
+  "paced.reopen-generation",
+  "paced.delayed-refusal",
+  "scenario.backup-lease-release-recovery",
+  "scenario.backup-native-recovery",
+  "scenario.backup-multi-domain-wait",
+  "scenario.client-wire-backup-outage",
+  "stress.paced.reopen-generation",
+  "stress.paced.delayed-refusal",
+  "stress.backup-lease-release-recovery",
+  "stress.backup-native-recovery",
+  "stress.backup-multi-domain-wait",
+  "stress.client-wire-backup-outage",
+]
+
+[[owner]]
 path = "crates/client-core/src/client.rs"
 workloads = [
   "scenario.restore-attempt-history",
@@ -4252,6 +4284,8 @@ workloads = [
 [[owner]]
 path = "crates/connectors/kafka/src/topic/ingestor_rejection.rs"
 workloads = [
+  "scenario.kafka-allowance-rebalance",
+  "stress.kafka-allowance-rebalance",
   "scenario.inherited-kafka-readers",
   "stress.inherited-kafka-readers",
   "scenario.inherited-growth",
@@ -4794,14 +4828,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4840,14 +4866,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4905,14 +4923,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4955,14 +4965,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -5036,14 +5038,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
   "scenario.websocket-declaration-buffer",
@@ -5326,14 +5320,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -6320,102 +6306,22 @@ selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-10"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-10"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-11"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-11"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-12"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-12"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-13"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-13"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
+examples = 4
 feature = "tests/features/runtime/ingestor_instances.feature"
 id = "scenario.ingestor-instance-14"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invariant = "Each global instance runs on its selected owner beside its relay partition, holds a consumer on exactly the partition topics dealt to it, and every record reaches its relay once."
 invocation = "scenarios"
-scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+scenario = "Pulsar <subscription_type> readers deal the partition topics of a hashed branch on <nodes> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
 coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
+examples = 4
 feature = "tests/features/runtime/ingestor_instances.feature"
 id = "stress.ingestor-instance-14"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invariant = "Each global instance runs on its selected owner beside its relay partition, holds a consumer on exactly the partition topics dealt to it, and every record reaches its relay once."
 invocation = "stress-scenarios"
-scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+scenario = "Pulsar <subscription_type> readers deal the partition topics of a hashed branch on <nodes> nodes"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -7239,6 +7145,26 @@ scenario = "A committed silence policy expires a lost forwarded acknowledgement 
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "A held consumer runs its assignment callback on a connector control worker and acquires the rejection-floor lock. Broker execution, async wakes and the connector's native control turn are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/ingestor_rate_limit.feature"
+id = "scenario.kafka-allowance-rebalance"
+invariant = "The held group member concedes and regains its partition during a rebalance, then admits the next unread record once when the allowance returns."
+invocation = "scenarios"
+scenario = "A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: a held consumer runs its assignment callback on a connector control worker and acquires the rejection-floor lock. Broker execution, async wakes and the connector's native control turn are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/ingestor_rate_limit.feature"
+id = "stress.kafka-allowance-rebalance"
+invariant = "The held group member concedes and regains its partition during a rebalance, then admits the next unread record once when the allowance returns."
+invocation = "stress-scenarios"
+scenario = "A rate-limited Kafka ingestor pauses a partition that leaves and returns during a hold"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Production source-instance lifecycle, branch runtime and ACK owners, schedule publication and native checkpoint transfer; restore additionally traverses captured materialized rows and epoch/provenance installation. Broker I/O, async observation and routing publications are outside detector evidence."
 examples = 6
 feature = "tests/features/runtime/inherited_partitions.feature"
@@ -7296,6 +7222,46 @@ id = "stress.inherited-growth"
 invariant = "The committed external layout and its exact-unit readers retain key identity, acknowledged native next offsets and state through lifecycle changes without a tracked deadlock."
 invocation = "stress-scenarios"
 scenario = "A growing Kafka topology preserves keyed state when a producer moves a key to a new shard"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production planned ownership handoff of a regrouped reader: concurrent per-move capture, preparation and confirmation, concurrent source reads of each preparation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-growth-slow-handoff-reads"
+invariant = "A growing topology's regrouping handoff finishes within one entity gate deadline while every checkpoint read is slow, and the new epoch's readers deliver once, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A growing Kafka topology is published within the entity gate deadline when every handoff checkpoint read is slow"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production planned ownership handoff of a regrouped reader: concurrent per-move capture, preparation and confirmation, concurrent source reads of each preparation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-growth-slow-handoff-reads"
+invariant = "A growing topology's regrouping handoff finishes within one entity gate deadline while every checkpoint read is slow, and the new epoch's readers deliver once, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A growing Kafka topology is published within the entity gate deadline when every handoff checkpoint read is slow"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Production planned ownership handoff of a regrouped reader that times out capturing, discards its attempt and releases its gate, then succeeds on a later attempt: concurrent per-move capture, preparation and confirmation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "scenario.inherited-growth-handoff-timeout-retry"
+invariant = "A regrouping handoff that times out discards its attempt and releases the readers, a later attempt publishes the growth, and every record is delivered once, without a tracked deadlock."
+invocation = "scenarios"
+scenario = "A growing Kafka topology whose handoff times out is published by a later attempt with every record delivered once"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Production planned ownership handoff of a regrouped reader that times out capturing, discards its attempt and releases its gate, then succeeds on a later attempt: concurrent per-move capture, preparation and confirmation, schedule publication and native checkpoint transfer. Broker I/O, async observation and routing publications are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/inherited_partitions.feature"
+id = "stress.inherited-growth-handoff-timeout-retry"
+invariant = "A regrouping handoff that times out discards its attempt and releases the readers, a later attempt publishes the growth, and every record is delivered once, without a tracked deadlock."
+invocation = "stress-scenarios"
+scenario = "A growing Kafka topology whose handoff times out is published by a later attempt with every record delivered once"
 selections = ["deloxide-stress"]
 
 [[workload]]

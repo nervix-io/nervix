@@ -68,6 +68,7 @@ mod entity_drain_tests;
 mod entity_swap;
 mod execution;
 mod explicit_commit;
+mod forced_recovery;
 mod handoff_gate_link;
 mod interest_visibility;
 mod licensing;
@@ -79,6 +80,7 @@ mod materialized_fetch_hold;
 mod materialized_reads;
 mod model_publication;
 mod orphaned_domain_pause;
+mod ownership_handoff_reads;
 mod pause;
 mod processor_flush;
 mod relay_memory;
@@ -86,6 +88,7 @@ mod relay_partition_fanout;
 mod relay_slicing;
 pub use relay_slicing::RelayCapabilityRefusal;
 mod relocation_commit;
+mod request_progress;
 mod resource_discovery;
 mod resource_publication;
 #[cfg(test)]
@@ -216,6 +219,8 @@ struct FaultInjectionState {
     /// One-shot, node-local refusals of the next subscription a node is asked to open, each removed
     /// when its node delivers it.
     refused_subscription_openings: DashMap<ClusterNodeName, (), RandomState>,
+    /// The nodes whose sessions withhold the progress reports of the requests they serve.
+    withheld_request_progress: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot, node-local clock attachment refusals, consumed by the next attach or cleared
     /// by the host test's teardown.
     refused_clock_attachments: DashMap<ClusterNodeName, (), RandomState>,
@@ -362,6 +367,8 @@ struct FaultInjectionState {
     /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
     /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
     owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
+    /// Every ownership handoff checkpoint read in a domain first waits this long.
+    ownership_handoff_checkpoint_read_delays: DashMap<String, Duration, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
     emitter_swap_after_detach_pauses:
         DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
@@ -372,6 +379,8 @@ struct FaultInjectionState {
     /// A destination pauses after making a handoff preparation durable but before returning its
     /// response, reproducing an ambiguous prepare RPC outcome.
     ownership_handoff_prepare_response_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    forced_recovery_pauses:
+        DashMap<DomainName, Arc<forced_recovery::ForcedRecoveryPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
@@ -552,6 +561,7 @@ impl Default for FaultInjection {
                 refused_runtime_installations: DashMap::default(),
                 refused_interest_visibility: DashMap::default(),
                 refused_subscription_openings: DashMap::default(),
+                withheld_request_progress: DashMap::default(),
                 refused_clock_attachments: DashMap::default(),
                 wasm_reset_publication_authority_losses: DashMap::default(),
                 failed_wasm_reset_publications: DashMap::default(),
@@ -604,10 +614,12 @@ impl Default for FaultInjection {
                 owner_relay_fanout_pauses: DashMap::default(),
                 owner_relay_partition_fanout_pauses: DashMap::default(),
                 owner_relay_fanout_delays: DashMap::default(),
+                ownership_handoff_checkpoint_read_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
+                forced_recovery_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
                 domain_clock_authority_proposal_rejections: DashMap::default(),
                 wasm_checkpoint_pauses: DashMap::default(),
@@ -896,6 +908,9 @@ impl FaultInjection {
         })?
     }
 
+    /// Gives back the observer `node` registered when it opened its consensus. A node gives its own
+    /// back once its consensus has stopped. The scenario harness gives back the one a node left
+    /// when its task panicked or was cancelled before that point.
     pub fn unregister_consensus(&self, node: &ClusterNodeName) {
         if let Some(mut state) = self.inner.consensus_probes.get_mut(node) {
             state.probe = None;

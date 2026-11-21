@@ -140,19 +140,22 @@ Feature: Web console Plexus REPL
   Scenario: Web console refuses a command past its outstanding requests and recovers once they complete
     Given a 1 node nervix cluster is started
     Then the current leader node is saved as placeholder "leader"
-    When the web console is opened on the leader node
+    When the web console is opened on the leader node with its request window observed
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     Given command response delivery on node "{{leader}}" pauses after execution
-    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA unselected_schema ( id I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
     Then the command response delivery pause on node "{{leader}}" is reached
-    When the web console submits "SHOW CLUSTER STATUS;" 256 times
+    When the web console submits "CREATE SCHEMA unselected_schema ( id I64 );" 256 times
     Then selector ".terminal" contains "256 requests are already outstanding in the console's session; this one was not sent"
     When the command response delivery pause on node "{{leader}}" is released
-    Then selector ".terminal" contains "[schedule]"
-    When selector ".prompt-row input" is filled with "LIST DOMAINS;"
+    Then selector ".terminal" contains "no active domain selected"
+    # The outstanding limit includes lookups. After these replies, the remaining
+    # one-line results cannot fill the retained history and erase the follow-up.
+    And the web console has received replies to at least 128 observed commands
+    When selector ".prompt-row input" is filled with "DESCRIBE CLUSTER;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "no domains registered"
+    Then selector ".terminal" contains "cluster uid:"
 
   @client_wire36
   Scenario: Web console completes its latest input after a full command request window drains
@@ -561,6 +564,30 @@ Feature: Web console Plexus REPL
     When selector ".prompt-row input" is filled with "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET va"
     Then selector ".suggestions" contains "value"
     And selector ".suggestions" does not contain "other_schema_field"
+
+  @window_collection_completion
+  Scenario: Web console completes the collection aggregates a window route's bound admits
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA reading ( device STRING, cpu F64 );
+      CREATE SCHEMA history ( cpu_values ARRAY<F64, 3> );
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY histories SCHEMA history UNBRANCHED;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = COLLECT_"
+    Then selector ".suggestions" contains "COLLECT_ARRAY"
+    And selector ".suggestions" contains "COLLECT_VEC"
+    When selector ".prompt-row input" is filled with "CREATE WINDOW PROCESSOR history FROM readings WIDTH 10s DURATION STEP 1s DURATION MAX STATE SIZE 1MiB UNBRANCHED TO histories SET cpu_values = COLLECT_"
+    Then selector ".suggestions" contains "COLLECT_VEC"
+    And selector ".suggestions" does not contain "COLLECT_ARRAY"
+    When selector ".prompt-row input" is filled with "CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = COLLECT_ARRAY(co"
+    Then selector ".suggestions" contains "coalesce"
+    And selector ".suggestions" does not contain "COLLECT_"
 
   @connector_completion
   Scenario: Web console offers header functions only where the transport supports headers

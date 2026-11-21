@@ -184,6 +184,45 @@ impl RelayAdmissions {
         );
     }
 
+    /// The relays that admitted a batch between `earlier` and this reading, as
+    /// [`relays_admitting_since`](Self::relays_admitting_since) counts them.
+    pub(super) fn relays_admitted_since(&self, earlier: &Self) -> Vec<DomainNodeRef> {
+        let mut admitted = Vec::new();
+        for (relay, reading) in &self.relays {
+            let unchanged = match earlier.relays.get(relay) {
+                Some(before) => {
+                    Arc::ptr_eq(&before.transit, &reading.transit)
+                        && before.admissions == reading.admissions
+                }
+                None => false,
+            };
+            if !unchanged {
+                admitted.push(relay.clone());
+            }
+        }
+        for relay in earlier.relays.keys() {
+            if !self.relays.contains_key(relay) {
+                admitted.push(relay.clone());
+            }
+        }
+        admitted
+    }
+
+    /// Every admission this reading counted, as one witness of movement: two readings that differ
+    /// here saw a batch enter a relay between them. The sum wraps, because it is compared for
+    /// equality only.
+    pub(super) fn total(&self) -> u64 {
+        let mut total = 0_u64;
+        for reading in self.relays.values() {
+            total = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "the total is a movement witness compared only for equality, so it wraps",
+                total.wrapping_add(reading.admissions)
+            );
+        }
+        total
+    }
+
     /// How many relays admitted a batch between `earlier` and this reading. A relay only one of
     /// the readings saw, or one replaced in between, counts as a relay that admitted.
     pub(super) fn relays_admitting_since(&self, earlier: &Self) -> usize {

@@ -580,7 +580,7 @@ impl SessionServiceImpl {
                 continue;
             };
             if committed.status == DomainStatus::Stopped
-                && let Some(DomainStopCause::Licensing(reason)) = committed.stop_cause
+                && let Some(DomainStopCause::Licensing(reason)) = committed.stop_cause()
             {
                 stopped.insert(restored.domain.clone(), reason);
             }

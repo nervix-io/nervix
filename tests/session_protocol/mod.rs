@@ -534,6 +534,7 @@ fn command_message(
             expected_transaction_position: None,
             expected_preview: None,
         }),
+        progress: None,
     }
 }
 
@@ -589,6 +590,7 @@ async fn when_active_session_sends_split_cursor(
             SuggestRequest::new(input.clone(), offset, domain.clone())
                 .expect("a character boundary is a valid cursor"),
         ),
+        progress: None,
     };
     let original = suggestion(before);
     let variant = suggestion(after);
@@ -620,6 +622,7 @@ async fn when_active_session_sends_invalid_page_size(
                 .with_page(size, None)
                 .assured("one and two are valid completion page sizes"),
         ),
+        progress: None,
     };
     session
         .send_altered(&suggestion(1), &suggestion(2), &[page_size])

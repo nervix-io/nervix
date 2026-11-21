@@ -93,6 +93,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) generator_activity_by_domain:
         DashMap<DomainName, Arc<AtomicUsize>, RandomState>,
+    /// What this node's teardown of each stopped domain cut, kept until the stop's owner collects
+    /// it or the domain starts again.
+    pub(in crate::runtime) stop_ledgers:
+        DashMap<DomainName, domain_stop::StopLedgerEntry, RandomState>,
     pub(in crate::runtime) emitter_buffers:
         DashMap<DomainNodeUnitRef, Arc<AtomicUsize>, RandomState>,
     pub(in crate::runtime) force_flush_by_domain:
@@ -191,6 +195,10 @@ pub(in crate::runtime) struct RuntimeInner {
         DashMap<DomainNodeUnitRef, ActivatedRuntimeStateHandoff, RandomState>,
     pub(in crate::runtime) prepared_forced_runtime_state_recoveries:
         DashMap<DomainNodeUnitRef, PreparedForcedRuntimeStateRecovery, RandomState>,
+    /// The newest rejected round by leader term and coordinator sequence. The automatic scheduler
+    /// prepares one round at a time. A later rejection fences delayed preparations from earlier
+    /// rounds, while deletion always compares the exact preparation for a unit.
+    pub(in crate::runtime) rejected_forced_recovery_round: watch::Sender<(u64, u64)>,
     #[cfg_attr(
         nervix_lint,
         expect(

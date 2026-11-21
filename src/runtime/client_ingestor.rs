@@ -2226,6 +2226,7 @@ impl IngestorQuiesceControl {
             Some(
                 IngestorQuiesceCause::EntityHold
                 | IngestorQuiesceCause::DomainPause
+                | IngestorQuiesceCause::DomainStop
                 | IngestorQuiesceCause::MemoryPressure,
             ) => ClientIntakeState::Suspended,
         }

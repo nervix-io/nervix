@@ -270,6 +270,12 @@ instance 0 reads each of them whole and lists `partitions=all`. Every emitter me
 an `instance` label: the instance index, or `-` for an emitter that runs one instance. A drain that
 waits for emitters still publishing names each instance as `<emitter> instance <i>`.
 
+`DESCRIBE EMITTER` reports each instance's publish and commit attempts, preparation, retry and
+lifecycle observations under `destination:`. Use `incoming_edges` for traffic from each relay and
+`messages_total sent` for records delivered at that emitter's declared boundary. The
+[Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
+inventory defines the matching Prometheus families and their counting points.
+
 ## Publishing modes
 
 Every emitter entity requires `MODE <body>` before its body selection, immediately before
@@ -709,9 +715,13 @@ change must remain valid with them. A complete `SET TO` body may replace constru
 invocations along with the destination. The complete candidate is
 validated before the transaction commits and has the same effective drain obligation as an
 `ALTER` replacement. A destination that remains unavailable can prevent that drain. The operator
-can repair it, or `STOP` the domain, change the emitter while stopped, and `START` again. Stopping
-discards prepared requests and retry state; attached work depends on its ingestor's redelivery
-contract, and an endpoint that applied a request before losing its response may see a duplicate.
+can repair it, or `STOP` the domain, change the emitter while stopped, and `START` again. A graceful
+`STOP` does not wait for a destination that stays unavailable: records the emitter holds for a retry
+are cut and listed in the stop's answer, while a publish attempt already on the wire runs to its
+outcome, so a destination that accepts a request and never answers needs `STOP ENFORCE AFTER
+<duration>`. Stopping discards prepared requests and retry state; attached work depends on its
+ingestor's redelivery contract, and an endpoint that applied a request before losing its response
+may see a duplicate.
 
 While confirmations or infrastructure retries are pending, the emitter stops consuming from its
 relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how much work enters a
@@ -777,7 +787,7 @@ The `destination:` section of `DESCRIBE EMITTER` separately reports host publish
 attempts and their elapsed wall durations. Retried host attempts each count once, while the
 `sent` counters above continue to count each delivered record once. All operation/outcome
 children exist at zero when the task starts. See
-[Connector Interactions](metrics-and-observability.md#connector-interactions) for the families,
+[Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics) for the families,
 bounded outcomes, labels and process-local lifetime.
 
 ## Batching

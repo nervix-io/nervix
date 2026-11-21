@@ -406,6 +406,22 @@ Each receiver lease is a distinct in-memory instance even when an identical requ
 after release. Its deadline task may remove only that exact instance. An earlier deadline can
 therefore neither release nor erase a replacement lease occupying the same logical operation key.
 
+A domain's stop has two management-pool requests from the leader that owns it, each carrying the
+stop owner's coordination identity, which a node answers only while their sender leads.
+`domain_stop_drain` names the domain and one action: release the work in motion the node holds with
+a force-flush generation unless one is running, start the generation that confirms nothing is still
+moving, or only observe. The answer is the node's view of the stopping domain, entity by entity:
+work in motion (an ingestor still admitting, a generator still producing, work a node holds or a
+flush releases, batches a relay delivers, records an emitter's next flush publishes, a publish on
+the wire, a relay admitting during the view) and held work the stop does not wait for (`REQUIRED
+WAIT` messages, records an emitter holds for a retry, rows a reorderer or correlator holds), the
+force-flush obligations of participants that still take work, and the node's count of relay
+admissions, which the owner compares across its confirming round. A node that has not applied the
+stopping record still runs its intake and reports its ingestors as admitting. `domain_stop_report`
+names the domain and the start version the stop ended it at; the answer is what the node's teardown
+cut, entity by entity and by kind, that the teardown has not ended the domain's tasks yet, or that
+the node holds no report for that stop because it restarted or never ran the domain.
+
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
 the sender, carries its remaining drain budget, and moves its scheduled work through planned
@@ -550,7 +566,8 @@ consensus commands with their exact request and independent binding records, the
 connector host capabilities in each node's incarnation-bound claim, the ordered `RATE LIMIT`
 clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
 rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
-carries for a unit whose ingestor writes `RATE LIMIT`. Peers must
+carries for a unit whose ingestor writes `RATE LIMIT`. The fingerprint also includes the
+`node` expression scope and the `SHOW NODES` statement in the archived vocabulary. Peers must
 match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
@@ -1637,11 +1654,13 @@ domain's capture is one management reply, at most 64 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
-into its staged file under a `restore_metadata` conversion charge and a 64 KiB bulk buffer, so the
+into its staged file under a `restore_metadata` conversion charge and the staged writer's output
+buffer of one resolved bulk chunk, charged to `bulk`, so the
 inventory declares a section's exact length and digest without the owner holding the section
 whole. It also checks a WASM save's scheduled generation before opening that save, then streams
 its raw bytes from the same snapshot into a staged section under an independent
-`restore_metadata` charge and three fixed 64 KiB bulk buffers. The stored read supplies the descriptor's
+`restore_metadata` charge and a bulk charge of two 64 KiB buffers beside the staged writer's output
+buffer. The stored read supplies the descriptor's
 revision. An interruption fails the capture before its inventory is published, and the
 coordinator can retry with a new cut. Materialized inventories distinguish archive descriptors,
 scalar identity groups and Arrow column groups. Their bounded sections are staged from a fresh
@@ -1974,6 +1993,14 @@ their existing persistence steps before description. No checkpoint body enters a
 replication-class message. Preparation retains its verified checkpoint set until activation, so
 the destination's total held bytes still grow with the number and size of the entity's branches.
 
+The forced-recovery prepare and discard requests use the Replication class. Both carry the
+leader's term and a coordination identity bound to the authenticated peer process. A discard
+also names the exact preparation, including its destination incarnation and target-schedule
+fingerprint. The destination checks the declared term against its observed leadership. An
+accepted discard fences delayed prepares from that round before it removes the named staged
+state. See [Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
+for the publication and rejection rules.
+
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
@@ -1996,7 +2023,7 @@ Runtime-state message properties use the production bounded encoder and decoder 
 request's Commands, Replication or Bulk class. The `runtime-state-replication-wire` target checks
 complete request and response values, including every state kind, schema and WASM generation,
 model kind, checkpoint read kind, ordered listing, full-width counters, checkpoint length and
-digest, and each remote-operation refusal and subject. Branch floats are compared by their bits,
+digest, forced-recovery round identity, and each remote-operation refusal and subject. Branch floats are compared by their bits,
 including signed zero and nested collection values. `runtime-checkpoint-listing-owner` additionally
 checks the complete runtime owner listing across its semantic conversion and the replication
 response codec. Its current branch-key domain is nonempty, has distinct canonical field names,
@@ -2576,12 +2603,18 @@ contract.
 
 ## Ingestor Instance Observation And Intake Gates
 
-An ingestor describe request carries its exact `Unit`. The receiver resolves the current owner
-for that unit and reports only its ingestor lifetime, readiness and transient state. The control
-plane composes the logical description from all scheduled unit owners. The ingestor envelope
-also carries its complete ordered source-interaction metric lines, preserving the local counter
-and duration projection through remote inspection. The current wire fingerprint includes this
-required field.
+An ingestor describe request carries its exact `Unit`. The serving owner reports that unit's
+lifetime, readiness, transient state and metrics. The reply includes typed intake counters and
+the ordered `source_metrics` strings for reads, polls, endpoint outcomes, acknowledgements,
+lifecycle and declared events. The asking node uses the strings for display and assembles the
+description from the scheduled unit owners. The current wire fingerprint includes the required
+field.
+
+Remote emitter inspection fetches the owner-rendered `destination:` lines in the metrics reply.
+For an instanced emitter, the control plane obtains the observations from the nodes that execute
+its units. The labels retain their physical node and instance. [Connector Interaction
+Metrics](metrics-and-observability.md#connector-interaction-metrics) owns both sections' line
+formats and series lifetimes.
 
 Entity-gate engagement and drain-status requests carry `EntityGateTargets`: complete logical
 entities for model changes, or exact `NodeUnitRef` units for ownership transfer. Lease identity

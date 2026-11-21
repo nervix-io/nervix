@@ -2339,13 +2339,14 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 
 ### Whole-Batch And Node Failures
 
-Emitter interaction metrics project the host's existing typed result into a bounded observation:
-success, retryable failure (also an interrupted attempt), invalid connector configuration, or
-terminal preparation/contract violation. An unknown or repeated record answer belongs to the
-last class. The projection does not replace a report, render its cause into a label or change
-retry and acknowledgement policy. A settled record rejection can therefore accompany a
-successful host attempt. The exact label spellings and families belong to
-[Connector Interactions](metrics-and-observability.md#connector-interactions).
+Emitter interaction metrics read the typed outcome at the host boundary. They count a completed
+attempt as `succeeded` even when the destination definitively refused some rows. Each such row
+has its own typed rejection code. Retryable failures and interrupted attempts count as
+`transient`, invalid connector configuration as `misconfigured`, and terminal preparation or
+contract failures as `violation`. An unknown or repeated record answer belongs to `violation`.
+The original cause remains in the diagnostic report. Only the bounded classes reach the metric
+labels. [Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
+owns the families and their exact counting points.
 
 A planned batch that fails as a whole, rather than one message at a time, returns a
 `PlannedGeneralError` report together with the acknowledgements of every message the batch held.
@@ -4042,6 +4043,11 @@ binding has reached its expiry. A stale admitted command cannot release a later 
 These conflicts change no identity, decision or grant. Service refusals retain their protocol
 problem kind; signature, trust and binding refusals retain the shared verifier's typed cause.
 
+When a leadership refusal interrupts the application of an admitted activation, the session
+classifies it from the typed consensus cause and recovers the command under its original reference.
+Definitive activation proposal failures retain the licensing operation context and record a cluster
+rejection.
+
 `LicensingRefusal` retains the quota name, effective limit, current usage, requested amount and
 refusal state. Quota arithmetic creates its report at the refusal; policy handles preserve it,
 and the admission owner adds its domain or membership context with `change_context`. It keeps
@@ -4056,8 +4062,13 @@ uses the same constraint. Existing-domain updates and `IF NOT EXISTS` observatio
 ordinary outcomes.
 
 A membership-quota refusal is carried in the leader's typed admission verdict for that node run.
-The joining node's existing supervision reports it and stops the refused newcomer. Licensing never
-removes a committed member, and a returning member does not consume another quota slot.
+The joining node's existing supervision reports it and stops the refused newcomer. The leader keeps
+that verdict for the run, without judging it again, until the run is no longer an admission
+candidate: the failure detector keeps a stopped run live in gossip for several of its heartbeat
+intervals, and a member admitted after its run stopped would never run. A policy that admits
+newcomers again therefore admits the node's next run, not the refused one, and the leader counts
+the refused run once in `nervix_licensing_admissions_refused_total`. Licensing never removes a
+committed member, and a returning member does not consume another quota slot.
 
 ### Licensing Stop Gate Refusals
 
@@ -4140,7 +4151,7 @@ the committed grant deadline later.
 ## Public Listener Input Refusals
 
 The [Listener Bounds](node-settings.md#listener-bounds) table owns HTTP input status/reason pairs.
-Body size and completion deadline produce 413 and 408; memory and assembly admission produce 503;
+Body size and completion deadline produce 413 and 408; memory and body-move admission produce 503;
 malformed body framing produces 400. Their typed causes remain attached until the HTTP reporting
 boundary. Hyper enforces header capacity with 431 and closes incomplete headers at their deadline.
 An input-memory refusal passes its complete admission report through the foreign I/O error; the
@@ -4158,7 +4169,7 @@ TLS/gRPC refusal ends that connection. None of these paths claims graph admissio
 rejection, and retryable memory/worker refusal is never classified as a codec failure.
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs accounted body assembly returns 503. Assembly
+expiry while the server waits for or performs a body move on a data worker returns 503. The move
 retains its reservation until the worker actually exits after cancellation.
 
 ## Licensing Notification Failures

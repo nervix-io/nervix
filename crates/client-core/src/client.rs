@@ -24,7 +24,7 @@ use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachTransactionRequest, ClientMessage,
     ClientRequest, CommandDisposition, CommandRequest, DetachDomainClockRequest,
     DomainClockAttachOutcome, DomainClockDetachOutcome, DomainInfo, InspectTransactionRequest,
-    InspectionOutcome, Leadership, ReplyBody, SubscribeRequest, SubscriptionType,
+    InspectionOutcome, Leadership, ProgressInterval, ReplyBody, SubscribeRequest, SubscriptionType,
     UnsubscribeRequest,
 };
 use nervix_models::{
@@ -45,6 +45,7 @@ use url::Url;
 #[cfg(feature = "autocomplete")]
 use crate::events::{AutocompleteOutcome, AutocompleteSuggestion};
 use crate::{
+    call_deadline::CallDeadline,
     cancellation::CallCancellation,
     connection::{
         ConnectOptions, EndpointValidationError, GrpcConnector, ServerDirectory, TlsRequirement,
@@ -52,7 +53,7 @@ use crate::{
     domain_clock::{AttachedDomainClock, DomainClockEvent},
     error::{ClientError, EventStreamKind, RequestKind},
     events::{ServerEvent, SubscriptionEvent, SubscriptionRequest},
-    exchange::{EventQueueError, Exchange, ExchangeRequests, SessionEvents},
+    exchange::{EventQueueError, Exchange, ExchangeRequests, RequestSilence, SessionEvents},
     outcome::{CommandOutcome, Routing},
     restoration::Restoration,
     subscriptions::{
@@ -247,12 +248,14 @@ impl StatementRoute {
         }
     }
 
-    /// When a session recovery made for this route's call, ending at `call`, gives up. A backup's
-    /// wait is one deadline that every redirect and reconnect of the backup shares; any other call
-    /// recovers within the retry budget, which is also what bounds the call itself.
-    fn recovery_deadline(&self, call: Instant) -> RecoveryDeadline {
-        match self {
-            Self::Backup(_) => RecoveryDeadline::Call(call),
+    /// When a session recovery made for this route's call, which ends at `call` unless a progress
+    /// report restarts it, gives up. A backup's wait is one deadline that every redirect and
+    /// reconnect of the backup shares; any other call recovers within the retry budget, which is
+    /// also what bounds the call itself. A backup whose deadline no instant can hold recovers
+    /// within the retry budget too.
+    fn recovery_deadline(&self, call: &CallDeadline) -> RecoveryDeadline {
+        match (self, call.current()) {
+            (Self::Backup(_), Some(until)) => RecoveryDeadline::Call(until),
             _ => RecoveryDeadline::RetryBudget,
         }
     }
@@ -479,19 +482,19 @@ impl Client {
     ) -> error_stack::Result<CommandOutcome, ClientError> {
         let query = query.into();
         let route = Self::route(&query);
-        let deadline = Instant::now() + route.wait_timeout(&self.inner.connector);
+        let deadline = CallDeadline::starting_now(route.wait_timeout(&self.inner.connector));
         if route.is_subscription() {
             let execution = self.prepare_execution_with_route(query, route).await;
             return self
-                .execute_prepared_after_lock(&execution, deadline, CallCancellation::NONE)
+                .execute_prepared_after_lock(&execution, &deadline, CallCancellation::NONE)
                 .await;
         }
-        let _command_guard =
-            nervix_primitives::time::timeout_at(deadline, self.inner.command_lock.lock())
-                .await
-                .map_err(|_| Report::new(ClientError::RetryDeadline))?;
+        let _command_guard = deadline
+            .bound(self.inner.command_lock.lock())
+            .await
+            .map_err(|_| Report::new(ClientError::RetryDeadline))?;
         let execution = self.prepare_execution_with_route(query, route).await;
-        self.execute_prepared_after_lock(&execution, deadline, CallCancellation::NONE)
+        self.execute_prepared_after_lock(&execution, &deadline, CallCancellation::NONE)
             .await
     }
 
@@ -592,26 +595,28 @@ impl Client {
         execution: &ExecutionHandle,
         cancellation: CallCancellation<'_>,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
-        let deadline = Instant::now() + execution.route.wait_timeout(&self.inner.connector);
+        let deadline =
+            CallDeadline::starting_now(execution.route.wait_timeout(&self.inner.connector));
         if execution.route.is_subscription() {
             return self
-                .execute_prepared_after_lock(execution, deadline, cancellation)
+                .execute_prepared_after_lock(execution, &deadline, cancellation)
                 .await;
         }
         let lock = std::pin::pin!(self.inner.command_lock.lock());
         let locking = cancellation.unless_requested(lock);
-        let locked = nervix_primitives::time::timeout_at(deadline, locking)
+        let locked = deadline
+            .bound(locking)
             .await
             .map_err(|_| Report::new(ClientError::RetryDeadline))?;
         let _command_guard = locked?;
-        self.execute_prepared_after_lock(execution, deadline, cancellation)
+        self.execute_prepared_after_lock(execution, &deadline, cancellation)
             .await
     }
 
     async fn execute_prepared_after_lock(
         &self,
         execution: &ExecutionHandle,
-        deadline: Instant,
+        deadline: &CallDeadline,
         cancellation: CallCancellation<'_>,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
         if let StatementRoute::Restore(restore) = &execution.route {
@@ -634,11 +639,14 @@ impl Client {
             };
         }
         let mut attempts = CommandAttempts::default();
-        let result = nervix_primitives::time::timeout_at(
-            deadline,
-            self.execute_prepared_within_budget(execution, deadline, cancellation, &mut attempts),
-        )
-        .await;
+        let result = deadline
+            .bound(self.execute_prepared_within_budget(
+                execution,
+                deadline,
+                cancellation,
+                &mut attempts,
+            ))
+            .await;
         let result = match result {
             Ok(result) => result,
             Err(_) => Err(Report::new(ClientError::RetryDeadline)),
@@ -702,7 +710,7 @@ impl Client {
     async fn execute_prepared_within_budget(
         &self,
         execution: &ExecutionHandle,
-        deadline: Instant,
+        deadline: &CallDeadline,
         cancellation: CallCancellation<'_>,
         attempts: &mut CommandAttempts,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
@@ -879,11 +887,10 @@ impl Client {
     async fn execute_with_redirects(
         &self,
         execution: &ExecutionHandle,
-        deadline: Instant,
+        deadline: &CallDeadline,
         cancellation: CallCancellation<'_>,
         attempts: &mut CommandAttempts,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
-        let recovery = execution.route.recovery_deadline(deadline);
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
             // A call cancelled after an attempt sends nothing more. Its first attempt still goes
@@ -891,7 +898,10 @@ impl Client {
             if attempt > 0 && cancellation.is_requested() {
                 return Err(Report::new(ClientError::CallCancelled));
             }
-            let result = self.execute_once(execution, cancellation).await;
+            // A progress report restarts the call's deadline, so a recovery reads where it ends
+            // only when it begins.
+            let recovery = execution.route.recovery_deadline(deadline);
+            let result = self.execute_once(execution, deadline, cancellation).await;
             attempts.observe(&result);
             let outcome = match result {
                 Ok(outcome) => outcome,
@@ -934,7 +944,7 @@ impl Client {
         if cancellation.is_requested() {
             return Err(Report::new(ClientError::CallCancelled));
         }
-        self.execute_once(execution, cancellation).await
+        self.execute_once(execution, deadline, cancellation).await
     }
 
     /// Serves a query once: locally, as a subscription request, or as a command. A command the
@@ -943,6 +953,7 @@ impl Client {
     async fn execute_once(
         &self,
         execution: &ExecutionHandle,
+        deadline: &CallDeadline,
         cancellation: CallCancellation<'_>,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
         let query = execution.query.as_str();
@@ -1115,7 +1126,7 @@ impl Client {
                     _ => None,
                 };
                 match self
-                    .request_until(request, None, wait, cancellation)
+                    .request_until(request, None, wait, cancellation, Some(deadline))
                     .await?
                 {
                     ReplyBody::Command(outcome) => Ok(CommandOutcome::from(*outcome)),
@@ -1331,7 +1342,7 @@ impl Client {
         captured: Option<Arc<ExchangeRequests>>,
         timeout: Option<Duration>,
     ) -> error_stack::Result<ReplyBody, ClientError> {
-        self.request_until(request, captured, timeout, CallCancellation::NONE)
+        self.request_until(request, captured, timeout, CallCancellation::NONE, None)
             .await
     }
 
@@ -1345,100 +1356,127 @@ impl Client {
         captured: Option<Arc<ExchangeRequests>>,
         timeout: Option<Duration>,
         cancellation: CallCancellation<'_>,
+        call: Option<&CallDeadline>,
     ) -> error_stack::Result<ReplyBody, ClientError> {
         let kind = RequestKind::from(&request);
         let read_only = matches!(
             kind,
             RequestKind::ListDomains | RequestKind::Suggest | RequestKind::Choice
         );
-        let deadline = Instant::now() + self.inner.connector.retry_timeout();
+        // A read-only request may reopen a lost session and be sent again, all within one budget
+        // of the call's own that the server's progress reports restart like any call's.
+        let read_only_call;
+        let call = match call {
+            Some(call) => Some(call),
+            None if read_only => {
+                read_only_call = CallDeadline::starting_now(self.inner.connector.retry_timeout());
+                Some(&read_only_call)
+            }
+            None => None,
+        };
+        // How long the request may go without its reply or a report that the server still serves
+        // it. The request asks for reports often enough that this wait and the call's never pass
+        // while the server keeps serving it.
+        let wait = timeout.unwrap_or(self.inner.connector.request_timeout());
+        let reported_wait = match call {
+            Some(call) => wait.min(call.budget()),
+            None => wait,
+        };
+        let progress = ProgressInterval::within(reported_wait);
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
             let exchange = match &captured {
                 Some(exchange) => exchange.clone(),
                 None => self.inner.exchange.lock().await.requests(),
             };
-            let sent = nervix_primitives::time::timeout(
-                timeout.unwrap_or(self.inner.connector.request_timeout()),
-                async {
-                    // Register before sending so a prompt reply always finds its waiter.
-                    let Some(mut registered) = exchange.register_for(&request) else {
-                        return Err(Report::new(exchange.pending.lock().failure()));
-                    };
-                    let message = ClientMessage {
-                        request_id: registered.request_id,
-                        request: request.clone(),
-                    };
-                    let frame = message
-                        .encode(&exchange.limits)
-                        .change_context(ClientError::EncodeRequest { request: kind })?;
-                    if exchange.frames.send(frame).await.is_err() {
+            let sent = async {
+                // Register before sending so a prompt reply always finds its waiter.
+                let Some(mut registered) = exchange.register_for(&request) else {
+                    return Err(Report::new(exchange.pending.lock().failure()));
+                };
+                let message = ClientMessage {
+                    request_id: registered.request_id,
+                    request: request.clone(),
+                    progress: Some(progress),
+                };
+                let frame = message
+                    .encode(&exchange.limits)
+                    .change_context(ClientError::EncodeRequest { request: kind })?;
+                match nervix_primitives::time::timeout(wait, exchange.frames.send(frame)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
                         exchange.pending.lock().close();
                         return Err(Report::new(exchange.pending.lock().failure()));
                     }
+                    Err(_) => {
+                        exchange.pending.lock().close();
+                        return Err(Report::new(ClientError::RequestDeadline { request: kind }));
+                    }
+                }
+                // The request's wait restarts at every report that the server still serves it.
+                let mut silence = RequestSilence::starting_now(wait);
+                // The server still ends a cancelled request with a terminal reply of its own, so
+                // the cancellation's own waiter only has to outlive the wait for that reply.
+                let mut cancellation_waiter = None;
+                let waited = loop {
+                    nervix_primitives::task::consume_budget().await;
                     // A reply that has already arrived answers the request; only a request still
                     // waiting for one is cancelled.
-                    let reply = nervix_primitives::select! {
+                    nervix_primitives::select! {
                         biased;
-                        reply = registered.receive() => reply,
-                        () = cancellation.requested() => {
-                            // The server still ends the request with a terminal reply of its own.
-                            let _cancel = exchange.cancel(registered.request_id).await;
-                            registered.receive().await
+                        waited = registered.reply_within(&mut silence, call) => break waited,
+                        () = cancellation.requested(), if cancellation_waiter.is_none() => {
+                            cancellation_waiter =
+                                Some(exchange.cancel(registered.request_id).await);
                         }
-                    };
-                    match reply {
-                        Some(body) => Ok(body),
-                        None => match exchange.pending.lock().failure() {
-                            ClientError::SessionClosed => {
-                                Err(Report::new(ClientError::RequestInterrupted {
-                                    request: kind,
-                                }))
-                            }
-                            failure @ (ClientError::ExecutionReferenceMismatch { .. }
-                            | ClientError::ReplyKindMismatch { .. }) => Err(Report::new(failure)
-                                .change_context(ClientError::RequestInterrupted { request: kind })),
-                            failure => Err(Report::new(failure)),
-                        },
                     }
-                },
-            );
-            let sent = if read_only {
-                nervix_primitives::time::timeout_at(deadline, sent)
-                    .await
-                    .map_err(|_| Report::new(ClientError::RetryDeadline))?
-            } else {
-                sent.await
-            };
-            let sent = match sent {
-                Ok(result) => result,
-                Err(_) => {
+                };
+                drop(cancellation_waiter);
+                let Ok(reply) = waited else {
                     exchange.pending.lock().close();
-                    Err(Report::new(ClientError::RequestDeadline { request: kind }))
+                    return Err(Report::new(ClientError::RequestDeadline { request: kind }));
+                };
+                match reply {
+                    Some(body) => Ok(body),
+                    None => match exchange.pending.lock().failure() {
+                        ClientError::SessionClosed => {
+                            Err(Report::new(ClientError::RequestInterrupted {
+                                request: kind,
+                            }))
+                        }
+                        failure @ (ClientError::ExecutionReferenceMismatch { .. }
+                        | ClientError::ReplyKindMismatch { .. }) => Err(Report::new(failure)
+                            .change_context(ClientError::RequestInterrupted { request: kind })),
+                        failure => Err(Report::new(failure)),
+                    },
                 }
             };
             if !read_only {
-                return sent;
+                return sent.await;
             }
+            let read_only_call =
+                call.verified("a read-only request took a call budget of its own above");
+            let sent = read_only_call
+                .bound(sent)
+                .await
+                .map_err(|_| Report::new(ClientError::RetryDeadline))?;
             match sent {
                 Ok(body) => return Ok(body),
                 Err(report) if report.current_context().retryable_session_failure() => {
-                    let recovered = nervix_primitives::time::timeout_at(
-                        deadline,
-                        Box::pin(self.recover_session(
+                    let recovered = read_only_call
+                        .bound(Box::pin(self.recover_session(
                             RecoveryMode::IfClosed,
                             RecoveryDeadline::RetryBudget,
-                        )),
-                    )
-                    .await
-                    .map_err(|_| Report::new(ClientError::RetryDeadline))??;
+                        )))
+                        .await
+                        .map_err(|_| Report::new(ClientError::RetryDeadline))??;
                     if let SessionRecovery::Unavailable = recovered {
                         return Err(report);
                     }
-                    let allowed =
-                        nervix_primitives::time::timeout_at(deadline, self.await_retry(attempt))
-                            .await
-                            .map_err(|_| Report::new(ClientError::RetryDeadline))?;
+                    let allowed = read_only_call
+                        .bound(self.await_retry(attempt))
+                        .await
+                        .map_err(|_| Report::new(ClientError::RetryDeadline))?;
                     if !allowed {
                         return Err(report);
                     }

@@ -203,6 +203,7 @@ fn answer(frame: &VerifiedFrame<ClientFrame>) -> Option<Reply> {
             transaction_admission: None,
             inspection: None,
             entity_labels: None,
+            node_inspection: None,
             state: None,
             resource: None,
             backup: None,
@@ -422,6 +423,7 @@ fn command(id: u64, query: &str) -> ClientMessage {
             expected_transaction_position: None,
             expected_preview: None,
         }),
+        progress: None,
     }
 }
 
@@ -436,6 +438,7 @@ async fn replies_name_their_requests_and_large_replies_arrive_in_parts() {
         ClientMessage {
             request_id: request_id(2),
             request: ClientRequest::ListDomains,
+            progress: None,
         },
         ClientMessage {
             request_id: request_id(3),
@@ -443,6 +446,7 @@ async fn replies_name_their_requests_and_large_replies_arrive_in_parts() {
                 target: TransactionInspectionTarget::Attached,
                 operation: None,
             }),
+            progress: None,
         },
         command(u64::MAX, "SHOW CLUSTER;"),
     ];
@@ -486,6 +490,9 @@ async fn replies_name_their_requests_and_large_replies_arrive_in_parts() {
                     let reply = assembly.finish().assured("a complete transfer is a reply");
                     replies.insert(reply.request_id, reply.body);
                 }
+            }
+            ServerMessage::Progress(progress) => {
+                panic!("a progress report no request asked for: {progress:?}")
             }
             ServerMessage::Event(event) => panic!("an unexpected event {event:?}"),
         }
@@ -607,6 +614,7 @@ async fn an_undecodable_request_is_rejected_and_the_session_continues() {
     let valid = ClientMessage {
         request_id: request_id(42),
         request: ClientRequest::ListDomains,
+        progress: None,
     }
     .encode(&limits)
     .assured("a request fits");
@@ -730,6 +738,7 @@ async fn an_unknown_method_is_unimplemented() {
                 ClientMessage {
                     request_id: request_id(1),
                     request: ClientRequest::ListDomains,
+                    progress: None,
                 }
                 .encode(&limits)
                 .assured("a request fits"),

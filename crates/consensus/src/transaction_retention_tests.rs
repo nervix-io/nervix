@@ -175,7 +175,7 @@ fn applying_commands_retain_their_internal_transaction_and_refresh_attempts() {
         transaction_id: "internal-attempt".to_string(),
         source: "STOP".to_string(),
         statement: Box::new(nervix_models::Statement::StopDomain(
-            nervix_models::StopDomain,
+            nervix_models::StopDomain::default(),
         )),
     });
     fixture.add_finished_transaction("internal-attempt", Some(fixture.reference.clone()));

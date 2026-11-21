@@ -177,3 +177,76 @@ fn domain_teardown_ends_intake_even_when_a_request_retains_the_table() {
 fn shuttle_endpoint_domain_teardown_ends_intake_even_when_a_request_retains_the_table() {
     check_interleavings(domain_teardown_ends_intake_even_when_a_request_retains_the_table);
 }
+
+fn a_stopping_domains_withdrawal_keeps_the_intake_a_retained_request_borrowed() {
+    let routes = Arc::new(EndpointIntakeRoutes::default());
+    let keys = [key("/events")];
+    routes.replace_domain(
+        &domain(),
+        vec![(keys[0].clone(), endpoint(EndpointType::Http))],
+    );
+    routes.mark_installed();
+    let source = routes.bind(identity(), 1, &keys);
+    let withdrawing_routes = routes.clone();
+    let withdrawing = thread::spawn(move || withdrawing_routes.withdraw_stopping_domain(&domain()));
+    // A request resolves the route before or after the stop withdraws it. One that resolved it
+    // before keeps the intake it borrowed, which a withdrawal, unlike a teardown, never ends.
+    let retained = routes.resolve("edge.example.com", "/events");
+    withdrawing.join().assured(JOINS);
+    if let EndpointResolution::Routed(retained) = retained {
+        assert_eq!(
+            retained.bindings()[0].intake().as_deref(),
+            Some(&1),
+            "a withdrawal never ends the intake a request borrowed"
+        );
+    }
+    assert!(
+        matches!(
+            routes.resolve("edge.example.com", "/events"),
+            EndpointResolution::Unrouted
+        ),
+        "a request that arrives after the withdrawal finds no route"
+    );
+    assert_eq!(source.intake().as_deref(), Some(&1));
+}
+
+#[test]
+fn shuttle_endpoint_a_stopping_domains_withdrawal_keeps_the_intake_a_retained_request_borrowed() {
+    check_interleavings(a_stopping_domains_withdrawal_keeps_the_intake_a_retained_request_borrowed);
+}
+
+fn a_source_that_ends_while_its_stop_is_called_off_is_never_published_again() {
+    let routes = Arc::new(EndpointIntakeRoutes::default());
+    let keys = [key("/events")];
+    routes.replace_domain(
+        &domain(),
+        vec![(keys[0].clone(), endpoint(EndpointType::Http))],
+    );
+    routes.mark_installed();
+    let ending_source = routes.bind(identity(), 1, &keys);
+    let staying_source = routes.bind(identity(), 2, &keys);
+    routes.withdraw_stopping_domain(&domain());
+    let ending_routes = routes.clone();
+    let ending_keys = keys.clone();
+    let ending = thread::spawn(move || ending_routes.unbind(&ending_source, &ending_keys));
+    let restoring_routes = routes.clone();
+    let restoring = thread::spawn(move || restoring_routes.restore_withdrawn_domain(&domain()));
+    ending.join().assured(JOINS);
+    restoring.join().assured(JOINS);
+    let current = routes
+        .resolve("edge.example.com", "/events")
+        .into_route()
+        .assured("the called-off stop published the route again");
+    assert_eq!(
+        current.bindings().len(),
+        1,
+        "a source that ended while the stop was called off is never published again"
+    );
+    assert_eq!(current.bindings()[0].intake().as_deref(), Some(&2));
+    assert_eq!(staying_source.intake().as_deref(), Some(&2));
+}
+
+#[test]
+fn shuttle_endpoint_a_source_that_ends_while_its_stop_is_called_off_is_never_published_again() {
+    check_interleavings(a_source_that_ends_while_its_stop_is_called_off_is_never_published_again);
+}

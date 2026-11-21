@@ -708,7 +708,7 @@ Feature: Emitter batch lifecycle
       | 3            |
 
   @emitter_batch_lifecycle
-  Scenario Outline: A stopped slow domain replays unresolved partial work after restart
+  Scenario Outline: A stopped slow domain cuts the records its stalled emitter holds and replays them after restart
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -755,12 +755,22 @@ Feature: Emitter batch lifecycle
       [{"seq":1},{"seq":2}]
       """
     Then within "10s" DESCRIBE EMITTER "batched" on the leader node reports "messages_total" "received" relay "events" totalling "2"
+    # The stalled emitter holds its records for a retry, which a graceful stop does not wait for:
+    # the records are cut, the answer lists them, and the source sends them again.
     When emitter "batched" enters stall mode
     And these Plexus commands are executed on the leader node
       """
       STOP;
       """
-    Then the observed broker does not receive a payload within "1s"
+    Then the last command output contains
+      """
+      cannot be saved yet
+      """
+    And the last command output contains
+      """
+      emitter 'batched'
+      """
+    And the observed broker does not receive a payload within "1s"
     And within "2s" Kafka consumer group "batch_stop_group_{{test_id}}" next offset for topic "batch_stop_in_{{test_id}}" partition 0 is "below 1"
     When emitter "batched" leaves stall mode
     And these Plexus commands are executed on the leader node

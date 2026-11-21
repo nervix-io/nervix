@@ -301,6 +301,17 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("client_close_ingestor.nxcm", client(20)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
+        ("client_command_progress.nxcm", {
+            let mut message = client_messages()[0].clone();
+            message.progress = Some(
+                crate::ProgressInterval::new(std::time::Duration::from_secs(30))
+                    .assured("thirty seconds is above the protocol's shortest interval"),
+            );
+            message
+                .encode(&limits())
+                .assured("every corpus request fits the default limits")
+                .into_bytes()
+        }),
         ("client_commit.nxcm", client(1)),
         ("client_detach_domain_clock.nxcm", client(16)),
         ("client_open_emitter.nxcm", client(21)),
@@ -547,6 +558,20 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                             crate::StateInspectionRejection::NotReady,
                         ),
                     }));
+                    outcome
+                })),
+            ),
+        ),
+        (
+            "server_command_nodes.nxsm",
+            reply(
+                31,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.node_inspection =
+                        Some(Box::new(crate::node_inspection::tests::example()));
                     outcome
                 })),
             ),
@@ -840,6 +865,15 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     message: "`SubscribeRequest.subscription_type` is required".to_string(),
                 }),
             ),
+        ),
+        (
+            "server_request_progress.nxsm",
+            crate::RequestProgress {
+                request_id: request(9),
+            }
+            .encode(&limits())
+            .assured("a progress report fits the default limits")
+            .into_bytes(),
         ),
         ("server_rows.nxsm", rows_frame(&limits()).into_bytes()),
         (
@@ -1631,11 +1665,25 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 text(&ended.message)
             ));
         }
+        ServerMessage::Progress(progress) => {
+            lines.push(format!("REPLY {} PROGRESS", progress.request_id.get()));
+        }
         other => panic!("the corpus holds no {other:?} message"),
     }
 }
 
 fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
+    render_client_request(message, lines);
+    if let Some(progress) = message.progress {
+        lines.push(format!(
+            "REQUEST {} PROGRESS_INTERVAL ms={}",
+            message.request_id.get(),
+            progress.get().as_millis()
+        ));
+    }
+}
+
+fn render_client_request(message: &ClientMessage, lines: &mut Vec<String>) {
     let id = message.request_id.get();
     match &message.request {
         ClientRequest::Command(command) => {
@@ -1838,6 +1886,35 @@ fn render_command(head: &str, outcome: &CommandOutcome, lines: &mut Vec<String>)
     }
     if let Some(labels) = &outcome.entity_labels {
         render_entity_labels(labels, lines);
+    }
+    if let Some(inspection) = &outcome.node_inspection {
+        for row in &inspection.nodes {
+            lines.push(format!(
+                "NODE name={} live={} voter={} cordoned={} terminating={}",
+                row.name, row.live, row.voter, row.cordoned, row.terminating
+            ));
+            let Some(record) = &row.record else {
+                lines.push("NODE_RECORD none".to_string());
+                continue;
+            };
+            let number = |value: Option<std::num::NonZeroU64>| {
+                value.map_or_else(|| "none".to_string(), |value| value.to_string())
+            };
+            lines.push(format!(
+                "NODE_RECORD revision={} cpu_count={} memory_limit={} architecture={}",
+                record.revision,
+                number(record.cpu_count),
+                number(record.memory_limit),
+                text(record.properties.architecture.as_str())
+            ));
+            for (key, value) in record.tags.iter() {
+                lines.push(format!(
+                    "NODE_TAG key={} value={}",
+                    text(key.as_str()),
+                    text(value.as_str())
+                ));
+            }
+        }
     }
 }
 

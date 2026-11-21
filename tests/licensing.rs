@@ -24,6 +24,31 @@ use super::{
 };
 mod notifications;
 
+#[given(
+    expr = "node {string} refuses its next license activation because it cannot confirm its lease"
+)]
+async fn arm_activation_lease_refusal(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let node = super::common::cluster::node_name(&node);
+    world
+        .fault_injection
+        .refuse_next_license_activation_as_lapsed_lease(&node)
+        .await;
+}
+
+#[then(expr = "node {string} refused a license activation because it could not confirm its lease")]
+async fn observe_activation_lease_refusal(world: &mut ScenarioWorld, node: String) {
+    let node = expand_placeholders(world, &node);
+    let node = super::common::cluster::node_name(&node);
+    assert!(
+        world
+            .fault_injection
+            .license_activation_refused_as_lapsed_lease(&node)
+            .await,
+        "node '{node}' did not attempt the activation at the armed proposal boundary"
+    );
+}
+
 #[given(expr = "the free licensing quota {string} is limited to {int}")]
 fn limit_quota(world: &mut ScenarioWorld, condition: String, limit: u64) {
     let name = match condition.as_str() {
@@ -106,8 +131,18 @@ fn typed_scope(world: &mut ScenarioWorld) {
         panic!("the completed licensing observation is a page");
     };
     assert_eq!(page.unit_count, 1);
-    assert_eq!(page.counts.rows, 3);
+    // One summary row, one row per cluster quota and one per catalog capability, no transition.
+    assert_eq!(page.counts.rows, 4);
     assert_eq!(page.counts.branches, 0);
+    let section_names: Vec<&str> = page.units[0]
+        .sections
+        .iter()
+        .map(|section| section.name.as_str())
+        .collect();
+    assert_eq!(
+        section_names,
+        ["summary", "quotas", "capabilities", "transitions"]
+    );
     assert_eq!(page.units[0].unit, nervix_models::Unit::SINGLE);
     assert_eq!(page.units[0].origin.node.node_id(), &page.units[0].owner);
     for section in &page.units[0].sections {
@@ -1231,6 +1266,24 @@ async fn reduce_domain_quota(world: &mut ScenarioWorld) {
         .as_ref()
         .verified("fixture started")
         .configure(|model| model.reduce_domain_quota_with_grace())
+        .await;
+}
+
+#[given(expr = "the licensing service enables the capability {string}")]
+async fn enable_capability(world: &mut ScenarioWorld, name: String) {
+    use nervix_licensing_protocol::conditions::{Capability, ConditionValue};
+
+    world
+        .licensing_service
+        .as_ref()
+        .verified("the fixture started its HTTPS licensing service")
+        .configure(|model| {
+            let mut plan = model.conditions();
+            plan.usage
+                .capabilities
+                .insert(name, ConditionValue::Known(Capability::Enabled));
+            model.plan(plan);
+        })
         .await;
 }
 

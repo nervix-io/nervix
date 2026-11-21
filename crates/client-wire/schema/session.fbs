@@ -1415,7 +1415,9 @@ table RestoredUsers {
 enum DomainStatus : ubyte {
   Stopped,
   Running,
-  Paused
+  Paused,
+  /// Intake has stopped and the work in motion finishes before the domain stops.
+  Stopping
 }
 
 /// One domain a restore recreates.
@@ -1781,6 +1783,45 @@ table ClusterLicenseInspectionEntity {}
 union StateInspectionEntity { DomainNodeInspectionEntity, ClusterLicenseInspectionEntity }
 table StateInspection { entity: StateInspectionEntity (required); result: StateInspectionResult (required); }
 
+enum NodeUndetectedReason : ubyte { NotReported, LibraryUnavailable, DriverUnavailable, QueryFailed, DeadlineExpired, DetectionFailed, ExceedsRecordBound }
+enum NodeCudaRegistration : ubyte { Registered, NotInLibrary, RegistrationFailed }
+table NodeUndetected { reason: NodeUndetectedReason = null; }
+table NodeDetectedText { value: string (required); }
+table NodeDetectedBytes { bytes: ulong = null; }
+table NodeDetectedProviders { values: [string] (required); }
+union NodeTextDetection { NodeDetectedText, NodeUndetected }
+union NodeBytesDetection { NodeDetectedBytes, NodeUndetected }
+union NodeProvidersDetection { NodeDetectedProviders, NodeUndetected }
+table NodeGpuDevice { model: NodeTextDetection (required); memory: NodeBytesDetection (required); }
+table NodeGpuDevices { devices: [NodeGpuDevice] (required); driver: NodeTextDetection (required); }
+table NodeNoGpuDevice {}
+union NodeGpuInventory { NodeGpuDevices, NodeNoGpuDevice, NodeUndetected }
+table NodeOnnxRuntime { version: NodeTextDetection (required); providers: NodeProvidersDetection (required); cuda: NodeCudaRegistration = null; }
+union NodeOnnxDetection { NodeOnnxRuntime, NodeUndetected }
+table NodeDetectedProperties {
+  architecture: string (required);
+  cpu_model: NodeTextDetection (required);
+  gpus: NodeGpuInventory (required);
+  onnx: NodeOnnxDetection (required);
+}
+table NodeTagEntry { key: string (required); value: string (required); }
+table NodeInspectionRecord {
+  revision: ulong = null;
+  cpu_count: ulong = null;
+  memory_limit: ulong = null;
+  properties: NodeDetectedProperties (required);
+  tags: [NodeTagEntry] (required);
+}
+table NodeInspectionRow {
+  name: string (required);
+  live: bool = null;
+  voter: bool = null;
+  cordoned: bool = null;
+  terminating: bool = null;
+  record: NodeInspectionRecord;
+}
+table NodeInspection { nodes: [NodeInspectionRow] (required); }
+
 // An exact metadata read under its captured committed acceptance policy.
 table LabelEntry { key: string (required); value: string (required); }
 table EntityLabelLimits { count: ulong; key_bytes: ulong; value_bytes: ulong; bytes: ulong; }
@@ -1821,6 +1862,8 @@ table CommandOutcome {
   /// Typed bounded state inspection, independent of the requested presentation format.
   state: StateInspection;
   entity_labels: EntityLabelsInspection;
+  /// Committed node facts and observed membership flags, regardless of the requested format.
+  node_inspection: NodeInspection;
 }
 
 table TransactionAttached {
@@ -2097,6 +2140,13 @@ table RequestRejected {
   field: string;
   message: string (required);
 }
+
+/// The server still serves the request its Reply's request_id names. It completes nothing: the
+/// request's terminal reply follows it. The server sends one at the interval the request's
+/// ClientMessage.progress_interval_ms asked for, and only for a request that asked. A client restarts
+/// its wait for the request at each one, and ignores one for a request it no longer waits on: one
+/// queued just before the terminal reply can arrive after it.
+table RequestProgress {}
 
 /// One part of a reply too large for a single frame. The parts of one reply share its request_id
 /// and total_bytes, arrive in order with contiguous offsets starting at zero, and concatenate to a
@@ -2443,7 +2493,8 @@ union ReplyBody {
   OpenEmitterOutcome,
   ReadEmitterBatchOutcome,
   SettleEmitterBatchOutcome,
-  CloseEmitterOutcome
+  CloseEmitterOutcome,
+  RequestProgress
 }
 
 table Reply {
@@ -2904,6 +2955,10 @@ table ClientMessage {
   /// Non-zero, and never reused within one session.
   request_id: ulong;
   request: ClientRequest (required);
+  /// How often the server reports, while it serves this request, that it still does: it sends a
+  /// RequestProgress reply at least this often from when it takes the request until it queues the
+  /// request's terminal reply. In milliseconds, at least 100. Absent: the client asks for none.
+  progress_interval_ms: ulong = null;
 }
 
 /// Root of a server frame ("NXEL").

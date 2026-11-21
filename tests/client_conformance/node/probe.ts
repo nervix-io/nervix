@@ -814,6 +814,8 @@ function commandLines(head: string, outcome: wire.CommandOutcome): string[] {
   if (state !== null) lines.push(...stateInspectionLines(state));
   const labels = outcome.entityLabels();
   if (labels !== null) lines.push(...entityLabelLines(labels));
+  const nodes = outcome.nodeInspection();
+  if (nodes !== null) lines.push(...nodeInspectionLines(nodes));
   return lines;
 }
 
@@ -1329,6 +1331,8 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           const outcome = member(reply.body(new wire.CloseEmitterOutcome()) as wire.CloseEmitterOutcome | null);
           return [`REPLY ${id} EMITTER_CLOSE disposition=${wire.EmitterCloseDisposition[member(outcome.disposition())]} message=${text(bytesOf((encoding) => outcome.message(encoding)))}`];
         }
+        case wire.ReplyBody.RequestProgress:
+          return [`REPLY ${id} PROGRESS`];
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -1399,6 +1403,15 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
 
 function clientLines(frame: Uint8Array): string[] {
   const message = wire.ClientMessage.getRootAsClientMessage(frameBuffer(frame, 'NXCM'));
+  const lines = clientRequestLines(message);
+  const progress = message.progressIntervalMs();
+  if (progress !== null) {
+    lines.push(`REQUEST ${message.requestId()} PROGRESS_INTERVAL ms=${progress}`);
+  }
+  return lines;
+}
+
+function clientRequestLines(message: wire.ClientMessage): string[] {
   const id = message.requestId();
   switch (message.requestType()) {
     case wire.ClientRequest.CommandRequest: {
@@ -1691,6 +1704,27 @@ function entityLabelLines(value: wire.EntityLabelsInspection): string[] {
   for (let index = 0; index < value.labelsLength(); index += 1) {
     const entry = member(value.labels(index));
     lines.push(`LABEL key=${text(bytesOf((encoding) => entry.key(encoding)))} value=${text(bytesOf((encoding) => entry.value(encoding)))}`);
+  }
+  return lines;
+}
+
+function nodeInspectionLines(value: wire.NodeInspection): string[] {
+  const lines: string[] = [];
+  for (let index = 0; index < value.nodesLength(); index += 1) {
+    const row = member(value.nodes(index));
+    lines.push(`NODE name=${row.name()} live=${member(row.live())} voter=${member(row.voter())} cordoned=${member(row.cordoned())} terminating=${member(row.terminating())}`);
+    const record = row.record();
+    if (record === null) {
+      lines.push('NODE_RECORD none');
+      continue;
+    }
+    const properties = member(record.properties());
+    const architecture = text(bytesOf((encoding) => properties.architecture(encoding)));
+    lines.push(`NODE_RECORD revision=${member(record.revision())} cpu_count=${record.cpuCount() ?? 'none'} memory_limit=${record.memoryLimit() ?? 'none'} architecture=${architecture}`);
+    for (let index = 0; index < record.tagsLength(); index += 1) {
+      const entry = member(record.tags(index));
+      lines.push(`NODE_TAG key=${text(bytesOf((encoding) => entry.key(encoding)))} value=${text(bytesOf((encoding) => entry.value(encoding)))}`);
+    }
   }
   return lines;
 }

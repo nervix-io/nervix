@@ -178,7 +178,7 @@ fn planning_parameter_fence_preserves_existing_conflict_precedence() {
         start_version: 0,
         last_start: nervix_models::DomainStartPoint::Resume,
         clock: None,
-        stop_cause: None,
+        stop: None,
     });
     let applied = apply_consensus_command(
         &mut state,
@@ -254,7 +254,7 @@ fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
         else {
             unreachable!("the fixture selects Kafka")
         };
-        topic.instances = nervix_models::IngestorInstances::PerPartition;
+        topic.instances = nervix_models::IngestorInstances::PerTransportPartition;
         let units = (0..u64::from(count))
             .map(|index| Unit::try_instance(index).assured("the bounded instance fits"))
             .collect::<Vec<_>>();

@@ -471,6 +471,7 @@ impl PeerHealthStateSnapshot {
     fn replace_endpoints(
         &mut self,
         endpoints: impl IntoIterator<Item = PeerHealthEndpoint>,
+        observed_live_nodes: &BTreeSet<ClusterNodeName>,
         now: Instant,
         observation_freshness: Duration,
     ) -> Vec<PeerHealthProbeTarget> {
@@ -508,9 +509,23 @@ impl PeerHealthStateSnapshot {
         let changed = previous != next;
         self.peers = next;
         if changed {
-            self.effective_statuses = self.derive_effective_statuses(now, observation_freshness);
+            let statuses = self.derive_effective_statuses(now, observation_freshness);
+            // Discovery can stop probing a peer after both gossip and health exclude it. Its
+            // retirement changes diagnostics, but the scheduler already planned without it.
+            let eligibility_changed = self.peers.iter().any(|(node, peer)| {
+                previous.get(node) != Some(peer)
+                    || statuses.get(node) != self.effective_statuses.get(node)
+            }) || previous.keys().any(|node| {
+                !self.peers.contains_key(node)
+                    && (observed_live_nodes.contains(node)
+                        || self.effective_statuses.get(node)
+                            != Some(&PeerHealthStatus::Unavailable))
+            });
+            self.effective_statuses = statuses;
             self.advance_revision();
-            self.advance_scheduling_revision();
+            if eligibility_changed {
+                self.advance_scheduling_revision();
+            }
         } else {
             self.refresh_effective_statuses(now, observation_freshness);
         }
@@ -1715,6 +1730,7 @@ impl ClusterHandle {
     pub(crate) fn replace_peer_health_endpoints(
         &self,
         endpoints: impl IntoIterator<Item = PeerHealthEndpoint>,
+        observed_live_nodes: &BTreeSet<ClusterNodeName>,
     ) -> Vec<PeerHealthProbeTarget> {
         let now = Instant::now();
         let endpoints = endpoints.into_iter().collect::<Vec<_>>();
@@ -1723,6 +1739,7 @@ impl ClusterHandle {
             let previous_revision = snapshot.revision();
             targets = snapshot.replace_endpoints(
                 endpoints.clone(),
+                observed_live_nodes,
                 now,
                 self.node_unavailability_timeout(),
             );

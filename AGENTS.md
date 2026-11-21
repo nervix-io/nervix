@@ -287,6 +287,11 @@ checklists.
 - Errors keep typed causes (`thiserror`, `error-stack`) until the reporting boundary, never driver
   `Display` text or free-text reasons, and no `nervix::error_boundary` claims a record rejection the
   path does not perform.
+- The host records every external interaction it owns through the connector-interaction metric
+  families, once at its typed outcome boundary. Connector crates report transport-specific facts
+  through a declared event or a typed host-handle `record_*` method and name no metrics types. A new
+  family joins the node's metric store with vocabulary-derived labels, declared buckets, windows
+  and bounds, and its `source:` or `destination:` projection in `DESCRIBE`.
 - Every publish, window or batch, header and metadata mapping and acknowledgement path has unit
   coverage through its production owner, and every connector-owned encoding or encoded-size measure
   a registered, bounded Bolero property (shared implementations keep theirs with their owner).
@@ -313,9 +318,10 @@ checklists.
   confirmed record. A delivery defect is fixed red first: a public scenario through the real
   transport and, for an interleaving, a Shuttle check over the production owner.
 - Before closing a connector epic, review landed parallel work against both standards and record
-  evidence and compliance tasks on ClickUp. A connector change keeps the contract chapter, the
-  relevant manuals and the ratchet current in the same change; `just ratchet` and the clock-boundary
-  check treat connector crates as data plane.
+  evidence and compliance tasks on ClickUp. Check coverage of host interactions, typed outcomes and
+  event reporting, metric ownership, labels, declared constants and inspection placement. A connector
+  change keeps the contract chapter, the relevant manuals and the ratchet current in the same
+  change. `just ratchet` and the clock-boundary check treat connector crates as data plane.
 
 ### Execution-sensitive primitives
 
@@ -360,8 +366,8 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   coordinate, and only tests of elapsed-time behavior enable the `test-util` paused clock.
 - **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
   or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
-  code the node cannot bound (UDF calls, JAQ transformations) takes the extension class and password
-  hashing the credentials class. A refusal is a typed error the caller maps to its own outcome, and
+  code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
+  class and password hashing the credentials class. A refusal is a typed error the caller maps to its own outcome, and
   one that judged nothing stays retryable, never a decode, encode or authentication failure. A full
   queue is a temporary condition and never costs data ([Planned operations cost backpressure, never
   data](#planned-operations-cost-backpressure-never-data)). Work a source handed over (a record,
@@ -499,7 +505,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   registration, type or sensitivity checking, constant folding or expression sharing, compiled
   programs and their prepared artifacts, the runtime bridge and execution context, scalar operands,
   selected-row execution of conditional arms, row and batch errors, kernel selection and SIMD use,
-  function-family implementations, injected functions, window aggregate and sketch structures.
+  function-family implementations, list conversions and kernels, injected functions, window
+  aggregation and sketches, and retained sequence representation, bounds and recovery.
   [Expression Functions](docs/src/filter-map-functions.md) owns every public function contract.
 - [SIMD Kernels](docs/src/simd-kernels.md): kernel ownership, dispatch or build targets, arithmetic
   or bitmap contracts, byte scanning, typed run execution, scalar/level qualification, SIMD
@@ -517,6 +524,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   guest state, state generations and the events that advance them, ownership fencing or forced
   recovery of guest state, coordinated, guest-requested or rejected-state resets, the guest save,
   restore and reset ABI, how rebinding affects guest state.
+- [Inferencer State And Recovery](docs/src/inferencer-state.md): the tensors an inferencer's
+  `STATE` carries per branch, their schema and model identity, publication after admitted batches,
+  the snapshot frame, cadence and bound, restore under the branch incarnation, eviction, replica
+  copies, planned handoff and forced recovery of inferencer state, its archive sections, how
+  rebinding or redeclaration affects it, and what recovery can skip or replay.
 - [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md): the archive crate
   or format; how a backup cuts a domain or captures, stages, transfers, assembles, retains or serves
   state; how a restore receives, prepares, plans, admits, records or resumes its steps; how restored
@@ -581,6 +593,13 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - All schemaful operations are exact-type operations. Implicit casts, parsing, stringification,
   numeric widening or narrowing, datetime/string interchange and wire/internal coercions are
   forbidden.
+- Scalar operators and scalar functions use their declared scalar operands. Computation on
+  `ARRAY` and `VEC` elements uses named list functions, with distinct names for list/list and
+  list/scalar arithmetic. New list functions start with `list_` and have names distinct from
+  window aggregates.
+- List element types and containers change through `AS` or `TRY_CAST` with the full target list
+  type. These casts preserve nesting depth. Use `list_reshape` to give a fixed array a new shape
+  and `list_flatten` to remove one list level. Expressions share one declared-type grammar.
 - Nullability is part of the type contract: required uninitialized fields are errors, and optional
   uninitialized fields finalize as typed nulls.
 - Sensitivity may be promoted but never downgraded implicitly. External emission of a sensitive
@@ -623,6 +642,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
 - Window output is set-only. Live `input` values are available only inside aggregate arguments,
   although aggregate calls may participate in larger scalar expressions; aggregates never nest
   inside aggregates.
+- An aggregate argument that becomes a list element must be required. Every list element is
+  non-null.
 - Correlators use explicit `left` and `right` scopes and never expose an ambiguous default input.
 - Relay names are graph references, never top-level field qualifiers; materialized state is the
   explicit exception, through the `relay_state.<relay>.<field>` namespace.
@@ -719,6 +740,9 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 - Arrow columnar batches are the only data-plane payload representation, end to end: ingest
   decoding, relay carriage, VM input and output, stateful processor state, error handling, emission,
   sessions and interconnect. A batch with one row is still a batch.
+- A retained sequence travels as one `ARRAY` or `VEC` field in one record, built by a window
+  processor from the rows its branch retains. A generator samples materialized state one record
+  at a time without accumulating a window of its own.
 - No row-oriented payload representation is introduced, reintroduced or extended: no
   `HashMap`-of-fields records, per-row boxed value maps or dual row-plus-column carriers kept in
   sync. A single message is addressed through a row view over an Arc'd Arrow batch (a batch
@@ -756,6 +780,29 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   justifiably shared, because several owners register into it or observers read it across owners,
   and whose accesses stay off recurring data-plane paths. State one owner mutates stays in an
   ordinary collection that owner holds.
+
+### Branch-local runtime state
+
+- A branch-local runtime state kind, state a placement names by its branch, joins the shared
+  periodic snapshot owner, `ReplicatedBranchState`, instead of a persistence path of its own: its
+  branch task publishes immutable generations there, and the shared writer persists, announces and
+  replicates them. The change that adds the kind also ships its fingerprinted placement identity,
+  its archive section, its typed inspection, its external chaos coverage and its qualification
+  ledger. [Data-Plane
+  Concurrency](docs/src/data-plane-concurrency.md#periodically-snapshotted-branch-state) owns the
+  carrier; WASM guest state keeps the per-callback checkpoint [WASM State And
+  Recovery](docs/src/wasm-state.md) owns.
+
+### Inference
+
+- Every inferencer runs through one implementation: the model runs once for each admitted batch,
+  before any route, batched or one message at a time, and a route's `FLUSH` governs dispatch only.
+  `STATE` is a variation of one message at a time that carries its tensors from message to message,
+  never a second execution path, and an inferencer behaves differently with and without `STATE`
+  only where [State tensors](docs/src/processors.md#state-tensors) declares it.
+- An inferencer form the grammar accepts is honoured by the runtime in the same change; no accepted
+  clause, declaration or mode is stored and ignored. [Inferencer State And
+  Recovery](docs/src/inferencer-state.md) owns the carried state's contract.
 
 ### Domains and external systems
 
@@ -797,6 +844,8 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   transitions. Per-message, per-record, per-batch, payload-bearing, duplicate-drop and branch-churn
   details belong at `debug` or `trace`.
 - Hot-path logs and structured errors never expose sensitive payload values.
+- [Metrics And Observability](docs/src/metrics-and-observability.md#connector-interaction-metrics)
+  owns the connector-interaction families, their labels, lifetimes and inspection format.
 
 ## Node Settings
 
@@ -1262,6 +1311,9 @@ miss-heavy keys; a lower count or a shorter function is not a speedup.
 - Parser-only work requires positive and negative parse tests and completion-context tests that
   guard against grammar-branch leakage, kept near the grammar they protect; composed language
   phrases require completion coverage.
+- A new window aggregate includes its structure in `DESCRIBE WINDOW PROCESSOR`, its evaluated
+  argument columns in `SHOW WINDOW PROCESSOR STATE`, and snapshot and archive coverage. A new
+  builtin includes a qualification-ledger row, a registered Bolero property and a benchmark.
 - Compile-time rejection is checked with Rustdoc `compile_fail` doctests beside the owning API,
   paired with compiling examples of the current imports and supported signatures, never with
   `trybuild` or its dependencies, harnesses, fixtures or snapshots. They run in the normal test

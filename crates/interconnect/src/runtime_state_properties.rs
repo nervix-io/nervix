@@ -49,6 +49,7 @@ enum Message {
     CaptureResponse(OwnershipHandoffResponse<Vec<OwnershipHandoffCheckpoint>>),
     Confirm(ConfirmOwnershipHandoffStateRequest),
     ForcedPrepare(crate::PrepareForcedOwnershipRecoveryRequest),
+    ForcedDiscard(crate::DiscardForcedOwnershipRecoveryRequest),
     KafkaStart(crate::KafkaStartRequest),
     KafkaStartResponse(Result<crate::KafkaStartResponse, RemoteOperationFailure>),
 }
@@ -69,6 +70,14 @@ impl<'a> Messages<'a> {
         recovery_budget: nervix_models::ClusterParameterDuration,
     ) -> crate::PrepareForcedOwnershipRecoveryRequest {
         crate::PrepareForcedOwnershipRecoveryRequest {
+            round: crate::ForcedOwnershipRecoveryRound {
+                leader_term: self.number(),
+                coordination: CoordinationIdentity::new(
+                    self.arbitrary.cluster_node(),
+                    self.number(),
+                    self.number(),
+                ),
+            },
             recovery_budget,
             operation_id: self.arbitrary.string(),
             source: self.arbitrary.cluster_node(),
@@ -510,7 +519,14 @@ impl<'a> Messages<'a> {
                     std::time::Duration::from_nanos(nanos),
                 )
                 .assured("the generated positive budget fits the policy domain");
-                Message::ForcedPrepare(self.forced_preparation(recovery_budget))
+                let preparation = self.forced_preparation(recovery_budget);
+                if self.arbitrary.entropy().flag() {
+                    Message::ForcedPrepare(preparation)
+                } else {
+                    Message::ForcedDiscard(crate::DiscardForcedOwnershipRecoveryRequest {
+                        preparation,
+                    })
+                }
             }
         }
     }
@@ -649,6 +665,14 @@ impl Message {
                 )
                 .await;
             }
+            Self::ForcedDiscard(m) => {
+                round_trip(
+                    executor,
+                    crate::DiscardForcedOwnershipRecoveryRequest::CLASS,
+                    m,
+                )
+                .await;
+            }
             Self::Confirm(m) => {
                 round_trip(executor, ConfirmOwnershipHandoffStateRequest::CLASS, m).await;
             }
@@ -685,6 +709,9 @@ impl Message {
             Self::Capture(m) => damaged!(m, CaptureOwnershipHandoffStateRequest::CLASS),
             Self::ForcedPrepare(m) => {
                 damaged!(m, crate::PrepareForcedOwnershipRecoveryRequest::CLASS)
+            }
+            Self::ForcedDiscard(m) => {
+                damaged!(m, crate::DiscardForcedOwnershipRecoveryRequest::CLASS)
             }
             Self::Confirm(m) => damaged!(m, ConfirmOwnershipHandoffStateRequest::CLASS),
             Self::CaptureResponse(m) => damaged!(m, CaptureOwnershipHandoffStateRequest::CLASS),
@@ -933,7 +960,11 @@ fn runtime_state_wire_variant_boundaries() {
             let budget = nervix_models::ClusterParameterDuration::try_from(duration)
                 .assured("the current preparation boundary budget fits the transport value");
             let mut messages = Messages::new(b"captured-recovery-boundaries");
-            Message::ForcedPrepare(messages.forced_preparation(budget))
+            let preparation = messages.forced_preparation(budget);
+            Message::ForcedPrepare(preparation.clone())
+                .check(&executor)
+                .await;
+            Message::ForcedDiscard(crate::DiscardForcedOwnershipRecoveryRequest { preparation })
                 .check(&executor)
                 .await;
         }

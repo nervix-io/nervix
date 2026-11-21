@@ -324,6 +324,14 @@ fn decode_field_type(
 /// The most bytes one cell's tables add to a frame beyond the string it may hold: the cell table
 /// and its value table, their vtables, and alignment padding. A test measures every cell kind
 /// against it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the session schema's Cell layout encodes a cell table and its value table \
+                  within 64 bytes beyond the string a cell holds; the every-kind test pins it"
+    )
+)]
 pub(crate) const CELL_TABLES_BYTES: usize = 64;
 
 /// Writes the cells of one row, one branch key, or one list value, in field order.
@@ -514,7 +522,8 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
     /// Checks one more cell, holding `payload` bytes beyond its tables, against the limits.
     fn admit(&self, payload: usize) -> Result<(), Report<WireEncodeError>> {
         let value_depth = self.depth.checked_add(1).assured(
-            "a writer is at most one level past a nesting limit of at most MAX_NESTING_DEPTH",
+            "a writer is at most one level past a nesting limit of at most \
+             SessionNestingDepth::MAXIMUM",
         );
         self.encoder.nesting(self.field, value_depth)?;
         let cells = self

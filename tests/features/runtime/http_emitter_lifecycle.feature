@@ -585,7 +585,7 @@ Feature: HTTP REQUEST emitter lifecycle
       | 3            | CORDON NODE node-2; CORDON NODE node-3; |
 
   @http_emitter_stop_recovery
-  Scenario Outline: Stopping a domain whose HTTP request cannot drain releases it for the source to redeliver to the reconfigured destination
+  Scenario Outline: Enforcing the stop of a domain whose HTTP request cannot drain releases it for the source to redeliver to the reconfigured destination
     Given Kafka is running
     And HTTP receiver "first" is running
     And HTTP receiver "first" answers unscripted requests with "hold response until released"
@@ -641,13 +641,21 @@ Feature: HTTP REQUEST emitter lifecycle
         METHOD 'PUT' PATH concat('/second/', input.id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
-    # Stopping the domain ends the request instead: its connection is released and its record stays
-    # unacknowledged at the attached source.
+    # A graceful stop would wait for the request on the wire, so the stop is enforced: the request
+    # is ended, its connection released, and its record stays unacknowledged at the attached source.
     When these Plexus commands are executed on the leader node
       """
-      STOP;
+      STOP ENFORCE AFTER 0s;
       """
-    Then HTTP receiver "first" eventually sees the client abandon at least 1 unfinished response
+    Then the last command output contains
+      """
+      enforced
+      """
+    And the last command output contains
+      """
+      emitter 'published'
+      """
+    And HTTP receiver "first" eventually sees the client abandon at least 1 unfinished response
     And within "2s" Kafka consumer group "http_stop_group_{{test_id}}" next offset for topic "http_stop_{{test_id}}" partition 0 is "below 1"
     # While the domain is stopped, the replacement needs no drain, and the restarted source
     # redelivers the record, which the replacement sends to the second destination.

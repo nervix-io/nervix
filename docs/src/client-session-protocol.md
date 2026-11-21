@@ -501,6 +501,22 @@ whose request no longer waits, because its caller stopped waiting, is not this v
 completes no request, and the reader still follows the subscription, clock or producer it opens,
 as it does for every late reply.
 
+### Progress Reports
+
+A client that bounds how long it waits for a request asks the server to report while it still
+serves the request. `ClientMessage.progress_interval_ms` names how often, in milliseconds, at least
+100; a request without it asks for no reports, and a shorter interval is refused with
+`RequestRejected` as an invalid request. From when the session takes the request until it queues
+the request's terminal reply, the session sends a `RequestProgress` reply under the request's
+identity at that interval, whichever lane serves the request and however long it waits there,
+including behind another request in the ordered lane. A report completes nothing and carries
+nothing: the request's terminal reply still follows it. The client restarts its wait for the request
+at each report, so a request the server keeps serving for longer than the client's own deadline is
+still answered, while a server that stops reporting, a session that ends and a transport that breaks
+still end the wait as they would without reports. A report queued just before the request's
+terminal reply can arrive after that reply, so a client ignores a report for a request it no longer
+waits on; such a report is never the violation above.
+
 ### Two Lanes
 
 A session serves each request on one of two lanes:
@@ -765,6 +781,12 @@ to reconnect. The console starts its per-command wait at 250 milliseconds, doubl
 seconds while the answer remains unknown, and keeps processing session messages during the wait.
 Held commands retain their issue order, and the selected domain, clock and subscription tabs keep
 their existing attachments. Only a terminal disposition is rendered as the command's outcome.
+
+When leadership moves or the leader cannot confirm its lease while applying an admitted
+`ACTIVATE LICENSE`, the command stays pending under its original execution reference. The client
+receives `OutcomeUnknown` with the `LeadershipLost` cause while recovery is pending. Nervix resumes
+using the verified decision saved with the command. It preserves the original creation request
+identity recorded by the licensing service.
 
 For a WASM state reset, loss of Raft leadership during generation publication leaves the durable
 step applying under its original reference. The request can wait for recovery or answer
@@ -1225,11 +1247,17 @@ The Rust client bounds each connection attempt by `connect_timeout` (10 seconds 
 request by `request_timeout` (120 seconds), and each public call, including all of its retries and
 redirects, by `retry_timeout` (120 seconds). A `BACKUP` takes `backup_wait_timeout` in place of
 both: its replies and every redirect and reconnect it makes share that one deadline, so a backup
-keeps reconnecting through an outage longer than `retry_timeout`. A request that outlives
+keeps reconnecting through an outage longer than `retry_timeout`. Every request it sends asks for
+[progress reports](#progress-reports) four times per the shorter of its request wait and its call's
+budget, never more often than every 100 milliseconds. The request and call deadlines are silence
+deadlines: each report starts both again, so a command the server keeps serving, such as a `STOP`
+that waits for the work in motion or a `START` that waits for another node to start the domain's
+ingestors, is answered however long it takes, and a deadline passes only
+once neither the answer nor a report arrived within it. A request that goes silent for
 `request_timeout` causes the client to end every request still waiting on that session, and the
-next request opens a new one. This also bounds a stalled application wait when transport keepalive
-still succeeds. While an
-election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
+next request opens a new one. The deadline bounds silence only: a request the server still serves
+is reported however long it waits, so a wait ends on a node that stopped answering, not on one that
+is slow to answer. While an election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
 second. When a call's deadline passes before a command's outcome is known, and the command may have
 been admitted, the call fails as uncertain and names the execution reference. When a nonterminal
 server answer arrived before the deadline, the Rust client's report also retains the last such
@@ -1244,7 +1272,8 @@ see [Interrupting A Statement](./client-tools-cli.md#interrupting-a-statement). 
 stops waiting only drops its waiter, and the reply, when it comes, is discarded.
 
 `nervix-cli backup --timeout` sets only each running domain's quiesce timeout; its request and
-retry budgets stay at their defaults, and `--backup-wait-timeout` bounds the overall command wait.
+retry budgets stay at their defaults, and `--backup-wait-timeout` bounds how long the command waits
+with neither its answer nor a progress report.
 
 For native Rust sessions, the client loads a Hickory resolver during setup or uses one its owner
 provided. It resolves the hostname of each selected server, seed, and redirect on a new connection
@@ -2282,7 +2311,9 @@ With `RESUME`, complete publication, gate release and the transition to `Running
 generation and clock mapping precede the successful outcome. A client can immediately inspect
 that lifecycle or attach its clock. A dry run reports the planned lifecycle without activation.
 `DomainInfo` in `DomainList` and `DomainsChanged` carries a required `start_version` beside its
-status and pace. Wire verification rejects missing required lifecycle and generation fields;
+status and pace. Its status is `Stopped`, `Running`, `Paused` or `Stopping`: a stopping domain has
+stopped its intake and waits for its work in motion before it stops, and refuses every other
+change meanwhile. Wire verification rejects missing required lifecycle and generation fields;
 the decoder never invents a default generation.
 
 The call is not bounded by the request deadline, because an archive can take far longer to send
@@ -2650,7 +2681,7 @@ installation; notices retain their ordinary best-effort delivery contract. No fr
 shape changes. Cluster inspection reports committed and per-node installed values.
 
 The public session listener starts while live cluster policy may still be unavailable. Authenticated
-`SHOW CLUSTER STATUS` and `DESCRIBE CLUSTER` work during that wait; status names the node's
+`SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER` and `SHOW NODES` work during that wait. Status names the node's
 `initializing` or `ready` initialization state. Other command batches are refused before durable
 admission until live policy is caught up and initialization completes. A durable command may be
 resuming an earlier execution, so this wait answers `OutcomeUnknown(NotYetAuthoritative)` under
@@ -2684,6 +2715,25 @@ reply-transfer and `ReplyTooLarge` contracts apply to the complete typed outcome
 parts never combine separate metadata reads. [Entity Labels](entity-labels.md) owns target,
 transaction and execution semantics.
 
+## Node Inspection
+
+A single-statement `SHOW NODES` command returns `CommandOutcome.node_inspection` for both
+`TEXT` and `JSON`. A successful read carries one `NodeInspection`, with a vector of unique node
+names in ascending order. Each
+row includes the answering node's observations of the node's live, voter, cordoned and
+terminating flags. A row's optional committed record contains the applied revision, optional CPU
+count and memory limit, the detected properties and the exact ordered tag map. Counts, byte sizes
+and revisions use unsigned 64-bit integers.
+
+Typed property choices preserve the differences between a detected value, no GPU device and an
+undetected value with its recorded reason. The GPU inventory retains its per-device model and
+memory detections and driver detection. The ONNX Runtime observation retains its version,
+execution-provider list and CUDA registration state. The decoder validates required flags and
+properties, declared choices, unique names, and the bounds of each record and of the reply. An
+empty successful result still carries its envelope. A selector that fails while evaluating one
+node's record excludes that node and includes its diagnostic with the successful outcome.
+Large replies use the ordinary reply-transfer and `ReplyTooLarge` contracts.
+
 ## State Inspection Envelope
 
 `CommandOutcome.state` carries `StateInspection`, independently of the display message. Its result
@@ -2699,10 +2749,12 @@ carries its domain and node reference. A cluster-license entity has neither a do
 name. `DESCRIBE LICENSE` uses the same page, unit, origin and Row-section contract, capturing one
 published policy revision and its committed usage. Its single unit belongs to the answering node.
 The `summary` includes typed decision issue/receipt timestamps and the active transition count.
-The `quotas` section reports current usage against each target; `transitions` reports the original
-and target quota, affected usage, identity, start, deadline, effective deadline, acknowledgement and
-current quota state. Its datetime cells retain full timestamp precision. Counts include transition
-rows, and a client preserves every section through the generic inspection contract.
+The `quotas` section reports current usage against each target; `capabilities` reports each
+catalog capability's `state` (`enabled`, `disabled` or `permitted`) with a `permitted_until`
+deadline only for `permitted`; `transitions` reports the original and target quota, affected usage,
+identity, start, deadline, effective deadline, acknowledgement and current quota state. Its
+datetime cells retain full timestamp precision. Counts include capability and transition rows, and
+a client preserves every section through the generic inspection contract.
 
 Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
 retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes

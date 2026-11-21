@@ -61,15 +61,15 @@ Each public listener enforces its own connection ceiling, independently of place
 | --- | --- | --- |
 | `--listener-max-connections` | 1,024 | Each public TCP listener, including upgraded WebSockets and TLS handshakes |
 | `--listener-header-bytes` | 16 KiB | HTTP/1 request head and chunked trailers |
-| `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer; minimum 8 KiB |
+| `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer, and the largest body copy made on the connection; minimum 8 KiB |
 | `--listener-header-timeout` | 30 s | Complete HTTP/1 request head |
 | `--listener-tls-timeout` | 10 s | HTTPS, console TLS and gRPC TLS handshake |
 | `--listener-idle-timeout` | 60 s | Accepted public I/O without read or write byte progress |
 | `--listener-accept-retry-delay` | 100 ms | Public and interconnect accepts after a node-local failure |
 | `--listener-http-keepalive` | true | HTTP/1 connection reuse |
 | `--http-body-bytes` | 32 MiB | Complete HTTP endpoint payload, including chunked input |
-| `--http-body-copy-bytes` | 64 KiB | Body assembly bytes between cancellation checks |
-| `--http-body-timeout` | 30 s | Complete HTTP input, including bounded assembly |
+| `--http-body-copy-bytes` | 64 KiB | Body bytes a data worker moves between cancellation checks |
+| `--http-body-timeout` | 30 s | Complete HTTP input, including moving its body to a larger buffer |
 | `--http-refusal-drain-timeout` | 5 s | Transport drain after a completed HTTP input refusal |
 | `--websocket-message-bytes` | 64 MiB | Ingest endpoint WebSocket message |
 | `--websocket-frame-bytes` | 16 MiB | Ingest endpoint WebSocket frame |
@@ -89,13 +89,18 @@ are positive and must fit their native protocol/admission representation. Deadli
 and representable by the monotonic clock. Kernel keepalive durations are whole seconds from 1
 through 32,767; the probe count is from 1 through 127, matching the native socket-option ranges.
 The HTTP/1 header default preserves the transport's 16 KiB trailer ceiling. Request heads also
-fit the configured read-buffer capacity.
+fit the configured read-buffer capacity. The shared HTTP/1 parser refuses a request head with more
+than 100 headers, including a WebSocket upgrade request.
 The startup preflight requires the intake pool to hold two body limits plus the declared initial
 read scratch and collection metadata. An explicit inconsistent pair refuses startup before stores
 or listeners open.
 
-Read and write progress both renew idle time. A WebSocket upgrade retains the accepted socket's
-lease and deadline. Connection tasks are reaped while the listener runs; shutdown retains its
+Read and write byte progress both renew idle time. A WebSocket upgrade retains the accepted
+socket's lease and deadline, so a silent peer waiting for its next frame eventually loses its
+connection. The frame size setting caps each frame's payload. The message size setting caps the
+assembled message across its frames. See the [endpoint manual](ingestors.md#websockets-endpoint)
+for what a client observes on expiry or overflow.
+Connection tasks are reaped while the listener runs; shutdown retains its
 existing admission, grace and terminal-cut order. HTTP listeners keep one bounded refusal
 slot alongside accepts, in addition to admitted connections. At capacity, cleartext HTTP returns 503 with reason
 `listener_connection_capacity` through the same bounded HTTP parser. Receiving its request and
@@ -105,13 +110,20 @@ that slot is occupied, further excess connections close without a protocol excha
 available admission capacity remains usable. A TLS or gRPC connection is closed before protocol
 admission.
 
-HTTP endpoint bodies use the independent `intake` executor memory class. It accounts retained
-transport backing buffers and collection metadata conservatively, as well as the copy overlap when
-several frames are concatenated. Input contention refuses immediately with 503; it never holds
-relay decode capacity while waiting for relay work. A single data frame keeps its existing shared
-byte buffer. Multi-frame assembly runs through the data CPU class with cancellation checks between
-bounded copies, and the reservation follows the worker and final body until dispatch ends.
-Size is a payload limit; highly fragmented bodies may exhaust the memory ceiling before that size.
+HTTP endpoint bodies use the independent `intake` executor memory class. It accounts the
+transport read buffers a request holds conservatively, and its body buffer exactly, including both
+allocations while a body moves to a larger buffer. Input contention refuses immediately with 503;
+it never holds relay decode capacity while waiting for relay work.
+
+A body that arrives in a single data frame keeps the shared byte buffer it was read into, with no
+copy. From the second data frame on, the endpoint copies each frame into one body buffer as it
+arrives and releases the frame at once, so the connection keeps reusing its read buffer instead of
+holding one per read: the charge follows the body's size, however the network splits it. The body
+buffer is sized to a declared `Content-Length`; without one it doubles as frames arrive, up to
+`--http-body-bytes`. A copy of at most one read buffer runs on the connection itself. Moving a body
+that already holds more runs through the data CPU class, with a cancellation check every
+`--http-body-copy-bytes`, and its reservation follows the worker until it exits. The final body
+keeps the charge for its own allocation until dispatch ends.
 
 The endpoint's public input outcomes are:
 
@@ -121,11 +133,11 @@ The endpoint's public input outcomes are:
 | 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
 | 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
 | 503 | `http_input_memory_capacity` | The intake pool cannot back retained input |
-| 503 | `http_input_worker_capacity` | Accounted body assembly cannot be admitted, expires or finishes cancelled |
+| 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer cannot be admitted on a data worker, expires or finishes cancelled |
 | 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
 
 The HTTP input completion budget distinguishes phases: expiry while receiving bytes returns 408;
-expiry while the server waits for or performs accounted body assembly returns 503. Assembly
+expiry while the server waits for or performs a body move on a data worker returns 503. The move
 retains its reservation until the worker actually exits after cancellation.
 
 Input refusals admit no payload to the graph. Hyper completes the response and closes its write
@@ -438,10 +450,12 @@ The edge validates the tags before any I/O, and a refusal ends the process with 
 the tag and the rule it broke, such as `node tag key 'Pool' must start with a lower-case letter or a
 digit and hold only lower-case letters, digits, '.', '_' and '-'`.
 
-Tags belong to the node's identity, addresses and paths, like `--node-id`, rather than to a
-settings class: they describe the node and bound no policy. No statement reads them into a Model
-or writes them. A node changes its tags by restarting with other values, which announces a new
-record, so a tag change follows the rolling-restart procedure of a capability change.
+Tags describe the node alongside its identity, addresses and paths. A node changes its tags by
+restarting with other values and announcing a new record. Tag changes follow the rolling-restart
+procedure of a capability change.
+
+Use [`SHOW NODES`](placement.md#selecting-nodes) to see the committed tag values and preview a
+selector before using those values to choose nodes.
 
 ### In `DESCRIBE CLUSTER`
 
@@ -493,7 +507,8 @@ explains why a fresh cluster restored from an archive keeps its own UUID and key
 ## Cluster Licensing
 
 A cluster starts with the embedded free policy. Its current quotas, `cluster.nodes` and
-`cluster.domains`, are unlimited. Node usage counts committed voters and learners; domain usage
+`cluster.domains`, are unlimited, and its one capability, `licensing.dummy`, is disabled. Node usage
+counts committed voters and learners; domain usage
 counts committed domain records, including stopped domains. Returning members and updates to an
 existing domain do not consume another slot. Free mode contacts no licensing service, including
 after restart.
@@ -508,8 +523,10 @@ DESCRIBE LICENSE;
 domain and outside domain transactions. Nervix uses the credential for the creation request;
 its durable execution retains the verified signed response and the public eight-character key
 identifier. Neither the credential nor the command's source enters that effect or its semantic
-request digest. Reusing the execution reference resumes its recorded outcome. If the service
-already processed creation, Nervix adopts the matching activation through an authenticated refresh.
+request digest. If leadership moves or the leader cannot confirm its authority after the cluster
+records the command, clients can recover under the same execution reference. Nervix resumes
+applying the saved decision or returns the recorded outcome. If the service already processed
+creation, Nervix adopts the matching activation through an authenticated refresh.
 `REFRESH LICENSE` runs immediately on the leader, outside domain transactions, and completes when
 the newer signed decision commits or the service or cluster returns a typed refusal.
 
@@ -576,7 +593,9 @@ crossings independently of its refresh attempt. The derived refresh state is `li
 `licensed due`, or `licensed overdue`; a bounded `valid_until` crossing becomes `lapsed freeze`.
 An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running
 and refuses new domain and member usage. Existing domain lifecycle commands and backups remain
-available. A later verified decision can clear the lapse.
+available. A later verified decision can clear the lapse. A newcomer refused during the freeze
+stops, and the leader keeps refusing that run after the lapse clears, for as long as gossip still
+shows it; the node joins under the cleared policy when it starts again.
 
 The licensed leader holds one authenticated outbound event stream. Each connection obtains a
 fresh challenge and single-use signed stream ticket; credentials stay out of the URL. The initial
@@ -611,12 +630,16 @@ While the gate is closed:
   `processing: stopped by licensing: ephemeral activation expired at <instant>`.
 - Admission refuses all new usage with state `stopped`, `CREATE DOMAIN` and the domains a restore
   would create included. The cluster never falls back to the free policy.
-- The leader stops every running domain through the ordinary `STOP`, which preserves its persisted
-  runtime state. `DESCRIBE DOMAIN` then reports
-  `stopped by licensing: ephemeral activation expired at <instant>` until the domain's next
-  `START`. An `ALTER` or a backup that holds a domain paused when the gate closes still
-  completes, and its pause ends in the licensing stop instead of a resume. A domain another
-  operation holds is stopped once that operation releases it.
+- The leader stops every running domain through the ordinary graceful stop, which preserves its
+  persisted runtime state: intake ends at once and the work in motion finishes. The licensing
+  stop's request is forced a fixed 60 seconds after the expiry in committed licensing time
+  (`LICENSING_STOP_ENFORCE_AFTER`, a fixed constant), whatever holds the domain then, and no
+  `CANCEL` withdraws it; an operator's `STOP ENFORCE AFTER` that comes due earlier ends it earlier.
+  `DESCRIBE DOMAIN` then reports `stopped by licensing: ephemeral activation expired at <instant>`
+  with how the stop ended and what it cut until the domain's next `START`. An `ALTER` or a backup
+  that holds a domain paused when the gate closes still completes, and its pause ends in the
+  licensing stop's request instead of a resume. A domain another operation holds begins its
+  licensing stop once that operation releases it, still forced at the same instant.
 - Planning refuses `START`, a transactional `START` and `RESTORE ... RESUME` with
   `licensing stopped processing`. Consensus refuses every other change that would make a domain
   run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
@@ -631,9 +654,17 @@ ephemeral activation expired, because the service released its capacity at that 
 stay stopped until an operator starts them.
 
 Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
-It reports the mode, policy, public identity, committed time, processing state and quotas. An
-activation adds its binding, public credential identifier, decision and conditions revisions,
-verification, signed deadlines, license facts and refresh state. A follower marks the leader's
+It reports the mode, policy, public identity, committed time, processing state, quotas and
+capabilities. An activation adds its binding, public credential identifier, decision and conditions
+revisions, verification, signed deadlines, license facts and refresh state.
+
+A capability is a feature a license switches on. The typed `capabilities` section lists every
+catalog capability with its `state`, `enabled` or `disabled`, and the text form prints one line
+per capability, such as `capability licensing.dummy: enabled`. The section's `permitted` state and
+its `permitted_until` deadline belong to a capability whose removal has a grace period; no current
+capability has one. The catalog's only capability, `licensing.dummy`, changes nothing in Nervix:
+the free policy disables it, and a license whose plan enables it shows that a verified decision
+reached the cluster. A follower marks the leader's
 incarnation- and tenure-bound connectivity observation as reported. Connectivity distinguishes
 reachable service, transport outage and non-retryable service refusal, retaining each outage or
 refusal's start and typed cause. Connectivity grants nothing; a failed request renews no deadline.
@@ -797,8 +828,8 @@ they preserve ordered cursor progress without materializing the entire catalog. 
 receives one fifteenth of the domain drain budget, two seconds at the default. Internal drain,
 freeze and replication rechecks derive from their owning deadline or replication cadence, with a
 one-nanosecond floor. ONNX sessions use one intra-operation and one inter-operation thread because
-the Data executor already owns parallel admission. State admission spins only with parallel Data
-workers; its bounded spin is followed by the selected thread yield.
+the Extension executor already owns the parallel admission of model runs. State admission spins
+only with parallel Data workers; its bounded spin is followed by the selected thread yield.
 
 Framing, packed identity bits, sequential single-slot handoffs, accounting granules and persisted
 segment sizes remain fixed contracts, with their owning code and format chapters declaring why.
@@ -921,7 +952,9 @@ relay pool, capped at 32 MiB each; `--execution-relay-scratch-bytes` defaults to
 capped at 16 MiB. All are positive. Validation requires two complete operations to fit relay,
 active read and cache pools independently. `--execution-resident-replication-batches` defaults
 to at most four, retaining command-budget room for an answer. `--execution-bulk-chunk-bytes`
-defaults to one 512th of bulk memory, capped at 64 KiB. Captured-section reads group sixteen
+defaults to one 512th of bulk memory, capped at 64 KiB. The resolved chunk sizes the staged
+snapshot encoder's output buffer. Stored branch captures and native restore conversions include
+that buffer in their bulk admission before encoding. Captured-section reads group sixteen
 bulk quanta, capped at half the immutable bulk pool so a preceding transport buffer and the next
 read can coexist; the default read remains 1 MiB. Existing operation working-set checks
 still apply. Peer receive limits derive from these final limits before transport construction.
@@ -988,7 +1021,13 @@ so a member that returns with a record an older voter cannot run beside is refus
 that kept running are not. Refusing a voter's run changes no membership. The leader judges a live
 node outside the membership against the accepted voters' records: it admits one that can run beside
 every one of them, refuses one that cannot, naming the first such voter, and leaves one that has
-published no record it can read outside the membership.
+published no record it can read outside the membership. The leader keeps its verdict on a refused
+run outside the membership, without judging that run again, until the run is no longer an admission
+candidate: the run stops once it reads the verdict, yet the failure detector keeps it live in gossip
+for several of its heartbeat intervals, about half a minute for a run that lived a second or two,
+and a member admitted after its run stopped would never run. Once the voter it named stops, is
+dropped or returns with a record the node could run beside, the leader therefore admits the node's
+next run, not the refused one.
 
 The leader publishes its verdicts in its gossip state under the key `admission_verdicts`, with the
 Raft term it leads. A node that finds another node leading withdraws the verdicts it published, and
@@ -1352,10 +1391,26 @@ The compiler accepts this contract on a constant, including an associated consta
 source scanner validates the gate before excluding a constant, including inactive code. The
 reason remains reviewed evidence; neither parser nor compiler proves its prose true.
 
-The one-minute and fifteen-minute metric EMA windows, their decay conversion and the published
-connector-interaction duration buckets are fixed observation contracts. Their declarations carry
-the fixed reasons in the metric owners; they are not node settings. The current resolution is
-documented in [Metrics And Observability](metrics-and-observability.md#connector-interactions).
+The one-minute and fifteen-minute metric EMA windows, their decay conversion, the steps of the
+percentile windows, the unit and precision of the HDR histograms that metric snapshots carry, the
+published histogram buckets and the published connector-interaction duration buckets are fixed
+observation contracts. Their declarations carry the fixed reasons in the metric owners; they are
+not node settings. The current resolution is documented in
+[Metrics And Observability](metrics-and-observability.md#connector-interaction-metrics).
+
+The per-session bounds of the [client session protocol](client-session-protocol.md) (requests in
+flight, producers, consumers and batch credit), the chunk bounds both peers of a stream check, the
+process exit statuses and the forced-exit report bound of [Shutdown](shutdown.md#exit-status), and
+the absence markers of packed atomic encodings are fixed the same way, each at its owner. A memory
+charge that mirrors a buffer sized by `--execution-bulk-chunk-bytes` derives from the resolved bulk
+chunk rather than repeating its default.
+
+The shared session codec in `nervix-client-wire` fixes the WebSocket close codes RFC 6455
+assigns, the frame header and the table and traversal budgets of rule F-3 of the
+[Client Implementation Manual](client-implementation-manual.md#frames), the envelope bounds and
+table depths the session schema's frame layouts fix, and the 64 KiB below which its gRPC decoder
+copies a frame out of the read buffer (rule F-9). It takes each session limit's default and bounds
+from that limit's own setting definition rather than restating them.
 
 `just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
 `const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,
@@ -1413,6 +1468,12 @@ A Kafka consumer's single control-operation turn is an ordering invariant rather
 operator capacity. Its fixed constant states that a cancelled native mutation cannot be
 overtaken by the next operation. The ingestor control-call budget is the external client's
 `socket.timeout.ms`; [Connector Contract](connector-contract.md) owns that per-system value.
+
+The licensing stop's forced ending, `LICENSING_STOP_ENFORCE_AFTER`, is 60 seconds and a fixed
+constant, never a setting, flag or clause. It is a licensing restriction rather than a tunable: a
+temporary license is not meant to serve real traffic, and the cluster must be stopped one minute
+after its expiry. No test build shortens it. See [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain).
 
 Sentry's 1,000,000-byte event limit is a fixed external ingestion contract. The connector
 vocabulary declares its one constant; [Sentry's event contract](emitters.md#sentry) defines which bytes

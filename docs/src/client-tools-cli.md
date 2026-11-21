@@ -52,7 +52,7 @@ server options and their environment variables.
 | `--cursor <OFFSET>` | | end of input | UTF-8 byte offset in `--suggest` input |
 | `--execution-reference <REFERENCE>` | | | with `--command` or a node administration subcommand, send the command under the execution reference the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
 | `--upload-identity <IDENTITY>` | | | with a `--command` that is one `UPLOAD RESOURCE`, send it under the upload identity the CLI printed for an earlier uncertain run of it, which recovers that run's outcome |
-| `--backup-wait-timeout <DURATION>` | `NERVIX_CLI_BACKUP_WAIT_TIMEOUT` | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
+| `--backup-wait-timeout <DURATION>` | `NERVIX_CLI_BACKUP_WAIT_TIMEOUT` | `10m` | how long one `BACKUP` command waits with neither its answer nor a progress report, across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
 TLS options have no environment-variable equivalents. The DNS options select the resolver used by
@@ -73,9 +73,9 @@ name with underscores. The typed native client definitions supply both help and 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--connect-timeout` | 10 s | deadline of each connection attempt |
-| `--request-timeout` | 120 s | deadline of each request |
-| `--retry-timeout` | 120 s | total request recovery deadline across redirects and retries |
-| `--backup-wait-timeout` | 10 min | total wait for a backup, including recovery |
+| `--request-timeout` | 120 s | how long each request may go without its reply or a server progress report |
+| `--retry-timeout` | 120 s | how long each call may go, across redirects and retries, without its answer or a server progress report |
+| `--backup-wait-timeout` | 10 min | how long a backup may go, including recovery, without its answer or a server progress report |
 | `--retry-backoff` | 100 ms | initial reconnect/recovery delay |
 | `--retry-max-backoff` | 1 s | ceiling for doubled retry delays |
 | `--subscription-record-capacity` | 32 | events retained per subscription |
@@ -83,6 +83,13 @@ name with underscores. The typed native client definitions supply both help and 
 | `--subscriptions-retained-in-full` | 4 | multiplier for the aggregate subscription record and byte bounds |
 | `--upload-frame-capacity` | 8 | queued outbound resource-upload frames |
 | `--restore-frame-capacity` | 8 | queued outbound restore frames |
+
+The server reports every request the CLI sends while it still serves it, four times per the shorter
+of the request and call timeouts and at least every 100 milliseconds, and each report starts both
+timeouts again. A statement the server keeps working on, such as a `STOP` that waits for the
+domain's work in motion or a `START` that waits for another node to start the domain's ingestors,
+therefore runs as long as it needs; the timeouts end only a wait in which neither the answer nor a
+report arrived.
 
 Durations accept one millisecond through 24 hours. The backoff base cannot exceed its ceiling.
 Capacities must be positive, fit the native channel bound and produce addressable aggregate byte
@@ -255,6 +262,15 @@ them. This includes ingestor `FILTER WHERE`, emitter input `WHERE`, HTTP `METHOD
 and constructions inside `ALTER`. After `metadata.`, an ingestor offers its declared metadata
 fields. Suggestions come from the grammar at the cursor, so a duration or mode position does
 not offer expression functions.
+
+A window processor route's `SET` value also offers the collection aggregates its window admits,
+by the rule the window applies when it is created: `COLLECT_ARRAY` after `WIDTH <n> MESSAGES` with
+no duration, and `COLLECT_VEC` after a message `WIDTH` or a `MAX STATE SIZE`. They are offered
+beside the ordinary functions, so typing `COLLECT_` in
+`CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = `
+offers both, and the route can still wrap one in a list function. Inside an aggregate's argument,
+in the route's `WHERE` and in every other processor's routes, expression positions keep the
+ordinary functions alone.
 
 Codec and relay names follow what the statement can accept, by the same rules the web console's
 forms apply to their choices. After `DECODE USING` only codecs that decode are offered, and after
@@ -444,9 +460,17 @@ counts, row limits and stale-token handling,
 [Inspect Held Rows](./processors.md#inspect-held-rows) for reorderer and correlator rows, and
 [Inspect Carried Inference State](./processors.md#inspect-carried-inference-state) for tensor sections, and
 [WASM State And Recovery](./wasm-state.md#observability) for WASM checkpoint facts. Standalone JSON
-mode accepts `DESCRIBE TRANSACTION`, `SHOW RELAY ... MATERIALIZED STATE`,
+mode accepts `DESCRIBE TRANSACTION`, `SHOW NODES`, `SHOW RELAY ... MATERIALIZED STATE`,
 `SHOW REORDERER ... STATE`, `SHOW CORRELATOR ... STATE`, `SHOW DEDUPLICATOR ... STATE`,
 `SHOW WINDOW PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE` and `SHOW WASM PROCESSOR ... STATE` with `FORMAT JSON`.
+
+Use one `SHOW NODES` command to read the matching node records as a JSON document. See
+[Selecting Nodes](placement.md#selecting-nodes) for the selector and the meaning of the results.
+
+```bash
+nervix-cli --command "SHOW NODES WHERE tag('zone') = 'eu' FORMAT JSON;"
+```
+
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.

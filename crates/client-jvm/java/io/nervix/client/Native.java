@@ -161,6 +161,9 @@ final class Native {
     static native long entityLabelsMaxBytes(long handle);
     static native Object[] entityLabelsEntries(long handle);
     static native long outcomeInspection(long handle);
+    static native long outcomeNodeInspection(long handle);
+    static native String nodeInspectionJson(long handle);
+    static native Object[] nodeInspectionNames(long handle);
     static native String inspectionDomain(long handle);
     static native String inspectionEntityKind(long handle);
     static native String inspectionEntityName(long handle);

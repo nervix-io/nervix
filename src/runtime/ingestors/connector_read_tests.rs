@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use nervix_connector::{
     IngestMessageHeaders, IngestMetadataRow, IngestorBatchAcknowledgementServices,
-    IngestorReadCancellation, IngestorResult,
+    IngestorReadCancellation, IngestorReadHold, IngestorResult,
 };
 use nervix_primitives::sync::{Notify, blocking::Mutex, mpsc};
 
@@ -79,6 +79,10 @@ pub(super) enum ReadEvent {
     HeldBack,
     /// A hold of the loop for the allowance ended.
     HoldEnded,
+    #[cfg(feature = "shuttle")]
+    MaintenanceStarted,
+    #[cfg(feature = "shuttle")]
+    MaintenanceEnded,
 }
 
 /// The ordered log the gathering ingestor and the recording host share.
@@ -137,6 +141,8 @@ pub(super) fn assert_every_taken_position_taken_in_first(events: &[ReadEvent]) {
             | ReadEvent::CountedOversized(_)
             | ReadEvent::HeldBack
             | ReadEvent::HoldEnded => {}
+            #[cfg(feature = "shuttle")]
+            ReadEvent::MaintenanceStarted | ReadEvent::MaintenanceEnded => {}
         }
     }
     assert_eq!(
@@ -211,6 +217,8 @@ pub(super) struct GatheringIngestor {
     events: ReadLog,
     signals: Arc<IngestorSignals>,
     read: ReadInFlight,
+    #[cfg(feature = "shuttle")]
+    maintenance: Option<RecordingMaintenance>,
     /// Ends the first read after its first message without the host cancelling it, which the ingestor
     /// contract forbids.
     interrupts_unasked: bool,
@@ -227,8 +235,19 @@ impl GatheringIngestor {
             events,
             signals,
             read: ReadInFlight::default(),
+            #[cfg(feature = "shuttle")]
+            maintenance: None,
             interrupts_unasked: false,
         }
+    }
+
+    #[cfg(feature = "shuttle")]
+    pub(super) fn with_hold_maintenance(mut self, started: Arc<Notify>) -> Self {
+        self.maintenance = Some(RecordingMaintenance {
+            events: self.events.clone(),
+            started,
+        });
+        self
     }
 
     async fn gather(
@@ -294,6 +313,13 @@ impl BrokerIngestorConnector for GatheringIngestor {
     type Message = GatheredMessage;
     type Position = u64;
 
+    #[cfg(feature = "shuttle")]
+    fn hold_maintenance(&mut self) -> Option<&mut dyn IngestorReadHold> {
+        self.maintenance
+            .as_mut()
+            .map(|maintenance| -> &mut dyn IngestorReadHold { maintenance })
+    }
+
     async fn next_batch(
         &mut self,
         request: IngestorBatchRequest,
@@ -313,6 +339,31 @@ impl BrokerIngestorConnector for GatheringIngestor {
 
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
         panic!("the tests acknowledge every batch, yet the host rejected {positions:?}")
+    }
+}
+
+#[cfg(feature = "shuttle")]
+struct RecordingMaintenance {
+    events: ReadLog,
+    started: Arc<Notify>,
+}
+
+#[cfg(feature = "shuttle")]
+#[async_trait]
+impl IngestorReadHold for RecordingMaintenance {
+    async fn maintain(&mut self, _until: Instant) -> Report<IngestorError> {
+        struct InFlight<'a>(&'a ReadLog);
+
+        impl Drop for InFlight<'_> {
+            fn drop(&mut self) {
+                self.0.record(ReadEvent::MaintenanceEnded);
+            }
+        }
+
+        self.events.record(ReadEvent::MaintenanceStarted);
+        let _in_flight = InFlight(&self.events);
+        self.started.notify_one();
+        std::future::pending().await
     }
 }
 
@@ -456,6 +507,7 @@ impl IngestorHostServices for RecordingHost {
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         self.take_in(&messages);
         Ok(())
@@ -464,6 +516,7 @@ impl IngestorHostServices for RecordingHost {
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        _maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         self.take_in(&messages);
         Ok(IngestorBatchAcknowledgement::new(ImmediateAck))

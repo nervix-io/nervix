@@ -1,0 +1,144 @@
+BEGIN;
+
+CREATE SCHEMA chaos_stop_record (
+  event_id STRING,
+  source STRING,
+  lane STRING,
+  branch_name STRING,
+  sequence I64,
+  content STRING
+);
+
+CREATE JAQ JSON CODEC chaos_stop_unfold
+  TO SCHEMA chaos_stop_record
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+
+CREATE WIRE JSON SCHEMA chaos_stop_wire MODE STRICT (
+  event_id STRING,
+  source STRING,
+  lane STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  content STRING
+);
+
+CREATE WIRE JSON CODEC chaos_stop_json
+  FROM WIRE SCHEMA chaos_stop_wire
+  TO SCHEMA chaos_stop_record;
+
+CREATE SCHEMA chaos_stop_branch_key (
+  branch_name STRING
+);
+
+CREATE BRANCH chaos_stop_branch SCHEMA chaos_stop_branch_key TTL 1h;
+
+CREATE RELAY chaos_stop_incoming SCHEMA chaos_stop_record BRANCHED BY chaos_stop_branch CAPACITY 64;
+CREATE RELAY chaos_stop_held SCHEMA chaos_stop_record BRANCHED BY chaos_stop_branch CAPACITY 64;
+CREATE RELAY chaos_stop_collected SCHEMA chaos_stop_record BRANCHED BY chaos_stop_branch CAPACITY 64;
+CREATE RELAY chaos_stop_outgoing SCHEMA chaos_stop_record BRANCHED BY chaos_stop_branch CAPACITY 64;
+CREATE RELAY chaos_stop_parked SCHEMA chaos_stop_record BRANCHED BY chaos_stop_branch CAPACITY 64;
+
+CREATE KAFKA CLIENT chaos_stop_source
+  CONFIG {
+    'bootstrap.servers' = 'broker:9092'
+  };
+
+CREATE KAFKA CLIENT chaos_stop_destination
+  CONFIG {
+    'bootstrap.servers' = 'broker:9092',
+    'enable.idempotence' = 'true'
+  };
+
+CREATE KAFKA TOPIC INGESTOR chaos_stop_acked
+  FROM chaos_stop_source TOPIC 'chaos_stop_acked_input' OFFSET BY CONSUMER GROUP 'chaos_stop_acked' START AT EARLIEST MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_stop_unfold
+  TO chaos_stop_incoming
+    INHERIT ALL
+    WHERE lane != 'ingestor' AND lane != 'collector'
+    BRANCHED BY chaos_stop_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  TO chaos_stop_held
+    INHERIT ALL
+    WHERE lane = 'ingestor'
+    BRANCHED BY chaos_stop_branch SET branch_name = message.branch_name
+    FLUSH EACH 3m MAX BATCH SIZE 4MiB
+    ON MESSAGE ERROR LOG
+  TO chaos_stop_collected
+    INHERIT ALL
+    WHERE lane = 'collector'
+    BRANCHED BY chaos_stop_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE KAFKA TOPIC INGESTOR chaos_stop_unacked
+  FROM chaos_stop_source TOPIC 'chaos_stop_unacked_input' OFFSET BY CONSUMER GROUP 'chaos_stop_unacked' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND
+  DECODE USING chaos_stop_unfold
+  TO chaos_stop_incoming
+    INHERIT ALL
+    WHERE lane != 'ingestor' AND lane != 'collector'
+    BRANCHED BY chaos_stop_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  TO chaos_stop_held
+    INHERIT ALL
+    WHERE lane = 'ingestor'
+    BRANCHED BY chaos_stop_branch SET branch_name = message.branch_name
+    FLUSH EACH 3m MAX BATCH SIZE 4MiB
+    ON MESSAGE ERROR LOG
+  TO chaos_stop_collected
+    INHERIT ALL
+    WHERE lane = 'collector'
+    BRANCHED BY chaos_stop_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE JUNCTION chaos_stop_collector
+  FROM chaos_stop_collected COLLECT FOR 3m
+  ATTACHED
+  BRANCHED BY chaos_stop_branch
+  TO chaos_stop_outgoing
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE JUNCTION chaos_stop_forward
+  FROM chaos_stop_incoming, chaos_stop_held
+  ATTACHED
+  BRANCHED BY chaos_stop_branch
+  TO chaos_stop_outgoing
+    INHERIT ALL
+    WHERE lane != 'junction'
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  TO chaos_stop_parked
+    INHERIT ALL
+    WHERE lane = 'junction'
+    FLUSH EACH 3m MAX BATCH SIZE 4MiB
+    ON MESSAGE ERROR LOG;
+
+CREATE KAFKA TOPIC EMITTER chaos_stop_publisher
+  FROM chaos_stop_outgoing WHERE input.lane != 'emitter', chaos_stop_parked
+  ATTACHED
+  TO chaos_stop_destination TOPIC 'chaos_stop_output'
+    MODE ACK PARALLEL MAX 1024 ACK TIMEOUT 2m RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_stop_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE KAFKA TOPIC EMITTER chaos_stop_holder
+  FROM chaos_stop_outgoing WHERE input.lane = 'emitter'
+  ATTACHED
+  TO chaos_stop_destination TOPIC 'chaos_stop_output'
+    MODE ACK PARALLEL MAX 1024 ACK TIMEOUT 2m RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_stop_json
+  INHERIT ALL
+  FLUSH EACH 3m MAX BATCH SIZE 4MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

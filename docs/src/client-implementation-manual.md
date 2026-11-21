@@ -266,6 +266,13 @@ archive; see [Restore Streams](#restore-streams).
   a reply of any other kind as a protocol violation under F-8. It MUST NOT adopt the subscription,
   clock attachment, producer, transaction or redirect such a reply carries. A reply whose request
   no longer waits is routed under C-3, whatever its kind.
+- **C-12.** A client that bounds a request's wait SHOULD ask for
+  [progress reports](./client-session-protocol.md#progress-reports) in its `ClientMessage`, with
+  an interval of at least 100 milliseconds that fits several times within its wait. A
+  `RequestProgress` reply completes nothing and MUST NOT be taken as the request's terminal reply or
+  as the protocol violation of C-11: the client restarts its wait for the request at each report.
+  A report for a request no longer waiting, which can arrive after the request's terminal reply,
+  MUST be ignored.
 
 ## Structured Choice Lookups
 
@@ -435,7 +442,10 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   name.
 - **D-3.** A client SHOULD remember a bounded set of endpoints it learned from redirects and
   `LeadershipObserved`, and try them, and its configured seeds, when its session is lost.
-- **D-4.** A client MUST bound every call with a deadline of its own. When a deadline passes before
+- **D-4.** A client MUST bound every call with a deadline of its own. A client that asked for
+  progress reports (C-12) MAY start that deadline again at each report, so that only a call that
+  went without its answer and without a report for its whole budget ends; the Rust client does
+  both for every request and call. When a deadline passes before
   a command's outcome is known, the client MUST report the command as uncertain, naming its
   reference, and never as failed or completed. The Rust client keeps the last nonterminal answer's
   typed disposition and message in the report chain when one arrived before the deadline; that
@@ -729,7 +739,8 @@ remain the schema the ingestor declares; a payload field cannot replace the auth
 
 - **E-1.** A client MUST open a `TO CLIENT` emitter with `OpenEmitterRequest`, naming its domain,
   emitter and exact ordered output fields, including optionality and sensitivity. It MUST supply
-  nonzero batch and byte limits; the requested byte limit MUST hold one maximum-sized IPC batch.
+  nonzero batch and byte limits, a batch limit no larger than 1,024; the requested byte limit MUST
+  hold one maximum-sized IPC batch.
   An open inside a transaction is refused. The open's `request_id` becomes its `ConsumerId`.
 - **E-2.** A client MUST continue reading transport frames while an application waits for
   consumer credit or processes an output batch. A pending `ReadEmitterBatchRequest` does not
@@ -1450,6 +1461,21 @@ and an empty value differs from absence. Large results use the existing reply-tr
 and its typed oversize rejection. Native `EntityLabelsInspection` views outlive the outcome;
 host guides demonstrate their ownership and committed/staged accessors.
 
+## Reading Cluster Nodes
+
+Clients MUST preserve the typed `CommandOutcome.node_inspection` independently of the command's
+display message. A successful `SHOW NODES` can contain an empty vector. Keep the node names
+in order, the four membership flags and the optional committed record per node. For a record,
+retain its full-width revision, optional CPU count and byte limit, typed detection values and
+reasons, exact tags, and the per-device and execution-provider order. Read the typed fields from
+the envelope. The command's selected format only governs how it is displayed.
+
+The read can be sent directly to any ready node over a session with no selected domain.
+Clients preserve command diagnostics even on a successful read because a diagnostic can
+identify a node the selector failed to evaluate. Follow the ordinary reply-transfer contract for
+a large result. The native bindings expose an independently retained node inspection with the
+ordered names and a JSON projection of the full verified envelope.
+
 ## Reading Typed Materialized State
 
 Clients MUST retain `CommandOutcome.state` independently of the command message and preserve its
@@ -1461,10 +1487,10 @@ from the presence of `state` or parse text to reconstruct rows.
 Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
 a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
 domain/name accessors return absent values for a cluster-license observation, and its entity kind
-is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's `transitions`
-section uses that generic contract for committed grants; preserve its complete schema and typed
-rows, including datetime precision and all original/target values. The section's rows contribute
-to the page and unit counts. Native and console warnings render the same licensing transition
+is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's
+`capabilities` and `transitions` sections use that generic contract for capability states and
+committed grants; preserve their complete schemas and typed rows, including datetime precision and
+all original/target values. Their rows contribute to the page and unit counts. Native and console warnings render the same licensing transition
 codes and parameters supplied by the server.
 
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer

@@ -307,6 +307,7 @@ impl KafkaTopicIngestorStartPlan {
                 config: resolved_client.entries,
                 topic,
                 offset_mode: connector_offset_mode,
+                maintain_rate_limit_holds: !ingestor.rate_limit.is_empty(),
             },
             capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
             acknowledgement,

@@ -171,17 +171,43 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 /// What the connector of a WEBSOCKETS ENDPOINT holds and how long it waits.
 const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "unresolved data frames under MODE ACK, per node and ingestor",
-        bound: BufferBound::Bounded {
-            capacity: BufferCapacity::Setting("MODE ACK MAX"),
-            overflow: BufferOverflow::RefuseRequest,
+    buffers: &[
+        DeclaredBuffer {
+            holds: "the upgrade request head",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-header-bytes"),
+                overflow: BufferOverflow::RefuseOversized,
+            },
         },
-    }],
+        DeclaredBuffer {
+            holds: "an incoming frame payload, per session",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("websocket-frame-bytes"),
+                overflow: BufferOverflow::CloseSession,
+            },
+        },
+        DeclaredBuffer {
+            holds: "an incoming message assembled from frames, per session",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("websocket-message-bytes"),
+                overflow: BufferOverflow::CloseSession,
+            },
+        },
+        DeclaredBuffer {
+            holds: "unresolved data frames under MODE ACK, per node and ingestor",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("MODE ACK MAX"),
+                overflow: BufferOverflow::RefuseRequest,
+            },
+        },
+    ],
     waits: &[
         DeclaredWait {
-            wait: "graph acknowledgement under MODE ACK",
-            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+            wait: "the upgrade request head",
+            bound: WaitBound::NodeSetting {
+                setting: "listener-header-timeout",
+                expiry: "closes the connection without an answer",
+            },
         },
         DeclaredWait {
             wait: "the signaling handshake",
@@ -189,10 +215,17 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "reading the next frame",
-            bound: WaitBound::Unbounded,
+            bound: WaitBound::NodeSetting {
+                setting: "listener-idle-timeout",
+                expiry: "closes that session after no read or write byte progress",
+            },
+        },
+        DeclaredWait {
+            wait: "graph acknowledgement under MODE ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
         },
     ],
-    driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the session."],
+    driver_limits: &[],
 };
 
 /// The text or binary kind of one data frame of a WebSockets connection.

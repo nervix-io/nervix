@@ -283,6 +283,9 @@ impl ClientRequestKind {
 pub struct ClientMessage {
     pub request_id: RequestId,
     pub request: ClientRequest,
+    /// How often the server is asked to report that it still serves the request. `None` asks for
+    /// no reports.
+    pub progress: Option<crate::ProgressInterval>,
 }
 
 impl ClientMessage {
@@ -298,6 +301,7 @@ impl ClientMessage {
                 request_id: self.request_id.wire(),
                 request_type: request.discriminant,
                 request: Some(request.value),
+                progress_interval_ms: self.progress.map(crate::ProgressInterval::wire),
             },
         );
         encoder.finish::<ClientFrame>(message)
@@ -314,9 +318,14 @@ impl ClientMessage {
         let request_id =
             RequestId::decode(decoder, "ClientMessage.request_id", message.request_id())?;
         let request = ClientRequest::decode(frame, decoder, message)?;
+        let progress = crate::ProgressInterval::decode(
+            "ClientMessage.progress_interval_ms",
+            message.progress_interval_ms(),
+        )?;
         Ok(Self {
             request_id,
             request,
+            progress,
         })
     }
 }
@@ -350,7 +359,7 @@ impl ClientRequest {
                 )?;
                 let cursor = u32::try_from(suggest.cursor).verified(
                     "the cursor lies within the input, which passed a string limit of at most \
-                     MAX_FRAME_BYTES above",
+                     SessionFrameBytes::MAXIMUM above",
                 );
                 let request = wire::SuggestRequest::create(
                     encoder.fbb(),

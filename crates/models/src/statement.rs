@@ -125,6 +125,7 @@ pub enum Statement {
     DescribeClient(DescribeClient),
     AlterBranch(AlterBranch),
     DescribeBranch(DescribeBranch),
+    ShowNodes(ShowNodes),
 }
 
 impl Statement {
@@ -209,6 +210,7 @@ impl Statement {
             | Self::ShowProcessorState(_)
             | Self::ShowWasmProcessorState(_)
             | Self::ShowClusterStatus(_)
+            | Self::ShowNodes(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
             | Self::DescribeCluster(_)
@@ -404,6 +406,15 @@ pub struct ShowCreate {
 )]
 pub struct ShowClusterStatus;
 
+/// Previews an optional selector over the cluster's committed node records.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowNodes {
+    pub selector: Option<crate::Expression>,
+    pub format: InspectionFormat,
+}
+
 /// Describes every live node of the cluster: the prerequisites it brings, and how its timings
 /// differ from the leader's.
 #[derive(
@@ -554,7 +565,11 @@ pub struct StartDomain {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub struct StopDomain;
+pub struct StopDomain {
+    /// How long the stop may wait for the work in motion before it is forced through or called
+    /// off. Absent, the stop waits without a limit of its own.
+    pub wait_limit: Option<crate::WaitLimit>,
+}
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -662,6 +677,8 @@ pub enum DomainStatus {
     Stopped,
     Running,
     Paused,
+    /// Intake has stopped and the work in motion finishes before the domain stops.
+    Stopping,
 }
 
 #[derive(
@@ -684,8 +701,9 @@ pub struct DomainState {
     pub start_version: u64,
     pub last_start: DomainStartPoint,
     pub clock: Option<DomainClockState>,
-    /// Why its committed stop ended the domain, kept while it stays stopped; a start clears it.
-    pub stop_cause: Option<crate::DomainStopCause>,
+    /// The stop the domain is in while it stops, or the one that ended it while it stays
+    /// stopped; a start clears it.
+    pub stop: Option<crate::DomainStop>,
 }
 
 #[derive(

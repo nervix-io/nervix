@@ -37,6 +37,7 @@ use thiserror::Error;
 mod authentication;
 pub mod backup;
 mod capability_publication;
+pub mod domain_stop;
 mod relay_slicing;
 #[doc(hidden)]
 pub use relay_slicing::RelaySliceCursor;
@@ -613,7 +614,14 @@ pub struct ConfirmOwnershipHandoffStateRequest {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForcedOwnershipRecoveryRound {
+    pub leader_term: u64,
+    pub coordination: CoordinationIdentity,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrepareForcedOwnershipRecoveryRequest {
+    pub round: ForcedOwnershipRecoveryRound,
     /// The coordinator captures this budget from the policy that planned the transition.
     pub recovery_budget: nervix_models::ClusterParameterDuration,
     pub operation_id: String,
@@ -625,6 +633,11 @@ pub struct PrepareForcedOwnershipRecoveryRequest {
     pub unit: Unit,
     pub base_schedule_fingerprint: [u8; 32],
     pub target_schedule_fingerprint: [u8; 32],
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscardForcedOwnershipRecoveryRequest {
+    pub preparation: PrepareForcedOwnershipRecoveryRequest,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

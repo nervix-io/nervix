@@ -159,6 +159,11 @@ and exits immediately with the status a shell reports for that signal, whichever
 started the shutdown. No destructor, exit handler, or remaining phase runs. Whichever comes first,
 the repeated signal or the deadline, decides how the process exits.
 
+Both forced exits write their record before they exit, which normally takes microseconds. When
+standard output has stopped draining, a forced exit waits at most one second for that record and
+then exits with the same status without it, so a stalled log consumer cannot keep the process
+alive.
+
 A diagnostic node that reports an active deadlock ends the same way, immediately, whatever phase it
 is in: its blocked threads hold work it can no longer finish. It describes the cycle on standard
 error, records it as evidence, and exits with `3`, or with `4` when the recording failed, without
@@ -726,10 +731,11 @@ ingestor redelivers the record to the new owner rather than committing it; see
 Forced recovery is the path that publishes a schedule when the source cannot participate. It stages
 the destination's checkpoint inventory under the destination's process incarnation and the complete
 target-schedule fingerprint, and applying staged checkpoints accepts only that exact preparation. A
-missing or mismatched preparation does not imply a reset: without an exhaustive reset outcome in the
-schedule, activation fails and leaves every saved checkpoint unchanged. State is recreated only when
-the accepted decision either stages a recreated inventory or reports a reset for every state
-component the entity owns.
+relay that only forwards records owns zero durable checkpoints. The destination can install its
+committed move with an empty inventory after restarting. A stateful move with missing or mismatched
+preparation fails and leaves every saved checkpoint unchanged unless the schedule authorizes a
+reset of every component. State is recreated only when the accepted decision either stages a
+recreated inventory or reports a reset for every state component the entity owns.
 
 The destination first waits for the execution schedule it validates to finish installing, within
 the existing five-second preparation deadline. Lifecycle state can be published before the graph,
@@ -1023,6 +1029,41 @@ waits for those writes and for the last write of each of its deduplicator, windo
 inferencer branches, which a branch ended at its grace left to its snapshot task, before teardown
 moves to the next domain.
 
+### A Domain's Stop
+
+A domain's `STOP` ends the domain's tasks through the same teardown, without stopping the node, and
+drains before it does. Its owner, the leader, commits the domain `stopping`: every node stops the
+domain's intake as a terminating node stops its own, whatever each ingestor's `ON QUIESCE` says,
+while the graph and the domain clock keep running. The owner then drains across the cluster in
+rounds, as a backup cut does: each node that holds work in motion releases it with a force-flush
+generation, and once no node holds any, every node starts the generation that confirms nothing is
+still moving. A node asked for a round before it applied the stop answers with its view and releases
+nothing, starting no generation until it has applied the stop, so the owner asks again. Each of its
+ingestors that still admits holds the drain open in that view, while a node with no intake and
+nothing in motion does not hold it open, even while its installation of the stop waits. A node that
+does not answer a round within the request's deadline holds the domain stopping, as one that holds
+work in motion does, and a request's clause still acts at its time: the owner abandons a round that
+a late node holds when an `ENFORCE AFTER`, a `CANCEL AFTER` or the
+licensing stop's fixed time comes due, acts on it, and drains again from a releasing round. The
+drain has no time limit: the domain drain timeout and the task grace bound neither it nor the
+publish attempts on the wire it waits for. Work that cannot move on, held by a `REQUIRED WAIT`, an
+emitter's retry, a reorderer or correlator until its time or its partner, or a window until further
+input fills it, never holds it open. During a stop, an emitter that a generation finds waiting for
+a retry completes the generation at once, and one whose publish fails during a generation hands the
+records to its retry schedule rather than retrying inline. Only then does the owner commit the
+domain stopped, and each node tears the domain down.
+
+A completed stop's teardown first lets a publish already on the wire run to its outcome, records
+what it is about to cut, and then ends the domain's tasks with the final snapshot writes described
+above. Each node records its cut while the domain's tasks still run, before it installs the stopped
+domain clock that the same committed revision carries, because a branch that loses its clock ends
+on its own and with it the count of what it held. An enforced stop's teardown, once a request's `ENFORCE AFTER` or the licensing stop's fixed
+time has passed, records what it cuts and ends the tasks at once: emitters get no time to finish,
+and each deduplicator, window, inferencer and WASM processor branch keeps the last snapshot it took
+before the stop instead of writing what it published since. Each node keeps what its teardown cut,
+by entity and kind, until the owner collects it into the stop's report. See [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain) for the statement, its clauses and its answers.
+
 Generators and reingestors share their grace. A generator reads its source relay from the node that
 owns it, and both kinds publish to the node that owns their output relay, so while they work they
 wait on other nodes. When every node of a cluster stops at once those peers stop answering, and
@@ -1072,10 +1113,13 @@ publication; the replica's assignment token still fences installation if ownersh
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is
 dropped. The registry and runtime database is released separately after the services that hold its
-handles. Terminal teardown does not finish until both database locks have been released. A build
-with the `testing` feature is the exception: its fault injection keeps an observer of each running
-node's consensus state, so an in-process test node's consensus database closes only once the
-scenario harness gives that registration back, after the node has stopped; see
+handles. Terminal teardown does not finish until both database locks have been released, whatever
+asked the node to stop: a termination signal, the caller embedding it, a failed listener, a refused
+initialization, or the cluster refusing its join. A node whose start fails after it opened its
+stores releases both locks the same way before it returns. In a build with the `testing` feature,
+the fault injection also keeps an observer of each running node's consensus state. The node gives
+that observer back itself as soon as its consensus has stopped, so nothing it registered holds the
+consensus database once it has returned, and the same node can start again in the same process; see
 [Integration Test Lifecycle](./integration-test-lifecycle.md#cluster-teardown). See
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.

@@ -26,8 +26,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, CreateDomain, CreateStatement, DomainClockState,
-    DomainName, DomainStartPoint, DomainState, DomainStatus, DomainStopCause, QuiesceLevel,
-    StartDomain, StopDomain, TimestampError,
+    DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel, TimestampError,
 };
 use nervix_primitives::time::{Instant, interval};
 use thiserror::Error;
@@ -696,10 +695,15 @@ impl SessionServiceImpl {
                     // so the domain may not run again. Its pause ends in the licensing stop the
                     // leader would make once the lease is released, under this same lease, and
                     // the operation completes with the domain stopped until an operator starts it.
-                    let cause = DomainStopCause::Licensing(*reason);
+                    // The pause becomes the licensing stop's request, which drains what is
+                    // still in motion and is forced at the fixed time after the expiry.
                     self.inner
                         .consensus
-                        .stop_domain(domain.clone(), mutation, cause)
+                        .request_domain_stop(
+                            domain.clone(),
+                            nervix_models::StopRequest::Licensing(*reason),
+                            mutation,
+                        )
                         .await
                         .change_context_lazy(|| DomainAlterError::LicensingStop {
                             domain: domain.clone(),
@@ -748,34 +752,6 @@ impl SessionServiceImpl {
             impact.release(attempt);
         }
         Ok(())
-    }
-
-    /// Stops a domain whose start could not be completed, and says so when the stop fails too.
-    ///
-    /// The caller is on its way to returning the start failure, and this rollback is what keeps
-    /// the cluster from holding a domain the operator was told did not start. A rollback that
-    /// fails leaves exactly that state, so the reason is appended to the caller's message rather
-    /// than dropped: nothing else in the command's answer would mention it.
-    async fn roll_back_started_domain(&self, domain_id: &DomainName) -> String {
-        let mut failures = Vec::new();
-        if let Err(error) = self
-            .inner
-            .consensus
-            .stop_domain(domain_id.clone(), None, DomainStopCause::Operator)
-            .await
-        {
-            failures.push(format!("stopping it again failed: {error}"));
-        }
-        if let Err(error) = self.apply_current_cluster_state().await {
-            failures.push(format!("reapplying the cluster state failed: {error:#}"));
-        }
-        if failures.is_empty() {
-            return String::new();
-        }
-        format!(
-            "; the domain may still be running because {}",
-            failures.join(" and ")
-        )
     }
 
     /// Restores the pre-alteration models and schedule after a committed batch failed to reach the
@@ -858,7 +834,7 @@ impl SessionServiceImpl {
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
         };
         match self
             .inner
@@ -932,132 +908,6 @@ impl SessionServiceImpl {
             clock: DomainClockState::new(wall_started_at, logical_start, time_rate),
         })
     }
-
-    pub(in crate::application) async fn start_domain(
-        &self,
-        domain_id: &DomainName,
-        start: StartDomain,
-    ) -> CommandResult {
-        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
-            return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
-        };
-        if let DomainStatus::Running = domain.status {
-            return command_error(format!(
-                "domain '{}' is already running",
-                domain_id.as_str()
-            ));
-        }
-        if let DomainStatus::Paused = domain.status {
-            return command_error(format!(
-                "domain '{}' is paused for a model alteration",
-                domain_id.as_str()
-            ));
-        }
-        // Refused before a clock authority is chosen or the start is resolved; consensus refuses
-        // the start again under the gate it commits against.
-        if let Some(reason) = self.committed_licensing_stop() {
-            return command_error(format!(
-                "domain '{}' cannot start: licensing stopped processing: {reason}",
-                domain_id.as_str()
-            ));
-        }
-        let authority = if domain.config.pace.is_paced() {
-            let Some(authority) = self.selected_domain_clock_authority(domain_id).await else {
-                return command_error(format!(
-                    "no live voter is available to own the clock for domain '{}'",
-                    domain_id.as_str()
-                ));
-            };
-            Some(authority)
-        } else {
-            None
-        };
-        let resolved_start = match self
-            .resolve_domain_start(domain_id, &domain, &start.start)
-            .await
-        {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                return command_error(format!(
-                    "failed to construct domain clock start for '{}': {error}",
-                    domain_id.as_str()
-                ));
-            }
-        };
-        match self
-            .inner
-            .consensus
-            .start_domain(
-                domain_id.clone(),
-                resolved_start.concrete_start,
-                domain
-                    .config
-                    .pace
-                    .is_paced()
-                    .then_some(resolved_start.clock.clone()),
-                authority,
-                None,
-            )
-            .await
-        {
-            Ok(()) => {
-                if let Err(error) = self.apply_current_cluster_state().await {
-                    let rollback = self.roll_back_started_domain(domain_id).await;
-                    return command_error(format!(
-                        "failed to start domain '{}': {error:#}{rollback}",
-                        domain_id.as_str()
-                    ));
-                }
-                command_ok(format!("started domain '{}'", domain_id.as_str()))
-            }
-            Err(error) => {
-                self.consensus_report_response(
-                    &error,
-                    format!("failed to start domain '{}'", domain_id.as_str()),
-                )
-                .await
-            }
-        }
-    }
-
-    pub(in crate::application) async fn stop_domain(
-        &self,
-        domain_id: &DomainName,
-        _stop: StopDomain,
-    ) -> CommandResult {
-        let Some(domain) = self.inner.consensus.current_domain(domain_id).await else {
-            return command_error(format!("domain '{}' does not exist", domain_id.as_str()));
-        };
-        if let DomainStatus::Stopped = domain.status {
-            return command_error(format!(
-                "domain '{}' is already stopped",
-                domain_id.as_str()
-            ));
-        }
-        match self
-            .inner
-            .consensus
-            .stop_domain(domain_id.clone(), None, DomainStopCause::Operator)
-            .await
-        {
-            Ok(()) => {
-                if let Err(error) = self.apply_current_cluster_state().await {
-                    return command_error(format!(
-                        "stopped domain '{}', but remote stopping did not complete: {error:#}",
-                        domain_id.as_str()
-                    ));
-                }
-                command_ok(format!("stopped domain '{}'", domain_id.as_str()))
-            }
-            Err(error) => {
-                self.consensus_report_response(
-                    &error,
-                    format!("failed to stop domain '{}'", domain_id.as_str()),
-                )
-                .await
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1082,47 +932,6 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]
-    async fn start_domain_storage_failure_preserves_stopped_state() {
-        let probe = ConsensusTestProbe::default();
-        let TestService {
-            service,
-            registry,
-            path,
-        } = build_test_service_with_probe(true, probe.clone()).await;
-        let domain = DomainName::parse("default").assured("the test domain name is valid");
-        let storage_fault = probe.storage_fault();
-
-        storage_fault.fail_next(
-            "start-domain:default".to_string(),
-            StorageBoundary::BeforeCommit,
-        );
-        let start = service
-            .start_domain(
-                &domain,
-                StartDomain {
-                    start: DomainStartPoint::Resume,
-                },
-            )
-            .await;
-        assert!(!start.succeeded(), "{start:?}");
-        assert!(start.message.contains("consensus storage"), "{start:?}");
-        assert!(matches!(
-            service
-                .inner
-                .consensus
-                .current_domain(&domain)
-                .await
-                .map(|state| state.status),
-            Some(DomainStatus::Stopped)
-        ));
-
-        drop(service);
-        drop(registry);
-        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
-    }
-
-    #[cfg(feature = "testing")]
-    #[nervix_primitives::test]
     async fn pause_domain_storage_failure_retains_typed_cause_and_running_state() {
         let probe = ConsensusTestProbe::default();
         let TestService {
@@ -1131,15 +940,7 @@ mod tests {
             path,
         } = build_test_service_with_probe(true, probe.clone()).await;
         let domain = DomainName::parse("default").assured("the test domain name is valid");
-        let start = service
-            .start_domain(
-                &domain,
-                StartDomain {
-                    start: DomainStartPoint::Resume,
-                },
-            )
-            .await;
-        assert!(start.succeeded(), "{start:?}");
+        service.test_start_domain("default").await;
         probe.storage_fault().fail_next(
             "pause-domain:default".to_string(),
             StorageBoundary::BeforeCommit,
@@ -1179,23 +980,33 @@ mod tests {
             path,
         } = build_test_service_with_probe(true, probe.clone()).await;
         let domain = DomainName::parse("default").assured("the test domain name is valid");
-        let start = service
-            .start_domain(
-                &domain,
-                StartDomain {
-                    start: DomainStartPoint::Resume,
-                },
-            )
-            .await;
-        assert!(start.succeeded(), "{start:?}");
+        service.test_start_domain("default").await;
 
         probe.storage_fault().fail_next(
-            "stop-domain:default".to_string(),
+            "request-domain-stop:default".to_string(),
             StorageBoundary::BeforeCommit,
         );
-        let stop = service.stop_domain(&domain, StopDomain).await;
-        assert!(!stop.succeeded(), "{stop:?}");
-        assert!(stop.message.contains("consensus storage"), "{stop:?}");
+        let request = nervix_models::StopRequest::Operator {
+            reference: nervix_models::CommandExecutionReference::parse("stop-default")
+                .assured("the test reference is a valid literal"),
+            request: nervix_models::OperatorStopRequest {
+                requested_at: nervix_models::Timestamp::from_unix_nanos(1),
+                limit: None,
+            },
+        };
+        let stop = service
+            .inner
+            .consensus
+            .request_domain_stop(domain.clone(), request, None)
+            .await;
+        let error = stop.expect_err("a stop request whose write fails is reported");
+        assert!(
+            matches!(
+                error.current_context(),
+                ConsensusError::Storage | ConsensusError::RaftStorage
+            ),
+            "{error:?}"
+        );
         assert!(matches!(
             service
                 .inner
@@ -1310,7 +1121,7 @@ mod tests {
             start_version: 0,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
         };
 
         let first = service
@@ -1352,16 +1163,7 @@ mod tests {
     async fn running_default_domain(faults: &crate::FaultInjection) -> (TestService, DomainName) {
         let test_service = build_test_service_with_fault_injection(true, faults.clone()).await;
         let domain = DomainName::parse("default").assured("the test domain name is valid");
-        let start = test_service
-            .service
-            .start_domain(
-                &domain,
-                StartDomain {
-                    start: DomainStartPoint::Resume,
-                },
-            )
-            .await;
-        assert!(start.succeeded(), "{start:?}");
+        test_service.service.test_start_domain("default").await;
         (test_service, domain)
     }
 

@@ -630,6 +630,7 @@ pub(crate) async fn send_on_exchange(
     let message = ClientMessage {
         request_id: registered.request_id,
         request,
+        progress: None,
     };
     let frame = message
         .encode(&exchange.limits)
@@ -1120,6 +1121,7 @@ impl ProducerAttachment {
         let message = ClientMessage {
             request_id: registered.request_id,
             request,
+            progress: None,
         };
         let frame = match message.encode(&self.exchange.limits) {
             Ok(frame) => frame,

@@ -120,9 +120,12 @@ pub use cluster_identity::{
     ClusterSigner, PendingClusterKey,
 };
 pub use cluster_parameters::ClusterParameterPlanningInputs;
+pub use node_records::CommittedNodeObservations;
 mod connectivity_fault;
 mod domain_mutation;
 mod domain_pause_recovery;
+#[cfg(all(test, feature = "shuttle"))]
+mod domain_stop_shuttle_tests;
 mod durable_batch;
 mod leadership;
 mod lease_refusal;
@@ -158,6 +161,8 @@ pub use leadership::LeadershipObservation;
 #[cfg(any(test, feature = "testing"))]
 pub use lease_refusal::CommandWrite;
 use lease_refusal::LeaseRefusal;
+#[cfg(feature = "testing")]
+use lease_refusal::RefusalTarget;
 pub use restore::{
     RestoreExecution, RestoreStateInstallationError, RestoreStateRetention, RestoreStepEffect,
     RestoredResource,
@@ -555,17 +560,33 @@ pub enum ConsensusCommand {
         mutation: Option<Box<DomainMutationLease>>,
         domain_quota: nervix_licensing_vocabulary::Quota,
     },
-    StartDomain {
+    /// Asks a domain to stop. A running domain no other execution holds begins stopping, a paused
+    /// one only under the mutation that pauses it, and a stopping one takes the request beside the
+    /// requests it holds, whatever holds it. A repeated request, or one for a stopped domain,
+    /// changes nothing.
+    RequestDomainStop {
         domain_id: DomainName,
-        start: DomainStartPoint,
-        clock: Option<DomainClockState>,
-        authority: Option<ClusterNodeIdentity>,
+        request: Box<nervix_models::StopRequest>,
         mutation: Option<Box<DomainMutationLease>>,
     },
-    StopDomain {
+    /// Withdraws an operator's stop request whose `CANCEL` acted. The last request's withdrawal
+    /// calls the stop off and the domain runs on.
+    WithdrawDomainStopRequest {
         domain_id: DomainName,
-        mutation: Option<Box<DomainMutationLease>>,
-        cause: nervix_models::DomainStopCause,
+        reference: nervix_models::CommandExecutionReference,
+    },
+    /// Ends the stop that began at `began_at_revision`, if the domain is still in it. An enforced
+    /// ending names a request the stop still holds.
+    EndDomainStop {
+        domain_id: DomainName,
+        began_at_revision: u64,
+        ending: nervix_models::StopEnding,
+    },
+    /// Records what the teardown of the stop that ended the domain at `start_version` cut.
+    RecordDomainStopReport {
+        domain_id: DomainName,
+        start_version: u64,
+        report: Box<nervix_models::DomainStopReport>,
     },
     PauseDomain {
         domain_id: DomainName,
@@ -921,8 +942,18 @@ impl std::fmt::Display for ConsensusCommand {
                 write!(f, "reconcile-ownership-handoff-preparations:{authority}")
             }
             Self::PutDomain { domain, .. } => write!(f, "put-domain:{}", domain.id.as_str()),
-            Self::StartDomain { domain_id, .. } => write!(f, "start-domain:{}", domain_id.as_str()),
-            Self::StopDomain { domain_id, .. } => write!(f, "stop-domain:{}", domain_id.as_str()),
+            Self::RequestDomainStop { domain_id, .. } => {
+                write!(f, "request-domain-stop:{}", domain_id.as_str())
+            }
+            Self::WithdrawDomainStopRequest { domain_id, .. } => {
+                write!(f, "withdraw-domain-stop-request:{}", domain_id.as_str())
+            }
+            Self::EndDomainStop { domain_id, .. } => {
+                write!(f, "end-domain-stop:{}", domain_id.as_str())
+            }
+            Self::RecordDomainStopReport { domain_id, .. } => {
+                write!(f, "record-domain-stop-report:{}", domain_id.as_str())
+            }
             Self::PauseDomain { domain_id, .. } => write!(f, "pause-domain:{}", domain_id.as_str()),
             Self::ResumeDomain { domain_id, .. } => {
                 write!(f, "resume-domain:{}", domain_id.as_str())
@@ -1356,10 +1387,14 @@ impl MembershipSnapshot {
         uniform == voters && self.effective.log_id() == self.committed.log_id()
     }
 
+    /// Plans this reconciliation's membership changes. A run outside the membership that
+    /// `refused` holds keeps the refusal it received and stays outside, whatever else would
+    /// admit it now.
     fn automatic_mutations(
         &self,
         gossip: &GossipState,
         admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+        refused: &RefusedRuns,
     ) -> MembershipPlan {
         let candidates = gossip.latest_admission_candidates();
         let voters = self.voter_ids();
@@ -1373,11 +1408,27 @@ impl MembershipSnapshot {
                 mutations: vec![MembershipMutation::CompleteVoterChange],
                 refusals,
                 verdicts,
+                refused_newcomers: BTreeMap::new(),
             };
         }
         let mut mutations = Vec::new();
         let mut desired_voters = voters.clone();
+        let mut refused_newcomers = BTreeMap::new();
         for node in candidates.into_values() {
+            let run = node.identity();
+            let is_member = self.node(&node.node_id).is_some();
+            if !is_member && let Some(refusal) = refused.refusal_of(&run) {
+                // The run stops on this refusal once it reads it, so admitting it now would leave
+                // a member that never runs.
+                verdicts.insert(run.clone(), refusal.verdict());
+                if let Some(reason) = refusal.reported_reason() {
+                    refusals.push(AdmissionRefusal {
+                        candidate: run,
+                        reason,
+                    });
+                }
+                continue;
+            }
             if !voters.contains(&node.node_id)
                 && let Some(reason) = AdmissionRefusalReason::of(&node, &accepted)
             {
@@ -1389,6 +1440,17 @@ impl MembershipSnapshot {
                             mismatch: mismatch.clone(),
                         },
                     );
+                    // A newcomer's run stops on this verdict, so later reconciliations keep it
+                    // while gossip still shows the run, whatever the live voters have become.
+                    if !is_member {
+                        refused_newcomers.insert(
+                            node.identity(),
+                            IncompatibleVoter {
+                                voter: voter.clone(),
+                                mismatch: mismatch.clone(),
+                            },
+                        );
+                    }
                 }
                 refusals.push(AdmissionRefusal {
                     candidate: node.identity(),
@@ -1438,6 +1500,7 @@ impl MembershipSnapshot {
             mutations,
             refusals,
             verdicts,
+            refused_newcomers,
         }
     }
 
@@ -1526,6 +1589,10 @@ struct MembershipPlan {
     mutations: Vec<MembershipMutation>,
     refusals: Vec<AdmissionRefusal>,
     verdicts: BTreeMap<ClusterNodeIdentity, AdmissionVerdict>,
+    /// The runs outside the membership that this reconciliation refused because they cannot run
+    /// beside a live voter, with that voter. Later reconciliations keep refusing each of them
+    /// while gossip shows it.
+    refused_newcomers: BTreeMap<ClusterNodeIdentity, IncompatibleVoter>,
 }
 
 /// A gossip-discovered node the leader leaves outside the membership.
@@ -1622,6 +1689,105 @@ impl ReportedAdmissionRefusals {
     }
 }
 
+/// Why the leader refused a run outside the membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RunRefusal {
+    /// Admitting the run would exceed the cluster's node quota.
+    NodeQuota(nervix_licensing_vocabulary::LicensingRefusal),
+    /// The run cannot run beside a live voter whose run the leader accepted.
+    Prerequisites(IncompatibleVoter),
+}
+
+impl RunRefusal {
+    /// The verdict the leader publishes on the refused run.
+    fn verdict(&self) -> AdmissionVerdict {
+        match self {
+            Self::NodeQuota(refusal) => AdmissionVerdict::QuotaRefused { refusal: *refusal },
+            Self::Prerequisites(IncompatibleVoter { voter, mismatch }) => {
+                AdmissionVerdict::Refused {
+                    voter: voter.clone(),
+                    mismatch: mismatch.clone(),
+                }
+            }
+        }
+    }
+
+    /// Why the leader leaves the refused run outside the membership, when it reports that reason
+    /// among a reconciliation's refusals. A node-quota refusal is reported where licensing refuses
+    /// the run instead.
+    fn reported_reason(&self) -> Option<AdmissionRefusalReason> {
+        match self {
+            Self::NodeQuota(_) => None,
+            Self::Prerequisites(IncompatibleVoter { voter, mismatch }) => {
+                Some(AdmissionRefusalReason::Incompatible {
+                    voter: voter.clone(),
+                    mismatch: mismatch.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// The runs outside the membership that this node, while it led, refused, with the refusal each
+/// received: for the cluster's node quota, or because the run cannot run beside a live voter.
+///
+/// A refused run stops once it reads its verdict, yet the failure detector keeps it live in gossip
+/// for several of its heartbeat intervals, so later reconciliations still see it as a candidate.
+/// The leader keeps refusing such a run with the verdict it gave, whatever the licensing policy or
+/// the live voters have become since, because admitting a run that has stopped would leave a
+/// member that never runs. A run is forgotten once it is no longer the current run of an admission
+/// candidate; the node's next run is judged again.
+#[derive(Debug, Default)]
+struct RefusedRuns(BTreeMap<ClusterNodeIdentity, RunRefusal>);
+
+impl RefusedRuns {
+    /// The refusal this node gave `run`, if it refused it.
+    fn refusal_of(&self, run: &ClusterNodeIdentity) -> Option<&RunRefusal> {
+        self.0.get(run)
+    }
+
+    /// Records that this node refused `run`.
+    fn record(&mut self, run: ClusterNodeIdentity, refusal: RunRefusal) {
+        self.0.insert(run, refusal);
+    }
+
+    /// Records that this node refused each run of `refused_newcomers` because it cannot run
+    /// beside the voter named with it.
+    fn record_refused_newcomers(
+        &mut self,
+        refused_newcomers: BTreeMap<ClusterNodeIdentity, IncompatibleVoter>,
+    ) {
+        for (run, incompatible) in refused_newcomers {
+            self.record(run, RunRefusal::Prerequisites(incompatible));
+        }
+    }
+
+    /// Forgets every refused run that is no longer the current run of one of `candidates`: its
+    /// node left gossip, or a newer run of the node replaced it.
+    fn retain_candidates(&mut self, candidates: &BTreeMap<ClusterNodeName, GossipNode>) {
+        self.0
+            .retain(|run, _| Self::is_current_run(run, candidates));
+    }
+
+    fn is_current_run(
+        run: &ClusterNodeIdentity,
+        candidates: &BTreeMap<ClusterNodeName, GossipNode>,
+    ) -> bool {
+        match candidates.get(run.node_id()) {
+            Some(node) => node.identity() == *run,
+            None => false,
+        }
+    }
+}
+
+/// What membership reconciliation keeps from one pass to the next, behind the lock that
+/// serializes membership changes.
+#[derive(Debug, Default)]
+struct MembershipJudgments {
+    reported: ReportedAdmissionRefusals,
+    refused: RefusedRuns,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StateMachineData {
     cluster_identity: Option<Arc<ClusterIdentityRecord>>,
@@ -1708,10 +1874,20 @@ impl StateMachineData {
     }
 
     fn domain_planning_inputs(&self, domain: &DomainName) -> DomainPlanningInputs {
+        // A stop's requests, ending and report decide nothing a transaction plans, and a step after
+        // a `STOP` step cannot know how the stop will end, so the record is no planning input.
+        let state = match self.domains.get(domain) {
+            Some(state) => {
+                let mut planned = state.clone();
+                planned.stop = None;
+                Some(Box::new(planned))
+            }
+            None => None,
+        };
         DomainPlanningInputs {
             parameters: self.parameters,
             domain: domain.clone(),
-            state: self.domains.get(domain).cloned().map(Box::new),
+            state,
             resources: self.domain_resource_planning_inputs(domain),
             schedule: self.schedule.domain(domain).cloned().map(Box::new),
             topology: self.schedule_topology_inputs(),
@@ -1774,7 +1950,7 @@ impl StateMachineData {
             return false;
         };
         domain.status = DomainStatus::Running;
-        domain.stop_cause = None;
+        domain.clear_stop();
         domain.start_version = domain
             .start_version
             .checked_add(1)
@@ -1791,23 +1967,127 @@ impl StateMachineData {
         true
     }
 
-    fn commit_domain_stop(
-        &mut self,
-        domain_id: &DomainName,
-        cause: nervix_models::DomainStopCause,
-    ) -> bool {
-        let Some(domain) = self.domains.get_mut(domain_id) else {
-            return false;
-        };
-        domain.record_stop(cause);
-        let paced = domain.config.pace.is_paced();
-
+    /// A stopped domain leaves its clock: a paced domain's authority advances to no owner, so a
+    /// later start assigns one afresh.
+    fn release_stopped_domain_clock(&mut self, domain_id: &DomainName) {
+        let paced = self
+            .domains
+            .get(domain_id)
+            .is_some_and(|domain| domain.config.pace.is_paced());
         if paced {
             self.advance_domain_clock_authority(domain_id, None);
         } else {
             self.domain_clock_authorities.remove(domain_id);
         }
-        true
+    }
+
+    /// Applies a stop request at the revision of the entry that carries it. A running domain, and a
+    /// paused one, begins stopping only under the mutation that holds it, if any holds it; a
+    /// stopping domain takes the request whatever holds it. Returns whether the domain changed.
+    fn request_domain_stop(
+        &mut self,
+        domain_id: &DomainName,
+        request: &nervix_models::StopRequest,
+        mutation: Option<&DomainMutationLease>,
+    ) -> error_stack::Result<bool, DomainStopRequestConflict> {
+        let Some(domain) = self.domains.get(domain_id) else {
+            return Err(Report::new(DomainStopRequestConflict::MissingDomain {
+                domain: domain_id.clone(),
+            }));
+        };
+        match domain.status {
+            DomainStatus::Stopped => return Ok(false),
+            DomainStatus::Stopping => {}
+            DomainStatus::Running | DomainStatus::Paused => {
+                validate_domain_mutation(self, domain_id, mutation)
+                    .change_context(DomainStopRequestConflict::Held)?;
+            }
+        }
+        if let nervix_models::StopRequest::Licensing(_) = request
+            && self.licensing_stop().is_none()
+        {
+            return Err(Report::new(DomainStopRequestConflict::LicensingGateOpen {
+                domain: domain_id.clone(),
+            }));
+        }
+        let revision = match &self.last_applied_log_id {
+            Some(log_id) => log_id.index,
+            None => 0,
+        };
+        let domain = self
+            .domains
+            .get_mut(domain_id)
+            .verified("the domain's presence was checked above, in the same applied entry");
+        let admission = domain.request_stop(request.clone(), revision);
+        Ok(matches!(
+            admission,
+            nervix_models::StopRequestAdmission::Began
+                | nervix_models::StopRequestAdmission::Joined
+        ))
+    }
+
+    /// Withdraws an operator's stop request. Returns whether the domain changed.
+    fn withdraw_domain_stop_request(
+        &mut self,
+        domain_id: &DomainName,
+        reference: &nervix_models::CommandExecutionReference,
+    ) -> bool {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return false;
+        };
+        !matches!(
+            domain.withdraw_stop_request(reference),
+            nervix_models::StopWithdrawal::NotHeld
+        )
+    }
+
+    /// Ends the stop that began at `began_at_revision`, if the domain is still in it. Returns
+    /// whether the domain changed.
+    fn end_domain_stop(
+        &mut self,
+        domain_id: &DomainName,
+        began_at_revision: u64,
+        ending: &nervix_models::StopEnding,
+    ) -> error_stack::Result<bool, DomainStopRequestConflict> {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return Ok(false);
+        };
+        let Some(stopping) = domain.stopping() else {
+            return Ok(false);
+        };
+        if stopping.began_at_revision != began_at_revision {
+            return Err(Report::new(DomainStopRequestConflict::AnotherStop {
+                domain: domain_id.clone(),
+            }));
+        }
+        if let nervix_models::StopEnding::Enforced { by } = ending
+            && !stopping.holds(by)
+        {
+            return Err(Report::new(DomainStopRequestConflict::EnforcerWithdrawn {
+                domain: domain_id.clone(),
+                request: by.clone(),
+            }));
+        }
+        domain.end_stop(ending.clone());
+        self.release_stopped_domain_clock(domain_id);
+        Ok(true)
+    }
+
+    /// Records what the teardown of the stop that ended the domain at `start_version` cut.
+    /// Returns whether the domain changed.
+    fn record_domain_stop_report(
+        &mut self,
+        domain_id: &DomainName,
+        start_version: u64,
+        report: &nervix_models::DomainStopReport,
+    ) -> bool {
+        let Some(domain) = self.domains.get_mut(domain_id) else {
+            return false;
+        };
+        if domain.start_version != start_version {
+            return false;
+        }
+        domain.record_stop_report(report.clone())
     }
 
     fn reconcile_domain_clock_authority(
@@ -2393,8 +2673,9 @@ struct ConsensusState {
     membership_interruption: MembershipInterruption,
     raft_retention: RaftRetentionPolicy,
     operations: RaftOperationSettings,
-    /// Serializes membership changes, and holds the admission refusals the leader has reported.
-    membership_mutation: AsyncMutex<ReportedAdmissionRefusals>,
+    /// Serializes membership changes, and holds the admission refusals the leader has reported
+    /// and the newcomer runs it refused, for the node quota or for their prerequisites.
+    membership_mutation: AsyncMutex<MembershipJudgments>,
     /// The verdicts on live runs this node holds while it leads, replaced by every membership
     /// reconciliation and withdrawn once a reconciliation finds another node leading.
     admission_verdicts: watch::Sender<Option<AdmissionVerdicts>>,
@@ -2517,7 +2798,10 @@ impl ConsensusTestProbe {
         reference: nervix_models::CommandExecutionReference,
         write: CommandWrite,
     ) {
-        self.inner.lease_refusal.arm(reference, write).await;
+        self.inner
+            .lease_refusal
+            .arm(RefusalTarget::Command { reference, write })
+            .await;
     }
 
     /// Whether this node refused `reference`'s `write` as the refusal armed for it.
@@ -2526,7 +2810,27 @@ impl ConsensusTestProbe {
         reference: &nervix_models::CommandExecutionReference,
         write: CommandWrite,
     ) -> bool {
-        self.inner.lease_refusal.delivered(reference, write).await
+        let target = RefusalTarget::Command {
+            reference: reference.clone(),
+            write,
+        };
+        self.inner.lease_refusal.delivered(&target).await
+    }
+
+    /// Refuse this node's next license activation proposal as an unconfirmed leader lease.
+    pub async fn refuse_next_license_activation_as_lapsed_lease(&self) {
+        self.inner
+            .lease_refusal
+            .arm(RefusalTarget::LicenseActivation)
+            .await;
+    }
+
+    /// Whether this node's activation proposal reached the armed refusal.
+    pub async fn license_activation_refused_as_lapsed_lease(&self) -> bool {
+        self.inner
+            .lease_refusal
+            .delivered(&RefusalTarget::LicenseActivation)
+            .await
     }
 
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
@@ -2946,7 +3250,7 @@ impl Consensus {
                 membership_interruption,
                 raft_retention: retention,
                 operations: settings.operations,
-                membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
+                membership_mutation: AsyncMutex::new(MembershipJudgments::default()),
                 admission_verdicts: watch::channel(None).0,
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
@@ -4121,39 +4425,73 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
-    pub async fn start_domain(
+    /// Asks a domain to stop: begins its stop, or joins the stop it is in. A repeated request, or
+    /// one for a stopped domain, changes nothing; the domain's committed record then tells the
+    /// caller what became of its request.
+    pub async fn request_domain_stop(
         &self,
         domain_id: DomainName,
-        start: DomainStartPoint,
-        clock: Option<DomainClockState>,
-        authority: Option<ClusterNodeIdentity>,
+        request: nervix_models::StopRequest,
         mutation: Option<&DomainMutationLease>,
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
-            .client_write(ConsensusCommand::StartDomain {
+            .client_write(ConsensusCommand::RequestDomainStop {
                 domain_id,
-                start,
-                clock,
-                authority,
+                request: Box::new(request),
                 mutation: mutation.cloned().map(Box::new),
             })
             .await?;
         Self::applied_response(response.data)
     }
 
-    pub async fn stop_domain(
+    /// Withdraws an operator's stop request whose `CANCEL` acted.
+    pub async fn withdraw_domain_stop_request(
         &self,
         domain_id: DomainName,
-        mutation: Option<&DomainMutationLease>,
-        cause: nervix_models::DomainStopCause,
+        reference: nervix_models::CommandExecutionReference,
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
-            .client_write(ConsensusCommand::StopDomain {
+            .client_write(ConsensusCommand::WithdrawDomainStopRequest {
                 domain_id,
-                mutation: mutation.cloned().map(Box::new),
-                cause,
+                reference,
+            })
+            .await?;
+        Self::applied_response(response.data)
+    }
+
+    /// Ends the stop that began at `began_at_revision`, if the domain is still in it.
+    pub async fn end_domain_stop(
+        &self,
+        domain_id: DomainName,
+        began_at_revision: u64,
+        ending: nervix_models::StopEnding,
+    ) -> error_stack::Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::EndDomainStop {
+                domain_id,
+                began_at_revision,
+                ending,
+            })
+            .await?;
+        Self::applied_response(response.data)
+    }
+
+    /// Records what the teardown of the stop that ended the domain at `start_version` cut.
+    pub async fn record_domain_stop_report(
+        &self,
+        domain_id: DomainName,
+        start_version: u64,
+        report: nervix_models::DomainStopReport,
+    ) -> error_stack::Result<(), ConsensusError> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::RecordDomainStopReport {
+                domain_id,
+                start_version,
+                report: Box::new(report),
             })
             .await?;
         Self::applied_response(response.data)
@@ -4696,8 +5034,10 @@ impl Administrator {
         + Send
         + Sync,
     ) -> error_stack::Result<(), ConsensusError> {
-        let mut reported_refusals = self.inner.membership_mutation.lock().await;
+        let mut judgments = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
+        let candidates = gossip.latest_admission_candidates();
+        judgments.refused.retain_candidates(&candidates);
         // One observation gives both the leadership and the term the verdicts are published under.
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         if metrics.current_leader.as_ref() != Some(&self.inner.local_node_id) {
@@ -4717,8 +5057,12 @@ impl Administrator {
                 mutations,
                 refusals,
                 mut verdicts,
-            } = current.automatic_mutations(&gossip, &admission_fences);
-            reported_refusals.report(&refusals);
+                refused_newcomers,
+            } = current.automatic_mutations(&gossip, &admission_fences, &judgments.refused);
+            judgments.reported.report(&refusals);
+            judgments
+                .refused
+                .record_refused_newcomers(refused_newcomers);
             self.inner
                 .admission_verdicts
                 .send_replace(Some(AdmissionVerdicts::new(
@@ -4772,13 +5116,18 @@ impl Administrator {
                         };
                         if new_member && let Err(refusal) = admit(&node_id, count) {
                             quota_refused.insert(node_id.clone());
-                            let run = gossip
-                                .latest_admission_candidates()
+                            let run = candidates
                                 .get(&node_id)
                                 .verified(
                                     "a learner mutation names a candidate from this gossip cut",
                                 )
                                 .identity();
+                            // Later reconciliations keep this verdict for the run until it leaves
+                            // gossip, whatever the licensing policy has become.
+                            judgments.refused.record(
+                                run.clone(),
+                                RunRefusal::NodeQuota(*refusal.current_context()),
+                            );
                             // Publish only the fixed membership verdict; the report stays at its reporting boundary.
                             verdicts.insert(
                                 run,
@@ -5963,11 +6312,29 @@ fn domain_mutation_recovery_fence(state: &StateMachineData) -> DomainMutationRec
     DomainMutationRecoveryFence::at_revision(revision)
 }
 
+/// Refuses a mutation of a stopping domain: its stop owns it until the stop ends or is called off.
+fn refuse_stopping_domain(
+    state: &StateMachineData,
+    domain: &DomainName,
+) -> error_stack::Result<(), DomainMutationError> {
+    if state
+        .domains
+        .get(domain)
+        .is_some_and(|current| current.status == DomainStatus::Stopping)
+    {
+        return Err(Report::new(DomainMutationError::Stopping {
+            domain: domain.clone(),
+        }));
+    }
+    Ok(())
+}
+
 fn admit_domain_mutation(
     state: &mut StateMachineData,
     domain: &DomainName,
     owner: &DomainMutationOwner,
 ) -> error_stack::Result<DomainMutationLease, DomainMutationError> {
+    refuse_stopping_domain(state, domain)?;
     let admission = DomainMutationAdmission::decide(
         state.domain_mutations.get(domain),
         owner,
@@ -5991,6 +6358,7 @@ fn admit_domain_mutations(
     let recovery_fence = domain_mutation_recovery_fence(state);
     let mut admitted = BTreeMap::new();
     for domain in domains {
+        refuse_stopping_domain(state, domain)?;
         let admission = DomainMutationAdmission::decide(
             state.domain_mutations.get(domain),
             owner,
@@ -6008,6 +6376,27 @@ fn admit_domain_mutations(
         state.domain_mutations.insert(domain.clone(), lease.clone());
     }
     Ok(admitted)
+}
+
+/// Why a stop request, or the end of a stop, cannot act on its domain.
+#[derive(Debug, thiserror::Error)]
+enum DomainStopRequestConflict {
+    #[error("domain '{domain}' does not exist")]
+    MissingDomain { domain: DomainName },
+    /// The mutation that refuses the request is beneath.
+    #[error("the domain is held by another execution")]
+    Held,
+    #[error("the licensing stop gate no longer closes domain '{domain}'")]
+    LicensingGateOpen { domain: DomainName },
+    #[error("domain '{domain}' stopped and began another stop since its drain was observed")]
+    AnotherStop { domain: DomainName },
+    #[error(
+        "stop request '{request}' of domain '{domain}' was withdrawn before it enforced the stop"
+    )]
+    EnforcerWithdrawn {
+        domain: DomainName,
+        request: nervix_models::StopRequestId,
+    },
 }
 
 fn validate_domain_mutation(
@@ -6407,35 +6796,35 @@ fn apply_consensus_command_at(
             state.domains.insert(domain.id.clone(), (**domain).clone());
             changes.domains_changed = true;
         }
-        ConsensusCommand::StartDomain {
+        ConsensusCommand::RequestDomainStop {
             domain_id,
-            start,
-            clock,
-            authority,
+            request,
             mutation,
+        } => match state.request_domain_stop(domain_id, request, mutation.as_deref()) {
+            Ok(changed) => changes.domains_changed = changed,
+            Err(reason) => return AppliedConsensusCommand::conflict(format!("{reason:#}")),
+        },
+        ConsensusCommand::WithdrawDomainStopRequest {
+            domain_id,
+            reference,
         } => {
-            if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            if let Some(reason) = state.licensing_stop() {
-                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
-                    reason,
-                });
-            }
-            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            changes.domains_changed = state.commit_domain_start(domain_id, start, clock, authority);
+            changes.domains_changed = state.withdraw_domain_stop_request(domain_id, reference);
         }
-        ConsensusCommand::StopDomain {
+        ConsensusCommand::EndDomainStop {
             domain_id,
-            mutation,
-            cause,
+            began_at_revision,
+            ending,
+        } => match state.end_domain_stop(domain_id, *began_at_revision, ending) {
+            Ok(changed) => changes.domains_changed = changed,
+            Err(reason) => return AppliedConsensusCommand::conflict(format!("{reason:#}")),
+        },
+        ConsensusCommand::RecordDomainStopReport {
+            domain_id,
+            start_version,
+            report,
         } => {
-            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            changes.domains_changed = state.commit_domain_stop(domain_id, *cause);
+            changes.domains_changed =
+                state.record_domain_stop_report(domain_id, *start_version, report);
         }
         ConsensusCommand::PauseDomain {
             domain_id,
@@ -7252,7 +7641,17 @@ fn apply_consensus_command_at(
                 );
             }
             if let Some(effect) = effect {
-                apply_transaction_step_effect(state, &transaction.domain, effect, &mut changes);
+                let step_reference = transaction
+                    .statements
+                    .get(*expected_next_statement)
+                    .map(|statement| statement.request_reference.clone());
+                apply_transaction_step_effect(
+                    state,
+                    &transaction.domain,
+                    effect,
+                    step_reference.as_ref(),
+                    &mut changes,
+                );
             }
             state.transactions.insert(id.clone(), transaction.clone());
             changes.transactions_changed = true;
@@ -7576,12 +7975,15 @@ fn validate_transaction_step_effect(
                         .is_some_and(|domain| matches!(domain.status, DomainStatus::Stopped))
                     && matches!(statements[0].statement, Statement::StartDomain(_))
             }
-            TransactionStepEffect::StopDomain { inputs } => {
+            TransactionStepEffect::StopDomain { inputs, request } => {
                 statements.len() == 1
-                    && inputs
-                        .state()
-                        .is_some_and(|domain| !matches!(domain.status, DomainStatus::Stopped))
-                    && matches!(statements[0].statement, Statement::StopDomain(_))
+                    && inputs.state().is_some_and(|domain| {
+                        matches!(domain.status, DomainStatus::Running | DomainStatus::Paused)
+                    })
+                    && matches!(
+                        &statements[0].statement,
+                        Statement::StopDomain(stop) if stop.wait_limit == request.limit
+                    )
             }
             TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
                 statements.len() == 1
@@ -7678,10 +8080,13 @@ fn transaction_schedule_rollback(
     Ok(step_inputs.schedule().cloned())
 }
 
+/// Applies a committed step's effect. `step_reference` is the request reference of the step's
+/// first statement, which names the request a `STOP` step makes.
 fn apply_transaction_step_effect(
     state: &mut StateMachineData,
     domain: &DomainName,
     effect: &TransactionStepEffect,
+    step_reference: Option<&nervix_models::CommandExecutionReference>,
     changes: &mut StateMachineChanges,
 ) {
     match effect {
@@ -7701,9 +8106,27 @@ fn apply_transaction_step_effect(
             changes.domains_changed =
                 state.commit_domain_start(inputs.domain(), start, clock, authority);
         }
-        TransactionStepEffect::StopDomain { inputs } => {
-            changes.domains_changed =
-                state.commit_domain_stop(inputs.domain(), nervix_models::DomainStopCause::Operator);
+        TransactionStepEffect::StopDomain { inputs, request } => {
+            // The step's own statement names the request; the transaction's mutation lease, which
+            // its commit holds, admits the stop.
+            let Some(reference) = step_reference else {
+                return;
+            };
+            let request = nervix_models::StopRequest::Operator {
+                reference: reference.clone(),
+                request: request.as_ref().clone(),
+            };
+            let revision = match &state.last_applied_log_id {
+                Some(log_id) => log_id.index,
+                None => 0,
+            };
+            if let Some(domain) = state.domains.get_mut(inputs.domain()) {
+                changes.domains_changed = matches!(
+                    domain.request_stop(request, revision),
+                    nervix_models::StopRequestAdmission::Began
+                        | nervix_models::StopRequestAdmission::Joined
+                );
+            }
         }
         TransactionStepEffect::CreateResourceCatalog { identifier, .. } => {
             state.resources.ensure_catalog(domain, identifier);
@@ -7812,15 +8235,15 @@ mod tests {
         CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionRequestConflict,
         CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusConflict,
         ConsensusResponse, FjallLogReader, FjallStore, GossipNode, GossipState,
-        IncomingSnapshotTransfer, LeaderTenure, MembershipMutation, MembershipSnapshot,
-        ProtocolOriginError, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
-        SnapshotTransferError, SnapshotTransferIds, StateMachineChanges, StateMachineData,
-        StoredMembership, TransactionApplicationOutcome, TransactionCommandResult,
-        TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
-        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
-        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
-        validate_protocol_origin,
+        IncomingSnapshotTransfer, IncompatibleVoter, LeaderTenure, MembershipMutation,
+        MembershipSnapshot, ProtocolOriginError, RefusedRuns, ResourceRecords, RunRefusal,
+        SnapshotChunkPart, SnapshotMeta, SnapshotTransferError, SnapshotTransferIds,
+        StateMachineChanges, StateMachineData, StoredMembership, TransactionApplicationOutcome,
+        TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionMutationError,
+        TransactionOutcome, TransactionStatement, TransactionStatementRequest,
+        TransactionStepEffect, TransactionStepResult, TypeConfig, UserCredentials,
+        apply_consensus_command, apply_consensus_command_at, apply_transaction_step_effect,
+        io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LeadershipObservation, LogIdOf, ReplicatedTransaction,
@@ -8290,7 +8713,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences)
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -8320,7 +8743,7 @@ mod tests {
 
         assert!(
             membership
-                .automatic_mutations(&gossip, &admission_fences)
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -8343,7 +8766,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences)
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -8382,7 +8805,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences)
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::UpdateAddress {
@@ -8424,7 +8847,7 @@ mod tests {
 
         assert_eq!(
             membership
-                .automatic_mutations(&gossip, &admission_fences)
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![MembershipMutation::UpdateAddress {
                 node_id: restarted.clone(),
@@ -8443,7 +8866,7 @@ mod tests {
         membership = uniform_membership_snapshot(membership.voter_ids(), updated_addresses);
         assert!(
             membership
-                .automatic_mutations(&gossip, &admission_fences)
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -8469,7 +8892,7 @@ mod tests {
 
         assert!(
             membership
-                .automatic_mutations(&gossip, &admission_fences)
+                .automatic_mutations(&gossip, &admission_fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -8482,7 +8905,7 @@ mod tests {
             .incarnation = ClusterNodeIncarnation::new(3);
         assert_eq!(
             membership
-                .automatic_mutations(&restarted, &admission_fences)
+                .automatic_mutations(&restarted, &admission_fences, &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -8510,8 +8933,81 @@ mod tests {
             start_version: 7,
             last_start: DomainStartPoint::Resume,
             clock: None,
-            stop_cause: None,
+            stop: None,
         }
+    }
+
+    /// Commits the step of the one-step transaction a client's `START` of the unpaced domain `raw`
+    /// commits: the step's effect is validated against the committed state as the commit
+    /// validates it and, once valid, applied. The refusal is the commit's.
+    pub(super) fn commit_start_step(
+        state: &mut StateMachineData,
+        raw: &str,
+    ) -> error_stack::Result<(), TransactionMutationError> {
+        let domain_id = domain(raw);
+        let owner = UserName::parse("operator")
+            .assured("the fixture owner is an identifier-shaped literal");
+        let activity = TransactionActivity::from_timeout(
+            Timestamp::from_unix_nanos(1),
+            Duration::from_secs(60),
+        );
+        let mut transaction = ReplicatedTransaction::open(
+            "start".to_owned(),
+            domain_id.clone(),
+            owner.clone(),
+            activity,
+        );
+        transaction
+            .queue(
+                &owner,
+                &domain_id,
+                activity,
+                1,
+                TransactionStatement::test_admitted(TransactionStatementRequest {
+                    request_reference: nervix_models::CommandExecutionReference::parse("start.0")
+                        .assured("the fixture reference is a valid request reference"),
+                    expected_position: 0,
+                    source: "START".to_owned(),
+                    statement: Statement::StartDomain(nervix_models::StartDomain {
+                        start: DomainStartPoint::Resume,
+                    }),
+                }),
+                TransactionQueueLimits {
+                    max_statements: 1,
+                    max_source_bytes: 1024,
+                },
+            )
+            .assured("an open transaction of its owner queues one statement within its limits");
+        let effect = TransactionStepEffect::StartDomain {
+            inputs: captured_inputs(state, raw),
+            start: DomainStartPoint::Resume,
+            clock: None,
+            authority: None,
+        };
+        let result = TransactionStepResult {
+            impact: crate::transaction::test_commit_plan("start", 1).steps[0]
+                .impact
+                .clone(),
+            result: TransactionCommandResult {
+                success: true,
+                message: format!("starting domain '{raw}'"),
+                diagnostics: Vec::new(),
+                already_existed: false,
+                admission: None,
+            },
+        };
+        super::validate_transaction_step_effect(
+            state,
+            &transaction,
+            0,
+            1,
+            &result,
+            &effect,
+            Some(&TransactionOutcome::Committed),
+        )?;
+        let mut changes = StateMachineChanges::default();
+        apply_transaction_step_effect(state, &domain_id, &effect, None, &mut changes);
+        Ok(())
     }
 
     fn node_identity(raw: &str, incarnation: u64) -> ClusterNodeIdentity {
@@ -8538,7 +9034,8 @@ mod tests {
             BTreeMap::from([(first, "node-1.test:7443".to_string())]),
         );
 
-        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+        let plan =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
 
         assert!(plan.mutations.is_empty());
         assert_eq!(
@@ -8575,7 +9072,8 @@ mod tests {
             BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
         );
 
-        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+        let plan =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
 
         let mismatch = PrerequisiteMismatch::Timing {
             prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
@@ -8632,7 +9130,8 @@ mod tests {
             BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
         );
 
-        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+        let plan =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
 
         assert!(plan.refusals.is_empty());
         assert_eq!(
@@ -8732,7 +9231,7 @@ mod tests {
         };
         assert_eq!(
             joint
-                .automatic_mutations(&gossip, &BTreeMap::new())
+                .automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default())
                 .mutations,
             vec![MembershipMutation::CompleteVoterChange]
         );
@@ -8746,7 +9245,7 @@ mod tests {
         let uniform = voters(&target);
         assert_eq!(
             uniform
-                .automatic_mutations(&gossip, &BTreeMap::new())
+                .automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default())
                 .mutations,
             vec![
                 MembershipMutation::AddLearner {
@@ -8777,13 +9276,15 @@ mod tests {
         };
         let fences = BTreeMap::from([(removed, ClusterNodeIncarnation::new(3))]);
         assert_eq!(
-            joint.automatic_mutations(&gossip, &fences).mutations,
+            joint
+                .automatic_mutations(&gossip, &fences, &RefusedRuns::default())
+                .mutations,
             vec![MembershipMutation::CompleteVoterChange]
         );
         assert_eq!(joint.joint_target(), Some(&voters(&target).voter_ids()));
         assert!(
             voters(&target)
-                .automatic_mutations(&gossip, &fences)
+                .automatic_mutations(&gossip, &fences, &RefusedRuns::default())
                 .mutations
                 .is_empty()
         );
@@ -9069,7 +9570,11 @@ mod tests {
             dead_node_identities: BTreeSet::new(),
         };
 
-        let plan = voters(&["node-1", "node-2"]).automatic_mutations(&gossip, &BTreeMap::new());
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &RefusedRuns::default(),
+        );
 
         let mismatch = heartbeat_mismatch(Duration::from_millis(250), Duration::from_secs(1));
         assert!(plan.mutations.is_empty());
@@ -9111,8 +9616,11 @@ mod tests {
             dead_node_identities: BTreeSet::new(),
         };
 
-        let plan =
-            voters(&["node-1", "node-2", "node-3"]).automatic_mutations(&gossip, &BTreeMap::new());
+        let plan = voters(&["node-1", "node-2", "node-3"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &RefusedRuns::default(),
+        );
 
         assert_eq!(
             plan.verdicts,
@@ -9147,7 +9655,11 @@ mod tests {
             dead_node_identities: BTreeSet::new(),
         };
 
-        let plan = voters(&["node-1", "node-2"]).automatic_mutations(&gossip, &BTreeMap::new());
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &RefusedRuns::default(),
+        );
 
         let mismatch = heartbeat_mismatch(Duration::from_millis(100), Duration::from_millis(250));
         assert!(plan.mutations.is_empty());
@@ -9182,7 +9694,11 @@ mod tests {
             dead_node_identities: BTreeSet::new(),
         };
 
-        let plan = voters(&["node-1", "node-2"]).automatic_mutations(&gossip, &BTreeMap::new());
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &RefusedRuns::default(),
+        );
 
         assert_eq!(
             plan.mutations,
@@ -9206,6 +9722,472 @@ mod tests {
                 voter: ClusterNodeName::parse("node-1").assured("the test node name is valid"),
                 mismatch: heartbeat_mismatch(Duration::from_millis(250), Duration::from_secs(1)),
             })
+        );
+    }
+
+    /// The refusal a lapsed one-node cluster gives a newcomer.
+    fn lapsed_node_refusal() -> nervix_licensing_vocabulary::LicensingRefusal {
+        nervix_licensing_vocabulary::LicensingRefusal {
+            state: nervix_licensing_vocabulary::AdmissionState::Lapsed,
+            condition: nervix_licensing_vocabulary::QuotaName::ClusterNodes,
+            limit: 1,
+            current_usage: 1,
+            requested: 1,
+        }
+    }
+
+    /// The refusals a leader remembers after refusing `runs` for the node quota.
+    fn quota_refused(runs: &[ClusterNodeIdentity]) -> RefusedRuns {
+        let mut refused = RefusedRuns::default();
+        for run in runs {
+            refused.record(run.clone(), RunRefusal::NodeQuota(lapsed_node_refusal()));
+        }
+        refused
+    }
+
+    #[test]
+    fn a_newcomer_refused_for_the_node_quota_keeps_its_refusal_while_gossip_shows_its_run() {
+        // The policy that refused the run no longer reaches the planner: nothing else keeps
+        // node-2 out, so only the remembered refusal does.
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(250)),
+                live_voter("node-2", 2, Duration::from_millis(250)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &quota_refused(&[node_identity("node-2", 2)]),
+        );
+
+        assert!(plan.mutations.is_empty());
+        assert!(plan.refusals.is_empty());
+        assert_eq!(
+            plan.verdicts,
+            BTreeMap::from([
+                (node_identity("node-1", 1), AdmissionVerdict::Accepted),
+                (
+                    node_identity("node-2", 2),
+                    AdmissionVerdict::QuotaRefused {
+                        refusal: lapsed_node_refusal(),
+                    },
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_next_run_of_a_node_refused_for_the_node_quota_is_judged_again() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(250)),
+                live_voter("node-2", 3, Duration::from_millis(250)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &quota_refused(&[node_identity("node-2", 2)]),
+        );
+
+        assert_eq!(
+            plan.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-2.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+        assert_eq!(
+            plan.verdicts,
+            BTreeMap::from([(node_identity("node-1", 1), AdmissionVerdict::Accepted)])
+        );
+    }
+
+    #[test]
+    fn a_remembered_node_quota_refusal_never_holds_back_a_member() {
+        // node-2 is already a learner of the membership: the refusal of its run judged no member,
+        // so it changes nothing about the member's catch-up and promotion.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let learner = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![live_voter("node-2", 2, Duration::from_millis(250))],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([
+                (first.clone(), "node-1.test:7443".to_string()),
+                (learner.clone(), "node-2.test:7443".to_string()),
+            ]),
+        );
+
+        let remembered = membership.automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &quota_refused(&[node_identity("node-2", 2)]),
+        );
+        let unremembered =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
+
+        assert_eq!(remembered, unremembered);
+        assert_eq!(
+            remembered.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: learner.clone(),
+                    endpoint: node_endpoint("node-2.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, learner]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn node_quota_refusals_are_forgotten_once_their_run_is_no_longer_a_candidate() {
+        let mut refused = quota_refused(&[
+            node_identity("node-2", 2),
+            node_identity("node-3", 3),
+            node_identity("node-4", 4),
+        ]);
+        // node-2's refused run is still live, node-3 started a newer run, and node-4 left gossip.
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-2", 2, Duration::from_millis(250)),
+                live_voter("node-3", 5, Duration::from_millis(250)),
+                live_voter("node-4", 4, Duration::from_millis(250)),
+            ],
+            dead_node_ids: BTreeSet::from([
+                ClusterNodeName::parse("node-4").assured("the test node name is valid")
+            ]),
+            dead_node_identities: BTreeSet::from([node_identity("node-4", 4)]),
+        };
+
+        refused.retain_candidates(&gossip.latest_admission_candidates());
+
+        assert_eq!(
+            refused.refusal_of(&node_identity("node-2", 2)),
+            Some(&RunRefusal::NodeQuota(lapsed_node_refusal()))
+        );
+        assert_eq!(refused.refusal_of(&node_identity("node-3", 3)), None);
+        assert_eq!(refused.refusal_of(&node_identity("node-3", 5)), None);
+        assert_eq!(refused.refusal_of(&node_identity("node-4", 4)), None);
+    }
+
+    /// node-4's 400ms heartbeat is the one a newcomer at 166ms cannot run beside, seen from node-4.
+    fn refused_beside_node_4() -> IncompatibleVoter {
+        IncompatibleVoter {
+            voter: ClusterNodeName::parse("node-4").assured("the test node name is valid"),
+            mismatch: heartbeat_mismatch(Duration::from_millis(400), Duration::from_millis(166)),
+        }
+    }
+
+    /// The refusals a leader remembers after refusing `runs` because node-4 cannot run beside them.
+    fn prerequisites_refused(runs: &[ClusterNodeIdentity]) -> RefusedRuns {
+        let mut refused = RefusedRuns::default();
+        for run in runs {
+            refused.record(
+                run.clone(),
+                RunRefusal::Prerequisites(refused_beside_node_4()),
+            );
+        }
+        refused
+    }
+
+    #[test]
+    fn only_a_newcomer_refused_for_its_prerequisites_is_kept_for_later_reconciliations() {
+        // node-2's returning run cannot run beside the older voter node-1. The newcomer node-3 and
+        // the learner node-5 cannot run beside node-4, and the newcomer node-6 has published no
+        // record. Only node-3 is outside the membership and refused, so only its refusal is kept.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let fourth = ClusterNodeName::parse("node-4").assured("the test node name is valid");
+        let learner = ClusterNodeName::parse("node-5").assured("the test node name is valid");
+        let mut unpublished = undiscovered_node("node-6", 8);
+        unpublished.prerequisites = None;
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 7, Duration::from_secs(1)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+                live_voter("node-4", 2, Duration::from_millis(400)),
+                live_voter("node-5", 5, Duration::from_millis(166)),
+                unpublished,
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone(), second.clone(), fourth.clone()]),
+            BTreeMap::from([
+                (first, "node-1.test:7443".to_string()),
+                (second, "node-2.test:7443".to_string()),
+                (fourth, "node-4.test:7443".to_string()),
+                (learner, "node-5.test:7443".to_string()),
+            ]),
+        );
+
+        let plan =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
+
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.refused_newcomers,
+            BTreeMap::from([(node_identity("node-3", 6), refused_beside_node_4())])
+        );
+        let mut refused_runs = BTreeSet::new();
+        for refusal in &plan.refusals {
+            refused_runs.insert(refusal.candidate.clone());
+        }
+        assert_eq!(
+            refused_runs,
+            BTreeSet::from([
+                node_identity("node-2", 7),
+                node_identity("node-3", 6),
+                node_identity("node-5", 5),
+                node_identity("node-6", 8),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_refused_newcomer_stays_refused_after_the_voter_that_refused_it_is_dropped() {
+        // node-4 refused node-3's run and has since been dropped: the voters left would admit the
+        // run, so only the remembered refusal keeps it out.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-3").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = voters(&["node-1", "node-2"]);
+
+        let remembered = membership.automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+        let unremembered =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
+
+        let IncompatibleVoter { voter, mismatch } = refused_beside_node_4();
+        assert!(remembered.mutations.is_empty());
+        assert!(remembered.refused_newcomers.is_empty());
+        assert_eq!(
+            remembered.refusals,
+            vec![AdmissionRefusal {
+                candidate: node_identity("node-3", 6),
+                reason: AdmissionRefusalReason::Incompatible {
+                    voter: voter.clone(),
+                    mismatch: mismatch.clone(),
+                },
+            }]
+        );
+        assert_eq!(
+            remembered.verdicts,
+            BTreeMap::from([
+                (node_identity("node-1", 1), AdmissionVerdict::Accepted),
+                (node_identity("node-2", 2), AdmissionVerdict::Accepted),
+                (
+                    node_identity("node-3", 6),
+                    AdmissionVerdict::Refused { voter, mismatch },
+                ),
+            ])
+        );
+        assert_eq!(
+            unremembered.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-3.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, second, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refused_newcomer_stays_refused_after_the_voter_that_refused_it_returns_compatible() {
+        // node-4 refused node-3's run, then returned as a run at 300ms that node-3 could run
+        // beside: the voter's new record does not reopen the refused run.
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+                live_voter("node-4", 9, Duration::from_millis(300)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1", "node-2", "node-4"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+
+        let IncompatibleVoter { voter, mismatch } = refused_beside_node_4();
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.verdicts.get(&node_identity("node-3", 6)),
+            Some(&AdmissionVerdict::Refused { voter, mismatch })
+        );
+        assert_eq!(
+            plan.verdicts.get(&node_identity("node-4", 9)),
+            Some(&AdmissionVerdict::Accepted)
+        );
+    }
+
+    #[test]
+    fn the_next_run_of_a_node_refused_for_its_prerequisites_is_judged_again() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-3").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 10, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+
+        let plan = voters(&["node-1", "node-2"]).automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+
+        assert!(plan.refusals.is_empty());
+        assert_eq!(
+            plan.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-3.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, second, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_remembered_prerequisite_refusal_never_holds_back_a_member() {
+        // node-3 is already a learner of the membership: the refusal of its run judged no member,
+        // so it changes nothing about the member's catch-up and promotion.
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let learner = ClusterNodeName::parse("node-3").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = uniform_membership_snapshot(
+            BTreeSet::from([first.clone()]),
+            BTreeMap::from([
+                (first.clone(), "node-1.test:7443".to_string()),
+                (learner.clone(), "node-3.test:7443".to_string()),
+            ]),
+        );
+
+        let remembered = membership.automatic_mutations(
+            &gossip,
+            &BTreeMap::new(),
+            &prerequisites_refused(&[node_identity("node-3", 6)]),
+        );
+        let unremembered =
+            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
+
+        assert_eq!(remembered, unremembered);
+        assert_eq!(
+            remembered.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: learner.clone(),
+                    endpoint: node_endpoint("node-3.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, learner]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_newcomer_refused_in_one_reconciliation_stays_refused_in_the_next() {
+        // The first pass sees node-4 refuse node-3's run, as the leader records it. By the next
+        // pass node-4 has been dropped, and only what the first pass recorded keeps the run out.
+        let mut refused = RefusedRuns::default();
+        let with_node_4 = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+                live_voter("node-4", 3, Duration::from_millis(400)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let first_pass = voters(&["node-1", "node-2", "node-4"]).automatic_mutations(
+            &with_node_4,
+            &BTreeMap::new(),
+            &refused,
+        );
+        refused.record_refused_newcomers(first_pass.refused_newcomers);
+
+        let without_node_4 = GossipState {
+            live_nodes: vec![
+                live_voter("node-1", 1, Duration::from_millis(300)),
+                live_voter("node-2", 2, Duration::from_millis(300)),
+                live_voter("node-3", 6, Duration::from_millis(166)),
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        refused.retain_candidates(&without_node_4.latest_admission_candidates());
+        let next_pass = voters(&["node-1", "node-2"]).automatic_mutations(
+            &without_node_4,
+            &BTreeMap::new(),
+            &refused,
+        );
+
+        let IncompatibleVoter { voter, mismatch } = refused_beside_node_4();
+        assert!(first_pass.mutations.is_empty());
+        assert!(next_pass.mutations.is_empty());
+        assert_eq!(
+            next_pass.verdicts.get(&node_identity("node-3", 6)),
+            Some(&AdmissionVerdict::Refused { voter, mismatch })
         );
     }
 
@@ -9233,18 +10215,21 @@ mod tests {
             DomainTimeRate::ONE,
         );
 
-        apply_consensus_command(
+        let inputs = captured_inputs(&state, "paced");
+        apply_transaction_step_effect(
             &mut state,
-            &ConsensusCommand::StartDomain {
-                domain_id: domain_id.clone(),
+            &domain_id,
+            &TransactionStepEffect::StartDomain {
+                inputs,
                 start: DomainStartPoint::At {
                     timestamp: Timestamp::from_unix_nanos(1_000),
                     time_rate: DomainTimeRate::ONE,
                 },
                 clock: Some(mapping.clone()),
                 authority: Some(first_owner.clone()),
-                mutation: None,
             },
+            None,
+            &mut StateMachineChanges::default(),
         );
         let first = state
             .domain_clock_authorities
@@ -9303,10 +10288,24 @@ mod tests {
 
         apply_consensus_command(
             &mut state,
-            &ConsensusCommand::StopDomain {
+            &ConsensusCommand::RequestDomainStop {
                 domain_id: domain_id.clone(),
+                request: Box::new(test_operator_stop_request("authority-stop")),
                 mutation: None,
-                cause: nervix_models::DomainStopCause::Operator,
+            },
+        );
+        let began_at_revision = state
+            .domains
+            .get(&domain_id)
+            .and_then(|domain| domain.stopping())
+            .map(|stopping| stopping.began_at_revision)
+            .expect("the running domain began its stop");
+        apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::EndDomainStop {
+                domain_id: domain_id.clone(),
+                began_at_revision,
+                ending: nervix_models::StopEnding::Completed,
             },
         );
         let stopped = state
@@ -9318,7 +10317,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_transactional_lifecycle_commit_the_same_clock_state() {
+    fn direct_and_transactional_stop_requests_commit_the_same_clock_state() {
         let domain_id = domain("paced");
         let mut stopped = running_domain_state("paced");
         stopped.config.pace = DomainPace::Paced {
@@ -9333,62 +10332,52 @@ mod tests {
         stopped.start_version = 0;
         let mut direct = StateMachineData::default();
         direct.domains.insert(domain_id.clone(), stopped);
-        let mut transactional = direct.clone();
-        let owner = node_identity("node-1", 10);
-        let start = DomainStartPoint::At {
-            timestamp: Timestamp::from_unix_nanos(1_000),
-            time_rate: DomainTimeRate::ONE,
-        };
-        let mapping = DomainClockState::new(
-            Timestamp::from_unix_nanos(100),
-            Timestamp::from_unix_nanos(1_000),
-            DomainTimeRate::ONE,
-        );
-
-        apply_consensus_command(
-            &mut direct,
-            &ConsensusCommand::StartDomain {
-                domain_id: domain_id.clone(),
-                start: start.clone(),
-                clock: Some(mapping.clone()),
-                authority: Some(owner.clone()),
-                mutation: None,
-            },
-        );
         let mut changes = StateMachineChanges::default();
-        let inputs = captured_inputs(&transactional, "paced");
+        let inputs = captured_inputs(&direct, "paced");
         apply_transaction_step_effect(
-            &mut transactional,
+            &mut direct,
             &domain_id,
             &TransactionStepEffect::StartDomain {
                 inputs,
-                start,
-                clock: Some(mapping),
-                authority: Some(owner),
+                start: DomainStartPoint::At {
+                    timestamp: Timestamp::from_unix_nanos(1_000),
+                    time_rate: DomainTimeRate::ONE,
+                },
+                clock: Some(DomainClockState::new(
+                    Timestamp::from_unix_nanos(100),
+                    Timestamp::from_unix_nanos(1_000),
+                    DomainTimeRate::ONE,
+                )),
+                authority: Some(node_identity("node-1", 10)),
             },
+            None,
             &mut changes,
         );
         assert!(changes.domains_changed);
-        assert_eq!(transactional.domains, direct.domains);
-        assert_eq!(
-            transactional.domain_clock_authorities,
-            direct.domain_clock_authorities
-        );
+        let mut transactional = direct.clone();
 
+        let stop = test_operator_stop_request("transactional-stop");
         apply_consensus_command(
             &mut direct,
-            &ConsensusCommand::StopDomain {
+            &ConsensusCommand::RequestDomainStop {
                 domain_id: domain_id.clone(),
+                request: Box::new(stop.clone()),
                 mutation: None,
-                cause: nervix_models::DomainStopCause::Operator,
             },
         );
+        let nervix_models::StopRequest::Operator { reference, request } = stop else {
+            unreachable!("the fixture builds an operator's request");
+        };
         let mut changes = StateMachineChanges::default();
         let inputs = captured_inputs(&transactional, "paced");
         apply_transaction_step_effect(
             &mut transactional,
             &domain_id,
-            &TransactionStepEffect::StopDomain { inputs },
+            &TransactionStepEffect::StopDomain {
+                inputs,
+                request: Box::new(request),
+            },
+            Some(&reference),
             &mut changes,
         );
         assert!(changes.domains_changed);
@@ -9397,6 +10386,18 @@ mod tests {
             transactional.domain_clock_authorities,
             direct.domain_clock_authorities
         );
+    }
+
+    /// An operator's plain stop request under `reference`, made at a fixed instant.
+    fn test_operator_stop_request(reference: &str) -> nervix_models::StopRequest {
+        nervix_models::StopRequest::Operator {
+            reference: nervix_models::CommandExecutionReference::parse(reference)
+                .expect("the fixture reference is a valid literal"),
+            request: nervix_models::OperatorStopRequest {
+                requested_at: nervix_models::Timestamp::from_unix_nanos(1),
+                limit: None,
+            },
+        }
     }
 
     fn resource_version(domain_id: &str, identifier: &str, version: u64) -> ResourceVersion {
@@ -10194,11 +11195,8 @@ mod tests {
         assert!(matches!(blocked.response, ConsensusResponse::Conflict(_)));
         let blocked_lifecycle = apply_consensus_command(
             &mut state,
-            &ConsensusCommand::StartDomain {
+            &ConsensusCommand::PauseDomain {
                 domain_id: tenant.clone(),
-                start: DomainStartPoint::Resume,
-                clock: None,
-                authority: None,
                 mutation: None,
             },
         );
@@ -10415,7 +11413,7 @@ mod tests {
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
-            statement: Statement::StopDomain(nervix_models::StopDomain),
+            statement: Statement::StopDomain(nervix_models::StopDomain::default()),
         });
         transaction
             .queue(
@@ -10475,7 +11473,7 @@ mod tests {
                 .assured("the test append reference contains only admitted characters"),
             expected_position: 0,
             source: "STOP".to_string(),
-            statement: Statement::StopDomain(nervix_models::StopDomain),
+            statement: Statement::StopDomain(nervix_models::StopDomain::default()),
         });
         assert!(matches!(
             transaction
@@ -11370,7 +12368,7 @@ mod tests {
             Statement::StartDomain(nervix_models::StartDomain {
                 start: DomainStartPoint::Resume,
             }),
-            Statement::StopDomain(nervix_models::StopDomain),
+            Statement::StopDomain(nervix_models::StopDomain::default()),
         ]
         .into_iter()
         .enumerate()

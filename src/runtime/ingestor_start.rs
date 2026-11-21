@@ -97,21 +97,24 @@ pub(super) struct RetiringIngestorInput {
 impl Runtime {
     /// Finish every source of a replaced layout before installing any of its prepared state.
     /// Native checkpoints retain the complete history; current owners republish disjoint series.
+    /// Returns the ingestors whose placements need to be installed again.
     pub(super) async fn stop_replaced_ingestor_layouts(
         &self,
         domain: &DomainName,
         desired: Option<&ExecutionRevision>,
-    ) -> error_stack::Result<(), RuntimeError> {
-        for ingestor in self.replaced_ingestor_layouts(domain, desired) {
-            self.stop_ingestor(domain, &ingestor).await?;
+    ) -> error_stack::Result<Vec<IngestorName>, RuntimeError> {
+        let layouts = self.replaced_ingestor_layouts(domain, desired);
+        for ingestor in &layouts {
+            nervix_primitives::task::consume_budget().await;
+            self.stop_ingestor(domain, ingestor).await?;
             let dispatcher = self.inner.remote_dispatcher.load_full();
             self.inner.metrics.remove_ingestor_metrics(
                 domain,
-                &ingestor,
+                ingestor,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             );
         }
-        Ok(())
+        Ok(layouts)
     }
 
     /// The ingestors whose unit layout `desired` changes from the one `domain`'s execution has
@@ -728,7 +731,7 @@ mod tests {
                 start_version: 0,
                 last_start: nervix_models::DomainStartPoint::Resume,
                 clock: None,
-                stop_cause: None,
+                stop: None,
             },
         )]));
 
@@ -888,7 +891,7 @@ mod tests {
                 start_version: 0,
                 last_start: nervix_models::DomainStartPoint::Resume,
                 clock: None,
-                stop_cause: None,
+                stop: None,
             },
         )]));
 

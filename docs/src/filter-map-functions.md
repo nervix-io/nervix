@@ -77,11 +77,12 @@ in:
 | `ON MESSAGE ERROR SEND TO ... SET` | No | For a failure on a header-capable ingestor | No | Yes |
 | Materialized-state `DEFAULT` | No | No | No | No |
 | Session subscription `WHERE` | No | No | No | Yes |
+| Node selector | No | No | No | No |
 
 - `write_header` is a statement of an emitter route's `INVOKE` clause, never part of an
   expression; see [Header Functions](#header-functions).
-- A `udf::` call is available in every context. A materialized-state `DEFAULT` accepts only a UDF
-  that is not `VOLATILE`, and reads no field at all: it is built from constants.
+- A `udf::` call is available in domain expressions. A materialized-state `DEFAULT` accepts only
+  nonvolatile UDFs and reads only constants.
 - Outside a window route, `count`, `sum`, `first`, `last`, `min`, and `max` are the
   [array and vector functions](#array-and-vector-functions), and every other aggregate name is an
   unknown function, such as `unknown function 'avg' with arity 1`.
@@ -91,6 +92,35 @@ in:
 Reorderer `BY` expressions and emitter `VALUES` and `ATTRIBUTES` mappings are compiled when their
 domain's execution is built rather than when the statement is applied, and a subscription's
 `WHERE` when the subscription is created, so a type error in one of them is reported then.
+
+## Node Selectors
+
+`SHOW NODES WHERE <expression>` reads the `node` scope. The expression must return `BOOL`.
+Only true matches a node. A null result skips the node, and an evaluation error skips it and
+reports the diagnostic with the node's name. The selector reads committed values and uses
+deterministic builtins. Read [Selecting Nodes](placement.md#selecting-nodes) for how to run it.
+
+| Field | Plexus type | Value |
+| --- | --- | --- |
+| `node.name` | `STRING` | Canonical lowercase cluster node name |
+| `node.architecture` | `STRING` | Build architecture |
+| `node.cpu.count` | `U64` | CPU count, null if unknown |
+| `node.cpu.model` | `STRING` | CPU model, null if undetected |
+| `node.memory.limit` | `U64` | Memory limit in bytes, null if unknown |
+| `node.gpu.count` | `U64` | Number of detected GPUs |
+| `node.gpu.models` | `VEC<STRING>` | GPU models in device order, with null for a device whose model is undetected |
+| `node.gpu.memory` | `U64` | Smallest reported GPU memory in bytes, null if unavailable |
+| `node.gpu.driver` | `STRING` | Driver version, null if unavailable |
+| `node.onnx.version` | `STRING` | Loaded ONNX Runtime version, null if undetected |
+| `node.onnx.providers` | `VEC<STRING>` | Providers in the order the runtime reports, null if undetected |
+| `node.onnx.cuda` | `BOOL` | Whether the CUDA provider registered |
+| `node.cuda.available` | `BOOL` | `node.gpu.count > 0` and `node.onnx.cuda` |
+
+`tag('zone')` returns the exact `STRING` value of the `zone` tag, or null if the node has no such
+tag. It takes one literal `STRING` key. The `node` scope and `tag()` are available in selectors.
+Selectors accept field references from that scope. Match numeric operand types when comparing a
+count or byte size, for example `node.gpu.count >= (2 AS U64)`. For the source and lifetime of each value, see
+[The Node Record](node-settings.md#the-node-record).
 
 ## Evaluation Model
 
@@ -2046,9 +2076,10 @@ independently of the assigned field: a field of another length is an exact-type 
 or combined bound is refused when the processor is applied; use `COLLECT_VEC` for those windows.
 With `WIDTH 64 MESSAGES`, collecting `[input.cpu, input.mem]` yields `ARRAY<F32, 64, 2>` when both
 inputs are required `F32` values. Collecting a vector adds a fixed outer level and retains the
-vector inside it. The width and every necessarily present nested fixed dimension must fit Arrow's
-signed 32-bit field lengths. Actual output bytes still pass the node's decoded and encoded relay
-limits; a byte or admission refusal follows the existing window emission-failure policy.
+vector inside it. For each consecutive fixed level, the product of the widths through that level
+must fit Arrow's signed 32-bit field lengths. Both aggregates check actual collection sizes at
+emission. A size or admission refusal follows the window emission-failure policy.
+[Sequence bounds and emission](vm-functions.md#retained-sequences).
 
 The [approximate sketches](#approximate-sketches) describe the last three table entries.
 
@@ -2197,6 +2228,8 @@ local execution admission and caches follow the node's
 | `DATETIME` | `1677-09-21T00:12:43.145224192Z` through `2262-04-11T23:47:16.854775807Z`, in nanoseconds | Datetime functions and conversions, with `overflow` |
 | Datetime format | 256 bytes per value, counting every directive at its longest | Rejected when the statement is applied |
 | `date_bin` width | 9,223,372,036,854,775,807 nanoseconds, about 292 years | Rejected when the statement is applied |
+| Fixed list width | 1 through 2,147,483,647 elements per fixed level | Declared list types and the fixed widths computed by list expressions and `COLLECT_ARRAY` |
+| Collected list offsets | At most 2,147,483,647 retained rows, cumulative bytes per text level or children per variable-list level | `COLLECT_VEC` and `COLLECT_ARRAY` at emission |
 | Window sketches | Precision 4–16; capacity 32–4096; `k` at most the capacity | Rejected when the processor is applied |
 | Window sketch state | `MAX STATE SIZE` per branch, and at most `MAX INSTANCES` branches | Rows refused at admission; see [Approximate Sketches](#approximate-sketches) |
 
@@ -2284,6 +2317,7 @@ errors. `T` is the argument's type, and a list is an `ARRAY` or a `VEC`.
 | `uuid_v4`, `uuid_v7` | `STRING` | [Context And Identity](#context-and-identity) |
 | `read_header` | optional `STRING` | [Header Functions](#header-functions) |
 | `read_headers` | `VEC<STRING>` | [Header Functions](#header-functions) |
+| `tag` | optional `STRING` | [Node Selectors](#node-selectors) |
 | `write_header` | nothing; `INVOKE` only | [Header Functions](#header-functions) |
 | `LOOKUP_HASH_MAP` | optional field type | [Lookups And UDF Calls](#lookups-and-udf-calls) |
 | `udf::<name>` | the UDF's result type | [Lookups And UDF Calls](#lookups-and-udf-calls) |

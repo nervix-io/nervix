@@ -21,7 +21,7 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
+use std::{collections::VecDeque, fmt::Display, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use error_stack::Report;
@@ -38,11 +38,13 @@ use nervix_primitives::{
     stream::{Stream, StreamExt as _, wrappers::ReceiverStream},
     sync::{Arc, Mutex, blocking::Mutex as SyncMutex, mpsc, oneshot, watch},
     task::JoinHandle,
+    time::Instant,
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
 use tonic::{Request, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
+    call_deadline::CallDeadline,
     connection::GrpcConnector,
     domain_clock::DomainClockAttachments,
     error::{ClientError, RequestKind},
@@ -565,6 +567,7 @@ impl ExchangeRequests {
         Some(PendingRequest {
             request_id: registered.request_id,
             reply: registered.reply,
+            progress: registered.progress,
             pending: self.pending.clone(),
         })
     }
@@ -580,6 +583,7 @@ impl ExchangeRequests {
         let message = ClientMessage {
             request_id: cancellation.request_id,
             request,
+            progress: None,
         };
         let frame = message
             .encode(&self.limits)
@@ -595,12 +599,78 @@ impl ExchangeRequests {
 pub(crate) struct PendingRequest {
     pub(crate) request_id: RequestId,
     reply: oneshot::Receiver<ReplyBody>,
+    /// Changes at each report that the server still serves the request.
+    progress: watch::Receiver<()>,
     pending: Arc<SyncMutex<PendingReplies>>,
 }
 
 impl PendingRequest {
     pub(crate) async fn receive(&mut self) -> Option<ReplyBody> {
         (&mut self.reply).await.ok()
+    }
+
+    /// Waits for the request's terminal reply, or `None` when the exchange ended without one.
+    /// Every report that the server still serves the request starts `silence` again, and `call`
+    /// with it, so the wait gives up only once `silence` passes with neither the reply nor a
+    /// report. A reply that has already arrived answers the request even when its wait has passed,
+    /// and once the request has no waiter left, because the exchange ended, the reply side observes
+    /// that end.
+    pub(crate) async fn reply_within(
+        &mut self,
+        silence: &mut RequestSilence,
+        call: Option<&CallDeadline>,
+    ) -> Result<Option<ReplyBody>, RequestSilenceElapsed> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let progressed = async {
+                if self.progress.changed().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            };
+            nervix_primitives::select! {
+                biased;
+                reply = &mut self.reply => return Ok(reply.ok()),
+                () = progressed => {
+                    silence.restart();
+                    if let Some(call) = call {
+                        call.restart();
+                    }
+                }
+                () = silence.elapsed() => return Err(RequestSilenceElapsed),
+            }
+        }
+    }
+}
+
+/// How long a request may go without its terminal reply or a report that the server still serves
+/// it: its whole wait, started again at every report.
+pub(crate) struct RequestSilence {
+    wait: Duration,
+    /// When the wait gives up unless a report restarts it, or `None` when no instant can hold it.
+    until: Option<Instant>,
+}
+
+/// The request went its whole wait without its terminal reply or a progress report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RequestSilenceElapsed;
+
+impl RequestSilence {
+    pub(crate) fn starting_now(wait: Duration) -> Self {
+        Self {
+            wait,
+            until: Instant::now().checked_add(wait),
+        }
+    }
+
+    fn restart(&mut self) {
+        self.until = Instant::now().checked_add(self.wait);
+    }
+
+    async fn elapsed(&self) {
+        match self.until {
+            Some(until) => nervix_primitives::time::sleep_until(until).await,
+            None => std::future::pending::<()>().await,
+        }
     }
 }
 
@@ -724,6 +794,8 @@ pub(crate) enum PendingReplies {
 pub(crate) struct PendingReply {
     reply: oneshot::Sender<ReplyBody>,
     expected: ExpectedReply,
+    /// Tells the request's waiter that the server reported it still serves the request.
+    progress: watch::Sender<()>,
 }
 
 /// What a reply must be to answer the request registered under its identity.
@@ -790,6 +862,7 @@ pub(crate) enum ExchangeEnd {
 pub(crate) struct RegisteredRequest {
     pub(crate) request_id: RequestId,
     pub(crate) reply: oneshot::Receiver<ReplyBody>,
+    pub(crate) progress: watch::Receiver<()>,
 }
 
 impl PendingReplies {
@@ -830,16 +903,34 @@ impl PendingReplies {
         let request_id = next_request_id.take()?;
         *next_request_id = request_id.get().checked_add(1).map(RequestId::new);
         let (waiter, reply) = oneshot::channel();
+        let (progressed, progress) = watch::channel(());
         waiters
             .insert(
                 request_id,
                 PendingReply {
                     reply: waiter,
                     expected,
+                    progress: progressed,
                 },
             )
             .discarded("an identity is handed out once, so no earlier waiter holds it");
-        Some(RegisteredRequest { request_id, reply })
+        Some(RegisteredRequest {
+            request_id,
+            reply,
+            progress,
+        })
+    }
+
+    /// Tells the waiter of `request_id` that the server still serves its request. A report for a
+    /// request no waiter waits on any more is ignored: the server can queue one just before the
+    /// request's terminal reply, so it may arrive after the reply took the waiter.
+    pub(crate) fn report_progress(&self, request_id: RequestId) {
+        let Self::Open { waiters, .. } = self else {
+            return;
+        };
+        if let Some(waiter) = waiters.get(&request_id) {
+            waiter.progress.send_replace(());
+        }
     }
 
     /// Removes the waiter of `request_id`, because its reply arrived or its frame was never sent.
@@ -1005,6 +1096,10 @@ impl ExchangeReader {
         match message {
             ServerMessage::Reply(reply) => self.deliver(reply).await,
             ServerMessage::TransferPart(part) => self.assemble(part).await,
+            ServerMessage::Progress(progress) => {
+                self.pending.lock().report_progress(progress.request_id);
+                ReaderFlow::Continue
+            }
             ServerMessage::Event(event) => self.publish(event).await,
         }
     }

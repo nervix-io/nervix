@@ -253,6 +253,104 @@ fn exact_typed_rows_origins_and_continuation_round_trip_beside_their_json() {
     assert!(text.contains("\"secret\":\"<masked>\""));
 }
 
+/// A cluster-license page whose one section is `capabilities`, with each row's state and deadline.
+fn license_capabilities(rows: &[(&str, &str, Option<Timestamp>)]) -> StateInspection {
+    let limits = SessionLimits::DEFAULT;
+    let schema = RowSchema {
+        fields: vec![
+            field("condition", ParseAsType::String, false),
+            field("state", ParseAsType::String, false),
+            SchemaField {
+                optional: true,
+                ..field("permitted_until", ParseAsType::Datetime, false)
+            },
+        ],
+        branch: None,
+    };
+    let mut encoder = StateRowsEncoder::unbranched(&limits);
+    for (condition, state, deadline) in rows {
+        encoder
+            .push_row(|writer| {
+                writer.push_string(condition)?;
+                writer.push_string(state)?;
+                match deadline {
+                    Some(deadline) => writer.push_datetime(*deadline),
+                    None => writer.push_null(),
+                }
+            })
+            .assured("the fixed capability row fits");
+    }
+    let frame = encoder
+        .finish(&limits)
+        .assured("accepted cells finish within their bound");
+    let counts = StateInspectionCounts {
+        branches: 0,
+        rows: u64::try_from(rows.len()).assured("a fixture row count fits u64"),
+        bytes: 1,
+    };
+    StateInspection {
+        entity: StateInspectionEntity::ClusterLicense,
+        result: StateInspectionResult::Page(StateInspectionPage {
+            counts,
+            unit_count: 1,
+            units: vec![StateInspectionUnit {
+                unit: Unit::SINGLE,
+                owner: name("node_a"),
+                replicas: Vec::new(),
+                origin: StateInspectionOrigin {
+                    node: ClusterNodeIdentity::new(name("node_a"), ClusterNodeIncarnation::new(3)),
+                    fingerprint: [7; 32],
+                    generation: 2,
+                    revision: 2,
+                    stage: StateInspectionStage::Stored,
+                },
+                counts,
+                sections: vec![StateInspectionSection {
+                    name: "capabilities".to_string(),
+                    schema,
+                    frames: vec![frame],
+                    omitted_rows: 0,
+                    watermarks: None,
+                }],
+                wasm: None,
+            }],
+            continuation: None,
+            wasm_binding: None,
+        }),
+    }
+}
+
+#[test]
+fn license_capabilities_render_one_line_each_and_refuse_a_contradictory_row() {
+    let deadline = Timestamp::from_unix_nanos(1_700_000_000_000_000_000);
+    let text = license_capabilities(&[
+        ("licensing.dummy", "enabled", None),
+        ("other.capability", "disabled", None),
+        ("future.capability", "permitted", Some(deadline)),
+    ])
+    .display_text()
+    .assured("conforming capability rows render");
+    assert_eq!(
+        text,
+        format!(
+            "capability licensing.dummy: enabled\ncapability other.capability: \
+             disabled\ncapability future.capability: permitted until {deadline}\n"
+        )
+    );
+    for contradictory in [
+        ("licensing.dummy", "enabled", Some(deadline)),
+        ("licensing.dummy", "permitted", None),
+        ("licensing.dummy", "unknown", None),
+    ] {
+        assert!(
+            license_capabilities(&[contradictory])
+                .display_text()
+                .is_err(),
+            "{contradictory:?} is not a capability state the server writes"
+        );
+    }
+}
+
 #[test]
 fn embedded_frames_share_the_verified_reply_and_survive_its_release() {
     let limits = SessionLimits::DEFAULT;

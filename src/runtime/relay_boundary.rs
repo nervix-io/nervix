@@ -2803,11 +2803,15 @@ impl Runtime {
                         let now = match branches.expiration_time(&runtime, &domain) {
                             Ok(now) => now,
                             Err(error) => {
-                                runtime.events().report_error(format!(
-                                    "relay '{}' in domain '{}' lost its clock: {error:#}",
-                                    relay.as_str(),
-                                    domain.as_str(),
-                                ));
+                                // A stopped domain's clock ends the owner with its stop; any
+                                // other loss of the clock is a failure.
+                                if !error.current_context().is_stopped() {
+                                    runtime.events().report_error(format!(
+                                        "relay '{}' in domain '{}' lost its clock: {error:#}",
+                                        relay.as_str(),
+                                        domain.as_str(),
+                                    ));
+                                }
                                 break;
                             }
                         };

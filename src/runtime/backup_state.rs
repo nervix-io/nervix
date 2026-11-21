@@ -70,7 +70,7 @@ pub(crate) struct CapturedGuestSave {
 
 impl CapturedGuestSave {
     /// Covers the Fjall value and its decoded inline copy with room for conversion. Transfer
-    /// buffers are charged separately to the fixed bulk staging reservation.
+    /// buffers are charged separately to the bulk staging reservation.
     pub(crate) fn size_and_conversion_charge(
         &self,
     ) -> error_stack::Result<(u64, u64), BackupStateCaptureError> {
@@ -711,7 +711,8 @@ impl Runtime {
                 RuntimeStateKind::WindowProcessor,
                 RuntimeStateKind::Inferencer,
             ],
-            DomainStatus::Running | DomainStatus::Paused => &[
+            // A stopping domain still runs its graph until its stop ends.
+            DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => &[
                 RuntimeStateKind::WasmProcessor,
                 RuntimeStateKind::KafkaOffset,
                 RuntimeStateKind::BranchLru,
@@ -755,7 +756,8 @@ impl Runtime {
         let keys = self.lifecycle_keys(&current, &needed, cancellation)?;
         let mut branch_states = match status {
             DomainStatus::Stopped => Vec::new(),
-            DomainStatus::Running | DomainStatus::Paused => {
+            // A stopping domain still runs its graph until its stop ends.
+            DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => {
                 self.capture_published_branch_states(domain, primaries, &keys)
             }
         };
@@ -874,7 +876,8 @@ impl Runtime {
         }
         let materialized = match status {
             DomainStatus::Stopped => CapturedMaterializedState::Stored(stored_materialized),
-            DomainStatus::Running | DomainStatus::Paused => {
+            // A stopping domain still runs its graph until its stop ends.
+            DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => {
                 let mut materialized = Vec::new();
                 for state in self.inner.replicated_materialized_stream_states.iter() {
                     let placement = state.key();

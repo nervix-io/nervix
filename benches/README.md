@@ -333,6 +333,21 @@ and doubling ranges of the latency buckets. Use
 The measurements and generated-instruction inspection are in
 [SIMD kernels 03](https://app.clickup.com/t/86bc85v94).
 
+### Carried inference state on one and three nodes
+
+Run `just bench-inferencer-state-cluster` on an otherwise idle host. It uses the scenario runner's
+development build and a fresh loopback cluster for each of four cases. All four load the same
+`running_sum.onnx` model and run it once per message. With `STATE`, Nervix passes the successor
+tensor to the next call. Without `STATE`, Plexus supplies a zero tensor on each call and binds the
+successor as an ordinary output.
+The two relays and the inferencer share the HTTP intake's node in every case.
+
+Each case warms up with 200 acknowledged HTTP requests, then times 2,000 requests with up to eight
+in flight. `INFERENCE_BENCHMARK` reports acknowledged rows per second and nearest-rank p50, p95
+and p99 request latency in milliseconds. Any refusal fails the run. A final untimed request checks
+that the model processed all inputs with the expected score. Use timings from passing cases and
+compare the two modes at the same cluster size and on the same host.
+
 ### Expression VM function workbench
 
 `just bench-vm` runs the existing Criterion VM harness. Its `execute_program_batch_size` group

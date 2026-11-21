@@ -124,11 +124,11 @@ path = "crates/benchmark/src/kafka.rs"
 reason = "The driver is a harness, not a node; librdkafka's metadata fetch parks its calling thread until the broker answers."
 
 [[permission]]
-bound = "One database open per check, and one committed-offset request with a one-second timeout per poll of a bounded wait."
+bound = "One database open per check, and one Kafka committed-offset or group information request per poll of a bounded observation, with a one- or five-second request timeout respectively."
 items = ["task::spawn_blocking"]
 owner = "The scenario harness's cluster fixture."
 path = "tests/common/cluster.rs"
-reason = "The harness is not a node; it checks that a stopped node released its databases and reads Kafka's committed offsets, both blocking calls outside any node's executor."
+reason = "The harness is not a node; it checks that a stopped node released its databases and reads Kafka's offsets and group information, blocking calls outside any node's executor."
 
 [[permission]]
 bound = "One probe run, which ends when the probe's session with the cluster ends."
@@ -220,6 +220,13 @@ items = ["thread::spawn"]
 owner = "Conditional orphaned domain pause recovery checks."
 path = "crates/consensus/src/domain_pause_recovery/tests.rs"
 reason = "Model participants exercise the production applied mutation through the selected scheduler outside a node executor."
+
+[[permission]]
+bound = "Each Shuttle execution starts five finite participants, each applying one stop proposal, and joins all of them before it returns; exploration uses the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Domain stop ending fence checks."
+path = "crates/consensus/src/domain_stop_shuttle_tests.rs"
+reason = "Model participants apply their stop proposals to the production consensus state through the selected scheduler outside a node executor; no product thread is created."
 
 [[permission]]
 bound = "The recorder serially handles one delivery at a time, with at most one watchdog. It waits at most ten seconds; successful potential recording cancels and joins it, and timeout or a terminal finding exits the process."

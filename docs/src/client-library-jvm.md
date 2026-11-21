@@ -38,7 +38,9 @@ TLS connection needs that explicit authority. `REQUIRED` refuses a plaintext URI
 
 `ConnectOptions` is a handle: close it after connecting. The session retains the configuration it
 needs. Seeds let it reach the cluster when the initial address is unavailable. Connection, request,
-retry and backup-wait timeouts are seconds; cancellation deadlines can bound an individual call.
+retry and backup-wait timeouts are seconds; the request and call timeouts count only time without
+the answer or a server progress report, which restarts them. Cancellation deadlines can bound an
+individual call.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:seeds}}
@@ -100,6 +102,17 @@ captured policy revision and acceptance limits. Revision values retain all 64 bi
 {{#include ../../tests/client_conformance/java/suite/cluster/EntityLabelsTests.java:entity_labels}}
 ```
 
+### Inspect Cluster Nodes
+
+`outcome.nodeInspection()` returns an independently retained `NodeInspection` for either
+presentation of `SHOW NODES`. It returns `null` when the outcome has no node inspection.
+Read `names()` for the ordered matches and `json()` for the full membership and committed
+record data. Close the handle when finished.
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/InspectionTests.java:node_inspection}}
+```
+
 ### Inspect Materialized State
 
 `Outcome.stateInspection()` returns an independently retained inspection, or `null` when the
@@ -108,8 +121,10 @@ page fields. A refusal has no counts or units; a successful empty page has zero 
 `json()` preserves the complete typed envelope.
 
 `DESCRIBE LICENSE;` uses this envelope for cluster scope: `entityKind()` is `"LICENSE"`, while
-`domain()` and `entityName()` are `null`. Its summary and quota rows describe the answering node's
-committed policy. The command also works without selecting a domain.
+`domain()` and `entityName()` are `null`. Its unit's `summary`, `quotas`, `capabilities` and
+`transitions` sections describe the answering node's committed policy: one summary row, one row per
+cluster quota, one row per catalog capability, and one row per quota under a committed licensing
+transition. The command also works without selecting a domain.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

@@ -459,6 +459,9 @@ pub(super) struct NodeQuiesceCounters {
     parked: AtomicUsize,
     /// Force-flush obligations this node has not completed, reported the same way.
     force_flushes: AtomicUsize,
+    /// Rows or records the node's processors hold until their time or their partner, which no
+    /// drain or handoff waits for and a stop cuts.
+    held: AtomicUsize,
 }
 
 /// What one publisher of processor depths contributes to its node's quiesce accounting.
@@ -468,6 +471,9 @@ pub(super) struct NodeQuiesceContribution {
     admitted: usize,
     /// Messages parked on required materialized state.
     parked: usize,
+    /// Rows or records a processor holds until their time or their partner; no drain or handoff
+    /// waits for them, and only a stop's view and report read them.
+    held: usize,
 }
 
 impl NodeQuiesceContribution {
@@ -486,6 +492,7 @@ impl From<BranchQuiesceDepths> for NodeQuiesceContribution {
                 .checked_add(depths.output_buffers)
                 .assured("both counts total batches this processor already holds in memory"),
             parked: depths.pending_materialized,
+            held: depths.held_rows,
         }
     }
 }
@@ -504,6 +511,11 @@ impl NodeQuiesceCounters {
     /// Messages this node holds parked on required materialized state.
     pub(super) fn parked_work(&self) -> usize {
         self.parked.load(Ordering::Acquire)
+    }
+
+    /// Rows or records this node's processors hold until their time or their partner.
+    pub(super) fn held_rows(&self) -> usize {
+        self.held.load(Ordering::Acquire)
     }
 
     /// Force-flush obligations this node has taken on and not completed.
@@ -585,6 +597,8 @@ impl NodeQuiesceCounters {
         Self::lower(&self.admitted, previous.admitted, next.admitted);
         Self::lower(&self.parked, previous.parked, next.parked);
         Self::lower(&self.outstanding, held, holding);
+        Self::raise(&self.held, previous.held, next.held);
+        Self::lower(&self.held, previous.held, next.held);
     }
 
     fn raise(count: &AtomicUsize, previous: usize, next: usize) {
@@ -714,6 +728,10 @@ pub(super) struct BranchQuiesceDepths {
     pub(super) collected_inputs: usize,
     pub(super) pending_materialized: usize,
     pub(super) output_buffers: usize,
+    /// Rows a reorderer holds until their time, records a correlator holds until their partner,
+    /// or rows a window retains whose acknowledgements stay pending, which no drain waits for and
+    /// a stop cuts.
+    pub(super) held_rows: usize,
 }
 
 impl BranchQuiesceGauges {
@@ -740,6 +758,7 @@ impl BranchQuiesceGauges {
                     .iter()
                     .map(|output| output.pending.len())
                     .sum(),
+                held_rows: processor.operation.held_rows(),
             },
             None => BranchQuiesceDepths::default(),
         };

@@ -143,6 +143,7 @@ impl Runtime {
             return Ok(());
         }
 
+        Box::pin(self.capture_stop_teardowns(domains)).await;
         self.sync_committed_domains(revision, domains, domain_clock_authorities);
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.
@@ -235,6 +236,11 @@ impl Runtime {
             if let nervix_models::DomainStatus::Paused = domain_status {
                 self.engage_domain_ingestor_quiesce(&domain.domain);
             }
+            // A stopping domain's intake ends on every node at once, whatever each ingestor's
+            // `ON QUIESCE` declares; its graph runs on while the work in motion finishes.
+            if let nervix_models::DomainStatus::Stopping = domain_status {
+                self.engage_domain_stop_intake(&domain.domain);
+            }
             let desired_passive_only =
                 matches!(domain_status, nervix_models::DomainStatus::Stopped);
             if !matches!(delta, ExecutionDelta::Unchanged)
@@ -276,6 +282,24 @@ impl Runtime {
                 }
             }
 
+            // A stopping domain withdraws its endpoints once its intake holds, so a request that
+            // arrives later finds no route, and withdraws them again after a rebuild published
+            // them. A request admitted before the stop finishes through the intake it borrowed. A
+            // domain that runs again, its stop called off, publishes them again.
+            match domain_status {
+                nervix_models::DomainStatus::Stopping => {
+                    self.inner
+                        .endpoint_intake_routes
+                        .withdraw_stopping_domain(&domain.domain);
+                }
+                nervix_models::DomainStatus::Running | nervix_models::DomainStatus::Paused => {
+                    self.inner
+                        .endpoint_intake_routes
+                        .restore_withdrawn_domain(&domain.domain);
+                }
+                nervix_models::DomainStatus::Stopped => {}
+            }
+
             if let nervix_models::DomainStatus::Running = domain_status {
                 let build = || RuntimeError::build_domain_execution(&domain.domain);
                 self.purge_stale_runtime_state(&domain.domain)
@@ -287,6 +311,7 @@ impl Runtime {
                         .change_context_lazy(build)?;
                 }
                 self.release_domain_ingestor_quiesce(&domain.domain);
+                self.release_domain_stop_intake(&domain.domain);
             }
         }
         self.retain_assigned_wasm_modules(local_node_id, &revision_plan);
@@ -443,25 +468,27 @@ impl Runtime {
             };
             // A relay is rebound unit by unit: the units this node owned, the owner each unit had,
             // and the units it owns now decide which owner and state tasks stop and start.
-            let mut layout_replaced = false;
+            let mut ingestor_layout_replaced = false;
             let mut changed_units = desired_node.units.keys().copied().collect::<BTreeSet<_>>();
             let (previous_local_units, previous_unit_owners) = if let Some(execution) =
                 self.inner.executions.get(domain)
                 && let Some(existing) = Self::scheduled_node(&execution.revision, entity)
             {
-                layout_replaced = existing.units.keys().ne(desired_node.units.keys());
-                // An ingestor whose instance layout changed reads under a new layout in every unit:
-                // the planned handoff captured each unit's Kafka offset state, and only a new
-                // binding issues its originator again. Every unit is rebound, kept owners included.
-                let rebinds_every_unit = layout_replaced && entity.kind == ModelKind::Ingestor;
-                changed_units.retain(|unit| {
-                    rebinds_every_unit
-                        || existing.units.get(unit).is_none_or(|previous| {
+                ingestor_layout_replaced = entity.kind == ModelKind::Ingestor
+                    && existing.units.keys().ne(desired_node.units.keys());
+                if ingestor_layout_replaced {
+                    // Retire the previous placement tasks even for units removed by a shrink.
+                    // Then bind prepared state for every replacement, including retained owners.
+                    changed_units.extend(existing.units.keys().copied());
+                } else {
+                    changed_units.retain(|unit| {
+                        existing.units.get(unit).is_none_or(|previous| {
                             let desired = &desired_node.units[unit];
                             previous.primary_node != desired.primary_node
                                 || previous.assigned_nodes != desired.assigned_nodes
                         })
-                });
+                    });
+                }
                 let local = existing
                     .units_executing_on(local_node_id)
                     .intersection(&changed_units)
@@ -480,7 +507,7 @@ impl Runtime {
             if entity.kind == ModelKind::Ingestor {
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let key = DomainNodeUnitRef::new(entity.in_domain(domain), *unit);
-                    if !layout_replaced || self.inner.ingestors.contains_key(&key) {
+                    if !ingestor_layout_replaced || self.inner.ingestors.contains_key(&key) {
                         self.stop_ingestor_unit(
                             domain,
                             &IngestorName::from(&entity.identifier),
@@ -1100,7 +1127,17 @@ impl Runtime {
             installed,
             local_node_id,
         } = targets;
-        Box::pin(self.stop_replaced_ingestor_layouts_for_swap(domain, revision, journal)).await?;
+        let replaced_ingestor_layouts =
+            Box::pin(self.stop_replaced_ingestor_layouts_for_swap(domain, revision, journal))
+                .await?;
+        // A smaller layout can keep every remaining unit on its previous assignment. Its
+        // prepared state still needs to replace the placement before the readers start.
+        let mut placement_changes = SortedSet::from_unsorted(reassignments.to_vec());
+        placement_changes.extend(
+            replaced_ingestor_layouts
+                .into_iter()
+                .map(|ingestor| NodeRef::new(ModelKind::Ingestor, &ingestor)),
+        );
 
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
         // desired fingerprints before constructing state so the post-swap stale-state purge does
@@ -1113,7 +1150,7 @@ impl Runtime {
         let mut materialized_routing_changed = Box::pin(self.rebind_reassigned_nodes(
             domain,
             revision,
-            reassignments,
+            &placement_changes,
             local_node_id,
             &repartitioned,
             journal,
@@ -1243,29 +1280,31 @@ impl Runtime {
     }
 
     /// Stops the local units of every ingestor whose unit layout `desired` changes, recording
-    /// each in `journal`, before any of its prepared state is installed.
+    /// each in `journal`, before any of its prepared state is installed. Returns those ingestors,
+    /// whose placements need to be installed again.
     async fn stop_replaced_ingestor_layouts_for_swap(
         &self,
         domain: &DomainName,
         desired: &ExecutionRevision,
         journal: &mut EntitySwapJournal,
-    ) -> error_stack::Result<(), RuntimeError> {
+    ) -> error_stack::Result<Vec<IngestorName>, RuntimeError> {
         let dispatcher = self.inner.remote_dispatcher.load_full();
-        for ingestor in self.replaced_ingestor_layouts(domain, Some(desired)) {
+        let layouts = self.replaced_ingestor_layouts(domain, Some(desired));
+        for ingestor in &layouts {
             nervix_primitives::task::consume_budget().await;
             let step = journal.record(IngestorSwap::new(ingestor.clone()));
-            for unit in self.running_ingestor_units(domain, &ingestor) {
+            for unit in self.running_ingestor_units(domain, ingestor) {
                 nervix_primitives::task::consume_budget().await;
-                self.stop_ingestor_unit(domain, &ingestor, unit).await?;
+                self.stop_ingestor_unit(domain, ingestor, unit).await?;
                 journal.step(step).record_stopped(unit);
             }
             self.inner.metrics.remove_ingestor_metrics(
                 domain,
-                &ingestor,
+                ingestor,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             );
         }
-        Ok(())
+        Ok(layouts)
     }
 
     /// Close only changing routing generations selected by the forced-recovery plan. Closing

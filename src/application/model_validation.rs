@@ -22,7 +22,7 @@ use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{
-    Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass, QueueAdmission,
+    Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass, QueueAdmission, Reservation,
 };
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerName,
@@ -41,10 +41,6 @@ use super::{
 
 mod client_config;
 pub(in crate::application) use client_config::client_validation_message;
-
-/// The bounded buffer used to read the configured native image sequentially. ONNX Runtime owns
-/// its other allocations; this charge covers the image buffer and admits the bulk job.
-const MODEL_INSPECTION_RESERVATION_BYTES: u64 = 16 * 1024;
 
 struct OnnxModelMetadata {
     inputs: HashMap<String, OnnxTensorMetadata>,
@@ -708,9 +704,13 @@ impl SessionServiceImpl {
             "ONNX metadata inspection waiting for bulk memory"
         );
         // Native initialization and the model's load, optimization and release stay on this
-        // admitted worker. The reservation covers the bounded image buffer; ORT owns its heap.
+        // admitted worker. The reservation is one bulk chunk of this node's executor and covers the
+        // bounded image buffer; ORT owns its heap.
         let reservation = executor
-            .reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+            .reserve(
+                MemoryClass::Bulk,
+                executor.limits().bulk_chunk_bytes.as_u64(),
+            )
             .await
             .change_context_lazy(|| InferencerBindingValidationError::InspectionTask {
                 node: processor.name.clone(),
@@ -722,7 +722,7 @@ impl SessionServiceImpl {
             "ONNX metadata inspection submitted to bulk execution"
         );
         match executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
                 tracing::debug!(
                     node = %processor_name,
                     model_file = %processor_file,
@@ -734,12 +734,16 @@ impl SessionServiceImpl {
                     model_file = %processor_file,
                     "ONNX metadata native image preparing"
                 );
-                Self::prepare_onnx_metadata_image(configured_image.as_deref(), cancellation)
-                    .change_context_lazy(|| {
-                        InferencerBindingValidationError::InspectionCancelled {
-                            node: processor_name.clone(),
-                        }
-                    })?;
+                Self::prepare_onnx_metadata_image(
+                    configured_image.as_deref(),
+                    &charge,
+                    cancellation,
+                )
+                .change_context_lazy(|| {
+                    InferencerBindingValidationError::InspectionCancelled {
+                        node: processor_name.clone(),
+                    }
+                })?;
                 tracing::debug!(
                     node = %processor_name,
                     model_file = %processor_file,
@@ -779,6 +783,7 @@ impl SessionServiceImpl {
     /// initializer or cache is added here, and preparation stays inside the inspection's deadline.
     fn prepare_onnx_metadata_image(
         configured: Option<&std::ffi::OsStr>,
+        charge: &Reservation,
         cancellation: &Cancellation,
     ) -> Result<(), Cancelled> {
         cancellation.check()?;
@@ -802,21 +807,22 @@ impl SessionServiceImpl {
         if !matches!(image.metadata(), Ok(metadata) if metadata.is_file()) {
             return cancellation.check();
         }
-        Self::read_onnx_metadata_image(&mut image, cancellation)?;
+        Self::read_onnx_metadata_image(&mut image, charge, cancellation)?;
         Ok(())
     }
 
+    /// Reads `image` to its end through a buffer as large as `charge`, the job's whole memory
+    /// charge, checking `cancellation` before every read.
     fn read_onnx_metadata_image(
         image: &mut impl std::io::Read,
+        charge: &Reservation,
         cancellation: &Cancellation,
     ) -> Result<(), Cancelled> {
         cancellation.check()?;
-        let mut buffer = vec![
-            0;
-            usize::try_from(MODEL_INSPECTION_RESERVATION_BYTES).assured(
-                "the fixed inspection buffer fits every supported target"
-            )
-        ];
+        let buffer_bytes = usize::try_from(charge.bytes()).assured(
+            "a reservation holds at most u32::MAX bytes, which fits every supported usize",
+        );
+        let mut buffer = vec![0; buffer_bytes];
         loop {
             cancellation.check()?;
             match image.read(&mut buffer) {
@@ -982,22 +988,22 @@ mod tests {
                 std::io::Read::read(&mut self.bytes, buffer)
             }
         }
-        let size = usize::try_from(MODEL_INSPECTION_RESERVATION_BYTES)
-            .assured("the inspection buffer fits this target");
         for fail in [false, true] {
             let executor = nervix_execution::Executor::default();
+            let chunk_bytes = executor.limits().bulk_chunk_bytes.as_u64();
+            let size = usize::try_from(chunk_bytes).assured("the bulk chunk fits this target");
             let charge = executor
-                .try_reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+                .try_reserve(MemoryClass::Bulk, chunk_bytes)
                 .assured("one image buffer fits the bulk budget");
             let image = executor
-                .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                .run_cpu(CpuClass::Bulk, charge, move |charge, cancellation| {
                     let mut image = Image {
                         bytes: std::io::Cursor::new(vec![9; size * 2 + 1]),
                         requests: Vec::new(),
                         interrupted: false,
                         fail,
                     };
-                    SessionServiceImpl::read_onnx_metadata_image(&mut image, cancellation)
+                    SessionServiceImpl::read_onnx_metadata_image(&mut image, &charge, cancellation)
                         .assured("a read hint does not replace native loader error ownership");
                     image
                 })
@@ -1062,8 +1068,9 @@ mod tests {
             }
         }
         let executor = nervix_execution::Executor::default();
+        let chunk_bytes = executor.limits().bulk_chunk_bytes.as_u64();
         let charge = executor
-            .try_reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+            .try_reserve(MemoryClass::Bulk, chunk_bytes)
             .assured("one image buffer fits the bulk budget");
         let reads = Arc::new(AtomicUsize::new(0));
         let image_reads = reads.clone();
@@ -1073,7 +1080,7 @@ mod tests {
         let worker = executor.clone();
         let awaiting = nervix_primitives::task::spawn(async move {
             worker
-                .run_cpu(CpuClass::Bulk, charge, move |_charge, signal| {
+                .run_cpu(CpuClass::Bulk, charge, move |charge, signal| {
                     let mut image = Image {
                         state: ReadState::Held {
                             entered,
@@ -1081,7 +1088,8 @@ mod tests {
                         },
                         reads: image_reads,
                     };
-                    let outcome = SessionServiceImpl::read_onnx_metadata_image(&mut image, signal);
+                    let outcome =
+                        SessionServiceImpl::read_onnx_metadata_image(&mut image, &charge, signal);
                     finished
                         .send(outcome)
                         .assured("the cancelling caller observes the worker's outcome");
@@ -1091,10 +1099,7 @@ mod tests {
         reading
             .await
             .assured("the preparation entered its first bounded read");
-        assert_eq!(
-            executor.snapshot().bulk_memory.reserved_bytes,
-            MODEL_INSPECTION_RESERVATION_BYTES
-        );
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, chunk_bytes);
         awaiting.abort();
         assert!(
             awaiting
@@ -1102,10 +1107,7 @@ mod tests {
                 .expect_err("the awaiting job was aborted")
                 .is_cancelled()
         );
-        assert_eq!(
-            executor.snapshot().bulk_memory.reserved_bytes,
-            MODEL_INSPECTION_RESERVATION_BYTES
-        );
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, chunk_bytes);
         release
             .send(())
             .assured("the admitted worker still owns its read");
@@ -1199,12 +1201,16 @@ mod tests {
         ] {
             let executor = nervix_execution::Executor::default();
             let charge = executor
-                .try_reserve(MemoryClass::Bulk, MODEL_INSPECTION_RESERVATION_BYTES)
+                .try_reserve(
+                    MemoryClass::Bulk,
+                    executor.limits().bulk_chunk_bytes.as_u64(),
+                )
                 .assured("one preparation buffer fits the bulk budget");
             executor
-                .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                .run_cpu(CpuClass::Bulk, charge, move |charge, cancellation| {
                     SessionServiceImpl::prepare_onnx_metadata_image(
                         configured.as_deref().map(std::path::Path::as_os_str),
+                        &charge,
                         cancellation,
                     )
                     .assured("the loader owns path selection and image load failures");

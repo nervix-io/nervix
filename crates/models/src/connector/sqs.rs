@@ -193,7 +193,7 @@ impl IngestorDeclaration for SqsQueueIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
-        instancing: crate::IngestorInstancingCapability::PerPartition,
+        instancing: crate::IngestorInstancingCapability::Instances,
         // An SQS message's attributes: one value per name, in no order.
         headers: Some(HeaderModel::exact(HeaderLayout::LastWins)),
         payload: crate::IngestorPayloadDeclaration::BYTES,

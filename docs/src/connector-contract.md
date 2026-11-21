@@ -892,8 +892,16 @@ is full, each network wait with what ends it, and the limits its driver imposes 
 changes. The [Connector Capabilities](connector-capabilities.md) reference and each entity's manual
 render these bounds from the declaration, so a reader sees the same facts a reviewer checks.
 
-A buffer is bounded by a capacity Nervix fixes, a statement clause or client key sets, or a driver
-default declares. When it is full, a protocol with flow control is held back: the connector stops
+HTTP and WebSocket endpoint declarations include the HTTP/1 request head they accept and its
+deadline. The WebSocket endpoint also declares its frame and assembled-message caps and the
+socket's idle deadline for the next read. A size violation uses `CloseSession`: the listener
+keeps serving its other peers and the disconnected client owns any new connection. Connection
+admission, TLS, parser storage, keepalive and post-refusal teardown belong to the shared
+[listener transport](node-settings.md#listener-bounds).
+
+A buffer is bounded by a capacity Nervix fixes, a statement clause or client key sets, a node setting
+an operator chooses when the node starts, or a driver default declares. When it is full, a protocol
+with flow control is held back: the connector stops
 reading, and the transport's own window or prefetch keeps the peer from sending more, or a publish
 waits for the buffer to drain. A protocol without flow control drops what does not fit and counts
 it. A buffer that drops without counting, or whose overflow fails the publish for the host to retry,
@@ -922,12 +930,26 @@ nor makes the host reconnect. UDP admission separately drops and counts a datagr
 intake queue holds at most the node's `syslog-intake-queue-capacity` frames and applies backpressure;
 that queue does not limit the connection count or total connection-local retention.
 
+A connector that refuses a request it cannot hold declares which refusal it gives. A full queue or
+pool refuses the request for its sender to retry. A request above its size limit is refused as too
+large, and that refusal is final: the same request sent again is refused again. An `HTTP ENDPOINT`
+request passes the node's [Listener Bounds](node-settings.md#listener-bounds) before the endpoint
+dispatches it, so the endpoint's declaration names node settings. `http-body-bytes` refuses a larger
+request body as too large. The `execution-intake-memory-bytes` pool, which every HTTP endpoint
+connection on the node shares, refuses request input it cannot back, for its sender to retry.
+`listener-header-timeout` closes a connection whose request head is unfinished, without an answer,
+and `http-body-timeout` refuses a request whose body does not arrive in time.
+
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a protocol interval
-another client key sets, such as MQTT's `keep_alive_ms`, a fixed bound Nervix sets, or the driver's
-own default. A protocol interval is not a deadline key: it keeps its protocol's meaning, and the
-entity declares how its wait follows from the key and what applies where the client leaves the key
-out. A wait that only the host's stop ends is declared unbounded. The deadline keys mean the same
-thing for every connector:
+another client key sets, such as MQTT's `keep_alive_ms`, a node setting such as a listener's
+`listener-header-timeout`, a fixed bound Nervix sets, or the driver's own default. A protocol
+interval is not a deadline key: it keeps its protocol's meaning, and the entity declares how its
+wait follows from the key and what applies where the client leaves the key out. A node setting is
+not one either: it belongs to the node, an operator chooses it when the node starts, no statement or
+client changes it, and the entity declares what ending the wait does. Every node setting a
+declaration names, whether it bounds a buffer or a wait, is one the node declares, by the name its
+definition gives it, which the server's settings tests check. A wait that only the host's stop ends
+is declared unbounded. The deadline keys mean the same thing for every connector:
 
 | Key | What it bounds |
 | --- | --- |
@@ -970,8 +992,12 @@ A change that adds or alters a connector's buffers or network waits checks that:
 
 - every buffer between the transport and the host is declared with its capacity and overflow, and
   only a buffer already declared unbounded stays so;
-- every network wait is bounded by a declared deadline key, protocol interval key, clause, fixed
-  bound or driver default, and only a wait already declared unbounded stays so;
+- every network wait is bounded by a declared deadline key, protocol interval key, clause, node
+  setting, fixed bound or driver default, and only a wait already declared unbounded stays so;
+- every refusal it declares says whether its sender may retry the request or the request is too
+  large to be accepted at all;
+- every node setting its declaration names is a setting the node declares, by its definition's
+  name;
 - every deadline key it reads keeps the meaning above and is read through `ConfiguredDeadline`;
 - no driver call parks an asynchronous worker;
 - every deadline key its declaration names has its stalled-peer scenario in the inventory.
@@ -1565,15 +1591,18 @@ domain offsets all read those same plans; none of them reads the ingestor's Mode
 ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
 surfaces and parses its declared acknowledgement before any connector instance opens, so a start
 that fails leaves nothing running.
-Instance-capable entities declare `Count(NonZeroU64)` or `PerPartition` in the vocabulary. The
-registry resolves that declaration into exact `Instance(i)` unit placements and per-unit start
+Instance-capable entities declare `Count(NonZeroU64)` or `PerTransportPartition` in the vocabulary.
+The registry resolves that declaration into exact `Instance(i)` unit placements and per-unit start
 plans; `Single` entities retain their single unit. Each host opens only its plan's global index.
 Connector configuration still carries the total count where the transport needs it. A handoff
 changes one unit's primary and state originator without restarting its siblings.
 
-The vocabulary declares `Single | Instances | PerPartition` once per entity. Grammar, validation,
-console drafts, inspection and capability exports consume that declaration. Per-partition ingestors
-bind instance `p` to each constructing destination's partition `p`; Kafka requires domain offsets.
+The vocabulary declares `Single | Instances | PerTransportPartition` once per entity, and only an
+entity whose transport keeps partitions that Nervix observes, KAFKA TOPIC and PULSAR TOPIC, declares
+`PerTransportPartition`. Grammar, validation, console drafts, inspection and capability exports
+consume that declaration. Transport-partition ingestors bind instance `p` to each constructing
+destination's partition `p` and are dealt transport partition `k` by `k mod n`; Kafka requires
+domain offsets.
 Before placement materializes fixed instances, the registry refuses a count whose execution-unit
 entry layout is unaddressable on the target. The connector receives only its validated unit plan.
 All constructing routes agree on key fields and partition count. A count change freezes the
@@ -1934,7 +1963,8 @@ delivers them again, possibly after the held delivery was admitted.
 An ingestor's [`RATE LIMIT`](./ingestors.md#rate-limits) is host policy: the entity declares only
 whether, and in which delivery modes, its transport keeps what the host has not taken, and the host
 owns the allowance of each execution unit, its waits and its rejections. A connector learns of an
-allowance only through the size of the reads it is asked for.
+allowance through the size of the reads it is asked for and the optional `IngestorReadHold`
+session-control hook.
 
 Before every broker read the host asks its services for the read's budget,
 `IngestorHostServices::read_budget`, given the window its delivery mode leaves: one message under
@@ -1949,6 +1979,26 @@ holds before reading, on a deadline of the boundary's timer, servicing its inges
 cadence; a quiesce change or a stop ends the hold, and every turn asks for the budget again.
 `IngestorHostServices::record_rate_limit_hold_started` counts each hold as it starts and
 `record_rate_limit_hold_ended` adds its length once it ended.
+
+The host drives that hook during both waits for the allowance: before a read and when the
+allowance is still refilling for a measured payload the host already holds. The hook services
+transport control without taking records or deciding the outcome of records already held by the
+host. A transport error before a read goes through the broker loop's retry policy. During intake
+the host reports and retries transport maintenance while the held batch continues through its
+allowance and normal settlement.
+
+For a Kafka consumer group, short waits can end before maintenance is due. The connector uses
+librdkafka's configured `max.poll.interval.ms` to start maintenance early enough for control
+execution. On the connector control workers, it pauses the current assignment and polls the
+driver once. The stream wakes again for group events or at its native half-interval cadence.
+It yields after handling a rebalance callback, so the connector can pause newly assigned
+partitions before the next poll. The driver can discard prefetched copies as it pauses
+fetching. Its next read resumes fetching from the first unread position. The ingestor stores
+one identity for each topic partition it may have paused. When an admitted read resumes, it
+releases those pauses after any in-flight control poll finishes and leaves an inherited
+topology's partition pauses in force. Settlement and teardown also wait for an in-flight
+control poll. Domain-offset ingestors use explicit assignments and have no consumer-group
+membership to maintain.
 
 A clause with `OF` is paid once the read returned: the host measures every payload of the read
 once, before decoding, and admits each in order, dispatching what it admitted before it holds a
@@ -2034,11 +2084,15 @@ they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK` or
 keep-alive pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
 as an oversized outcome; no payload is counted twice.
 
-The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` once per ingestor and physical
-node and passes its counter handle to the connector. The driver increments it at each overflow,
-including while the host waits for downstream acknowledgement. Prometheus exposes the count with
-`domain`, `ingestor`, `physical_node_id` and `instance` labels; a reconnect does not reset it. It is separate
-from codec rejections, oversized payloads, quiesce drops and transport redeliveries.
+The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` for each ingestor unit,
+registered at zero, and hands the connector an `IngestorReadAheadOverflow` report in the unit's
+plan; the connector names no metrics type. Each connection's driver keeps a clone of the report and
+records overflow through it as it happens, including while the host waits for downstream
+acknowledgement: one call to the host's recorder, which increments the unit's child without a
+registry lookup, allocation or wait. Prometheus keeps the same local series across reconnects.
+[Ingestor intake and payload
+handling](metrics-and-observability.md#ingestor-intake-and-payload-handling) lists this counter and
+the other intake observations.
 
 Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
 publishing readiness, including under `NO ACK`. A lower grant is
@@ -2215,9 +2269,13 @@ it in the subscription. The plan carries it, and the connector passes it to ever
 builds: the data consumers, the non-durable existence probe and the removal consumer. Subscription
 identity ignores it, like ownership and the start position, so `SET TYPE` and a `SET FROM` that
 changes only the type retain the subscription. The registry refuses `FAILOVER` and `EXCLUSIVE` with
-a count other than one or with `INSTANCES PER PARTITION` at `CREATE` and on every alteration,
-because those types require one fixed consumer. `SHARED` and `KEY_SHARED` accept both fixed counts
-and partition-following instances; every unit opens its own consumer with its stable global index.
+a fixed count other than one at `CREATE` and on every alteration, because those types require one
+consumer per topic. `INSTANCES PER TRANSPORT PARTITION` is accepted with every type: the plan deals
+the observed partition topics among the units, and every unit opens its own consumer, with its
+stable global index, on the partition topics dealt to it, so each partition topic has one consumer
+of the ingestor. Until the leader has observed the topic, the units' plans are suspended and open
+no consumer. `SHARED` and `KEY_SHARED` also accept fixed counts, whose units each consume the whole
+topic.
 
 A Pulsar ingestor's client gives the driver one attempt at an operation. The driver would otherwise
 repeat a subscribe the broker answers with `ConsumerBusy` or `ServiceNotReady` without limit, which
@@ -2653,7 +2711,17 @@ window fails with a stop deadline error. This reporting grace gives no emitter m
 
 Terminal teardown of a domain execution, when the domain stops, its execution is
 rebuilt or the node shuts down, ends the emitter task wherever it is, including in the middle of a
-publish, and then finishes the emitter. The stopping execution gives every emitter its deadline before
+publish, and then finishes the emitter. A domain's graceful `STOP` never reaches a publish this
+way: its drain rests only with no publish on the wire, and its teardown first lets an attempt a
+retry began since run to its outcome. A force-flush generation that a stopping domain's drain
+requests gets one publish attempt from an emitter: a retryable failure hands the records to the
+emitter's own retry schedule, and an emitter already waiting for a retry completes the generation
+at once, so a destination that stays down never holds the stop open. Every other drain's
+generation, from an alteration's pause, a backup cut or a terminating node, publishes what the
+emitter holds at once, a record a retry holds included, and retries inline with its backoff until
+the destination takes it, the stop deadline passes or the task shuts down; once the domain begins
+stopping, it hands the records to its retry schedule instead. The stopping execution
+gives every emitter its deadline before
 it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
 shutdown deadline when the node is stopping. A task whose relay interaction ends without a stop or
 a teardown drains its buffer and finishes the emitter by the stop deadline it holds; a task that holds
@@ -3699,14 +3767,39 @@ sequenceDiagram
 
 ## Failure and observation
 
-A connector-specific fact uses the entity's declared event counter. The host registers all its
-event children at zero and exposes `ConnectorEventProvider` through `EmitterHost` and
-`IngestorHost`. Construction resolves a `ConnectorEventCounter` by typed event identity;
-requesting an undeclared event returns a typed refusal. The connector retains that counter and
-records through it without naming a metrics type, rebuilding labels or resolving a registry on
-the recurring path. The host owns counting, wall rates, process-local history and inspection.
-The event itself changes no delivery outcome. [Connector-declared events](metrics-and-observability.md#connector-declared-events)
-defines the public families and the Redis zero-subscriber event.
+The host records each external interaction it owns through the node's connector-interaction metric
+families. The typed outcome used by the data plane also selects the observation. For example, a
+publish attempt reports its attempt outcome once, and the host counts any settled record rejections
+by their own typed codes. Driver calls made inside the attempt contribute to that one host outcome.
+The host resolves labels and metric children at unit startup. The recurring path records through
+those retained handles.
+
+A connector reports a transport-specific fact using a host-handle method or a declared event, or,
+from a task that polls its transport apart from the host's loop, a typed report in its plan.
+
+- `IngestorHost` exposes `record_read`, `record_read_payloads`, `record_acknowledgement`,
+  `record_transport_settlement`, `record_resume` and `record_suspend` for host observations.
+  `record_transport_redeliveries`, `record_oversized_payloads` and `record_unconfirmed_stop`
+  report transport facts. `record_rate_limit_hold_started` and `record_rate_limit_hold_ended`
+  report allowance holds.
+- `EmitterHost` exposes `record_prepared_payload` and `record_payload_subdivisions` for native
+  preparation measurements.
+- Both handles expose `record_transient_error` for connector status. Its reason is a display
+  diagnostic. Labels and delivery choices come from typed classes.
+
+`ConnectorEventProvider` is exposed through both handles. During construction the connector
+resolves a `ConnectorEventCounter` by typed event identity and retains it. An undeclared event
+returns a typed refusal. Keep metric types, registration, labels, wall rates and inspection in the
+host. [Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
+owns the family inventory and inspection format. The generated capability reference owns each
+entity's declared events.
+
+A connector task that polls its transport apart from the host's loop cannot reach `IngestorHost`,
+so a fact only that task sees arrives through a report the host resolves into the plan instead. An
+ingestor connection's read-ahead overflow is the one such fact: the host builds an
+`IngestorReadAheadOverflow` around its counter child for the unit, and the task records each drop
+through its retained clone, with the same rules as an event counter. The host keeps the family, its
+labels and its registration; see [MQTT ingestor connections](#mqtt-ingestor-connections).
 
 The ingestor host resolves its interaction counter children once at startup for its exact execution
 unit. The retained group preserves each instance's counters, including decode rejections, without
@@ -3729,8 +3822,7 @@ children. Its existing typed result selects `succeeded`, `transient`, `misconfig
 `violation`; cancellation before a definitive answer is transient. A settled record rejection
 does not itself fail the attempt. Unknown or repeated record answers remain contract violations.
 The observation keeps the original report, retry decision, pending acknowledgements and error
-policy intact. [Connector Interactions](metrics-and-observability.md#connector-interactions) owns
-the families, labels, duration buckets and owner-routed `destination:` inspection section.
+policy intact. The owner reports the attempt and its duration under `destination:`.
 
 Each entity's vocabulary declaration names its native payload format; codec formats and their
 batch container selection remain with the codec Model. Inspection projects the emitter and codec
@@ -3862,7 +3954,6 @@ The whole-attempt report retains a transport driver or pool cause beneath `Emitt
 rejection keeps the destination's safe SQLSTATE, error code, or named rejection reason. These
 context changes do not alter request grouping, successful delivery, retries, or ACK ownership.
 
-The host owns ingestor and emitter metric updates, transient status, and runtime events.
 Ingestor and emitter tasks retain an immutable failure publication. An emitter's task and its retained
 connector background task report and clear their own failures independently within that atomic
 publication. EmitterHost transient-status callbacks own the connector failure; publish and commit
@@ -3925,8 +4016,11 @@ drain boundary. This chapter does not redefine those output formats.
    when their generated shapes change. Add unit coverage for transport behavior and feature
    scenarios through Plexus, including
    three-node execution and failure paths, and register the scenarios that observe each declared
-   capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
-   run the repository's validation and connector tests.
+   capability in the [capability inventory](#capability-inventory). Check each host interaction's
+   typed outcome and metric family. Declare connector-specific events on the entity or use a typed
+   host report. Register any new family in the node metric store with vocabulary-derived labels
+   and declared constants, and project it under `source:` or `destination:`. Confirm the crate
+   boundary and run the repository's validation and connector tests.
 5. Extend the console's declared entity choices and canonical previews, and verify kind-qualified
    completion, inspection and diagnostics. Update the [Ingestors](./ingestors.md) or
    [Emitters](./emitters.md) manual, relevant client and
@@ -3945,11 +4039,11 @@ delivery semantics rather than assuming a generic envelope or exactly-once exter
 The host prepares MQTT's connector plan, rendered client entries and resource mounts once per
 logical ingestor and installed declaration on each node. The connector checks the rendered client
 identities once in that prepared plan. Unit plans share immutable entry arrays and retain their own
-read-ahead counter; an executing unit retains only its selected instance's mount. Input replacement
-compares external sessions once per local logical input and retires only the explicitly ending
-global indices. This keeps preparation
-and retirement proportional to the declared instance count. A declaration change invalidates the
-prepared entry; no mutable driver or ingestor task is shared between units.
+read-ahead overflow report; an executing unit retains only its selected instance's mount. Input
+replacement compares external sessions once per local logical input and retires only the
+explicitly ending global indices. This keeps preparation and retirement proportional to the
+declared instance count. A declaration change invalidates the prepared entry; no mutable driver or
+ingestor task is shared between units.
 
 ## Committed Host Bounds
 

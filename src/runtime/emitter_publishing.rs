@@ -779,6 +779,24 @@ impl EmitterConnectorState {
         Ok(PublishReport::merge_optional(flushed, committed))
     }
 
+    /// One attempt to publish everything the buffer holds, whatever its cadence, as a force-flush
+    /// generation asks. A failure goes back to the task, whose retry schedule publishes the records
+    /// again, so the generation completes rather than waiting out its destination inline.
+    pub(super) async fn flush_now(
+        &mut self,
+        label: &str,
+        context: &EmitterConnectorContext,
+        control: &mut EmitterPublishControl<'_>,
+        buffer: &mut EmitterBatchBuffer,
+        kind: EmitterPublishAttemptKind,
+    ) -> EmitterRuntimeResult<Option<PublishReport>> {
+        let flushed = self.flush_buffer(context, control, buffer, kind).await?;
+        let committed = self
+            .commit_staged(label, context, control, buffer, EmitterCommitReason::Drain)
+            .await?;
+        Ok(PublishReport::merge_optional(flushed, committed))
+    }
+
     pub(super) async fn flush_all(
         &mut self,
         label: &str,
@@ -803,6 +821,12 @@ impl EmitterConnectorState {
                     return Err(error);
                 }
                 Err(error) if emitter_publish_error_is_retryable(&error) => {
+                    // A stopping domain's drain waits for no record a retry holds. A generation
+                    // that began before the domain stopped hands its records to the task's retry
+                    // schedule once it has, as the stop's own generations do.
+                    if context.clock.is_stopping() {
+                        return Err(error);
+                    }
                     self.reconnect_after(&error, context);
                     let reason = emitter_error_message(&error);
                     let wait = emitter_retry_delay(control.backoff, &error);

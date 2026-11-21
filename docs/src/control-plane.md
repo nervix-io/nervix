@@ -394,9 +394,11 @@ unavailable.
 Automatic scheduling runs independently of the health-probe sweep, resource downloads, and Raft
 learner catch-up. It does not wait for any of them to finish. Slow health responses, learner
 admission, and bulk progress can therefore overlap scheduling and unrelated administrative work.
-Scheduling uses only observations that are current when it computes and publishes a candidate; a
-changed topology or effective-health revision causes the candidate to be recomputed. A newer
-observation with the same effective health does not invalidate an otherwise current candidate.
+Scheduling checks the live and placement-eligible voter incarnations again after preparing a
+candidate. It also checks the peer-health generation, which catches a peer briefly changing
+availability during preparation. Retiring an already unavailable peer's probe target updates the
+health diagnostics. When gossip also has the peer absent and the other targets are unchanged, that
+retirement leaves the scheduling generation unchanged and the first preparation can be published.
 
 The leader's effective availability view also defines the required process incarnations for
 authoritative visibility, runtime preparation and readiness, and HTTPS listener installation.
@@ -589,6 +591,36 @@ records as an ordered effect rather than a model mutation, a guest's request for
 its own branch, and `ON REJECTED STATE RESET`. See
 [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
+## Stopping A Domain
+
+A domain's stop is committed state. One consensus decision admits each stop request: it begins the
+stop of a running domain that no other execution holds, or of a paused one only under the mutation
+that pauses it; it joins the stop a stopping domain is already in, needing no lease; and it changes
+nothing for a stopped domain. The `STOP` statement therefore takes no mutation lease of its own, so
+a second `STOP` joins the first rather than waiting for a lease the stop never releases, while a
+`STOP` that meets another execution's lease is refused as before. The committed record of a
+stopping domain holds each request: an operator's under the execution reference it was admitted
+with, the instant it was admitted and its `ENFORCE AFTER` or `CANCEL AFTER` clause, and the
+licensing stop gate's under its expiry. A stopping domain refuses every other mutation lease, so
+`START`, `ALTER`, transactions, `DROP`, `BACKUP` and relocation wait until the stop ends or is called
+off.
+
+One leader task owns each stopping domain, and the next leader resumes it from the committed
+record. It drains in rounds over every live node and every node the schedule assigns the domain's
+work to, as a backup cut does, until no node holds work in motion and a confirming round saw
+nothing move, and then commits the stop's completed ending. It commits an enforced ending once the
+earliest `ENFORCE AFTER` has passed, counted from each request's admission, or once committed
+licensing time reaches the licensing stop's fixed minute after the expiry; and it withdraws each
+request whose `CANCEL AFTER` passed, the last withdrawal calling the stop off. An ending names the
+stop it ends by the revision that began it, so a stop called off and begun again is never ended by
+the owner of the first. Once the domain is stopped, a task of its own collects every node's report
+of what its teardown cut and commits it beside the ending, and each request's `STOP` answers from
+that record. A `STOP` that a leader change interrupts is resumed under its execution reference: its
+request is already held, its stop already ended, or, when the domain has started again since the
+command was admitted, the stop it requested is long over. [Stopping A
+Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its answers, and [A
+Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
+
 ## Backing Up A Domain
 
 A normal domain backup acquires a replicated mutation lease under its persistent command
@@ -718,6 +750,18 @@ activation finish. Preparation retains its original deadline, distinct from the 
 protects activation. Repeated engagement requests use the same coordination identity and scope;
 a bounded reply timeout does not create another flush, and an engagement that carries a later
 deadline renews the lease to it.
+
+The coordinator prepares the moves of one handoff at the same time, not one after another. It
+captures each moved unit's state and prepares it on its destination and replicas. A reader whose
+unit layout changes, as when an inherited topic grows, makes every new unit a move whose state comes
+from every old unit. The coordinator then captures each old unit once and projects that capture for
+each new unit. A destination reads all of a preparation's sources at the same time. Confirmation of
+the prepared moves proceeds the same way. One preparation deadline bounds all of it, so a handoff
+takes about as long as its slowest chain of requests, not the sum of every move's requests. A
+capture or a confirmation only reads, so the first one that fails ends the handoff at once. A
+preparation persists on its recipients, so every preparation is recorded before any starts, and
+after one fails the coordinator lets the others finish. It then discards every preparation it
+attempted and releases the hold.
 
 Capture reads what each frozen branch publishes, not the last periodic snapshot. The freeze asks
 every branch of a moved processor to publish its live state, so a deduplicator's keys, a window's
@@ -883,7 +927,8 @@ node it reaches is refused: its record acknowledgements fail, and an ingestor wi
 redelivers the records. Failover is therefore at least once, not exactly once. A stateful processor
 that applied a record before its output was refused applies the redelivered record again, as the
 [WASM replay contract](wasm-state.md#replay-duplicates-and-exactly-once) and a stateful inferencer's
-[forced recovery](shutdown.md#when-the-former-owner-is-gone) describe.
+[forced recovery](shutdown.md#when-the-former-owner-is-gone) describe; see also [Replay, Skips And
+Duplicates](inferencer-state.md#replay-skips-and-duplicates).
 
 A survivor can also accept a batch before its own installation of the failover revision reaches the
 new route, and forward it to the lost owner. Such a batch never reached the lost owner, so it is
@@ -909,13 +954,23 @@ task discards that history.
 
 Forced recovery stages the destination's checkpoint inventory under the destination process
 incarnation and the complete target-schedule fingerprint. Applying staged checkpoints accepts only
-that exact preparation. A missing or mismatched preparation does not imply a reset; without an
-exhaustive reset outcome in the schedule, activation fails and leaves every saved checkpoint
-unchanged. After activation, the durable completion belongs to the ownership transition itself, so
+that exact preparation. A relay that only forwards records owns zero durable checkpoints. Its
+committed move can install with an empty inventory if a restart leaves its preparation absent or
+bound to the earlier process. A stateful move with missing or mismatched preparation fails and
+leaves every saved checkpoint unchanged unless the schedule authorizes a reset of every component.
+After activation, the durable completion belongs to the ownership transition itself, so
 reapplying its retained schedule after a destination restart or a later domain rebuild preserves any
 newer checkpoints the destination has published. A state reset occurs only when the accepted recovery
 decision either stages the recreated checkpoint inventory or reports a reset outcome for every state
 component owned by the entity.
+
+When current eligibility or leader tenure invalidates an automatic candidate, the coordinator
+logs why and asks each destination to discard its exact preparation. An explicit rejection by the
+commit fence also triggers discard. If publication returns an uncertain result, such as a leadership
+change while the proposal was pending, staging stays available for the schedule that may have
+committed. A destination records the rejected round before discarding its unit's staged state, so a
+delayed prepare cannot recreate it. A repeated discard matches the same transition, destination
+incarnation and schedule fingerprint, preserving newer preparations and activated state.
 
 A forced recovery of a WASM processor also starts a new guest-state generation for every branch, in
 the schedule publication that names the new owner, and that schedule is the one the recovery

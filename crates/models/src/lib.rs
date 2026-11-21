@@ -62,6 +62,8 @@ mod branch_partitions;
 mod node_endpoint;
 mod node_operations;
 mod node_record;
+mod node_selector;
+pub use node_selector::{NODE_SCOPE, NODE_TAG_FUNCTION, NodeSelectorField};
 mod node_ref;
 mod partition_epoch;
 mod partition_topology;
@@ -133,6 +135,7 @@ pub use command::{
 };
 pub use completion::{
     BuiltinFunctionScope, CodecDirection, RelayQuestion, RelayRule, SemanticReference,
+    WindowRouteValue,
 };
 pub use connector::{
     AcknowledgementConfirmation, AzureBlobConfigEntry, BufferBound, BufferCapacity, BufferOverflow,
@@ -276,7 +279,11 @@ pub use domain_clock::{
     DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
     DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
-pub use domain_stop::DomainStopCause;
+pub use domain_stop::{
+    DomainStop, DomainStopCause, DomainStopEnding, DomainStopReport, DomainStopping,
+    LICENSING_STOP_ENFORCE_AFTER, NodeStopReport, OperatorStopRequest, StopCut, StopCutKind,
+    StopCutReason, StopEnding, StopRequest, StopRequestAdmission, StopRequestId, StopWithdrawal,
+};
 pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
@@ -335,9 +342,9 @@ pub use node_endpoint::{
 pub use node_record::{
     CommittedNodeRecord, CudaProviderRegistration, Detected, ExecutionProviders, GpuDevice,
     GpuDevices, GpuInventory, MAX_NODE_TAGS, MAX_PROPERTY_LIST_ITEMS, MAX_PROPERTY_TEXT_BYTES,
-    MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES, NodeProperties, NodeRecord, NodeTag, NodeTagError,
-    NodeTags, OnnxRuntime, OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey,
-    TagValue, UndetectedReason,
+    MAX_TAG_KEY_BYTES, MAX_TAG_VALUE_BYTES, NodeInspection, NodeInspectionRecord,
+    NodeInspectionRow, NodeProperties, NodeRecord, NodeTag, NodeTagError, NodeTags, OnnxRuntime,
+    OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey, TagValue, UndetectedReason,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
 pub use partition_epoch::{BranchPartitionEpoch, PartitionEpochNumber, PartitionTransition};
@@ -389,7 +396,7 @@ pub use quiesce::{
     TransactionLifecycle, TransactionModelTransition, TransactionOperation,
     TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
     TransactionPosition, TransactionPreviewIdentity, TransactionResolvedDomainStart,
-    TransactionStatus, TransactionStatusError,
+    TransactionStatus, TransactionStatusError, WaitLimit,
 };
 pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceSelection};
 pub use remote::{
@@ -462,8 +469,8 @@ pub use statement::{
     MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PartitionSeed, RelayBranching,
     Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, RelocationUnitSelection, ResolvedBranching, ResolvedCodecWireFormat,
-    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
-    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes,
+    ShowPlacements, ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
     SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
     SignalingWireFormat, StartDomain, StateInspectedProcessor, StateInspectionPageRequest,
     Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,

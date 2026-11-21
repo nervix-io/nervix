@@ -392,16 +392,19 @@ async fn republish_branch_depths(counters: Arc<NodeQuiesceCounters>) {
             collected_inputs: 2,
             pending_materialized: 0,
             output_buffers: 0,
+            held_rows: 0,
         },
         BranchQuiesceDepths {
             collected_inputs: 1,
             pending_materialized: 1,
             output_buffers: 1,
+            held_rows: 0,
         },
         BranchQuiesceDepths {
             collected_inputs: 0,
             pending_materialized: 0,
             output_buffers: 2,
+            held_rows: 0,
         },
     ] {
         nervix_primitives::task::consume_budget().await;

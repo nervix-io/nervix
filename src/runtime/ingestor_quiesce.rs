@@ -43,6 +43,10 @@ pub(in crate::runtime) enum IngestorQuiesceCause {
     MemoryPressure,
     #[strum(serialize = "shutdown")]
     Shutdown,
+    /// The domain is stopping: intake ends whatever the ingestor's `ON QUIESCE` declares, and the
+    /// work already admitted finishes.
+    #[strum(serialize = "domain stop")]
+    DomainStop,
 }
 
 impl IngestorQuiesceCause {
@@ -57,7 +61,7 @@ impl IngestorQuiesceCause {
     /// received still dispatches, and no quiesce buffer or drop policy acts on their behalf.
     fn stops_intake_regardless_of_mode(self) -> bool {
         match self {
-            Self::OwnershipHandoff | Self::Shutdown => true,
+            Self::OwnershipHandoff | Self::Shutdown | Self::DomainStop => true,
             Self::EntityHold | Self::DomainPause | Self::MemoryPressure => false,
         }
     }
@@ -70,6 +74,7 @@ struct IngestorQuiesceReasons {
     domain_pause: bool,
     memory_pressure: bool,
     shutdown: bool,
+    domain_stop: bool,
 }
 
 impl IngestorQuiesceReasons {
@@ -78,6 +83,8 @@ impl IngestorQuiesceReasons {
             Some(IngestorQuiesceCause::Shutdown)
         } else if self.ownership_handoffs > 0 {
             Some(IngestorQuiesceCause::OwnershipHandoff)
+        } else if self.domain_stop {
+            Some(IngestorQuiesceCause::DomainStop)
         } else if self.memory_pressure {
             Some(IngestorQuiesceCause::MemoryPressure)
         } else if self.domain_pause {
@@ -106,6 +113,7 @@ impl IngestorQuiesceReasons {
             IngestorQuiesceCause::DomainPause => self.domain_pause = true,
             IngestorQuiesceCause::MemoryPressure => self.memory_pressure = true,
             IngestorQuiesceCause::Shutdown => self.shutdown = true,
+            IngestorQuiesceCause::DomainStop => self.domain_stop = true,
         }
     }
 
@@ -128,6 +136,7 @@ impl IngestorQuiesceReasons {
             IngestorQuiesceCause::DomainPause => std::mem::take(&mut self.domain_pause),
             IngestorQuiesceCause::MemoryPressure => std::mem::take(&mut self.memory_pressure),
             IngestorQuiesceCause::Shutdown => std::mem::take(&mut self.shutdown),
+            IngestorQuiesceCause::DomainStop => std::mem::take(&mut self.domain_stop),
         }
     }
 }
@@ -1063,7 +1072,9 @@ impl IngestorQuiesceControl {
     }
 
     /// Held endpoint responses end when intake stops for shutdown or ownership handoff. A
-    /// resumable pause still lets an admitted request finish through its existing ACK root.
+    /// resumable pause still lets an admitted request finish through its existing ACK root, and so
+    /// does a domain's stop: its admitted message finishes before the stop ends, or the stop's
+    /// teardown ends the request's intake lifetime.
     pub(in crate::runtime) async fn wait_until_intake_stops(&self) {
         let mut observation = self.observation();
         loop {
@@ -1072,7 +1083,12 @@ impl IngestorQuiesceControl {
                 .publication
                 .decision
                 .cause()
-                .is_some_and(IngestorQuiesceCause::stops_intake_regardless_of_mode)
+                .is_some_and(|cause| {
+                    matches!(
+                        cause,
+                        IngestorQuiesceCause::Shutdown | IngestorQuiesceCause::OwnershipHandoff
+                    )
+                })
             {
                 return;
             }
@@ -1364,6 +1380,44 @@ impl Runtime {
             "ingestor left quiesce"
         );
         true
+    }
+
+    /// Stops the intake of every ingestor of a stopping `domain`, whatever its `ON QUIESCE` mode.
+    pub(super) fn engage_domain_stop_intake(&self, domain: &DomainName) {
+        let ingestors = self
+            .inner
+            .ingestors
+            .iter()
+            .filter(|entry| &entry.key().entity.domain == domain)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for ingestor in ingestors {
+            self.engage_ingestor_quiesce(
+                domain,
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
+                IngestorQuiesceCause::DomainStop,
+            );
+        }
+    }
+
+    /// Resumes the intake a called-off stop of `domain` stopped.
+    pub(super) fn release_domain_stop_intake(&self, domain: &DomainName) {
+        let ingestors = self
+            .inner
+            .ingestor_quiescence
+            .iter()
+            .filter(|entry| &entry.key().entity.domain == domain)
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for ingestor in ingestors {
+            self.release_ingestor_quiesce(
+                domain,
+                &IngestorName::from(ingestor.entity.identifier()),
+                ingestor.unit,
+                IngestorQuiesceCause::DomainStop,
+            );
+        }
     }
 
     pub(super) fn engage_domain_ingestor_quiesce(&self, domain: &DomainName) {
@@ -2794,6 +2848,143 @@ mod tests {
         #[test]
         fn shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room() {
             check_interleavings(|| interrupted_live_delivery(LiveInterruption::Stop));
+        }
+
+        /// How the payload a paused ingestor received while its stop engaged ended.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum RacingPayload {
+            /// The pause's buffering mode retained it, before the stop's intake engaged.
+            Retained,
+            /// It dispatched as a payload the ingestor already received, which the stop's drain
+            /// waits for.
+            Dispatched,
+        }
+
+        fn received(bytes: &'static [u8]) -> BufferedIngestPayload {
+            BufferedIngestPayload::new(
+                bytes,
+                BufferedIngestMetadata::without_headers(),
+                Timestamp::from_unix_nanos(1),
+            )
+        }
+
+        /// A paused buffering ingestor whose domain begins stopping: the payload it receives
+        /// while the stop's intake engages is either retained by the pause, where it stays for
+        /// the stop's teardown to count and discard, or dispatched, never retained once the stop
+        /// holds; nothing retained replays into the stopping graph, polling ends and no endpoint
+        /// request is admitted. A stop that is called off resumes the domain, whose release of
+        /// both holds replays everything its pause retained.
+        fn intake_racing_the_stop_of_a_paused_buffering_ingestor() {
+            // A whole runtime is far heavier than one execution of this model needs, so the
+            // control takes the metrics it records into directly.
+            let metrics = RuntimeMetrics::default();
+            let metric_labels = metrics.register_ingestor_quiesce(
+                &domain("default"),
+                &named("paused_ingestor"),
+                nervix_models::Unit::SINGLE,
+                None,
+                nervix_models::IngestorEntityKind::Http(
+                    nervix_models::HttpIngestorEntity::Endpoint,
+                ),
+            );
+            let control = Arc::new(IngestorQuiesceControl::new(
+                IngestQuiesceMode::Buffer {
+                    max_size: "1MiB".to_string(),
+                    overflow: IngestQuiesceOverflow::DropOldest,
+                },
+                metrics,
+                metric_labels,
+            ));
+            control.engage(IngestorQuiesceCause::DomainPause);
+            assert!(matches!(
+                control.intake(received(b"retained"), false),
+                IngestorQuiesceIntake::Buffered
+            ));
+            let stop_engaged = Arc::new(AtomicBool::new(false));
+            let intake = thread::spawn({
+                let control = control.clone();
+                let stop_engaged = stop_engaged.clone();
+                move || {
+                    let after_stop = stop_engaged.load(Ordering::SeqCst);
+                    match control.intake(received(b"racing"), false) {
+                        IngestorQuiesceIntake::Buffered => {
+                            assert!(
+                                !after_stop,
+                                "a stopping ingestor retained a payload for its pause's buffering \
+                                 mode"
+                            );
+                            RacingPayload::Retained
+                        }
+                        IngestorQuiesceIntake::Dispatch(_) => RacingPayload::Dispatched,
+                        other => panic!(
+                            "a paused or stopping buffering ingestor neither retained nor \
+                             dispatched a payload it received: {other:?}"
+                        ),
+                    }
+                }
+            });
+            let stop = thread::spawn({
+                let control = control.clone();
+                let stop_engaged = stop_engaged.clone();
+                move || {
+                    control.engage(IngestorQuiesceCause::DomainStop);
+                    stop_engaged.store(true, Ordering::SeqCst);
+                    assert!(
+                        control.take_buffered().is_none(),
+                        "a stopping ingestor replayed what its pause retained"
+                    );
+                    assert_eq!(
+                        control.endpoint_admission(),
+                        Err(None),
+                        "a stopping ingestor admitted an endpoint request"
+                    );
+                    assert!(
+                        control.should_skip_poll(),
+                        "a stopping ingestor polled its source"
+                    );
+                }
+            });
+            let racing = intake.join().assured(
+                "Shuttle fails the whole execution when a model thread panics, so no join \
+                 observes one",
+            );
+            stop.join().assured(
+                "Shuttle fails the whole execution when a model thread panics, so no join \
+                 observes one",
+            );
+
+            // What the stop's teardown counts and discards is exactly what the pause retained.
+            let retained = match racing {
+                RacingPayload::Retained => 2,
+                RacingPayload::Dispatched => 1,
+            };
+            assert_eq!(control.counters().buffered_records, retained);
+            // A stopping domain keeps its pause's hold until it runs again, and releasing it
+            // alone leaves the stop's intake ended.
+            control.release(IngestorQuiesceCause::DomainPause);
+            assert!(
+                control.take_buffered().is_none(),
+                "releasing the pause's hold replayed retained payloads while the stop held"
+            );
+            control.release(IngestorQuiesceCause::DomainStop);
+            let mut replayed = 0_usize;
+            while let Some(delivery) = control.take_buffered() {
+                drop(delivery.finish());
+                replayed = replayed
+                    .checked_add(1)
+                    .assured("the model retains at most two payloads");
+            }
+            assert_eq!(
+                replayed, retained,
+                "a stop called off replays everything its pause retained"
+            );
+            assert_eq!(control.counters().buffered_records, 0);
+        }
+
+        #[test]
+        fn shuttle_a_payload_racing_the_stop_of_a_paused_buffering_ingestor_is_retained_for_the_cut_or_dispatched()
+         {
+            check_interleavings(intake_racing_the_stop_of_a_paused_buffering_ingestor);
         }
     }
 }

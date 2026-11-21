@@ -388,6 +388,7 @@ impl StatusEndpoint {
                 expected_transaction_position: None,
                 expected_preview: None,
             }),
+            progress: None,
         };
         let frame = message
             .encode(limits)

@@ -25,6 +25,7 @@ const MAX_COMMAND_EXECUTION_REFERENCE_BYTES: usize = 128;
 /// A reference is decoded through [`CommandExecutionReference::parse`], so its serde and archived
 /// forms admit exactly the text the rule allows.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Archive, RkyvSerialize)]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord))]
 pub struct CommandExecutionReference(String);
 
 impl<'de> Deserialize<'de> for CommandExecutionReference {

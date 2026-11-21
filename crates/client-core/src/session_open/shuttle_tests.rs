@@ -54,6 +54,7 @@ fn waiting_body() -> (
             producer: ProducerId::opened_by(request_id),
             batch: Bytes::from(vec![0x5a; 2048]),
         }),
+        progress: None,
     }
     .encode(&SessionLimits::DEFAULT)
     .assured("the queued frame fits the explicit fixture policy");

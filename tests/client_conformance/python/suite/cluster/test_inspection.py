@@ -10,6 +10,19 @@ import nervix_client as nx
 from support import Cluster, Row, build, completed, deadline, execute, input_fields
 
 
+def test_node_preview_retains_committed_facts(session: nx.Session) -> None:
+    # ANCHOR: node_inspection
+    outcome = execute(session, "SHOW NODES WHERE node.name = 'node-1';")
+    nodes = outcome.node_inspection
+    del outcome
+    assert isinstance(nodes, nx.NodeInspection)
+    assert nodes.names == ["node-1"]
+    row, = json.loads(nodes.json)["nodes"]
+    assert row["name"] == "node-1" and row["record"]["properties"]["architecture"]
+    # ANCHOR_END: node_inspection
+    assert execute(session, "DESCRIBE LICENSE;").node_inspection is None
+
+
 def test_inspection_metadata_and_verified_frames_survive_their_parents(
     cluster: Cluster, session: nx.Session, unique: str
 ) -> None:
@@ -29,7 +42,7 @@ def test_inspection_metadata_and_verified_frames_survive_their_parents(
     assert isinstance(license_inspection, nx.Inspection)
     assert license_inspection.domain is None and license_inspection.entity_name is None
     assert license_inspection.entity_kind == "LICENSE" and license_inspection.rejection is None
-    assert license_inspection.counts is not None and license_inspection.counts.rows == 3
+    assert license_inspection.counts is not None and license_inspection.counts.rows == 4
     outcome = execute(reader, f"SHOW RELAY {relay} MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;")
     inspection = outcome.state_inspection
     assert isinstance(inspection, nx.Inspection)

@@ -215,6 +215,13 @@ const _: () = assert!(
     "scenario cleanup must end well before the watchdog of a node a scenario stops itself"
 );
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// How long a scenario waits for a stopped node's run to leave another node's live gossip. The
+/// failure detector declares a run dead once eight of its smoothed heartbeat intervals pass in
+/// silence. That interval never exceeds the twenty-gossip-interval cap on a sample, ten seconds at
+/// the default half-second gossip interval, so a stopped run leaves within about eighty seconds
+/// even on a loaded host; a run that lived a second or two leaves after about half a minute. The
+/// budget doubles the bound.
+const REFUSED_RUN_GOSSIP_DEPARTURE_BUDGET: Duration = Duration::from_secs(160);
 const SQS_REGION: &str = "us-east-1";
 const TEST_LOG_DIR: &str = "tests/logs";
 const TEST_LOG_FILE: &str = "tests/logs/scenarios.log";
@@ -2491,6 +2498,60 @@ impl Cluster {
             .await
     }
 
+    /// Watches the status `observer_id` reports until its gossip no longer calls `refused_id`
+    /// live, and fails as soon as its Raft membership names `refused_id`, as a learner or a voter.
+    ///
+    /// A refused node stops at once, but the failure detector keeps its run live for several of
+    /// its observed heartbeat intervals, about half a minute for a run that lived a second or two.
+    /// The watch therefore spans every membership reconciliation the leader runs while it can still
+    /// see that run, and it ends on the run's departure rather than after a quiet period.
+    pub(crate) async fn wait_for_refused_run_to_leave_gossip_outside_membership(
+        &self,
+        observer_id: &str,
+        refused_id: &str,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(observer_id)
+            .unwrap_or_else(|| panic!("unknown node '{observer_id}'"));
+        let deadline = PhaseDeadline::after(REFUSED_RUN_GOSSIP_DEPARTURE_BUDGET);
+        let watched = deadline
+            .poll_until(
+                POLL_INTERVAL,
+                |phase| handle.cluster_status(phase),
+                |status| {
+                    status.membership.contains_key(refused_id)
+                        || status.has_left_live_gossip(refused_id)
+                },
+            )
+            .await;
+        let status = match watched {
+            Ok(status) => status,
+            Err(expired) => {
+                let mut message = format!(
+                    "node '{observer_id}' still saw the refused run of node '{refused_id}' in its \
+                     live gossip after {:?}",
+                    deadline.elapsed()
+                );
+                if let Some(status) = expired.last_output {
+                    message.push_str(&format!("\nlast status:\n{}", status.raw));
+                }
+                if let Some(failure) = expired.last_failure {
+                    message.push_str(&format!("\nlast error: {failure:#}"));
+                }
+                return Err(io::Error::other(message));
+            }
+        };
+        if let Some(role) = status.membership.get(refused_id) {
+            return Err(io::Error::other(format!(
+                "node '{observer_id}' admitted the refused run of node '{refused_id}' to its raft \
+                 membership as a {role} before that run left its gossip\nstatus:\n{}",
+                status.raw
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn wait_for_kafka_consumer_group_members(
         &self,
         group: &str,
@@ -2525,6 +2586,57 @@ impl Cluster {
                 )));
             }
             sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Checks the broker's group state over the whole observation window, including that a
+    /// member which leaves and rejoins is not mistaken for uninterrupted membership.
+    pub(crate) async fn assert_kafka_consumer_group_keeps_member(
+        &self,
+        group: &str,
+        duration: Duration,
+    ) -> io::Result<()> {
+        let inspect = || {
+            let dependencies = self.dependencies.clone();
+            let group = group.to_owned();
+            async move {
+                nervix_primitives::task::spawn_blocking(move || {
+                    inspect_kafka_consumer_group(&dependencies, &group, |info| {
+                        let members = info.members().iter().map(|member| member.id().to_owned());
+                        (info.state().to_owned(), members.collect::<Vec<_>>())
+                    })
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+        };
+        let initial = PhaseDeadline::after(STATUS_WAIT_BUDGET)
+            .poll_until(
+                POLL_INTERVAL,
+                |_| inspect(),
+                |(state, members)| state == "Stable" && members.len() == 1,
+            )
+            .await
+            .map_err(|observed| {
+                io::Error::other(format!(
+                    "Kafka consumer group '{group}' did not start with one stable member: \
+                     {observed:?}"
+                ))
+            })?;
+        let observation = PhaseDeadline::after(duration);
+        loop {
+            observation.pause(POLL_INTERVAL).await;
+            let actual = inspect().await?;
+            if actual != initial {
+                return Err(io::Error::other(format!(
+                    "Kafka consumer group '{group}' changed after {:?}: expected {initial:?}, \
+                     observed {actual:?}",
+                    observation.elapsed()
+                )));
+            }
+            if observation.has_passed() {
+                return Ok(());
+            }
         }
     }
 
@@ -4910,8 +5022,8 @@ impl NodeHandle {
     /// scenario configured. Scenario cleanup uses the harness cleanup budget instead.
     ///
     /// A node still stopping when the watchdog passes fails the step and keeps its task: it holds
-    /// its databases and its consensus registration until it has ended, so nothing of it is given
-    /// back here.
+    /// its databases until it has ended, and its consensus registration until its consensus has
+    /// stopped, so nothing of it is given back here.
     async fn wait_stopped(&mut self) -> io::Result<()> {
         let shutdown_timeout = self.shutdown_watchdog_timeout()?;
         let waited = self.task.wait(PhaseDeadline::after(shutdown_timeout)).await;
@@ -4952,6 +5064,7 @@ impl NodeHandle {
             );
             eprintln!("{record}");
         }
+        self.give_back_registration_left_by(&outcome);
         let task_result = if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
             Err(io::Error::other(NodeShutdownError::Task {
                 node: node_name(&self.spec.node_id),
@@ -4960,12 +5073,26 @@ impl NodeHandle {
         } else {
             Ok(())
         };
-        self.fault_injection
-            .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
             self.ensure_database_unlocked().await?;
         }
         task_result
+    }
+
+    /// Gives back the consensus fault registration of a run that ended before its own teardown
+    /// could give it back: a task that panicked or was cancelled. A run that returned gave it back
+    /// itself once its consensus stopped, so a registration still held after such a run is the
+    /// node's own failure to release its consensus database, and taking it back here would hide
+    /// that from the lock check and from the node's next start.
+    fn give_back_registration_left_by(&self, outcome: &NodeTaskTerminalOutcome) {
+        match outcome {
+            NodeTaskTerminalOutcome::Panic(_) | NodeTaskTerminalOutcome::Cancellation(_) => {
+                self.fault_injection
+                    .unregister_consensus(&node_name(&self.spec.node_id));
+            }
+            NodeTaskTerminalOutcome::CleanApplicationExit
+            | NodeTaskTerminalOutcome::ApplicationError(_) => {}
+        }
     }
 
     /// The record of a stop this handle waited for under `watchdog`.
@@ -5114,18 +5241,21 @@ impl StartableNode for NodeHandle {
 
     /// Failed-startup cleanup shares the node's remaining absolute startup budget. The stop is
     /// requested first, and the product's shutdown watchdog does not restart the harness budget.
-    /// A node still stopping when that budget ends keeps its task, its coordinator and its
-    /// consensus registration; a replacement cannot take the database or listeners it still holds.
+    /// A node still stopping when that budget ends keeps its task, its coordinator and, until its
+    /// consensus has stopped, its consensus registration; a replacement cannot take the database
+    /// or listeners it still holds.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
         self.request_stop();
         let outcome = AttemptCleanup::from(self.task.wait(cleanup).await);
         self.startup_listener_collision = None;
-        match outcome {
+        match &outcome {
             AttemptCleanup::StillStopping => {}
-            AttemptCleanup::NothingLaunched | AttemptCleanup::Stopped(_) => {
+            AttemptCleanup::NothingLaunched => {
                 self.shutdown = None;
-                self.fault_injection
-                    .unregister_consensus(&node_name(&self.spec.node_id));
+            }
+            AttemptCleanup::Stopped(ended) => {
+                self.shutdown = None;
+                self.give_back_registration_left_by(ended);
             }
         }
         outcome
@@ -7333,6 +7463,14 @@ fn kafka_consumer_group_member_count(
     dependencies: &DependencyEndpoints,
     group: &str,
 ) -> io::Result<usize> {
+    inspect_kafka_consumer_group(dependencies, group, |info| info.members().len())
+}
+
+fn inspect_kafka_consumer_group<T>(
+    dependencies: &DependencyEndpoints,
+    group: &str,
+    read: impl FnOnce(&nervix_connector_kafka::testing_rdkafka::groups::GroupInfo) -> T,
+) -> io::Result<T> {
     let mut client_config = kafka_client_config(dependencies)?;
     let consumer: BaseConsumer = client_config
         .set(
@@ -7349,7 +7487,7 @@ fn kafka_consumer_group_member_count(
         .iter()
         .find(|info| info.name() == group)
         .ok_or_else(|| io::Error::other(format!("kafka consumer group '{group}' not found")))?;
-    Ok(info.members().len())
+    Ok(read(info))
 }
 
 /// The consumer groups the Kafka broker lists. A group with neither members nor committed offsets

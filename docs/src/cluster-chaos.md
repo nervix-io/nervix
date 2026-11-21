@@ -83,7 +83,7 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
-| `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, outward TLS and diagnostic evidence |
+| `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, graceful-stop, outward TLS and diagnostic evidence |
 | `burst-load.sh`, `negative-outcomes.sh`, `events-observer.sh`, `observe-events.sh`, `expected-failure.sh` | The shared harness of [correctness reproductions](#correctness-reproductions): the burst load and its accepted-input ledger, the negative-outcome counters, the error-event observers that run inside containers of the image, and the expected failure of a red run |
 | `outward-tls.sh`, `tls-probe.py`, `tls-probe-openssl.cnf` | The three-node leader crash's outward TLS observations, the restricted TLS probe that runs inside the pinned Python image, and the probe's OpenSSL configuration |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
@@ -220,6 +220,7 @@ reference to one repository digest before shards start. A run builds and install
 | `fixtures/onnx/models/running_sum.onnx` | The stateful inferencer's model: it adds its input to the state it carries and scores the sum |
 | `fixtures/binding-endpoints.plexus`, `fixtures/generate-endpoints.jq` | The binding client graph and its typed records |
 | `fixtures/paced.plexus`, `fixtures/generate-paced.jq` | The paced domain's graph and its two interleaved branches |
+| `fixtures/graceful-stop.plexus`, `fixtures/generate-graceful-stop.jq` | The [graceful-stop](#graceful-stop) domain's graph and its burst payloads: one JSON array of records per lane and source, on two interleaved branches |
 | `fixtures/wasm/processors/branch-counter.wat` | The stateful scenario's prebuilt WASM guest, in WebAssembly text |
 | `fixtures/restore-state.plexus` | The restore scenarios' padded guest: a Kafka ingestor with domain-owned offsets and a detached, branched WASM processor |
 | `fixtures/wasm/padded-state-wat.sh` | Writes the padded guest in WebAssembly text for a save size: each branch saves exactly that many pseudo-random bytes, restores only a save of that size, and emits nothing |
@@ -279,11 +280,11 @@ A run needs a Linux Docker host with the following.
 - **The local Docker socket.** `/var/run/docker.sock` must exist. Every scenario except
   `baseline`, `backup`, `backup-cycles`, `restore-fresh-cluster` and `restore-volume` mounts it into
   Pumba's container, after checking Pumba's version and its access with a dry run.
-- **Network fault support.** The partition, degraded-link, former-owner, backup-fault and
-  restore-fault scenarios, the `owner-partition` and `voter-partition` faults and mixed instability
-  need a kernel that offers the `prio`, `sfq` and `netem` queueing disciplines and `iptables`
-  inside container network namespaces. Each run proves this on the worker before it starts; see
-  [Network Preflight](#network-preflight).
+- **Network fault support.** The partition, degraded-link, former-owner, backup-fault,
+  restore-fault and graceful-stop scenarios, the `owner-partition` and `voter-partition` faults and
+  mixed instability need a kernel that offers the `prio`, `sfq` and `netem` queueing disciplines
+  and `iptables` inside container network namespaces. Each run proves this on the worker before it
+  starts; see [Network Preflight](#network-preflight).
   - GitHub-hosted `ubuntu-24.04` workers qualify once the job has loaded `sch_prio`, `sch_sfq` and
     `sch_netem`. The repository's CI shards run on them, and their job loads those modules before it
     pulls the image and stops the shard there when the kernel cannot provide one.
@@ -431,7 +432,7 @@ take.
 | `--max-backlog N`, `--min-throughput-pct N` | `degraded-links` | 1 to 1,000, default 200; 1 to 100, default 50 |
 | `--max-recovery-backlog N`, `--max-memory-bytes N`, `--max-pending N` | `degraded-links`, `mixed-instability` | 0 to `--max-backlog`, default 20; at least 1 MiB, default 1 GiB; at least 1, default 128 |
 | `--seed N`, `--duration D`, `--policy POLICY`, `--coverage LIST`, `--plan FILE` | `mixed-instability` | See [Mixed Instability](#mixed-instability) |
-| `--expect-failure SYMPTOM[,SYMPTOM...]` | A scenario whose verdict names symptoms | Repeatable. Records a run of an image that still has the defect as its expected failure; see [Expected Failures](#expected-failures) |
+| `--expect-failure SYMPTOM[,SYMPTOM...]` | A scenario whose verdict names symptoms: `graceful-stop` | Repeatable. Records a run of an image that still has the defect as its expected failure; see [Expected Failures](#expected-failures) |
 
 The focused checks run parts of the runner on their own:
 
@@ -452,10 +453,11 @@ The focused checks run parts of the runner on their own:
 | `just test-chaos-backup-fault` | The option rules of `backup-fault`, `restore-fresh-cluster` and `backup-cycles`. It also checks the [fault backup verdict](#backup-faults) against synthetic reports: a clean refusal; a refusal that left the destination or a `.nervix-backup-` staging file; a failure without a JSON report or without a backup failure reason; an uncertain failure that keeps its execution reference; a success without an archive; leader-crash archives whose cut was engaged before and after the crash; and an archive whose cut released while the acknowledgement gate held |
 | `just test-chaos-restore` | The option rules of `restore-fault` and `restore-volume`; the padded guest generator's bounds and layout; the node sampler's records, the staging verdicts read from them, including a pair of samples across a restart; and the [restore verdict](#restore-faults) against synthetic reports: a completed restore, one without every step applied, an incomplete one with and without its one failed step, a refusal before and after its target exists, an uncertain failure and an end without a JSON report; and the padded guest's checkpoint wait over a typed WASM state page that is confirmed, uncommitted, left entries unread or was refused |
 | `just test-chaos-backup-state` | The [deduplicator and window verdict](#backup-cycles) over an exact set of outputs and one with replayed copies. It also checks the outputs that a restore which lost deduplicator keys, lost or doubled a window's retained rows, changed a record or dropped an output would produce, and malformed and missing inputs |
-| `just test-chaos-stateful-verifiers` | The state, clock and window verdicts, and the milestone's checkpoint wait over a typed WASM state page that is confirmed, unconfirmed, left entries unread or was refused |
+| `just test-chaos-stateful-verifiers` | The state, clock and window verdicts; the milestone's checkpoint wait over a typed WASM state page that is confirmed, unconfirmed, left entries unread or was refused; and the stateful placement read from every entity's `DESCRIBE` answer, `DESCRIBE INFERENCER`'s unit blocks included, on the state owner and off a faulted one |
 | `just test-chaos-lifetimes-verifiers` | The option rules of `lifetimes`, and its [verdicts](#lifetimes) against synthetic ledgers: records enriched with their branch's profile, with an ignored lower or equal timestamp's version, or before a replacement applied; a lost parked record; repeats with and without a fault, before and past the milestone; generated rows of a state never held or going back; malformed and lost windows; a rotation that evicted nothing; an expiring branch that never expired or kept its first profile; a lost late record; and buffered records that were not held or waited for their flush interval |
 | `just test-chaos-endpoint-verifiers` | The option rules of `endpoints`, and its [route and WebSocket verdicts](#endpoints) against synthetic ledgers: accepted records that reach both domains, or a withdrawn domain's route; a lost, repeated, altered or unsent record; a record never accepted or abandoned; a client that stopped early; a bound route that answered 404; a retained connection that was refused with 1013, closed otherwise or not probed; a delivered probe; and a lost, repeated or altered frame |
 | `just test-chaos-correctness-harness` | The [correctness harness](#correctness-reproductions) against stand-ins and synthetic evidence: the rules of `--expect-failure`; a burst's record and accepted ledger, including a producer that delivered part of it; negative-outcome counters that stayed, rose through ended waits, failed trees or unsent records, went back, are missing, or cannot be read; the strict verdict on an exact delivery, on replay duplicates, a lost, changed or unexpected record, rising counters, an error event inside the window, a quiet window an observer did not follow throughout, and sources that share an event ID; and every outcome of an expected failure |
+| `just test-chaos-graceful-stop` | The option rules of [graceful-stop](#graceful-stop), its fixture generator, and the verdict of its `STOP` answer on a plain answer, one saying nothing was cut, a silent cut, a reported cut, an enforced stop and a refused one |
 | `just verify-chaos-clock ARGS` | The clock verifier over retained observer transcripts |
 | `just coverage-chaos-*` | The same controls under kcov, keeping their shell coverage under `target/chaos-*-coverage/` |
 | `just coverage-chaos-baseline IMAGE [NODES] [TIMEOUT] [RUN_ID]` | The complete baseline controller under kcov against a prebuilt image; use a fresh run ID for each collection |
@@ -563,7 +565,10 @@ the broker decides what was accepted. The runner then checks two things:
 branch. It reports duplicate, missing, unexpected and corrupt records independently in
 `results/ledger.json`. The baseline allows no duplicate. A fault scenario accepts identical replay
 duplicates, which acknowledgement replay after a fault permits, and counts them separately; it
-still fails on any missing, unexpected, corrupt or wrong-branch record.
+still fails on any missing, unexpected, corrupt or wrong-branch record. A [graceful
+stop](#graceful-stop) touches only its own domain, so its baseline path keeps the baseline's strict
+ledger, and it judges its own sources, whose loads are [bursts](#burst-loads), with the [strict
+verdict](#the-strict-verdict).
 
 When a fault scenario's output stays short of the accepted input past its bound, the runner still
 saves the available output and runs the exact verifier, so the ledger names the missing IDs. The
@@ -688,11 +693,14 @@ imply exactly the planned links. The plan takes one of three forms:
 - **Quorum loss.** Each node gets one netem configuration that covers both of its peers.
 
 A partition plan targets only node-to-node links. The broker, load, observer, CLI and probe
-containers keep their routes. Two scenarios install rules that are not a partition plan:
+containers keep their routes. Three scenarios install rules that are not a partition plan:
 
 - [Backup Faults](#backup-faults) installs two netem rules, each on its own interface: an
   acknowledgement gate on the broker's egress to one node, and a rate limit on the leader's egress
   to the CLI's container.
+- [Graceful Stop](#graceful-stop) installs the same acknowledgement gate on the broker's egress to
+  the node that runs its emitters, as its slow destination, for at most about half a minute
+  around a `STOP`.
 - [Restore Faults](#restore-faults) delays the leader's egress toward both followers with one netem
   rule. Its `leader-partition` fault then installs an ordinary isolation of the leader beside that
   delay, and an INPUT rule on the leader that drops what the CLI's container sends it. That is the
@@ -937,6 +945,7 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `binding-endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, graceful owner stop/restart, owner crash/restart, or cluster restart | 1 s, and typed package submissions at 250 ms | 1,000 baseline records plus 400 binding records, 1,800 s |
 | `lifetimes` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the state owner, or a cluster restart | 1 s, and `life-load` at 500 ms | 1,000, 2,700 s |
 | `domain-time` | 1 or 3; one node only with no fault or a cluster restart | None, or each voter in turn crashed, paused, isolated or stopped, or a cluster restart | 1 s, and `paced-load` at 250 ms | 1,000, 2,700 s |
+| `graceful-stop` | 3 | A domain `STOP` while records rest in every buffer and a slow destination holds a publish on the wire, then a `START` | 1 s, and two [burst loads](#burst-loads) of an acknowledged and an unacknowledged source | 1,000, 1,800 s |
 | `mixed-instability` | 3 | A seeded or explicit plan of the families above, alone and combined | 1 s | Twice the planned timeline plus 15 minutes of records, at most 20,000; the duration plus the larger of the duration and 20 minutes, at most 6 hours |
 | `alteration-handover` | 1 or 3 | None; an alteration replaces a deduplicator holding 6,000 branches while a burst is in motion, after `DOMAIN_DRAIN_TIMEOUT` is lowered to 1.5 s | 1 s, and two burst loads per source | 1,000, 1,800 s |
 
@@ -1900,9 +1909,9 @@ deduplicator, window, inferencer or materialized relay state. Their durability v
 rest on this drained and held boundary rather than on an observed publication, and the result says
 so.
 
-`DESCRIBE` does not read an inferencer, so the runner places `chaos_running` from the schedule
-section of `SHOW CLUSTER STATUS`, one line per unit, and every other stateful entity from its
-`DESCRIBE` answer.
+The runner places every stateful entity from its `DESCRIBE` answer. For `chaos_running`,
+`DESCRIBE INFERENCER` names each execution unit with its owner and replicas beside the state that
+owner reports, so the inferencer's placement reads back only once every unit's owner runs it.
 
 **The fault.** The load resumes for four more records and holds again, and version 3 is published.
 The runner reads the fault's boundaries while the load holds, which takes several broker round trips.
@@ -2359,6 +2368,109 @@ Failover and shutdown bounds therefore stay physical, while windows follow logic
 Kafka timestamps, and both verdicts. `results/domain-time-progress.json` summarizes them, and each
 round's availability samples sit in their own directory.
 
+### Graceful Stop
+
+```bash
+just chaos run graceful-stop --image nervix:debian
+just chaos run graceful-stop --image <image of the base revision> \
+    --expect-failure duplicate-records,missing-records,silent-cut
+```
+
+This scenario is the chaos reproduction of [Graceful Lifecycle
+01](https://app.clickup.com/t/86bd1fxwd), which makes a domain `STOP` graceful: the stop ends
+intake, lets every record in motion finish and only then ends the domain's tasks. A `STOP` arrives
+while records sit at every stage of a domain, a `START` follows, and a [strict
+verdict](#the-strict-verdict) judges what became of every record of two sources. The baseline path
+keeps its own traffic in its own domain, and its ledger stays strict, since a stop of another domain
+must not touch it.
+
+**The graph.** `fixtures/graceful-stop.plexus` runs in its own domain, `chaos_stop`. A Kafka
+ingestor that acknowledges, in `MODE ACK SEQUENTIAL` with an `ACK TIMEOUT` of five minutes, and one
+in `MODE NO ACK` each read their own topic. A source's backlog is one Kafka payload, a JSON array of
+the records of every lane, which a JAQ codec unfolds; every record names its source and its lane.
+Route filters and emitter filters send each lane to one buffer, whose cadence of three minutes
+outlasts the time from `START` to the stop:
+
+| Lane | Records per source | Where the stop finds it |
+| --- | ---: | --- |
+| `deliver` | 8 | Delivered: it passes every stage after `START` |
+| `ingestor` | 6 | In each ingestor's route buffer, `FLUSH EACH 3m`, on `node-1` |
+| `collector` | 6 | In the input collector of the junction `chaos_stop_collector`, `COLLECT FOR 3m`, on `node-3` |
+| `junction` | 6 | In a route buffer of the junction `chaos_stop_forward`, `FLUSH EACH 3m`, on `node-3` |
+| `emitter` | 6 | In the buffer of the emitter `chaos_stop_holder`, `FLUSH EACH 3m`, on `node-2` |
+| `publish` | 8 | A second payload. The source without acknowledgements reads it at once, and the emitter `chaos_stop_publisher` holds it on the wire, where the slow destination withholds the answer. The acknowledged source has not read it: it reads a payload only once the one before is confirmed |
+
+The acknowledged source confirms its backlog only once every lane of it has been delivered. Its
+deliver lane is therefore delivered but unconfirmed when the stop arrives: a stop that cuts the rest
+leaves the source to send the whole backlog again after `START`, the delivered lane included.
+
+Every record crosses two relays between nodes, from `node-1` to `node-3` and from `node-3` to
+`node-2`, so finishing the stop moves the resting lanes across both. The records of each lane
+alternate between two branch keys. The graph keeps out every kind a stop still cuts by design: it
+has no reorderer, correlator, window or `REQUIRED WAIT`; its branch has no instance limit; its
+relays have room to spare, so no producer waits on a full relay and no relay holds a batch its
+consumer cannot take; and its destination comes back. Every record in motion is therefore one the
+stop must finish, which is what makes the strict verdict right.
+
+**The sequence.**
+
+1. One [error-event observer](#error-events) attaches per node.
+2. The graph is installed and placed while its domain is still stopped: the ingestors on `node-1`,
+   the relays and junctions on `node-3`, and the emitters on `node-2`, the one node no other Kafka
+   client of the run uses. Every entity must report its owner through `DESCRIBE` within 60 seconds.
+   The [negative-outcome counters](#negative-acknowledgements) are read; before `START` the units
+   have none.
+3. Each source's backlog is produced as a [burst](#burst-loads) and waits in its topic. `START`
+   follows.
+4. Within 60 seconds, the nodes' public metrics must place every lane exactly where the table puts
+   it: what each ingestor read and sent into each relay, what each junction received and sent, the
+   `buffered` rows of the holding emitter and the rows the publishing emitter delivered. The deliver
+   lanes must have reached the output, and the source without acknowledgements must have committed
+   through its backlog, so it will not read those records again.
+5. The acknowledged source's publish burst is produced; it waits in Kafka unread. The slow
+   destination then closes: after a Pumba dry run that selects exactly the broker, netem on the
+   broker drops every packet the broker sends to `node-2`, the [acknowledgement
+   gate](#backup-faults) of the backup faults, and the broker's qdisc and filter are read back. The
+   publish burst of the source without acknowledgements follows. Within 45 seconds, two metric
+   observations in a row must agree that the publishing emitter holds records `in_flight` and has
+   delivered nothing more, with every resting lane still in its buffer, and the output's end offset
+   must then have grown past the deliver lanes by no more than the publish burst: the broker
+   appended a publish whose answer it withholds. That proves the fault.
+6. The stop must be requested within 120 seconds of `START`, well inside the three-minute cadences,
+   or the run fails as an injection failure. `STOP;` goes through the packaged CLI in the
+   background. Four seconds later the destination heals, and its default interface state is
+   verified. On a developer worker, the gate has then held for 14 to 31 seconds in all, and the
+   publish has waited on the wire for less than 20 seconds. Its answer arrives with the broker's
+   next TCP retransmission, whose backoff doubles, so within twice that wait. The destination's
+   producer is idempotent, so even a retry by the driver writes no record twice, and the CLI's
+   120-second request timeout is never near. The answer, its exit status and its timing are
+   recorded in `stop-answer.txt`, `stop.exit` and `stop-timing.json`.
+7. `START` follows. Within the three-minute cadence and two minutes more, both sources must have
+   confirmed every position they read and the output must stand still for three observations five
+   seconds apart. Records a stop cut leave an acknowledged source to send them again, and those of
+   the resting lanes rest once more before they arrive, which the bound allows for.
+8. The counters are read again, the observers' transcripts are kept, and the verdict follows.
+
+**The verdict.** `verify-graceful-stop.sh` takes the strict verdict of both sources, with the
+counters and the observers as inputs, and adds the `STOP` answer, which brings three more symptoms:
+
+- `stop-not-acknowledged`: the CLI did not exit 0 with an answer naming the stopped domain
+- `stop-reported-cut`: the answer says the stop was enforced, or speaks of a cut and names an entity
+  of the graph. The graph holds no kind a stop cuts by design, so a graceful stop has nothing to
+  report; an answer that says nothing was cut names no entity and passes
+- `silent-cut`: records were cut, which shows as duplicate or missing records, and the answer
+  reports no cut
+
+A failing verdict is a product finding. The run continues to the baseline ledger before it exits
+nonzero, and `results/symptoms.json` names every symptom for an [expected
+failure](#expected-failures). The `STOP`'s timing judges nothing: a stop that does not wait for a
+publish on the wire cuts records, which the ledgers show.
+
+`graceful-stop/` keeps the placement, the stage observations at rest and in motion, the gate's
+rules, dry run and Pumba log, the answer and its timing, the settle observations, the counters
+before and after, the observers' transcripts and both verdicts.
+`results/graceful-stop-progress.json` summarizes them.
+
 ### Mixed Instability
 
 ```bash
@@ -2681,7 +2793,7 @@ ledgers accept identical replay duplicates, which is exactly what a record answe
 and sent again looks like; and every source they judge is Kafka, which sends a dropped record again,
 so it never shows as missing. The pieces below give a reproduction what it needs instead. They
 belong to the one harness under `scripts/chaos`: the first reproduction to need a piece adds it,
-and every later one reuses and extends it.
+and every later one reuses and extends it. [Graceful Stop](#graceful-stop) is the first.
 
 ### Burst Loads
 
@@ -2814,7 +2926,7 @@ A failed run keeps `results/finding.json` when it is one of these scenarios:
 
 - a crash, pause, partition or degraded-link run
 - a recovery, backup-fault or fresh-cluster restore run
-- a stateful, domain-time or mixed run
+- a stateful, domain-time, mixed or graceful-stop run
 
 Every diagnostic failure keeps one too. It holds:
 
@@ -2837,8 +2949,8 @@ Two kinds of violation are handled differently:
   away from a healthy node, a missing effect, and a resource limit exceeded. Findings are written
   to one file per family of scenarios:
   - partitions: `results/partition-findings.ndjson`
-  - the recovery, backup-fault, fresh-cluster restore, stateful, domain-time and mixed scenarios:
-    `results/recovery-findings.ndjson`
+  - the recovery, backup-fault, fresh-cluster restore, stateful, domain-time, mixed and
+    graceful-stop scenarios: `results/recovery-findings.ndjson`
   - degraded links: `degraded/findings.ndjson`
 - **Stopping failures.** A failure that makes the later steps meaningless stops the run at once,
   after it records every node's own status. Examples are an ineffective or unremovable fault, no
@@ -2936,7 +3048,7 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
 | `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`, and the symptoms of a scenario whose verdict names them, `symptoms.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
 | `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output. Also `verifier-self-test/`, the evidence of a [verifier self-check](#the-verifier-self-check) that did not pass or left something behind |
-| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
+| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `graceful-stop/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
 | `tls/` | The run's certificates. The private keys are removed when the run ends |
 
@@ -2957,7 +3069,8 @@ the run still holds:
 
 - **Pauses.** It unpauses every paused run-owned container, including when Pumba failed.
 - **Network faults.** It stops the injectors and removes any Pumba-owned qdisc or INPUT rule left on
-  a node, within 180 seconds.
+  a node, within 180 seconds. Stopping the injector of a graceful stop's acknowledgement gate
+  removes the gate from the broker.
 - **Stopped nodes.** It starts every node container a restart or recovery case still held stopped.
 - **Mixed runs.** A mixed run first stops its sampler and every pause it still waits for, then
   unpauses every node, heals every network fault and starts every stopped node.
@@ -3154,7 +3267,7 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 14 | `lifetimes-3-owner-crash`, `lifetimes-3-owner-partition`, `lifetimes-3-cluster-restart` 25 each |
 | 15 | `stateful-partitions-3-owner-crash` 25 |
 | 16 | `binding-endpoints-1` 10; `binding-endpoints-3-owner-stop`, `binding-endpoints-3-owner-crash`, `binding-endpoints-1-cluster-restart` 12 each |
-| 17 | `ingestor-metrics-owner-crash`, `emitter-metrics-owner-crash` 10 each |
+| 17 | `ingestor-metrics-owner-crash`, `emitter-metrics-owner-crash` 10 each; `graceful-stop` 12 |
 
 A few soak entries need explanation:
 
@@ -3165,6 +3278,14 @@ A few soak entries need explanation:
 - **`mixed-burst-loss-leader-peer`.** It runs the one-step plan in
   `fixtures/mixed-burst-loss-leader-peer.json`: burst loss from the leader to one follower, which
   moved leadership to that follower and left the old leader behind the quorum in seed 993081495.
+- **`graceful-stop`.** The chaos reproduction of [Graceful Lifecycle
+  01](https://app.clickup.com/t/86bd1fxwd), so a stop that cuts records cannot return unnoticed.
+  It joins the lightest shard with 12 minutes. On a developer worker, runs against the image of
+  the base revision took under six and a half minutes without the verifier self-check, which a
+  suite runs once for every entry. Nearly four of them went to the wait for the records the stop
+  cut to rest once more and arrive, which an image whose stop is graceful does not need, so the
+  budget holds either image with room to spare. The first runs on the CI worker against the image
+  of the fix measure it again.
 
 ### Running A Suite
 
@@ -3477,8 +3598,14 @@ Its limits:
   or partitioned. [Backup Faults](#backup-faults) adds two rules off those links: an
   acknowledgement gate on the broker's egress, and a rate limit on the leader's egress to the CLI.
   Each only holds a cut or a download open; no verdict judges the broker or the CLI under them.
+  [Graceful Stop](#graceful-stop) closes the same acknowledgement gate toward the emitters' node
+  for at most about half a minute, only to hold a publish on the wire when the stop arrives.
   [Restore Faults](#restore-faults) cuts the CLI off the isolated leader only so the CLI reaches the
   next leader before the heal.
+- **Graceful stop.** Its verdict covers the records a stop must finish. The kinds a stop still
+  cuts by design, a reorderer, correlator, window or `REQUIRED WAIT`, a branch at its instance
+  limit, a relay its producer waits on and a destination that never comes back, are kept out of
+  its graph, so a passing run establishes nothing about them.
 - **Restore faults.** The faults land while a restore stages, which a delay makes last. A fault
   during state publication needs a hook, so the Cucumber scenarios that pause a restore before
   publication carry that boundary. The release image exposes no publication generation and no count

@@ -60,7 +60,7 @@ impl ObservedFrame {
                     None
                 }
             }
-            ServerMessage::Event(_) => None,
+            ServerMessage::Event(_) | ServerMessage::Progress(_) => None,
         }
     }
 }
@@ -135,6 +135,41 @@ async fn commands_sent(world: &mut ScenarioWorld, expected: usize) {
         "the browser sent {seen} commands, expected {expected}"
     );
     assert_eq!(seen, expected);
+}
+
+#[then(expr = "the web console has received replies to at least {int} observed commands")]
+async fn commands_replied(world: &mut ScenarioWorld, minimum: usize) {
+    let mut completed = 0;
+    let result = nervix_primitives::time::timeout(super::WEB_CONSOLE_ASSERTION_TIMEOUT, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let mut pending = BTreeSet::new();
+            completed = 0;
+            for frame in record(world).await {
+                if let Some(ClientMessage {
+                    request_id,
+                    request: ClientRequest::Command(_),
+                    ..
+                }) = frame.request()
+                {
+                    pending.insert(request_id);
+                } else if let Some(request_id) = frame.terminal_reply()
+                    && pending.remove(&request_id)
+                {
+                    completed += 1;
+                }
+            }
+            if completed >= minimum {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "the browser received {completed} command replies, expected at least {minimum}"
+    );
 }
 
 #[when("the web console finishes its scheduled input callbacks")]

@@ -143,6 +143,7 @@ pub fn statement_parser<'src>()
         crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
         crate::drop_stmt::drop_parser().map(Statement::Drop),
         crate::show_cluster_status::show_cluster_status_parser().map(Statement::ShowClusterStatus),
+        crate::show_nodes::show_nodes_parser().map(Statement::ShowNodes),
         crate::describe_cluster::describe_cluster_parser().map(Statement::DescribeCluster),
         crate::describe_license::describe_license_parser().map(Statement::DescribeLicense),
         crate::show_transactions::show_transactions_parser().map(Statement::ShowTransactions),
@@ -261,7 +262,7 @@ pub(crate) fn completion_probe(tokens: &[Token], source: &str) -> bool {
             ..
         ]
     );
-    if !selected {
+    if !selected && !crate::show_nodes::has_head(tokens) {
         return false;
     }
     let mut depth = 0usize;
@@ -315,6 +316,8 @@ fn open_statement_tail(statement: &Statement, tokens: &[Token], normalized: &str
         }
     } else if matches!(statement, Statement::CreateDomain(_)) {
         vec![";".to_string()]
+    } else if let Statement::StopDomain(stop) = &statement {
+        crate::domain::stop_domain_tail(stop)
     } else if (normalized.starts_with("RELOCATE ")
         || normalized.starts_with("DESCRIBE RELOCATION "))
         && normalized.ends_with(" PREFERENCES")

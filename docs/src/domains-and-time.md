@@ -118,6 +118,8 @@ Domain lifecycle commands apply to the active domain:
 - `START AT NOW [TIME RATE <float>];`
 - `START AT <rfc3339_timestamp> [TIME RATE <float>];`
 - `STOP;`
+- `STOP ENFORCE AFTER <duration>;`
+- `STOP CANCEL AFTER <duration>;`
 
 Important runtime consequences:
 
@@ -125,19 +127,82 @@ Important runtime consequences:
 - `START AT NOW` reinitializes paced time and domain-owned ingestor offsets from current wall clock
 - `STOP` preserves persisted runtime state
 - `START` clears materialized relay state for the active domain before new execution proceeds
-- When an ephemeral activation expires, the leader stops every running domain the same way, and
-  `DESCRIBE DOMAIN` reports `stopped by licensing: <reason>` until the next `START`, which is
-  refused while the licensing stop gate stays closed (see
-  [Cluster Licensing](node-settings.md#cluster-licensing))
+- When an ephemeral activation expires, the leader stops every running domain through the same
+  graceful stop, forced a fixed 60 seconds after the expiry, and `DESCRIBE DOMAIN` reports
+  `stopped by licensing: <reason>` until the next `START`, which is refused while the licensing
+  stop gate stays closed (see [Cluster Licensing](node-settings.md#cluster-licensing))
+
+### Stopping A Domain
+
+A `STOP` is graceful and has no time limit of its own. It runs in this order:
+
+1. **Intake stops.** On every node the domain's ingestors stop taking input, whatever their
+   `ON QUIESCE` mode, its generators stop producing, and its client producers stay attached with
+   admission suspended. The domain's endpoints are withdrawn, so a request that arrives later is
+   answered `404`; one that reached an endpoint without being admitted is answered `503`, and a
+   request admitted before the stop gets its real answer. The domain shows `status: stopping`.
+2. **Messages in motion finish.** The domain's graph keeps running, and so does its clock. Every
+   collector, route buffer and emitter buffer is flushed whatever its cadence, and a publish attempt
+   already on the wire runs to its outcome. The stop waits, with no limit, until nothing is in
+   motion: no step in hand, no batch queued for a consumer that takes it, no publish on the wire.
+3. **Held work is cut and reported.** Work that cannot move on does not hold the stop open: messages
+   a `REQUIRED WAIT` retains, records an emitter holds for a retry, rows a reorderer or correlator
+   holds until their time or their partner, and work queued behind any of them. Until each kind
+   has a saved form, the stop cuts it as stopping always has: its sources hear "not processed", so
+   an acknowledged source delivers it again after `START` and a `MODE NO ACK` source loses it. The
+   rows a window retains stay in its saved state, but their pending acknowledgements are cut the
+   same way, so an acknowledged source delivers those rows again. An ingestor's pause buffer,
+   retained for a pause still open at the stop, is discarded.
+4. **The domain's tasks end** and the final snapshot is written. Apart from what step 3 cuts, a
+   graceful stop negatively acknowledges nothing and drops nothing.
+
+`STOP ENFORCE AFTER <duration>;` ends the domain's tasks at once once its time has passed: work
+still in motion is answered "not processed", the last snapshot of every processor's branch state is
+left as it was, and the answer says the stop was enforced and lists what it cut. A zero duration
+enforces at once. `STOP CANCEL AFTER <duration>;` withdraws its request once its time has passed: a
+domain left with no request runs on, intake resumes, its endpoints are published again, and nothing
+is cut. The answer of a cancelled request fails, says it was cancelled and names what the stop was
+waiting for. A statement carries at most one of the two clauses; each counts from when its command
+was admitted.
+
+A `STOP` that finds the domain stopping joins its stop as a request of its own. The earliest
+`ENFORCE` of any request ends the stop for all of them, and a `CANCEL` withdraws only its own
+request. The licensing stop is one more request, forced 60 seconds after the expiry in committed
+licensing time, which no `CANCEL` withdraws. While a domain stops, it refuses every other change:
+`START`, `ALTER`, transactions, `DROP`, `BACKUP` and relocation wait until the stop ends or is
+called off. A transaction's `STOP` step makes the same request and applies until its stop ends.
+
+Every answer says how the stop ended and what it cut, node by node and entity by entity. A stop
+that cut nothing answers `stopped domain '<domain>': every message in motion finished`; an enforced
+one names the request that enforced it. A clause per reason then lists the cuts, each as
+`<node>: <kind> '<entity>': <what> (<count>)`: `cut by enforcement` for work in motion an
+enforcement ended, `cut because it cannot be saved yet` for the held kinds of step 3, and
+`discarded with the ingestor session` for what a paused ingestor's buffer retained.
+While the domain stops, `DESCRIBE DOMAIN` lists its stop requests and what the stop waits for per
+node and entity, and `SHOW CLUSTER STATUS` lists every stopping domain the same way under
+`[stops]`; what a stop waits for is known to its owner, the leader, so another node names the
+requests alone. Once the domain stopped, `DESCRIBE DOMAIN` says how the stop ended and what was
+cut, until the next `START`.
 
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned ingestor has completed
-startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
-last running domain, and after every deduplicator and window branch it ended has written the state
-it published last, and the records of every materialized relay and the domain offsets of every
-Kafka ingestor have been written as they stood once the tasks that change them ended, so a backup
-taken as soon as `STOP` returns holds that state. A dependent
-connection, observation, or publish can follow immediately through any live node.
+startup. `STOP` returns once its stop ended and every node that ran the domain reported what its
+teardown cut, including when it is the last running domain.
+
+`START` commits the domain running before the cluster activates it, and nothing undoes that
+commit. Once every live node has prepared the revision, each node starts the domain's ingestors
+and takes input at once; `START` itself waits for the slowest live node to report the revision
+ready. A node that is not ready by the readiness deadline, the node-unavailability timeout plus
+the runtime readiness propagation bound, keeps `START` waiting: the leader applies the revision
+again and waits once more, while the domain runs on every node that started it. When applying the
+revision on the leader fails for another reason, such as an ingestor there that cannot reach its
+source, `START` answers with that failure, but the domain stays running and every node keeps
+applying the revision, so the ingestor joins once its source is reachable. A `START` that waits
+or fails stops nothing and cuts nothing; only `STOP` stops the domain. A graceful stop's teardown has every
+deduplicator and window branch write the state it published last, and the records of every
+materialized relay and the domain offsets of every Kafka ingestor written as they stood once the
+tasks that change them ended, so a backup taken as soon as `STOP` returns holds that state. A
+dependent connection, observation, or publish can follow immediately through any live node.
 
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
 authority identifies a concrete incarnation of a named cluster node and carries a revision that
@@ -334,9 +399,11 @@ writes and publishes nothing and never pauses.
 For an HTTP emitter, this means a pending request must finish at the origin selected when it was
 admitted before a new method, path, body mode, or client takes effect. A failed drain keeps that
 emitter definition active. An operator facing a persistently unavailable origin may restore it,
-or `STOP`, change the configuration while stopped, and `START`. Stopping leaves no prepared HTTP
-request or retry state to carry over; an acknowledged ingestor may redeliver unresolved attached
-work, including work the destination applied before its successful response was lost.
+or stop the domain, change the configuration while stopped, and `START`. A graceful `STOP` waits for
+a request on the wire to finish, so an origin that never answers needs `STOP ENFORCE AFTER
+<duration>`. Stopping leaves no prepared HTTP request or retry state to carry over; an acknowledged
+ingestor may redeliver unresolved attached work, including work the destination applied before its
+successful response was lost.
 
 Pause is not a restart: domain clock state, start version, broker offsets, branch identity, and
 eligible handoff residue are preserved across the quiesce cycle.

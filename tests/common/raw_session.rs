@@ -625,6 +625,7 @@ fn subscription_outcome(
         transaction_admission: None,
         inspection: None,
         entity_labels: None,
+        node_inspection: None,
         state: None,
         resource: None,
         backup: None,
@@ -925,6 +926,7 @@ impl TestSession {
         let message = ClientMessage {
             request_id,
             request,
+            progress: None,
         };
         let frame = message.encode(&self.limits).map_err(io::Error::other)?;
         let bytes = frame.into_bytes();
@@ -977,6 +979,8 @@ impl TestSession {
                     self.file_reply(reply);
                 }
             }
+            // A raw session asks for no progress reports, so one answers nothing it files.
+            ServerMessage::Progress(_) => {}
             ServerMessage::Event(event) => self.file_event(event)?,
         }
         Ok(true)

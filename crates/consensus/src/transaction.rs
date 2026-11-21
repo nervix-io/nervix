@@ -1299,8 +1299,11 @@ pub enum TransactionStepEffect {
         clock: Option<DomainClockState>,
         authority: Option<ClusterNodeIdentity>,
     },
+    /// A `STOP` step's request, which begins the stop of the domain its transaction holds. The
+    /// step stays applying until the stop it requested ends.
     StopDomain {
         inputs: Box<DomainPlanningInputs>,
+        request: Box<nervix_models::OperatorStopRequest>,
     },
     CreateResourceCatalog {
         inputs: Box<DomainPlanningInputs>,
@@ -1319,7 +1322,7 @@ impl TransactionStepEffect {
         match self {
             Self::ReplaceDomainSchedule { inputs, .. }
             | Self::StartDomain { inputs, .. }
-            | Self::StopDomain { inputs }
+            | Self::StopDomain { inputs, .. }
             | Self::CreateResourceCatalog { inputs, .. } => inputs,
             Self::ResetWasmState { inputs, .. } => inputs,
         }

@@ -40,6 +40,8 @@ mod consumer;
 mod domain;
 mod domain_clock;
 mod entity_labels;
+mod node_inspection;
+pub use node_inspection::node_inspection_json;
 mod event;
 mod execution_unit;
 mod frame;
@@ -48,6 +50,7 @@ pub mod grpc;
 mod impact;
 mod limits;
 mod producer;
+mod progress;
 mod reply;
 mod request;
 mod resource;
@@ -112,6 +115,7 @@ pub use producer::{
     OpenIngestorOutcome, OpenIngestorRequest, ProducerAdmissionChanged, ProducerEnded, ProducerId,
     ProducerOpened, SubmissionOutcome, SubmitBatchRequest,
 };
+pub use progress::{ProgressInterval, RequestProgress};
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,

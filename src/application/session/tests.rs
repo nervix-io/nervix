@@ -129,6 +129,7 @@ impl SessionUnderTest {
         self.send(&ClientMessage {
             request_id: request_id(id),
             request: ClientRequest::Command(request),
+            progress: None,
         });
     }
 
@@ -168,6 +169,7 @@ impl SessionUnderTest {
                 }
                 ServerMessage::Reply(_)
                 | ServerMessage::TransferPart(_)
+                | ServerMessage::Progress(_)
                 | ServerMessage::Event(_) => {}
             }
         }
@@ -252,6 +254,7 @@ async fn endpoint_opens_remain_retryable_until_committed_state_is_admitted() {
         session.send(&ClientMessage {
             request_id: request_id(id),
             request,
+            progress: None,
         });
         let (body, _) = session.reply(request_id(id)).await;
         match body {
@@ -277,6 +280,7 @@ async fn endpoint_opens_remain_retryable_until_committed_state_is_admitted() {
         session.send(&ClientMessage {
             request_id: request_id(id),
             request,
+            progress: None,
         });
         let (body, _) = session.reply(request_id(id)).await;
         match body {
@@ -391,6 +395,7 @@ async fn cancelling_a_request_that_is_not_in_flight_says_so() {
         request: ClientRequest::Cancel(CancelRequest {
             target: request_id(1),
         }),
+        progress: None,
     });
     let (body, _) = session.reply(request_id(2)).await;
 
@@ -456,6 +461,7 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
                 .assured("default rows fit usize"),
         },
         in_flight: nervix_primitives::sync::blocking::Mutex::new(InFlightRequests::default()),
+        progress_changed: nervix_primitives::sync::Notify::new(),
         view: nervix_primitives::sync::blocking::RwLock::new(subscriptions.view()),
         selection,
         producers: SessionProducers::default(),
@@ -463,9 +469,9 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     };
 
     shared
-        .register(request_id(1), InFlightKind::Request)
+        .register(request_id(1), InFlightKind::Request, None)
         .assured("the first request registers");
-    let Err(duplicate) = shared.register(request_id(1), InFlightKind::Request) else {
+    let Err(duplicate) = shared.register(request_id(1), InFlightKind::Request, None) else {
         panic!("a request identity already in flight is refused");
     };
     assert_eq!(duplicate.rejection, RequestRejection::DuplicateRequestId);
@@ -473,14 +479,14 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
     for id in 2..=MAX_IN_FLIGHT_REQUESTS {
         let id = u64::try_from(id).assured("the in-flight limit fits in u64");
         shared
-            .register(request_id(id), InFlightKind::Request)
+            .register(request_id(id), InFlightKind::Request, None)
             .assured("requests up to the limit register");
     }
     let beyond = u64::try_from(MAX_IN_FLIGHT_REQUESTS)
         .assured("the in-flight limit fits in u64")
         .checked_add(1)
         .assured("one past the limit fits in u64");
-    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request) else {
+    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request, None) else {
         panic!("a request beyond the in-flight limit is refused");
     };
     assert_eq!(refused.rejection, RequestRejection::TooManyRequestsInFlight);
@@ -491,21 +497,22 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
         .checked_add(1)
         .assured("two past the limit fits in u64");
     shared
-        .register(request_id(submission), InFlightKind::Submission)
+        .register(request_id(submission), InFlightKind::Submission, None)
         .assured("a submission registers while requests fill the limit");
-    let Err(duplicate) = shared.register(request_id(submission), InFlightKind::Submission) else {
+    let Err(duplicate) = shared.register(request_id(submission), InFlightKind::Submission, None)
+    else {
         panic!("a submission identity already in flight is refused");
     };
     assert_eq!(duplicate.rejection, RequestRejection::DuplicateRequestId);
     assert!(shared.finish(request_id(submission)));
-    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request) else {
+    let Err(refused) = shared.register(request_id(beyond), InFlightKind::Request, None) else {
         panic!("an answered submission frees no place a request counts");
     };
     assert_eq!(refused.rejection, RequestRejection::TooManyRequestsInFlight);
 
     assert!(shared.finish(request_id(1)));
     shared
-        .register(request_id(beyond), InFlightKind::Request)
+        .register(request_id(beyond), InFlightKind::Request, None)
         .assured("an answered request frees its place");
 
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
@@ -616,6 +623,7 @@ async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_
             subscription_type: SubscriptionType::Row,
             expected_schema: None,
         }),
+        progress: None,
     });
     let (body, _) = session.reply(request_id(1)).await;
 
@@ -658,6 +666,7 @@ impl SessionUnderTest {
             request: ClientRequest::AttachDomainClock(AttachDomainClockRequest {
                 domain: named::<DomainName>(domain),
             }),
+            progress: None,
         });
     }
 
@@ -667,6 +676,7 @@ impl SessionUnderTest {
             request: ClientRequest::DetachDomainClock(DetachDomainClockRequest {
                 domain: named::<DomainName>(domain),
             }),
+            progress: None,
         });
     }
 
@@ -688,7 +698,9 @@ impl SessionUnderTest {
                     event @ (ServerEvent::DomainClockObserved(_)
                     | ServerEvent::DomainClockAttachmentEnded(_)),
                 ) => return ClockMessage::Frame(event),
-                ServerMessage::Event(_) | ServerMessage::TransferPart(_) => {}
+                ServerMessage::Event(_)
+                | ServerMessage::TransferPart(_)
+                | ServerMessage::Progress(_) => {}
             }
         }
     }
@@ -725,11 +737,13 @@ const UNANSWERED_WINDOW: Duration = Duration::from_millis(500);
 fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
     let clock = match status {
         DomainStatus::Stopped => None,
-        DomainStatus::Running | DomainStatus::Paused => Some(DomainClockState::new(
-            Timestamp::from_unix_nanos(5),
-            Timestamp::from_unix_nanos(1_000),
-            DomainTimeRate::ONE,
-        )),
+        DomainStatus::Running | DomainStatus::Paused | DomainStatus::Stopping => {
+            Some(DomainClockState::new(
+                Timestamp::from_unix_nanos(5),
+                Timestamp::from_unix_nanos(1_000),
+                DomainTimeRate::ONE,
+            ))
+        }
     };
     DomainState {
         id: named("clocked"),
@@ -743,7 +757,7 @@ fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
         start_version,
         last_start: DomainStartPoint::Resume,
         clock,
-        stop_cause: None,
+        stop: None,
     }
 }
 
@@ -1024,6 +1038,7 @@ impl SessionUnderTest {
                 subscription_type: SubscriptionType::Row,
                 expected_schema,
             }),
+            progress: None,
         });
         let (body, _) = self.reply(request_id(id)).await;
         let ReplyBody::Subscribe(outcome) = body else {
@@ -1266,4 +1281,82 @@ fn bounded_state_inspection_reply_preserves_its_typed_refusal_and_requested_form
             ),
         }
     }
+}
+
+/// A session reports every request that asked for progress at its interval until its terminal
+/// reply is queued, and never reports a request that asked for none.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_request_that_asked_for_progress_is_reported_until_its_terminal_reply() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let (outbound, mut frames) = outbound::channel(
+        CancellationToken::new(),
+        &nervix_models::SessionCapabilities::default(),
+    );
+    let subscriptions = SessionSubscriptions::for_user(named::<UserName>("default"));
+    let (selection, _) = nervix_primitives::sync::watch::channel(None);
+    let shared = nervix_primitives::sync::Arc::new(SessionShared {
+        service: service.clone(),
+        transport: SessionTransport::Grpc,
+        delivery: SessionDelivery {
+            outbound,
+            limits: SessionLimits::DEFAULT,
+            rows_per_frame: nervix_models::SessionCapabilities::default()
+                .subscription_rows_per_frame()
+                .try_into()
+                .assured("default rows fit usize"),
+        },
+        in_flight: nervix_primitives::sync::blocking::Mutex::new(InFlightRequests::default()),
+        progress_changed: nervix_primitives::sync::Notify::new(),
+        view: nervix_primitives::sync::blocking::RwLock::new(subscriptions.view()),
+        selection,
+        producers: SessionProducers::default(),
+        consumers: super::consumers::SessionConsumers::default(),
+    });
+    let interval = nervix_client_wire::ProgressInterval::new(std::time::Duration::from_millis(100))
+        .assured("100 ms is the shortest interval the protocol allows");
+    let progress =
+        nervix_primitives::task::spawn(super::progress::run_request_progress(shared.clone()));
+    shared
+        .register(request_id(1), InFlightKind::Request, Some(interval))
+        .assured("a request asking for progress registers");
+    shared
+        .register(request_id(2), InFlightKind::Request, None)
+        .assured("a request asking for none registers");
+
+    let mut reported = Vec::new();
+    while reported.len() < 3 {
+        nervix_primitives::task::consume_budget().await;
+        let frame = frames
+            .next()
+            .await
+            .assured("the session sends until the test closes it");
+        let frame =
+            VerifiedFrame::<ServerFrame>::verify(frame.into_bytes(), &SessionLimits::DEFAULT)
+                .assured("the session sends verified frames");
+        match ServerMessage::decode(&frame).assured("a server frame decodes") {
+            ServerMessage::Progress(report) => reported.push(report.request_id),
+            other => panic!("only progress reports are sent, not {other:?}"),
+        }
+    }
+    assert_eq!(
+        reported,
+        [request_id(1), request_id(1), request_id(1)],
+        "only the request that asked for progress is reported"
+    );
+
+    // Once its terminal reply is owed elsewhere the request is no longer reported.
+    assert!(shared.finish(request_id(1)));
+    let after =
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(1), frames.next()).await;
+    assert!(
+        after.is_err(),
+        "a request whose entry was taken for its terminal reply is not reported again"
+    );
+
+    progress.abort();
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }

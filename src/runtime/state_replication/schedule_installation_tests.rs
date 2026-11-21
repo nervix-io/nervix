@@ -81,9 +81,12 @@ impl InstallationFixture {
             .assured("the complete stopped relay schedule installs without external resources");
     }
 
-    #[cfg(not(feature = "shuttle"))]
     fn request(&self) -> nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
         nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
+            round: nervix_interconnect::ForcedOwnershipRecoveryRound {
+                leader_term: 1,
+                coordination: CoordinationIdentity::new(named("node-1"), 1, 1),
+            },
             recovery_budget: nervix_models::ClusterParameterDuration::try_from(
                 nervix_models::ClusterParameterValues::default().forced_recovery_budget(),
             )
@@ -185,5 +188,76 @@ async fn installed_recovery_schedule_retains_fingerprint_and_node_validation() {
 fn shuttle_recovery_never_misses_initial_schedule_installation() {
     nervix_model_harness::shuttle::check_interleavings(|| {
         shuttle::future::block_on(installation_racing_recovery_resolves_the_exact_node());
+    });
+}
+
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_rejected_recovery_cannot_leave_or_replace_a_preparation() {
+    nervix_model_harness::shuttle::check_interleavings(|| {
+        shuttle::future::block_on(async {
+            let runtime = Runtime::new();
+            let rejected = InstallationFixture::new().request();
+            let entity = rejected.entity.in_domain(&rejected.domain);
+            let key = DomainNodeUnitRef::new(entity.clone(), rejected.unit);
+            let prepare = nervix_primitives::task::spawn({
+                let runtime = runtime.clone();
+                let rejected = rejected.clone();
+                let entity = entity.clone();
+                async move {
+                    let transition =
+                        ForcedRuntimeStateRecoveryTransition::from_request(&rejected, &entity);
+                    runtime
+                        .stage_forced_recovery_preparation(&rejected.round, &transition, Vec::new())
+                        .is_ok()
+                }
+            });
+            let discard = nervix_primitives::task::spawn({
+                let runtime = runtime.clone();
+                let rejected = rejected.clone();
+                async move {
+                    runtime.record_rejected_forced_recovery_round(&rejected.round);
+                    runtime
+                        .discard_forced_recovery_unit(&rejected)
+                        .expect("discard the rejected round");
+                }
+            });
+            prepare.await.expect("preparation task completes");
+            discard.await.expect("discard task completes");
+            assert!(
+                !runtime
+                    .inner
+                    .prepared_forced_runtime_state_recoveries
+                    .contains_key(&key)
+            );
+
+            let newer = nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
+                round: nervix_interconnect::ForcedOwnershipRecoveryRound {
+                    leader_term: 2,
+                    coordination: CoordinationIdentity::new(named("node-3"), 1, 1),
+                },
+                operation_id: "second-attempt".into(),
+                ..rejected.clone()
+            };
+            let transition = ForcedRuntimeStateRecoveryTransition::from_request(&newer, &entity);
+            runtime
+                .stage_forced_recovery_preparation(&newer.round, &transition, Vec::new())
+                .expect("the newer round can prepare the same unit");
+            let delayed = ForcedRuntimeStateRecoveryTransition::from_request(&rejected, &entity);
+            assert!(
+                runtime
+                    .stage_forced_recovery_preparation(&rejected.round, &delayed, Vec::new())
+                    .is_err()
+            );
+            runtime
+                .discard_forced_recovery_unit(&rejected)
+                .expect("retry the rejected discard");
+            let retained = runtime
+                .inner
+                .prepared_forced_runtime_state_recoveries
+                .get(&key)
+                .expect("the newer preparation survives");
+            assert!(retained.recovery.matches(&transition));
+        });
     });
 }

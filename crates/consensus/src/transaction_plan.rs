@@ -137,7 +137,6 @@ impl TransactionCommitAdmissionPlan {
                     Report::new(TransactionCommitPlanBuildError::MissingDomainState { operation })
                 })?;
                 domain.status = DomainStatus::Running;
-                domain.stop_cause = None;
                 domain.start_version = domain.start_version.checked_add(1).ok_or_else(|| {
                     Report::new(
                         TransactionCommitPlanBuildError::DomainStartGenerationOverflow {
@@ -155,8 +154,10 @@ impl TransactionCommitAdmissionPlan {
                 let mut domain = inputs.state().cloned().ok_or_else(|| {
                     Report::new(TransactionCommitPlanBuildError::MissingDomainState { operation })
                 })?;
-                // A transaction's STOP step commits the operator's cause.
-                domain.record_stop(nervix_models::DomainStopCause::Operator);
+                // A transaction's STOP step leaves the domain stopped once its stop ends; how it
+                // ended is no planning input.
+                domain.status = DomainStatus::Stopped;
+                domain.clock = None;
                 let schedule = inputs.schedule().cloned();
                 Ok(inputs.after_domain_update(domain, schedule))
             }
@@ -263,7 +264,7 @@ impl FrozenTransactionCommitStep {
             }
             (
                 TransactionCommitStepKind::StopDomain,
-                Some(TransactionStepEffect::StopDomain { inputs }),
+                Some(TransactionStepEffect::StopDomain { inputs, .. }),
             ) => **inputs == expected_inputs,
             (
                 TransactionCommitStepKind::CreateResource {
@@ -665,13 +666,54 @@ mod tests {
             &decision.steps[0],
         )
         .assured("the running test domain has a record to stop");
-        assert!(committed.commit_domain_stop(&domain, nervix_models::DomainStopCause::Operator));
+        // The step's stop begins, waits for the work in motion and ends: the record it leaves is
+        // stopped with the operator's ending, which no step after it plans against.
+        let reference = nervix_models::CommandExecutionReference::parse("tx-stop")
+            .assured("the fixture reference is a valid literal");
+        assert!(
+            committed
+                .request_domain_stop(
+                    &domain,
+                    &nervix_models::StopRequest::Operator {
+                        reference,
+                        request: nervix_models::OperatorStopRequest {
+                            requested_at: nervix_models::Timestamp::from_unix_nanos(1),
+                            limit: None,
+                        },
+                    },
+                    None,
+                )
+                .assured("the running test domain no execution holds begins its stop")
+        );
+        let began_at_revision = committed
+            .domains
+            .get(&domain)
+            .and_then(|state| state.stopping())
+            .map(|stopping| stopping.began_at_revision)
+            .assured("the request above began the stop");
+        assert!(
+            committed
+                .end_domain_stop(
+                    &domain,
+                    began_at_revision,
+                    &nervix_models::StopEnding::Completed
+                )
+                .assured("the stop that began above is the one that ends")
+        );
         assert_eq!(after_stop, committed.domain_planning_inputs(&domain));
         assert_eq!(
             after_stop
                 .state()
                 .assured("the stopped test domain keeps its record")
-                .stop_cause,
+                .stop,
+            None,
+            "how a stop ended is no planning input"
+        );
+        assert_eq!(
+            committed
+                .domains
+                .get(&domain)
+                .and_then(|state| state.stop_cause()),
             Some(nervix_models::DomainStopCause::Operator)
         );
 
@@ -689,7 +731,7 @@ mod tests {
             after_start
                 .state()
                 .assured("the started test domain keeps its record")
-                .stop_cause,
+                .stop,
             None
         );
     }

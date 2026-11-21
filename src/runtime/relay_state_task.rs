@@ -131,7 +131,11 @@ impl RelayStateRun {
         let now = match self.now() {
             Ok(now) => now,
             Err(error) => {
-                self.runtime.events().report_error(self.lost_clock(&error));
+                // A stopped domain's clock ends the unit with its stop; any other loss of the
+                // clock is a failure.
+                if !error.current_context().is_stopped() {
+                    self.runtime.events().report_error(self.lost_clock(&error));
+                }
                 return ControlFlow::Break(());
             }
         };

@@ -954,6 +954,7 @@ fn command_outcome(disposition: CommandDisposition, subscription: bool) -> Comma
     };
     CommandOutcome {
         entity_labels: None,
+        node_inspection: None,
         execution_reference: Some(
             CommandExecutionReference::parse("reference-1").assured("a valid reference"),
         ),

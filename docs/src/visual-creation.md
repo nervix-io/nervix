@@ -209,8 +209,12 @@ a clause decodes or encodes with is labelled with that direction, and a relay wi
 plays in its statement, so both resolve through the rules in [Shared Rules](#shared-rules).
 Resource, version, runtime-node, domain, subscription and field labels name their own references. An
 expression position offers the built-in functions, the header reads or writes and the metadata
-fields the selected entity declares, and the domain's `udf::` functions. A position where a new name
-is typed offers nothing. A local-path position yields one local-directory item covering the quoted
+fields the selected entity declares, and the domain's `udf::` functions. In the value a window
+processor route's `SET` assigns, the expectation also carries the window's `WIDTH` and
+`MAX STATE SIZE` and the builtin calls the position is written inside, read from the statement up to
+the cursor. The server then adds `COLLECT_VEC` and `COLLECT_ARRAY` where the window aggregate
+declaration's collection bound admits them, the rule the window's validation applies, and adds no
+aggregate inside an aggregate's argument. A position where a new name is typed offers nothing. A local-path position yields one local-directory item covering the quoted
 path, which only the native CLI acts on; the console keeps text items only.
 
 References resolve against the selected domain's Models as the serving node's registry holds them,
@@ -584,6 +588,10 @@ body rules, and the completion walk must stay clean.
   check the role label of every codec and relay position and the question the client grammar
   reads for it from the statement, and that diagnostics keep the reference's kind. The session
   service's tests complete each role against queued Models.
+- The grammar's tests check the window route value each window bound and expression position
+  carries, the positions that keep the ordinary functions, and the assignment and calls left open
+  at the cursor. The VM's tests hold each collection aggregate to its `WindowCollectionBound`
+  and the aggregates a window route's value offers under each bound and nesting.
 - `just plexus-completion-walk` fails on any completion branch that accepting the parser's own
   suggestions cannot complete, and `just plexus-completion-walk-deep` searches further and reports.
   The walk drives the parser directly, not the session.
@@ -629,6 +637,11 @@ reads, and the Go and Node probes reproduce the corpus report in the client conf
   `tools/cli_session.feature` and the connector declaration features cover CLI and connector
   completion. `tools/cli_reference_completion.feature` completes every codec and relay role
   position through the CLI on one and three nodes, and `just test-reference-completion` runs it.
+  `tools/cli_window_collection_completion.feature` completes the collection aggregates of window
+  routes under count, duration and combined bounds, inside an aggregate's argument, in a route's
+  `WHERE` and in another processor's route, through the CLI on one and three nodes, and
+  `just test-window-collection-completion` runs it. `plexus_repl.feature` offers the same aggregates
+  in the console's REPL.
 - `just test-visual-create`, `just test-visual-window-correlator`,
   `just test-visual-generator-inferencer-wasm` and `just test-visual-placement-graph` run their
   feature files with the server's prerequisites; the other files run through

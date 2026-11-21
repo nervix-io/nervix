@@ -43,7 +43,9 @@ options unmodified during the connect call and release them once it returns (B-4
 ```
 
 The four timeout selectors bound one connection, one request, the whole retrying call, and waiting
-for a backup archive. Their values are milliseconds, validated from 1 ms through 24 hours. Add
+for a backup archive. Their values are milliseconds, validated from 1 ms through 24 hours. The
+request and call timeouts count only time without the answer or a server progress report, which
+restarts them, so a long-running statement such as a waiting `STOP` is still answered. Add
 further session URLs with `nx_connect_options_add_seed`. The suite supplies its fixture credentials,
 certificate path and server URLs through environment variables.
 
@@ -98,11 +100,25 @@ captured with the same read. C++ uses the same handle with its usual RAII owner.
 {{#include ../../tests/client_conformance/c/suite/contract.h:entity_labels}}
 ```
 
+### Inspect Cluster Nodes
+
+`nx_outcome_node_inspection` retains the typed result of `SHOW NODES` for either presentation
+format. The count and indexed name accessors read the ordered matches. The JSON accessor exposes
+the membership flags and the committed records. The accessors borrow UTF-8 bytes for the lifetime
+of the node inspection handle. Release it with `nx_node_inspection_free`. C++ can own the same
+handle with a typed deleter.
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:node_inspection}}
+```
+
 ### Read Materialized State
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
 `DESCRIBE LICENSE;` uses the same result for cluster scope. Its JSON has
-`"scope": "cluster_license"`, and its three rows contain the summary and cluster quotas.
+`"scope": "cluster_license"`, and its `summary`, `quotas`, `capabilities` and `transitions` sections
+hold one summary row, one row per cluster quota, one row per catalog capability, and one row per
+quota under a committed licensing transition.
 `nx_outcome_inspection` retains that result as an `nx_inspection` you own: it outlives the outcome
 and is released with `nx_inspection_free`. `nx_inspection_counts` reads the branches, rows and bytes
 of the complete selected cut, and returns false for a refused read, whose outcome is a failed

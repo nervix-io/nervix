@@ -657,6 +657,15 @@ public final class Nervix {
         public Inspection stateInspection() {
             return read(p -> { long handle = Native.outcomeInspection(p); return handle == 0 ? null : new Inspection(handle); });
         }
+        public NodeInspection nodeInspection() {
+            return read(p -> { long handle = Native.outcomeNodeInspection(p); return handle == 0 ? null : new NodeInspection(handle); });
+        }
+    }
+    /** A cluster node inspection retained independently of the originating outcome. */
+    public static final class NodeInspection extends Handle {
+        private NodeInspection(long pointer) { super(pointer); }
+        public List<String> names() { return read(p -> values(Native.nodeInspectionNames(p), String.class)); }
+        public String json() { return read(Native::nodeInspectionJson); }
     }
     /** Exact metadata and its captured policy, retained independently of the originating outcome. */
     public static final class EntityLabelsInspection extends Handle {

@@ -60,7 +60,7 @@ Nervix classifies each directed hop before applying its effective policy:
 
 | Hop class | Correspondence | Applicable policies |
 | --- | --- | --- |
-| `identity` | Both sides are single, or their partition structures correspond index for index. An intake declared `INSTANCES PER PARTITION` maps instance `p` to relay partition `p`, and so does an emitter declared `INSTANCES PER PARTITION` from each input relay. | All four policies. |
+| `identity` | Both sides are single, or their partition structures correspond index for index. An intake declared `INSTANCES PER TRANSPORT PARTITION` maps instance `p` to relay partition `p`, and so does an emitter declared `INSTANCES PER PARTITION` from each input relay. | All four policies. |
 | `fiber` | A declared mapping determines the destination unit without inspecting a record. A partitioned relay feeding a single emitter maps every partition to that emitter, and an input relay feeding an emitter declared `INSTANCES n` maps partition `p` to instance `p mod n`. | All four policies, applied to each fiber. |
 | `single↔many` | One side has one unit and the other has several, without an identity or fiber contract. | `NEUTRAL` and `SUGGEST SEPARATION`. |
 | `data-dependent` | The unit reached depends on record data or competing consumption. Examples are a competing-consumer ingestor feeding partitions and a re-sharding reingestor's output. | `NEUTRAL` only. |
@@ -650,6 +650,26 @@ of server listeners on every live node. Inspect the claims and negotiated receiv
 `DESCRIBE CLUSTER`; [Node Settings](node-settings.md#committed-node-capabilities) owns their detection
 and restart procedure.
 
+## Selecting Nodes
+
+Use `SHOW NODES` to list the cluster nodes that the answering node knows about. Each row shows
+whether the node is live, a voter, cordoned or terminating. A node's committed record adds its
+revision, CPU count, memory limit, detected properties and operator tags. A departed node's record
+remains visible until `DROP NODE` removes it. A node that is still announcing its record appears
+without a record in the unfiltered list.
+
+Add `WHERE` to preview a selector against the committed records. For example, this lists the
+nodes tagged `zone=eu` whose GPU and ONNX Runtime can use CUDA.
+
+```plexus
+SHOW NODES WHERE tag('zone') = 'eu' AND node.cuda.available;
+```
+
+Any node can answer this command without a selected domain. Its answer reflects the committed
+records it has applied and the liveness it observes. The command is read-only. `FORMAT JSON`
+selects the JSON projection of the same inspection. See
+[Node Selectors](filter-map-functions.md#node-selectors) for the fields, types and `tag()` syntax.
+
 ## Ingestor Instance Units
 
 An instance-capable ingestor with `INSTANCES n` has one `Instance(i)` placement per global index.
@@ -657,12 +677,13 @@ Every unit has its own primary, replicas and ownership transition. The scheduler
 counts across eligible nodes before comparing ordinary assignment load, so replica slots do not
 make one primary appear to be several active consumers. Existing live assignments remain sticky.
 
-`INSTANCES PER PARTITION` introduces an exact colocation component for each index: ingestor instance
-`p` and partition `p` of every relay whose branch it constructs. These components move independently.
-Named rules add bonds only through each hop's validated correspondence. Placement groups store
-exact `NodeUnitRef` members, including different unit kinds within one component. Shared group
-drain, failover and explicit relocation update only those members; ordinary relay members need no
-state replica to move with a stateful ingestor. See [Instancing](ingestors.md#instancing).
+An ingestor's `INSTANCES PER TRANSPORT PARTITION` introduces an exact colocation component for each
+index: ingestor instance `p` and partition `p` of every relay whose branch it constructs. These
+components move independently. Named rules add bonds only through each hop's validated
+correspondence. Placement groups store exact `NodeUnitRef` members, including different unit kinds
+within one component. Shared group drain, failover and explicit relocation update only those
+members; ordinary relay members need no state replica to move with a stateful ingestor. See
+[Instancing](ingestors.md#instancing).
 
 ## Emitter Instance Units
 
@@ -670,9 +691,10 @@ An emitter declared `INSTANCES n` or `INSTANCES PER PARTITION` has one `Instance
 instance, each with its own primary and ownership transition; an emitter without the clause keeps
 its one `Single` unit. Instance `i` of `n` serves the input partitions `p` with `p mod n = i`.
 
-`INSTANCES PER PARTITION` introduces an exact colocation component for each index, as an intake's
-does: emitter instance `p` and partition `p` of every input relay. An instance of `INSTANCES n`
-has no hard component of its own. It prefers the node that owns most of the partitions it serves,
-and a named `REQUIRE COLOCATION` rule on the fiber hop from an input relay joins it with all of
-them. An instance beyond the partition count serves no partition; it is placed like its siblings
-and runs nothing. See [Emitter instances](emitters.md#emitter-instances).
+An emitter's `INSTANCES PER PARTITION` introduces an exact colocation component for each index, as
+an intake's `INSTANCES PER TRANSPORT PARTITION` does: emitter instance `p` and partition `p` of
+every input relay. An instance of `INSTANCES n` has no hard component of its own. It prefers the
+node that owns most of the partitions it serves, and a named `REQUIRE COLOCATION` rule on the fiber
+hop from an input relay joins it with all of them. An instance beyond the partition count serves no
+partition; it is placed like its siblings and runs nothing. See [Emitter
+instances](emitters.md#emitter-instances).

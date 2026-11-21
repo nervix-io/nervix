@@ -71,6 +71,7 @@ typedef struct nx_execution nx_execution;
 typedef struct nx_outcome nx_outcome;
 typedef struct nx_inspection nx_inspection;
 typedef struct nx_entity_labels nx_entity_labels;
+typedef struct nx_node_inspection nx_node_inspection;
 typedef enum {
     NX_ENTITY_LABEL_VIEW_COMMITTED = 1,
     NX_ENTITY_LABEL_VIEW_STAGED = 2
@@ -556,6 +557,14 @@ void nx_suggestions_free(nx_suggestions *suggestions);
 /* ---- State inspections -------------------------------------------------------------------- */
 /* Retain exact entity metadata independently of outcome. Free with nx_entity_labels_free. */
 nx_error *nx_outcome_entity_labels(const nx_outcome *outcome, nx_entity_labels **out);
+
+/* Retain a SHOW NODES reply independently of its outcome. The JSON and names borrow this handle. */
+nx_error *nx_outcome_node_inspection(const nx_outcome *outcome, nx_node_inspection **out);
+size_t nx_node_inspection_count(const nx_node_inspection *inspection);
+/* Returns false when index is outside the list. */
+bool nx_node_inspection_name(const nx_node_inspection *inspection, size_t index, const uint8_t **data, size_t *len);
+void nx_node_inspection_json(const nx_node_inspection *inspection, const uint8_t **data, size_t *len);
+void nx_node_inspection_free(nx_node_inspection *inspection);
 void nx_entity_labels_free(nx_entity_labels *labels);
 /* All returned byte spans borrow labels, and retain exact UTF-8 including empty values. */
 void nx_entity_labels_domain(const nx_entity_labels *labels, const uint8_t **data, size_t *len);

@@ -52,7 +52,9 @@ Leaving the `with` block releases the session; see [Lifetimes And Memory](#lifet
 `seeds` lists further servers the session may reach, tried when the server does not answer and used
 again when the session reconnects. Every timeout is in seconds: `connect_timeout` bounds opening one
 connection, `request_timeout` one request, `retry_timeout` a call with all of its retries and
-redirects, and `backup_wait_timeout` a backup's wait for its archive.
+redirects, and `backup_wait_timeout` a backup's wait for its archive. The request and call timeouts
+count only time without the answer or a server progress report, which restarts them, so a
+long-running statement such as a waiting `STOP` is still answered.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:seeds}}
@@ -133,6 +135,16 @@ describe the committed acceptance policy captured with that view.
 {{#include ../../tests/client_conformance/python/suite/cluster/test_entity_labels.py:entity_labels}}
 ```
 
+### Inspect Cluster Nodes
+
+`outcome.node_inspection` holds a `NodeInspection` for either presentation of `SHOW NODES`.
+It returns `None` when the outcome has no node inspection. The report outlives the outcome
+and gives the ordered `names` and full `json` projection of membership and committed records.
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_inspection.py:node_inspection}}
+```
+
 ### Inspect Materialized State
 
 `outcome.state_inspection` returns an independently retained inspection, or `None` when the
@@ -141,8 +153,10 @@ page fields. A refusal has no counts or units; a successful empty page has zero 
 `json` preserves the complete typed envelope.
 
 `DESCRIBE LICENSE;` uses this envelope for cluster scope: `entity_kind` is `"LICENSE"`, while
-`domain` and `entity_name` are `None`. Its summary and quota rows describe the answering node's
-committed policy. The command also works without selecting a domain.
+`domain` and `entity_name` are `None`. Its unit's `summary`, `quotas`, `capabilities` and
+`transitions` sections describe the answering node's committed policy: one summary row, one row per
+cluster quota, one row per catalog capability, and one row per quota under a committed licensing
+transition. The command also works without selecting a domain.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

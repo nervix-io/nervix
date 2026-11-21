@@ -205,6 +205,106 @@ fn shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_un
     check_interleavings(a_batch_racing_a_quiesce_is_counted_or_refused);
 }
 
+/// Stops the domain's intake as a node applies a stopping domain, waits for every batch it
+/// admitted to resolve, as the stop's drain does, and then calls the stop off, as a domain whose
+/// last request was withdrawn runs on.
+async fn stop_drain_and_call_off(
+    control: Arc<IngestorQuiesceControl>,
+    trackers: Arc<IngestorAckRootTrackers>,
+    drained: StdArc<AtomicBool>,
+) {
+    control.engage(IngestorQuiesceCause::DomainStop);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        if trackers.ingestor_outstanding() == 0 {
+            break;
+        }
+        nervix_primitives::task::yield_now().await;
+    }
+    assert!(
+        matches!(
+            control.track_client_batch(&trackers),
+            Err(ClientSubmissionRefusal::Suspended)
+        ),
+        "a stopping domain's producer admitted a batch after its drain concluded"
+    );
+    drained.store(true, RecordOrdering::SeqCst);
+    // The stop still holds while the admission may run: it must find the fence closed.
+    nervix_primitives::task::yield_now().await;
+    // A domain whose stop is called off runs on, and its producers submit again: a batch admitted
+    // from here on is the running domain's, which no drain of the stop owed anything.
+    drained.store(false, RecordOrdering::SeqCst);
+    control.release(IngestorQuiesceCause::DomainStop);
+    let (reopened, _completion) = control
+        .track_client_batch(&trackers)
+        .assured("a domain whose stop was called off admits its producers' batches again");
+    reopened.ack_success();
+}
+
+fn a_batch_racing_the_stop_is_counted_or_refused() {
+    shuttle::future::block_on(async {
+        // A whole runtime is far heavier than one execution of this model needs, so the control
+        // takes the metrics it records into directly.
+        let metrics = RuntimeMetrics::default();
+        let domain = DomainName::parse("tenant").assured("a literal domain name");
+        let ingestor = IngestorName::parse("orders_in").assured("a literal ingestor name");
+        let metric_labels = metrics.register_ingestor_quiesce(
+            &domain,
+            &ingestor,
+            nervix_models::Unit::SINGLE,
+            None,
+            nervix_models::IngestorEntityKind::Client(
+                nervix_models::ClientIngestorEntity::Producer,
+            ),
+        );
+        // A stop ends intake whatever the ingestor's `ON QUIESCE` declares, so a buffering mode
+        // retains nothing for it.
+        let control = Arc::new(IngestorQuiesceControl::new(
+            IngestQuiesceMode::Buffer {
+                max_size: "1MiB".to_string(),
+                overflow: nervix_models::IngestQuiesceOverflow::DropOldest,
+            },
+            metrics,
+            metric_labels,
+        ));
+        let trackers = Arc::new(IngestorAckRootTrackers::detached());
+        let drained = StdArc::new(AtomicBool::new(false));
+        // The drain spins until the admitted root resolves, so it is spawned after the admission
+        // it waits for.
+        let admission = nervix_primitives::task::spawn(admit_one_batch(
+            control.clone(),
+            trackers.clone(),
+            drained.clone(),
+        ));
+        let stop = nervix_primitives::task::spawn(stop_drain_and_call_off(
+            control.clone(),
+            trackers.clone(),
+            drained,
+        ));
+        admission.await.assured(CHECK_TASK_JOINS);
+        stop.await.assured(CHECK_TASK_JOINS);
+        assert_eq!(
+            trackers.ingestor_outstanding(),
+            0,
+            "every tracked root resolved"
+        );
+        assert_eq!(
+            control.counters().buffered_records,
+            0,
+            "a stop retained a batch for a buffering mode it does not consult"
+        );
+    });
+}
+
+/// A batch a producer submits while its domain begins stopping is either counted by the stop's
+/// drain, which then waits for it to finish, or refused with its root resolved and nothing
+/// dispatched, whatever the ingestor's `ON QUIESCE` declares; a stop that is called off admits
+/// batches again.
+#[test]
+fn shuttle_a_batch_racing_the_stop_is_either_counted_by_its_drain_or_refused_undispatched() {
+    check_interleavings(a_batch_racing_the_stop_is_counted_or_refused);
+}
+
 /// How the model ends its producer.
 #[derive(Debug, Clone, Copy)]
 enum ProducerEnding {

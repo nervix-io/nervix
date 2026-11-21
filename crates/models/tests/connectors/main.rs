@@ -686,6 +686,59 @@ fn a_source_references_the_client_or_endpoint_its_body_names() {
 }
 
 #[test]
+fn endpoints_declare_the_node_settings_that_bound_their_input() {
+    use nervix_models::{BufferBound, BufferCapacity, BufferOverflow, WaitBound};
+
+    let http = IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
+        .capabilities()
+        .bounds;
+    let websocket = IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint)
+        .capabilities()
+        .bounds;
+
+    let request_head = BufferBound::Bounded {
+        capacity: BufferCapacity::NodeSetting("listener-header-bytes"),
+        overflow: BufferOverflow::RefuseOversized,
+    };
+    for bounds in [http, websocket] {
+        assert!(
+            bounds
+                .buffers
+                .iter()
+                .any(|buffer| buffer.bound == request_head)
+        );
+        assert!(bounds.waits.iter().any(|wait| matches!(
+            wait.bound,
+            WaitBound::NodeSetting {
+                setting: "listener-header-timeout",
+                ..
+            }
+        )));
+    }
+    for setting in ["websocket-message-bytes", "websocket-frame-bytes"] {
+        let limit = BufferBound::Bounded {
+            capacity: BufferCapacity::NodeSetting(setting),
+            overflow: BufferOverflow::CloseSession,
+        };
+        assert!(
+            websocket.buffers.iter().any(|buffer| buffer.bound == limit),
+            "{setting} must close only the session that sent the oversized input"
+        );
+    }
+    assert!(websocket.waits.iter().any(|wait| {
+        wait.wait == "reading the next frame"
+            && matches!(
+                wait.bound,
+                WaitBound::NodeSetting {
+                    setting: "listener-idle-timeout",
+                    ..
+                }
+            )
+    }));
+    assert!(websocket.driver_limits.is_empty());
+}
+
+#[test]
 fn declared_metadata_fields_read_as_optional_schema_fields_in_declared_order() {
     for kind in IngestorEntityKind::all() {
         let expected = source_declaration(kind)

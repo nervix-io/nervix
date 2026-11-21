@@ -441,18 +441,14 @@ types, null handling, numerical behavior, errors, and sensitivity, and
 [Approximate Sketches](filter-map-functions.md#approximate-sketches) owns the accuracy, memory, and
 expiry of the sketch aggregates.
 
-`COLLECT_VEC(input.value)` emits the retained argument values as one required vector, with the
-same ordering as `FIRST` and `LAST`. Its argument must be required; use `coalesce` for an optional
-field. A collecting route needs a message `WIDTH` or `MAX STATE SIZE`. Collection shares the
-retained argument column with `FIRST` and `LAST`, including through snapshot restore, and its
-values and structure remain visible through the existing state inspection commands.
-
-Use `COLLECT_ARRAY(input.value)` under `WIDTH n MESSAGES` without a duration to produce a required
-`ARRAY` of exactly `n` values. A fixed tensor axis can consume that field directly. The width sets
-the result type; the output schema must match it exactly. A new width requires a new window
-processor. Both collection forms use the existing branch-local retained columns through restart
-and ownership changes. See the [sampled-sequence example](quickstart-generators.md#collect-samples-for-a-fixed-tensor)
-for a generator feeding a count window and an inferencer.
+Use `COLLECT_VEC` for a variable-length sequence and `COLLECT_ARRAY` for a fixed axis. The
+[collection contracts](filter-map-functions.md#window-aggregates) give their argument, width and
+result types. Choose a new window processor when a different count width changes the result
+schema. Both forms use the branch's retained argument columns through restart and ownership
+changes. Those values and the shared `sequence` structure are visible through
+[window state inspection](#inspect-retained-window-state).
+The [sampled-sequence walkthrough](quickstart-generators.md#collect-samples-for-a-fixed-tensor)
+shows how a generator, window and inferencer use these fields.
 
 `MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
 input and argument allocations, row handles, branch keys, and the reserved capacity of every
@@ -538,8 +534,9 @@ as its high watermark.
 ## Inferencer
 
 Commands that bind an ONNX model inspect its tensor metadata on the node's bulk workers. Each
-inspection reserves a 16 KiB bulk buffer and uses its admitted worker to read an explicitly configured
-absolute native-library image sequentially before ONNX initialization and optimization. Its
+inspection reserves a bulk buffer of one bulk chunk (`--execution-bulk-chunk-bytes`) and uses its
+admitted worker to read an explicitly configured absolute native-library image sequentially before
+ONNX initialization and optimization. Its
 thirty-second bound covers memory admission, the worker queue, image preparation, model loading,
 metadata extraction and session release. Image preparation is advisory; native library discovery
 and loading errors remain owned by ONNX Runtime. A full bulk
@@ -572,13 +569,13 @@ CREATE INFERENCER score_events
 
 Every required route-output field is explicit. The source input is not implicitly inherited.
 
-Shape a fixed sequence to the model's exact input dimensions with
-[`list_reshape`, `list_flatten`, and `list_transpose`](filter-map-functions.md#array-and-vector-functions).
-For example, an `ARRAY<F32, 6>` field maps to `DENSE TENSOR<F32>[2, 3]` with
-`list_reshape(input.sequence, 2, 3)`. The dimensions are positive integer literals with the same
-element count as the input. Nervix validates them when the statement is applied, so the shape
-operation may be used in `INPUTS`, which has no message-error route. Shaping preserves sensitivity;
-the mapped input must still be required and have the model's exact `F32` element type.
+Shape a fixed sequence to the model's exact input dimensions with the
+[list shape functions](filter-map-functions.md#array-and-vector-functions). For example, an
+`ARRAY<F32, 6>` field maps to `DENSE TENSOR<F32>[2, 3]` with
+`list_reshape(input.sequence, 2, 3)`. `INPUTS` accepts shape operations checked when the
+statement is applied. Put conversions or arithmetic that can fail for a message in an upstream
+route with an `ON MESSAGE ERROR` policy. The final tensor field must be required and have the
+model's exact `F32` element type.
 
 `USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`. The inferencer loads the model file
 from the one version it stores, so a later upload of the resource does not change the scoring
@@ -657,11 +654,14 @@ the fixed size the declaration supplies.
 for each admitted message, in arrival order, and carries its tensors from one message to the next.
 All state successors advance together after a message the model accepts. A message that fails
 alone leaves the preceding state intact, and `FILTER WHERE` runs before the model, so a filtered
-row changes no state.
+row changes no state. A batch too large for one job runs its messages as several jobs, and its
+state advances only once every job's outputs are joined into the batch's outputs. Messages that
+fail because their outputs cannot be joined leave the preceding state intact as well, so each
+comes again and counts once.
 
-Each admitted batch publishes an immutable tensor generation. Nervix persists the newest
-generation on the runtime state snapshot interval and once more during a graceful stop; replicas
-receive the same generation. A restart continues from the newest surviving snapshot for that
+Each admitted batch that advances the state publishes an immutable tensor generation. Nervix
+persists the newest generation on the runtime state snapshot interval and once more during a
+graceful stop; replicas receive the same generation. A restart continues from the newest surviving snapshot for that
 model binding and branch incarnation. Recovery can skip updates made after that snapshot.
 Inference releases its input acknowledgement shares after dispatch, but another attached consumer
 can still hold the ingestor's position. A redelivered input invokes the model again, including when
@@ -702,6 +702,9 @@ again while preparing INITIAL before publishing the processor plan. A message's 
 includes the carried state, so the state counts against the relay operation limit
 [Execution](#execution) applies to every message. The state is retained once per active branch;
 use the branch's `MAX INSTANCES` to bound the number of live copies.
+
+[Inferencer State And Recovery](inferencer-state.md) describes how the carried state is owned,
+published, persisted, replicated, moved, archived and recovered.
 
 ### Inspect inference configuration and state
 

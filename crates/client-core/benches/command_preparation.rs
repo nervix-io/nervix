@@ -407,6 +407,7 @@ fn preparation_stages<'a>(
                         expected_transaction_position: None,
                         expected_preview: None,
                     }),
+                    progress: None,
                 };
                 let (sample, frame) = sampled(allocation, || {
                     message

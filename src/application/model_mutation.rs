@@ -2259,20 +2259,12 @@ impl SessionServiceImpl {
                  restore stream beside the session"
                     .to_string(),
             ),
-            Statement::StartDomain(start) => {
-                let domain = domain
-                    .as_ref()
-                    .verified("this statement requires a request domain, which was resolved above");
-                self.start_domain(domain, start).await
-            }
-            Statement::StopDomain(stop) => {
-                // `STOP` names no domain, so it acts on the session's domain. It is excluded from
-                // `requires_request_domain`, which leaves the session free of one here.
-                let Some(domain) = domain.as_ref() else {
-                    return command_error("no active domain selected".to_string());
-                };
-                self.stop_domain(domain, stop).await
-            }
+            Statement::StartDomain(_) => command_error(
+                "START runs only as an admitted command under its execution reference".to_string(),
+            ),
+            Statement::StopDomain(_) => command_error(
+                "STOP runs only as an admitted command under its execution reference".to_string(),
+            ),
             Statement::MutateEntityLabels(_)
             | Statement::Create(_)
             | Statement::AlterSchema(_)
@@ -2540,8 +2532,9 @@ impl SessionServiceImpl {
                 self.show_emitters(domain).await
             }
             Statement::ShowClusterStatus(_) => {
+                let stops = self.cluster_status_stop_lines().await;
                 let status =
-                    render_cluster_status(&self.inner.cluster, &self.inner.consensus).await;
+                    render_cluster_status(&self.inner.cluster, &self.inner.consensus, stops).await;
                 let initialization = if self.inner.initialization.is_ready() {
                     "ready"
                 } else {
@@ -2574,6 +2567,7 @@ impl SessionServiceImpl {
                 )
                 .await,
             ),
+            Statement::ShowNodes(show) => self.show_nodes(show).await,
             Statement::DescribeLicense(_) => self.describe_license().await,
             Statement::ShowTransactions(_) => self.show_transactions().await,
             Statement::DescribeTransaction(describe) => {
