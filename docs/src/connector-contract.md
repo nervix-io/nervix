@@ -2081,11 +2081,15 @@ they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK` or
 keep-alive pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
 as an oversized outcome; no payload is counted twice.
 
-The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` for each ingestor unit. The
-driver observes overflow as it happens, including while the host waits for downstream
-acknowledgement. Prometheus keeps the same local series across reconnects. [Ingestor intake and
-payload handling](metrics-and-observability.md#ingestor-intake-and-payload-handling) lists this
-counter and the other intake observations.
+The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` for each ingestor unit,
+registered at zero, and hands the connector an `IngestorReadAheadOverflow` report in the unit's
+plan; the connector names no metrics type. Each connection's driver keeps a clone of the report and
+records overflow through it as it happens, including while the host waits for downstream
+acknowledgement: one call to the host's recorder, which increments the unit's child without a
+registry lookup, allocation or wait. Prometheus keeps the same local series across reconnects.
+[Ingestor intake and payload
+handling](metrics-and-observability.md#ingestor-intake-and-payload-handling) lists this counter and
+the other intake observations.
 
 Every MQTT subscription checks the successful `SUBACK` grant against its declared QoS before
 publishing readiness, including under `NO ACK`. A lower grant is
@@ -3763,7 +3767,8 @@ by their own typed codes. Driver calls made inside the attempt contribute to tha
 The host resolves labels and metric children at unit startup. The recurring path records through
 those retained handles.
 
-A connector reports a transport-specific fact using a host-handle method or a declared event.
+A connector reports a transport-specific fact using a host-handle method or a declared event, or,
+from a task that polls its transport apart from the host's loop, a typed report in its plan.
 
 - `IngestorHost` exposes `record_read`, `record_read_payloads`, `record_acknowledgement`,
   `record_transport_settlement`, `record_resume` and `record_suspend` for host observations.
@@ -3781,6 +3786,13 @@ returns a typed refusal. Keep metric types, registration, labels, wall rates and
 host. [Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
 owns the family inventory and inspection format. The generated capability reference owns each
 entity's declared events.
+
+A connector task that polls its transport apart from the host's loop cannot reach `IngestorHost`,
+so a fact only that task sees arrives through a report the host resolves into the plan instead. An
+ingestor connection's read-ahead overflow is the one such fact: the host builds an
+`IngestorReadAheadOverflow` around its counter child for the unit, and the task records each drop
+through its retained clone, with the same rules as an event counter. The host keeps the family, its
+labels and its registration; see [MQTT ingestor connections](#mqtt-ingestor-connections).
 
 The ingestor host resolves its interaction counter children once at startup for its exact execution
 unit. The retained group preserves each instance's counters, including decode rejections, without
@@ -4020,11 +4032,11 @@ delivery semantics rather than assuming a generic envelope or exactly-once exter
 The host prepares MQTT's connector plan, rendered client entries and resource mounts once per
 logical ingestor and installed declaration on each node. The connector checks the rendered client
 identities once in that prepared plan. Unit plans share immutable entry arrays and retain their own
-read-ahead counter; an executing unit retains only its selected instance's mount. Input replacement
-compares external sessions once per local logical input and retires only the explicitly ending
-global indices. This keeps preparation
-and retirement proportional to the declared instance count. A declaration change invalidates the
-prepared entry; no mutable driver or ingestor task is shared between units.
+read-ahead overflow report; an executing unit retains only its selected instance's mount. Input
+replacement compares external sessions once per local logical input and retires only the
+explicitly ending global indices. This keeps preparation and retirement proportional to the
+declared instance count. A declaration change invalidates the prepared entry; no mutable driver or
+ingestor task is shared between units.
 
 ## Committed Host Bounds
 
