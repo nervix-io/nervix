@@ -493,7 +493,10 @@ submission returns only after its job has been selected. Each callback catches i
 returns `JobPanicked` to its caller, records its completed service and leaves successors runnable.
 The worker publishes its next selection or its idle transition before delivering the completed
 result. Existing per-class admission, refusal, completion, queue-time and work-time counters retain
-their meanings; work time measures callbacks, excluding dispatch and queue waits.
+their meanings; work time measures callbacks, excluding dispatch and queue waits. A class also
+reports how many `WaitForPlace` jobs wait for a place in its full queue: a job takes a free place
+exactly as a refusing job does, counts as waiting only once it finds the queue full, and stops
+counting when it takes a place, the pool closes or its caller drops the wait.
 
 Worker state distinguishes a selected callback, a callback executing and an idle worker. Runtime
 teardown that drops a worker between callbacks, or before its blocking task starts, returns its
