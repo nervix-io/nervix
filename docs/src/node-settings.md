@@ -1387,7 +1387,7 @@ percentile windows, the unit and precision of the HDR histograms that metric sna
 published histogram buckets and the published connector-interaction duration buckets are fixed
 observation contracts. Their declarations carry the fixed reasons in the metric owners; they are
 not node settings. The current resolution is documented in
-[Metrics And Observability](metrics-and-observability.md#connector-interactions).
+[Metrics And Observability](metrics-and-observability.md#connector-interaction-metrics).
 
 The per-session bounds of the [client session protocol](client-session-protocol.md) (requests in
 flight, producers, consumers and batch credit), the chunk bounds both peers of a stream check, the
