@@ -416,6 +416,15 @@ test-unfolding-backpressure *args: build-deps build-plexus-format build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/bounded_execution.feature {{ quote(args) }}
 
+# Work the node already accepted that waits for a place in a full worker class: relay slices and
+# subscription deliveries, checkpoints, captures and partition moves, committed compilation, and
+# the resource store, each seen waiting and then completing once after its class is released.
+test-full-queue-waits *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/full_queue_waits.feature {{ quote(args) }}
+
 # Exercise fixed window collection and its sampled-sequence tensor consumer.
 test-window-collection-arrays *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
