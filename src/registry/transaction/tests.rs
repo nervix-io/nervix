@@ -27,6 +27,7 @@ fn domain_state(status: DomainStatus) -> ControlDomainState {
         config: DomainConfig {
             pace: DomainPace::Unpaced,
         },
+        labels: nervix_models::EntityLabels::default(),
         status,
         start_version: 0,
         last_start: DomainStartPoint::Resume,

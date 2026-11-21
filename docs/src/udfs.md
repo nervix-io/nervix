@@ -123,7 +123,8 @@ refuses further UDF-bearing executions, which the owning processor's general err
 the node's relay, control and bulk work keeps its own workers throughout.
 
 Treat trusted authorship, code review, and passing Roto `test` blocks as admission policy. The
-extension class runs one job per available CPU but one, shared with JAQ transformations, and is not
+extension class runs one job per available CPU but one, shared with JAQ transformations and
+inferencer model runs, and is not
 a Plexus setting. Limit concurrent UDF-bearing paths or isolate them onto separate Nervix processes
 when one workload could hold every extension worker. See
 [Capacity Planning For Branched Graphs](capacity-planning.md).

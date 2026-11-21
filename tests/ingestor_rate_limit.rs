@@ -15,6 +15,17 @@
 
 use super::*;
 
+#[then(expr = "Kafka consumer group {string} keeps its single stable member for {string}")]
+async fn kafka_group_keeps_its_member(world: &mut ScenarioWorld, group: String, duration: String) {
+    let group = expand_placeholders(world, &group);
+    let duration = parse_duration_text(&duration).assured("the step names a valid duration");
+    world
+        .cluster()
+        .assert_kafka_consumer_group_keeps_member(&group, duration)
+        .await
+        .assured("rate limiting keeps the same Kafka consumer group member stable");
+}
+
 /// What a rate-limit scenario observed: when it recorded its start, if it bounds arrivals, and
 /// when each matched payload arrived, in arrival order.
 #[derive(Debug, Default)]

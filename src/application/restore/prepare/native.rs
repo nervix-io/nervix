@@ -15,17 +15,29 @@
 
 use error_stack::{Report, ResultExt as _};
 use nervix_backup::DescribedRuntimeState;
-use nervix_execution::MemoryClass;
+use nervix_execution::{AdmissionError, Executor, MemoryClass, Reservation};
 use nervix_models::DomainName;
 use nervix_primitives::sync::Arc;
 
 use super::{RestoreRefusal, VerifiedArchive};
 use crate::runtime::{
     BackupBranchLifecycleEntry, RESTORE_STATE_WORKING_BYTES, Runtime, SnapshotStagingError,
-    StagedArtifact, write_restored_branch_lifecycle, write_restored_kafka_offsets,
+    StagedArtifact, StagedSnapshotWriter, write_restored_branch_lifecycle,
+    write_restored_kafka_offsets,
 };
 
 impl VerifiedArchive {
+    /// Native state and its serializer scratch have their own restore-metadata charges. Keep
+    /// the restore bulk allowance as a floor and cover the output buffer at any configured size.
+    pub(in crate::application::restore) async fn reserve_native_checkpoint_encoding(
+        executor: &Executor,
+    ) -> error_stack::Result<Reservation, AdmissionError> {
+        let buffer = StagedSnapshotWriter::encoding_buffer_bytes(executor);
+        executor
+            .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES.max(buffer))
+            .await
+    }
+
     /// The description and its reservation travel into the admitted job together. Conversion
     /// materializes one native entry at a time; only serializer resolvers depend on entry count.
     pub(in crate::application) async fn stage_native_checkpoint(
@@ -66,9 +78,7 @@ impl VerifiedArchive {
         let maximum = maximum
             .checked_add(RESTORE_STATE_WORKING_BYTES)
             .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
-        let charge = runtime
-            .executor()
-            .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
+        let charge = Self::reserve_native_checkpoint_encoding(runtime.executor())
             .await
             .change_context(RestoreRefusal::MetadataAdmission)?;
         let writer = runtime
@@ -121,5 +131,34 @@ impl VerifiedArchive {
             .await
             .map(Arc::new)
             .change_context(RestoreRefusal::Unreadable)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use ubyte::ByteUnit;
+
+    use super::*;
+
+    // Archived metadata, regrouped lifecycles and deduplicator keyspaces share this admission.
+    #[rstest::rstest]
+    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024)]
+    #[case::within_the_floor(ByteUnit::Kibibyte(256), 2 * 1024 * 1024)]
+    #[case::default_chunk(ByteUnit::Kibibyte(64), 2 * 1024 * 1024)]
+    #[nervix_primitives::test]
+    async fn native_checkpoint_restore_charges_staging_buffer(
+        #[case] chunk: ByteUnit,
+        #[case] expected: u64,
+    ) {
+        let executor = StagedSnapshotWriter::encoding_test_executor(chunk);
+        let charge = VerifiedArchive::reserve_native_checkpoint_encoding(&executor)
+            .await
+            .assured("the test bulk budget fits the native restore encoder");
+        StagedSnapshotWriter::assert_staging_encoding_charge(&executor, charge, expected).await;
     }
 }

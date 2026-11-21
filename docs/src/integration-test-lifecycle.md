@@ -2457,8 +2457,9 @@ nothing and joined by nothing: a second launch into the same directory would fin
 locked, and the orphaned node would keep working beside every scenario that followed it. A node
 ends by its own shutdown instead. One that is still running when its owner stops waiting is
 **left stopping**: the owner hands the task to a keeper that waits for it to end, and the keeper
-holds what the node still uses, the cluster's storage, the node's seven ports, its consensus fault
-registration and the cluster's place in the live-cluster registry, and gives them back only then.
+holds what the node still uses, the cluster's storage, the node's seven ports and the cluster's
+place in the live-cluster registry, and gives them back only then, together with a consensus fault
+registration the node did not give back itself.
 A node whose handle is dropped while it runs is asked to stop and left stopping the same way. A
 keeper prints the end it waited for:
 
@@ -2535,15 +2536,17 @@ family. A successful stop of a task whose readiness timed out retains that timeo
 cause.
 
 Cleanup receives the remaining node startup budget, and the product's shutdown deadline cannot
-restart it. Once the task ends, the node gives back its consensus fault registration. A transient
-failure may then move the selected listeners to fresh ports and pause one second before another
-launch, provided the same budget still has time. A bind failure preserves unrelated addresses; a
-readiness timeout selects all seven ports.
+restart it. A node gives back its consensus fault registration itself once its consensus has
+stopped, and once the task ends, cleanup gives back only the registration of a task that panicked
+or was cancelled before that point. A transient failure may then move the selected listeners to
+fresh ports and pause one second before another launch, provided the same budget still has time. A
+bind failure preserves unrelated addresses; a readiness timeout selects all seven ports.
 
-A node still stopping when that budget expires keeps its task, its shutdown coordinator, its fault
-registration, its database and its listeners until its own shutdown has finished. The startup
-reports exhaustion, and cluster teardown waits for that node or leaves it stopping under its
-keeper. It never launches a replacement into resources a running predecessor still holds.
+A node still stopping when that budget expires keeps its task, its shutdown coordinator, its
+database and its listeners until its own shutdown has finished, and its fault registration until
+its consensus has stopped. The startup reports exhaustion, and cluster teardown waits for that node
+or leaves it stopping under its keeper. It never launches a replacement into resources a running
+predecessor still holds.
 
 The startup ends in one of four ways, each reported with the node, its budget, the time spent, and
 the record of every attempt:
@@ -2872,7 +2875,8 @@ scenario body's result is preserved.
 2. Every node's task is awaited concurrently under the one deadline. Each wait borrows its task from
    the node's owner, so a node still stopping when the deadline passes is still owned.
 3. Once the waits are over, each node whose task ended, whatever ended it, gives back what it holds:
-   its seven port leases and its consensus fault registration.
+   its seven port leases, and a consensus fault registration the node did not give back itself, as
+   a task that panicked or was cancelled before its consensus stopped leaves one.
 4. Each node still stopping is left to end itself. Its task goes to a keeper together with what the
    node still uses, and the keeper gives that back once the task has ended.
 
@@ -2903,14 +2907,22 @@ A step that replaces a scenario's cluster with a fresh one stops the old cluster
 budget and fails when a node of it was left stopping: that node still runs beside the cluster that
 would replace it, so the replacement has not happened.
 
-The consensus fault registration keeps an observer of the node's consensus state, as does every
-observer a step took from it, so the node's consensus database stays open after the node's task has
-ended until the last of those observers is dropped. That drop closes the database synchronously, on
-the task that makes it: the close synchronizes the journal and waits until none of the database's
-background workers is left. Cleanup and [scenario-driven stops](#scenario-driven-stops) give the
-registration back on the runner task, so every scenario and the suite watchdog wait for that close,
-while a keeper gives it back on a runtime worker. The close never waits for a worker whose flush or
-compaction failed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
+The consensus fault registration keeps an observer of the node's consensus state while the node
+runs. The node gives it back itself as soon as its consensus has stopped, in its terminal teardown
+or in the release of a start that failed after opening its stores, so its consensus database closes
+on the node's own filesystem storage worker before the node's task ends, whoever asked the node to
+stop: a step, cleanup, or the node itself, as when the cluster refuses its join. A node whose task
+ended by itself can therefore start again at once in the same process. Every observer a step took
+from the registration keeps the database open as well, until the step drops it. The last drop
+closes the database synchronously, on the task that makes it: the close synchronizes the journal
+and waits until none of the database's background workers is left. A task that panicked or was
+cancelled before its consensus stopped leaves the registration behind, so cleanup and
+[scenario-driven stops](#scenario-driven-stops) give it back on the runner task, and every scenario
+and the suite watchdog wait for that close, while a keeper gives it back on a runtime worker. They
+never take back the registration of a node whose task returned: one still held then is the node's
+own failure to release its consensus database, which the next start of the node or the stop's lock
+check reports. The close never waits for a worker whose flush or compaction failed; see
+[Terminal Teardown](./shutdown.md#terminal-teardown).
 
 ### What Cleanup Releases
 
@@ -3019,12 +3031,14 @@ with it, so the harness never cuts a product deadline short.
 Node-specific stop steps resolve a saved scenario placeholder before selecting the node, including
 the graceful stop used to exercise ownership handoff during drain.
 
-Once the node's task has ended, the stop gives back the node's consensus fault registration, which
-closes its consensus database as [Cluster Teardown](#cluster-teardown) describes, and a stop that
-ended cleanly then checks that the node released its node and consensus database locks. The step
-fails when the node's task panicked, when the watchdog passed with the node still stopping, or when
-a lock outlived the stop. A node still stopping keeps its task, its ports and its fault
-registration, and the scenario's cleanup waits for it again or leaves it stopping.
+Once the node's task has ended, the stop gives back the consensus fault registration of a task that
+panicked or was cancelled, which closes its consensus database as
+[Cluster Teardown](#cluster-teardown) describes. A stop that ended cleanly instead checks that the
+node released its node and consensus database locks itself, its consensus fault registration
+included. The step fails when the node's task panicked, when the watchdog passed with the node
+still stopping, or when a lock outlived the stop. A node still stopping keeps its task and its
+ports, and its fault registration until its consensus has stopped, and the scenario's cleanup waits
+for it again or leaves it stopping.
 Stopping every node requests every stop first and then waits for each node in turn. A scenario can
 also begin stopping a node without waiting, to observe how the cluster reacts while the node is on
 its way down; its cleanup waits for it later. It can hold such a node at the start of its graceful
@@ -4719,10 +4733,11 @@ Its limits:
 - Provisioning a Kafka topic's partitions and waiting for a consumer group's members query the
   broker synchronously on the runner task, for up to 5 seconds per query, and every scenario of the
   run waits while one of those queries runs.
-- Cleanup and stops give back a stopped node's consensus fault registration on the runner task, so
-  when no step still holds an observer of the node's consensus state, the node's consensus database
-  closes there, and every scenario of the run waits until the close has synchronized the journal and
-  the database's last background worker has left.
+- Cleanup and stops give back, on the runner task, the consensus fault registration of a node whose
+  task panicked or was cancelled before its consensus stopped, so when no step still holds an
+  observer of that node's consensus state, its consensus database closes there, and every scenario
+  of the run waits until the close has synchronized the journal and the database's last background
+  worker has left.
 - Kafka committed-offset assertions query on a blocking worker with a one-second request timeout.
   A query error retries within the assertion's original deadline; persistent errors fail rather
   than count as an offset observation. An offset that crosses a forbidden threshold fails

@@ -25,6 +25,15 @@ use crate::{
 
 /// Bytes a string or vector may add beyond its payload: a length prefix, a null terminator and
 /// alignment padding.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "FlatBuffers adds at most a 4-byte length prefix, a string's terminator byte and \
+                  7 bytes of padding to a string or vector, since session.fbs's widest scalar is \
+                  8 bytes, and 16 bytes cover that"
+    )
+)]
 const LENGTH_PREFIX_SLACK_BYTES: usize = 16;
 
 /// Why a verified frame does not decode into the value its schema describes.
@@ -354,8 +363,8 @@ impl<'fbb> Encoder<'fbb> {
     ) -> Result<(), Report<WireEncodeError>> {
         let grown = self.encoded_bytes().checked_add(payload).assured(
             "every check holds the builder to at most one item's tables past a byte limit of at \
-             most MAX_FRAME_BYTES, and adding at most isize::MAX bytes to that cannot overflow \
-             usize",
+             most SessionFrameBytes::MAXIMUM, and adding at most isize::MAX bytes to that cannot \
+             overflow usize",
         );
         let needed = grown.checked_add(self.free_bytes).assured(
             "the bytes kept free are a small envelope plus four bytes per row of an in-memory \

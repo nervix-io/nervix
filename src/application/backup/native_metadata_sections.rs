@@ -47,12 +47,9 @@ use crate::{
     application::session_service::SessionServiceImpl,
     runtime::{
         BackupBranchLifecycleEntry, BackupKafkaPartitionOffset, CapturedNativeMetadata,
-        SnapshotStagingError, StagedArtifact,
+        SnapshotStagingError, StagedArtifact, StagedSnapshotWriter,
     },
 };
-
-/// The bulk memory streaming one section holds: the staged file's buffered block.
-const SECTION_WRITER_BYTES: u64 = 64 * 1024;
 
 /// Why a captured native checkpoint did not become its archive section. No variant carries a
 /// value from the checkpoint.
@@ -185,8 +182,12 @@ impl SessionServiceImpl {
             .reserve(MemoryClass::RestoreMetadata, conversion_bytes)
             .await
             .map_err(|error| refusal(domain, error))?;
+        // The bulk memory streaming one section holds: the staged writer's output buffer.
         let working = executor
-            .reserve(MemoryClass::Bulk, SECTION_WRITER_BYTES)
+            .reserve(
+                MemoryClass::Bulk,
+                StagedSnapshotWriter::encoding_buffer_bytes(&executor),
+            )
             .await
             .map_err(|error| refusal(domain, error))?;
         let writer = self

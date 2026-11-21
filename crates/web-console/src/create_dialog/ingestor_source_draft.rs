@@ -45,6 +45,11 @@ use thiserror::Error;
 
 use super::SelectedReference;
 
+/// The `INSTANCES` choice of an entity whose transport keeps partitions, spelled as the vocabulary
+/// spells it.
+pub(super) const TRANSPORT_PARTITION_INSTANCES: &str =
+    nervix_models::IngestorInstances::PerTransportPartition.choice();
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OffsetChoice {
     Domain,
@@ -323,8 +328,12 @@ impl IngestorEntityDraft {
     pub(super) fn chosen_option(&self, keywords: &str) -> Option<&'static str> {
         let selected = match keywords {
             "INSTANCES" => Some(
-                if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") {
-                    "PER PARTITION"
+                if self
+                    .instances
+                    .trim()
+                    .eq_ignore_ascii_case(TRANSPORT_PARTITION_INSTANCES)
+                {
+                    TRANSPORT_PARTITION_INSTANCES
                 } else {
                     "<count>"
                 },
@@ -344,8 +353,15 @@ impl IngestorEntityDraft {
     pub(super) fn choose_option(&mut self, keywords: &str, choice: &str) {
         match keywords {
             "INSTANCES" => match choice {
-                "PER PARTITION" => self.instances = "PER PARTITION".to_owned(),
-                "<count>" if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") => {
+                TRANSPORT_PARTITION_INSTANCES => {
+                    self.instances = TRANSPORT_PARTITION_INSTANCES.to_owned()
+                }
+                "<count>"
+                    if self
+                        .instances
+                        .trim()
+                        .eq_ignore_ascii_case(TRANSPORT_PARTITION_INSTANCES) =>
+                {
                     self.instances.clear()
                 }
                 _ => {}
@@ -657,8 +673,17 @@ impl IngestorEntityDraft {
         } else {
             self.instances.trim()
         };
-        if value.eq_ignore_ascii_case("PER PARTITION") {
-            return Ok(nervix_models::IngestorInstances::PerPartition);
+        if value.eq_ignore_ascii_case(TRANSPORT_PARTITION_INSTANCES) {
+            // Only an entity whose transport keeps partitions offers this form.
+            let declared = nervix_models::IngestorInstances::PerTransportPartition;
+            let permitted = match self.kind {
+                Some(kind) => kind.capabilities().instancing.permits(declared),
+                None => false,
+            };
+            if !permitted {
+                return Err(Report::new(IngestorEntityDraftError::Instances));
+            }
+            return Ok(declared);
         }
         let count = value.parse::<NonZeroU64>().map_err(|cause| {
             Report::new(cause).change_context(IngestorEntityDraftError::Instances)
@@ -986,7 +1011,7 @@ pub(super) enum IngestorEntityDraftError {
     UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
-    #[error("INSTANCES must be a positive 64-bit count or PER PARTITION")]
+    #[error("INSTANCES must be a positive 64-bit count, or PER TRANSPORT PARTITION where offered")]
     Instances,
     #[error("Choose Kafka offset ownership")]
     Offset,
@@ -1448,6 +1473,39 @@ mod tests {
                 .build()
                 .assured("the complete form preserves the count");
             assert_eq!(filled_from(&entity).instances, count.to_string());
+        }
+    }
+
+    #[test]
+    fn an_instance_draft_follows_transport_partitions_only_where_the_entity_offers_it() {
+        let declared = nervix_models::IngestorInstances::PerTransportPartition;
+        for kind in IngestorEntityKind::modeled() {
+            let capabilities = kind.capabilities();
+            if capabilities.option("INSTANCES").is_none() {
+                continue;
+            }
+            let mut draft = complete(kind);
+            draft.instances = super::TRANSPORT_PARTITION_INSTANCES.to_owned();
+            if capabilities.instancing.permits(declared) {
+                assert_eq!(
+                    draft
+                        .instances()
+                        .assured("the entity offers the transport-partition form"),
+                    declared,
+                    "{}",
+                    kind.phrase()
+                );
+            } else {
+                let error = draft
+                    .instances()
+                    .expect_err("an entity whose transport keeps no partitions takes a count");
+                assert_eq!(
+                    error.current_context(),
+                    &IngestorEntityDraftError::Instances,
+                    "{}",
+                    kind.phrase()
+                );
+            }
         }
     }
 

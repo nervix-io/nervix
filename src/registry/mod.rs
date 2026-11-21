@@ -34,6 +34,7 @@ mod ingestor_units;
 mod message_error_plan;
 mod mutation;
 mod node_capacity;
+pub(crate) mod node_selector;
 mod partition_epochs;
 mod partition_topology;
 mod placement;

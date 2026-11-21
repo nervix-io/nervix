@@ -803,6 +803,88 @@ fn describe_cluster_context_offers_no_clause_of_show_cluster_status() {
 }
 
 #[test]
+fn parses_node_selector_preview_and_its_optional_clauses() {
+    for input in [
+        "SHOW NODES;",
+        "show nodes where node.cuda.available;",
+        "SHOW NODES WHERE tag('zone') = 'eu' FORMAT JSON;",
+        "SHOW NODES FORMAT TEXT;",
+    ] {
+        parse_statement(input).expect("node selector preview parses");
+    }
+    for input in [
+        "SHOW NODES node-1;",
+        "SHOW NODES WHERE;",
+        "SHOW NODES FORMAT;",
+        "SHOW NODES FORMAT JSON WHERE node.cuda.available;",
+        "SHOW NODES LIMIT 1;",
+    ] {
+        assert!(parse_statement(input).is_err(), "accepted {input:?}");
+    }
+}
+
+#[test]
+fn node_selector_preview_completion_follows_its_own_clauses() {
+    use nervix_models::{BuiltinFunctionScope, SemanticReference};
+
+    use crate::client_statement::CompletionExpectation;
+
+    let input = "SHOW ";
+    assert!(suggest_statement(input, input.len()).contains(&"NODES".to_string()));
+
+    let input = "SHOW NODES ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(
+        suggestions.contains(&"WHERE".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        suggestions.contains(&"FORMAT".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(!suggestions.contains(&"STATUS".to_string()));
+    assert!(!suggestions.contains(&"LIMIT".to_string()));
+
+    let input = "SHOW NODES FORMAT ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(suggestions.contains(&"JSON".to_string()), "{suggestions:?}");
+    assert!(!suggestions.contains(&"WHERE".to_string()));
+
+    let expectations =
+        |input: &str| crate::client_statement::suggest_client_expectations(input, input.len());
+    let selector_functions = CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+        BuiltinFunctionScope::NodeSelector,
+    ));
+    let selector_start = expectations("SHOW NODES WHERE ");
+    assert!(
+        selector_start.contains(&selector_functions),
+        "{selector_start:?}"
+    );
+    assert!(
+        selector_start.contains(&CompletionExpectation::Literal("node.".to_string())),
+        "{selector_start:?}"
+    );
+    for (input, expected) in [
+        ("SHOW NODES WHERE node.", "name"),
+        ("SHOW NODES WHERE node.", "gpu.models"),
+        ("SHOW NODES WHERE node.gpu.", "memory"),
+    ] {
+        let choices = expectations(input);
+        assert!(
+            choices.contains(&CompletionExpectation::Literal(expected.to_string())),
+            "{input:?}: {choices:?}"
+        );
+    }
+    assert!(!expectations("SUBSCRIBE TO relay1 WHERE ").contains(&selector_functions));
+    assert!(!expectations("SHOW NODES FORMAT ").contains(&selector_functions));
+    assert!(
+        !expectations("SHOW NODES WHERE udf::").contains(&CompletionExpectation::Semantic(
+            SemanticReference::Model(ModelKind::Udf),
+        ))
+    );
+}
+
+#[test]
 fn parses_describe_domain_statement() {
     let parsed = parse_statement("DESCRIBE DOMAIN;").expect("parse should succeed");
     assert_eq!(

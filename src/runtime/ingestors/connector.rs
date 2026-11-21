@@ -18,7 +18,7 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use std::time::Duration;
+use std::{pin::pin, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{FrameKind, Report, ResultExt as _};
@@ -28,9 +28,10 @@ use nervix_connector::{
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
     IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError, IngestorIntakeMessage,
     IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorReadBudget,
-    IngestorReadOutcome, IngestorResume, IngestorResumeOutcome, IngestorSettlement,
-    IngestorSettlementOperation, IngestorSettlementOutcome, IngestorSuspendCause,
-    PacedIngestorConnector, ParsedRetryPolicy, next_retry_delay, physical_time::actual_utc_now,
+    IngestorReadHold, IngestorReadOutcome, IngestorResume, IngestorResumeOutcome,
+    IngestorSettlement, IngestorSettlementOperation, IngestorSettlementOutcome,
+    IngestorSuspendCause, PacedIngestorConnector, ParsedRetryPolicy, next_retry_delay,
+    physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
@@ -57,7 +58,10 @@ use individual_settlement::IndividualBatch;
 
 #[path = "connector_read.rs"]
 mod read;
-use read::{AllowanceHoldEnd, ReadOutcome, hold_for_allowance, read_batch, wait_for_flush};
+use read::{
+    AllowanceHoldEnd, ReadOutcome, hold_for_allowance, maintain_held_transport, read_batch,
+    reborrow_maintenance, wait_for_flush,
+};
 
 #[path = "connector_poll.rs"]
 mod poll;
@@ -862,42 +866,79 @@ impl RuntimeIngestorHost {
     /// it holds back again, and counts the hold. The open ingest group is flushed whenever its
     /// cadence falls due meanwhile. A stop ends the hold and the intake: nothing the host had not
     /// yet taken in is dispatched.
-    async fn hold_intake(&mut self, until: Instant) -> IngestorIntakeResult<()> {
+    async fn hold_intake(
+        &mut self,
+        until: Instant,
+        mut maintenance: Option<&mut dyn IngestorReadHold>,
+    ) -> IngestorIntakeResult<()> {
+        enum HoldWake {
+            FlushOrStopChanged,
+            Stopped,
+            TransportFailed(Report<IngestorError>),
+        }
+
         let started = Instant::now();
         if let Some(allowance) = &self.allowance {
             allowance.record_hold_started();
         }
-        let ended = loop {
-            nervix_primitives::task::consume_budget().await;
-            // A stop an earlier wait already saw on this receiver changes it no more.
-            if *self.delivery_stop.borrow() {
-                break Err(Report::new(IngestorIntakeError::Stopped));
-            }
-            let next_flush = self.collector.next_flush();
-            let delivery_stop = &mut self.delivery_stop;
-            let interrupted = async {
-                nervix_primitives::select! {
-                    changed = delivery_stop.changed() => changed.is_err(),
-                    () = wait_for_flush(next_flush) => false,
+        let mut retry_after = None;
+        let ended = 'hold: loop {
+            let transport = reborrow_maintenance(&mut maintenance);
+            let mut servicing = pin!(async move {
+                if let Some(delay) = retry_after {
+                    sleep(delay).await;
                 }
-            };
-            // The deadline is the boundary's timer; once it passes, the caller asks the
-            // allowance again.
-            let Ok(stopped) = timeout_at(until, interrupted).await else {
-                break Ok(());
-            };
-            if stopped {
-                break Err(Report::new(IngestorIntakeError::Stopped));
-            }
-            // The stop signal changed, which the next turn reads, or the open group's flush fell
-            // due, which a flush that finds nothing due leaves as it is.
-            if self
-                .collector
-                .next_flush()
-                .is_some_and(|due| due <= Instant::now())
-                && let Err(error) = self.flush().await
-            {
-                break Err(error);
+                maintain_held_transport(transport, until).await
+            });
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                // A stop an earlier wait already saw on this receiver changes it no more.
+                if *self.delivery_stop.borrow() {
+                    break 'hold Err(Report::new(IngestorIntakeError::Stopped));
+                }
+                let next_flush = self.collector.next_flush();
+                let delivery_stop = &mut self.delivery_stop;
+                let interrupted = async {
+                    nervix_primitives::select! {
+                        changed = delivery_stop.changed() => {
+                            if changed.is_err() {
+                                HoldWake::Stopped
+                            } else {
+                                HoldWake::FlushOrStopChanged
+                            }
+                        }
+                        () = wait_for_flush(next_flush) => HoldWake::FlushOrStopChanged,
+                        error = &mut servicing => HoldWake::TransportFailed(error),
+                    }
+                };
+                // The deadline is the boundary's timer. Once it passes, the caller asks the
+                // allowance again.
+                let Ok(wake) = timeout_at(until, interrupted).await else {
+                    break 'hold Ok(());
+                };
+                match wake {
+                    HoldWake::Stopped => {
+                        break 'hold Err(Report::new(IngestorIntakeError::Stopped));
+                    }
+                    HoldWake::FlushOrStopChanged => {}
+                    HoldWake::TransportFailed(error) => {
+                        // A control failure judged none of this batch's records. Retry the
+                        // control work while the records keep their ordinary allowance and
+                        // settlement.
+                        self.report_error(format!("{error:#}"));
+                        retry_after = Some(self.runtime.inner.data_plane.ingestor_error_retry());
+                        break;
+                    }
+                }
+                // The stop signal changed, which the next turn reads, or a flush fell due.
+                if self
+                    .collector
+                    .next_flush()
+                    .is_some_and(|due| due <= Instant::now())
+                    && let Err(error) = self.flush().await
+                {
+                    break 'hold Err(error);
+                }
             }
         };
         if let Some(allowance) = &self.allowance {
@@ -1370,6 +1411,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
     async fn intake_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        mut maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         let costs = match &self.allowance {
             Some(allowance) => {
@@ -1405,7 +1447,8 @@ impl IngestorHostServices for RuntimeIngestorHost {
                             self.take_in_unacknowledged(std::mem::take(&mut run))
                                 .await?;
                         }
-                        self.hold_intake(until).await?;
+                        self.hold_intake(until, reborrow_maintenance(&mut maintenance))
+                            .await?;
                     }
                 }
             }
@@ -1419,6 +1462,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
     async fn intake_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        mut maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<IngestorBatchAcknowledgement> {
         let costs = match &self.allowance {
             Some(allowance) => {
@@ -1459,7 +1503,8 @@ impl IngestorHostServices for RuntimeIngestorHost {
                             let taken = self.take_in_acknowledged(std::mem::take(&mut run)).await?;
                             join_run(&mut acknowledgement, taken);
                         }
-                        self.hold_intake(until).await?;
+                        self.hold_intake(until, reborrow_maintenance(&mut maintenance))
+                            .await?;
                     }
                 }
             }
@@ -2279,9 +2324,20 @@ pub(super) async fn run_ingestor_instance_with_retry<C>(
                 ..window
             },
             IngestorReadBudget::WaitUntil(until) => {
-                match hold_for_allowance(&mut host, &mut shutdown, until).await {
+                let maintenance = connector.hold_maintenance();
+                match hold_for_allowance(&mut host, &mut shutdown, until, maintenance).await {
                     AllowanceHoldEnd::Returned | AllowanceHoldEnd::Restarting => continue,
                     AllowanceHoldEnd::Stopping => break,
+                    AllowanceHoldEnd::Failed(error) => {
+                        let delay = ingestor_retry_delay(retry_delay, error_retry);
+                        host.record_transient_error(ingestor_failure_reason(&error), delay);
+                        host.report_error(format!("{error:#}"));
+                        if !wait_for_retry(&mut host, &mut shutdown, delay).await {
+                            break;
+                        }
+                        retry_delay = next_retry_delay(retry_delay, retry_policy, retry_settings);
+                        continue;
+                    }
                 }
             }
         };
@@ -2417,7 +2473,7 @@ where
     if let (IngestorSettlement::Individual, IngestorAckPolicy::Parallel { timeout, .. }) =
         (C::SETTLEMENT, policy.acknowledgement)
     {
-        return IndividualBatch::intake(host, messages, timeout)
+        return IndividualBatch::intake(host, messages, timeout, connector.hold_maintenance())
             .await
             .settle(connector, host, settlement)
             .await;
@@ -2435,7 +2491,9 @@ where
         .collect();
     match policy.acknowledgement {
         IngestorAckPolicy::None => {
-            let intake = host.intake_unacknowledged(intake_messages).await;
+            let intake = host
+                .intake_unacknowledged(intake_messages, connector.hold_maintenance())
+                .await;
             if let Err(error) = intake {
                 if error.current_context().stopped() {
                     host.record_unconfirmed_stop(positions.len());
@@ -2448,7 +2506,9 @@ where
         }
         IngestorAckPolicy::Sequential { timeout, .. }
         | IngestorAckPolicy::Parallel { timeout, .. } => {
-            let intake = host.intake_acknowledged(intake_messages).await;
+            let intake = host
+                .intake_acknowledged(intake_messages, connector.hold_maintenance())
+                .await;
             let acknowledgement = match intake {
                 Ok(acknowledgement) => acknowledgement,
                 Err(error) => {

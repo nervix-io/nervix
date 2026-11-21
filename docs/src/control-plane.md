@@ -915,7 +915,8 @@ node it reaches is refused: its record acknowledgements fail, and an ingestor wi
 redelivers the records. Failover is therefore at least once, not exactly once. A stateful processor
 that applied a record before its output was refused applies the redelivered record again, as the
 [WASM replay contract](wasm-state.md#replay-duplicates-and-exactly-once) and a stateful inferencer's
-[forced recovery](shutdown.md#when-the-former-owner-is-gone) describe.
+[forced recovery](shutdown.md#when-the-former-owner-is-gone) describe; see also [Replay, Skips And
+Duplicates](inferencer-state.md#replay-skips-and-duplicates).
 
 A survivor can also accept a batch before its own installation of the failover revision reaches the
 new route, and forward it to the lost owner. Such a batch never reached the lost owner, so it is

@@ -525,6 +525,13 @@ impl Restore {
 #[pymethods]
 impl Outcome {
     #[getter]
+    fn node_inspection(&self) -> Option<crate::node_inspection::NodeInspection> {
+        self.outcome
+            .node_inspection()
+            .map(crate::node_inspection::NodeInspection::new)
+    }
+
+    #[getter]
     fn entity_labels(&self) -> Option<crate::entity_labels::EntityLabelsInspection> {
         self.outcome
             .entity_labels()

@@ -531,20 +531,27 @@ impl Runtime {
             };
             // A relay is rebound unit by unit: the units this node owned, the owner each unit had,
             // and the units it owns now decide which owner and state tasks stop and start.
-            let mut layout_replaced = false;
+            let mut ingestor_layout_replaced = false;
             let mut changed_units = desired_node.units.keys().copied().collect::<BTreeSet<_>>();
             let (previous_local_units, previous_unit_owners) = if let Some(execution) =
                 self.inner.executions.get(domain)
                 && let Some(existing) = Self::scheduled_node(&execution.revision, entity)
             {
-                layout_replaced = existing.units.keys().ne(desired_node.units.keys());
-                changed_units.retain(|unit| {
-                    existing.units.get(unit).is_none_or(|previous| {
-                        let desired = &desired_node.units[unit];
-                        previous.primary_node != desired.primary_node
-                            || previous.assigned_nodes != desired.assigned_nodes
-                    })
-                });
+                ingestor_layout_replaced = entity.kind == ModelKind::Ingestor
+                    && existing.units.keys().ne(desired_node.units.keys());
+                if ingestor_layout_replaced {
+                    // Retire the previous placement tasks even for units removed by a shrink.
+                    // Then bind prepared state for every replacement, including retained owners.
+                    changed_units.extend(existing.units.keys().copied());
+                } else {
+                    changed_units.retain(|unit| {
+                        existing.units.get(unit).is_none_or(|previous| {
+                            let desired = &desired_node.units[unit];
+                            previous.primary_node != desired.primary_node
+                                || previous.assigned_nodes != desired.assigned_nodes
+                        })
+                    });
+                }
                 let local = existing
                     .units_executing_on(local_node_id)
                     .intersection(&changed_units)
@@ -562,7 +569,7 @@ impl Runtime {
             if entity.kind == ModelKind::Ingestor {
                 for unit in previous_local_units.difference(&desired_local_units) {
                     let key = DomainNodeUnitRef::new(entity.in_domain(domain), *unit);
-                    if !layout_replaced || self.inner.ingestors.contains_key(&key) {
+                    if !ingestor_layout_replaced || self.inner.ingestors.contains_key(&key) {
                         self.stop_ingestor_unit(
                             domain,
                             &IngestorName::from(&entity.identifier),
@@ -936,8 +943,7 @@ impl Runtime {
         let explicitly_replaced = entities.iter().cloned().collect::<BTreeSet<_>>();
         let reassigned_units = reassignments.clone();
         let reassignments =
-            SortedSet::from_unsorted(reassignments.iter().map(|unit| unit.node.clone()).collect())
-                .into_vec();
+            SortedSet::from_unsorted(reassignments.iter().map(|unit| unit.node.clone()).collect());
         let activation_plan = &revision.activation;
         let resource_plans = &revision.resources;
         let entrypoints = &revision.entrypoints;
@@ -1022,7 +1028,16 @@ impl Runtime {
         }
         self.force_flush_domain(domain);
 
-        Box::pin(self.stop_replaced_ingestor_layouts(domain, Some(&revision))).await?;
+        let replaced_ingestor_layouts =
+            Box::pin(self.stop_replaced_ingestor_layouts(domain, Some(&revision))).await?;
+        // A smaller layout can keep every remaining unit on its previous assignment. Its
+        // prepared state still needs to replace the placement before the readers start.
+        let mut placement_changes = reassignments;
+        placement_changes.extend(
+            replaced_ingestor_layouts
+                .into_iter()
+                .map(|ingestor| NodeRef::new(ModelKind::Ingestor, &ingestor)),
+        );
 
         // Materialized relay state uses a start-version-qualified schema fingerprint. Install the
         // desired fingerprints before constructing state so the post-swap stale-state purge does
@@ -1040,7 +1055,7 @@ impl Runtime {
             .rebind_reassigned_nodes(
                 domain,
                 &revision,
-                &reassignments,
+                &placement_changes,
                 local_node_id,
                 &repartitioned,
             )

@@ -14,12 +14,14 @@
 
 use std::io::Write;
 
+use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use nervix_execution::{Cancellation, MemoryClass, Reservation};
+use meticulous::OptionExt as _;
+use nervix_execution::{Cancellation, Executor, MemoryClass, Reservation};
 use nervix_primitives::sync::StdArc;
 
 use super::{
-    Runtime, SnapshotStagingError, StagedArtifact,
+    RESTORE_STATE_CHUNK_BYTES, Runtime, SnapshotStagingError, StagedArtifact, StagedSnapshotWriter,
     backup_state::stored_branch::StoredBranchCheckpoint,
     inferencer_state::{InferencerGeneration, ReplicatedInferencerState},
     published_generation::Generation,
@@ -124,31 +126,49 @@ impl CapturedInferencer {
         raw_bytes: u64,
         snapshot_bytes: u64,
     ) -> Result<(StagedArtifact, InferencerArchiveMetadata), Report<SnapshotStagingError>> {
-        let tensors_working = snapshot_bytes
-            .checked_mul(2)
-            .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
-        let working = tensors_working
-            .checked_add(3 * 64 * 1024)
-            .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
-        let charge = match self.charge.take() {
-            Some(mut charge) => {
-                charge
-                    .grow_to(working)
-                    .change_context(SnapshotStagingError::Admission)?;
-                charge
-            }
-            None => runtime
-                .executor()
-                .reserve(MemoryClass::Bulk, working)
-                .await
-                .change_context(SnapshotStagingError::Admission)?,
-        };
+        let charge = self
+            .reserve_staging(runtime.executor(), snapshot_bytes)
+            .await?;
         let writer = runtime.try_stage_artifact(raw_bytes).await?;
         writer
             .encode_artifact_with_result(charge, move |output, cancellation| {
                 self.write(output, cancellation)
             })
             .await
+    }
+
+    async fn reserve_staging(
+        &mut self,
+        executor: &Executor,
+        snapshot_bytes: u64,
+    ) -> Result<Reservation, Report<SnapshotStagingError>> {
+        let tensors_working = snapshot_bytes
+            .checked_mul(2)
+            .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
+        let segment_bytes: u64 = RESTORE_STATE_CHUNK_BYTES.arch_into();
+        // Allow two fixed blocks for native and raw tensor work beside the configured writer.
+        let scratch = segment_bytes
+            .checked_mul(2)
+            .verified("two persisted segments fit in u64");
+        let output_bytes = StagedSnapshotWriter::encoding_buffer_bytes(executor).max(segment_bytes);
+        let buffers = scratch
+            .checked_add(output_bytes)
+            .verified("the fixed blocks and the validated u32 bulk chunk fit in u64");
+        let working = tensors_working
+            .checked_add(buffers)
+            .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
+        match self.charge.take() {
+            Some(mut charge) => {
+                charge
+                    .grow_to(working)
+                    .change_context(SnapshotStagingError::Admission)?;
+                Ok(charge)
+            }
+            None => executor
+                .reserve(MemoryClass::Bulk, working)
+                .await
+                .change_context(SnapshotStagingError::Admission),
+        }
     }
 
     fn write(
@@ -197,5 +217,48 @@ impl CapturedInferencer {
             incarnation,
             shapes,
         })
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use ubyte::ByteUnit;
+
+    use super::*;
+
+    #[rstest::rstest]
+    #[case::large_chunk(ByteUnit::Mebibyte(4), 4 * 1024 * 1024 + 130 * 1024)]
+    #[case::small_chunk(ByteUnit::Kibibyte(32), 194 * 1024)]
+    #[nervix_primitives::test]
+    async fn inferencer_capture_grows_the_retained_charge_for_the_staging_buffer(
+        #[case] chunk: ByteUnit,
+        #[case] expected: u64,
+    ) {
+        let executor = StagedSnapshotWriter::encoding_test_executor(chunk);
+        let snapshot_bytes = 1024;
+        let charge = executor
+            .try_reserve(MemoryClass::Bulk, snapshot_bytes)
+            .assured("the stored tensor snapshot retains its native charge");
+        let mut captured = CapturedInferencer {
+            revision: 1,
+            source: Source::Stored(BranchSnapshot {
+                incarnation: 1,
+                tensors: vec![TensorSnapshot {
+                    shape: vec![1],
+                    values: std::borrow::Cow::Owned(vec![1.0_f32]),
+                }],
+            }),
+            charge: Some(charge),
+        };
+        let charge = captured
+            .reserve_staging(&executor, snapshot_bytes)
+            .await
+            .assured("the test bulk budget fits the tensor encoder");
+        StagedSnapshotWriter::assert_staging_encoding_charge(&executor, charge, expected).await;
     }
 }

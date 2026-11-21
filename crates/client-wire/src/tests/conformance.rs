@@ -583,6 +583,20 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             ),
         ),
         (
+            "server_command_nodes.nxsm",
+            reply(
+                31,
+                ReplyBody::Command(Box::new({
+                    let mut outcome = command_outcome(CommandDisposition::Completed {
+                        already_existed: false,
+                    });
+                    outcome.node_inspection =
+                        Some(Box::new(crate::node_inspection::tests::example()));
+                    outcome
+                })),
+            ),
+        ),
+        (
             "server_command_redirect.nxsm",
             command(
                 2,
@@ -1935,6 +1949,35 @@ fn render_command(head: &str, outcome: &CommandOutcome, lines: &mut Vec<String>)
     }
     if let Some(labels) = &outcome.entity_labels {
         render_entity_labels(labels, lines);
+    }
+    if let Some(inspection) = &outcome.node_inspection {
+        for row in &inspection.nodes {
+            lines.push(format!(
+                "NODE name={} live={} voter={} cordoned={} terminating={}",
+                row.name, row.live, row.voter, row.cordoned, row.terminating
+            ));
+            let Some(record) = &row.record else {
+                lines.push("NODE_RECORD none".to_string());
+                continue;
+            };
+            let number = |value: Option<std::num::NonZeroU64>| {
+                value.map_or_else(|| "none".to_string(), |value| value.to_string())
+            };
+            lines.push(format!(
+                "NODE_RECORD revision={} cpu_count={} memory_limit={} architecture={}",
+                record.revision,
+                number(record.cpu_count),
+                number(record.memory_limit),
+                text(record.properties.architecture.as_str())
+            ));
+            for (key, value) in record.tags.iter() {
+                lines.push(format!(
+                    "NODE_TAG key={} value={}",
+                    text(key.as_str()),
+                    text(value.as_str())
+                ));
+            }
+        }
     }
 }
 

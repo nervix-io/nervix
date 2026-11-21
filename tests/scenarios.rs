@@ -13513,6 +13513,67 @@ async fn when_runtime_preparation_is_released(world: &mut ScenarioWorld, node_id
         .release_runtime_preparation_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[when(expr = "runtime readiness for domain {string} on node {string} is paused")]
+async fn when_runtime_readiness_is_paused(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node_id: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_runtime_readiness_on(crate::common::cluster::node_name(&node_id), domain);
+}
+
+#[then(
+    expr = "within {string} node {string} reaches its runtime readiness pause for domain {string}"
+)]
+async fn then_runtime_readiness_is_paused(
+    world: &mut ScenarioWorld,
+    within: String,
+    node_id: String,
+    domain: String,
+) {
+    let bound = parse_duration_text(&within).expect("the step's bound is a valid duration");
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        bound,
+        world.fault_injection.wait_for_runtime_readiness_pause(
+            &crate::common::cluster::node_name(&node_id),
+            &domain,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "node '{node_id}' did not reach its runtime readiness pause for domain '{}' within \
+             {within}",
+            domain.as_str()
+        )
+    });
+}
+
+#[when(expr = "runtime readiness for domain {string} on node {string} is released")]
+async fn when_runtime_readiness_is_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+    node_id: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_runtime_readiness_pause(&crate::common::cluster::node_name(&node_id), &domain);
+}
+
 #[when(expr = "application health probes from node {string} to node {string} are restored")]
 async fn when_directed_health_probes_are_restored(
     world: &mut ScenarioWorld,
@@ -14266,7 +14327,7 @@ fn then_node_refused_to_join(world: &mut ScenarioWorld, node_id: String, reason:
 
 /// The refused node has stopped, but its run stays live in the observer's gossip until the failure
 /// detector declares it dead. The membership the observer reports must never name it in that time,
-/// whatever the cluster's licensing policy has become since the refusal.
+/// whatever the cluster's licensing policy or its live voters have become since the refusal.
 #[then(
     expr = "node {string} never admits the refused run of node {string} to its raft membership \
             before that run leaves gossip"

@@ -281,6 +281,7 @@ pub fn expression_to_plexus(
                 FieldScope::Payload => Some("payload".to_string()),
                 FieldScope::PartialOutput => Some("partial_output".to_string()),
                 FieldScope::Error => Some("error".to_string()),
+                FieldScope::Node => Some(crate::NODE_SCOPE.to_string()),
             };
             let field = reference.field.as_str();
             Ok(match prefix {
@@ -1014,6 +1015,17 @@ impl Statement {
                 show.format,
             ),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
+            Self::ShowNodes(show) => {
+                let mut text = "SHOW NODES".to_string();
+                if let Some(selector) = &show.selector {
+                    text.push_str(" WHERE ");
+                    text.push_str(&expression_to_plexus(selector)?);
+                }
+                text.push_str(" FORMAT ");
+                text.push_str(show.format.as_ref());
+                text.push(';');
+                Ok(text)
+            }
             Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ActivateLicense(activate) => {
                 let kind = match activate.kind {

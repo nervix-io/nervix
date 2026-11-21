@@ -36,6 +36,8 @@ mod list_shapes;
 
 #[path = "vm/list_conversions.rs"]
 mod list_conversions;
+#[path = "vm/node_selectors.rs"]
+mod node_selectors;
 
 #[cfg(feature = "benchmark-allocations")]
 #[path = "vm/allocation_probe.rs"]
@@ -2877,6 +2879,7 @@ criterion_group!(
     list_statistics::list_statistic_benches,
     list_shapes::list_shape_benches,
     list_arithmetic::benches,
-    list_conversions::list_conversion_benches
+    list_conversions::list_conversion_benches,
+    node_selectors::node_tag_benches
 );
 criterion_main!(benches);

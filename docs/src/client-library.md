@@ -596,6 +596,15 @@ C and C++ endpoint accessors, credit and ownership are described in the
 [C and C++ Client Library](client-library-c.md#publish-through-a-client-ingestor).
 
 
+## Inspect Cluster Nodes
+
+Read `CommandOutcome::node_inspection` after `SHOW NODES` to get the typed result in either
+presentation format. Each row includes a `ClusterNodeName`, the four membership flags and an
+optional committed record. The record preserves exact tags and the typed detections, including
+reasons when a value is undetected. A selector that matches no nodes returns an empty report. A
+selector error on an individual node leaves its diagnostic on the outcome. See
+[Selecting nodes](placement.md#selecting-nodes).
+
 ## Transaction Handles And Attach
 
 `SHOW LABELS ON <entity> FORMAT TEXT|JSON` also returns

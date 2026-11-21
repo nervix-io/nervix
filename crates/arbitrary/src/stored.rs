@@ -923,7 +923,7 @@ impl Arbitrary<'_> {
     }
 
     /// The cause a stop records: an operator's stop, or the licensing stop gate at any instant.
-    pub fn stop_cause(&mut self) -> DomainStopCause {
+    fn stop_cause(&mut self) -> DomainStopCause {
         if self.entropy.flag() {
             DomainStopCause::Operator
         } else {

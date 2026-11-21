@@ -125,6 +125,7 @@ pub enum Statement {
     DescribeClient(DescribeClient),
     AlterBranch(AlterBranch),
     DescribeBranch(DescribeBranch),
+    ShowNodes(ShowNodes),
 }
 
 impl Statement {
@@ -211,6 +212,7 @@ impl Statement {
             | Self::ShowProcessorState(_)
             | Self::ShowWasmProcessorState(_)
             | Self::ShowClusterStatus(_)
+            | Self::ShowNodes(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
             | Self::DescribeCluster(_)
@@ -405,6 +407,15 @@ pub struct ShowCreate {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowClusterStatus;
+
+/// Previews an optional selector over the cluster's committed node records.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct ShowNodes {
+    pub selector: Option<crate::Expression>,
+    pub format: InspectionFormat,
+}
 
 /// Describes every live node of the cluster: the prerequisites it brings, and how its timings
 /// differ from the leader's.

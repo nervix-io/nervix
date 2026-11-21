@@ -261,7 +261,7 @@ impl IngestorDeclaration for NatsSubjectIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         external_partitions: crate::IngestorExternalPartitions::None,
         events: crate::DeclaredEvents::NONE,
-        instancing: crate::IngestorInstancingCapability::PerPartition,
+        instancing: crate::IngestorInstancingCapability::Instances,
         headers: Some(HeaderModel::exact(HeaderLayout::OrderedRepeats)),
         payload: crate::IngestorPayloadDeclaration::BYTES,
         metadata: IngestorMetadataDeclaration::new(&[

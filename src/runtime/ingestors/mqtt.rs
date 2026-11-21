@@ -125,7 +125,7 @@ impl MqttTopicIngestorStartPlan {
         ingestor: &IngestorSpec,
     ) -> error_stack::Result<ResolvedMqttIngestor, IngestorConnectorStartError> {
         let dispatcher = runtime.inner.remote_dispatcher.load();
-        let read_ahead_dropped = runtime.inner.metrics.ingestor_read_ahead_dropped_payloads(
+        let read_ahead_overflow = runtime.inner.metrics.ingestor_read_ahead_dropped_payloads(
             &ingestor.domain,
             &ingestor.name,
             ingestor.unit,
@@ -171,7 +171,7 @@ impl MqttTopicIngestorStartPlan {
                     qos: self.qos,
                     acknowledgement_window: self.mode.acknowledgement_window(),
                     dns: dns.clone(),
-                    read_ahead_dropped: read_ahead_dropped.clone(),
+                    read_ahead_overflow: read_ahead_overflow.clone(),
                 });
                 let rendered = Arc::new(RenderedMqttClient {
                     connector,
@@ -192,7 +192,7 @@ impl MqttTopicIngestorStartPlan {
         let connector = rendered
             .connector
             .clone()
-            .with_read_ahead_dropped(read_ahead_dropped);
+            .with_read_ahead_overflow(read_ahead_overflow);
         Ok(ResolvedMqttIngestor {
             connector,
             client_mounts: rendered.mounts.clone(),

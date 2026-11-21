@@ -1936,8 +1936,6 @@ enum CommandVariant {
     ApplyAutomaticDomainSchedule,
     ReconcileOwnershipHandoffPreparations,
     PutDomain,
-    StartDomain,
-    StopDomainBeforeAnyWork,
     RequestDomainStop,
     WithdrawDomainStopRequest,
     EndDomainStop,
@@ -2014,8 +2012,6 @@ impl CommandVariant {
                 Self::ReconcileOwnershipHandoffPreparations
             }
             ConsensusCommand::PutDomain { .. } => Self::PutDomain,
-            ConsensusCommand::StartDomain { .. } => Self::StartDomain,
-            ConsensusCommand::StopDomainBeforeAnyWork { .. } => Self::StopDomainBeforeAnyWork,
             ConsensusCommand::RequestDomainStop { .. } => Self::RequestDomainStop,
             ConsensusCommand::WithdrawDomainStopRequest { .. } => Self::WithdrawDomainStopRequest,
             ConsensusCommand::EndDomainStop { .. } => Self::EndDomainStop,
@@ -2227,24 +2223,6 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
                 mutation: optional_lease(arbitrary),
             }
         }
-        CommandVariant::StartDomain => {
-            let domain_id = arbitrary.rule_name();
-            let start = arbitrary.start_point();
-            let clock = optional(arbitrary, Arbitrary::domain_clock_state);
-            let authority = optional(arbitrary, Arbitrary::node_identity);
-            ConsensusCommand::StartDomain {
-                domain_id,
-                start,
-                clock,
-                authority,
-                mutation: optional_lease(arbitrary),
-            }
-        }
-        CommandVariant::StopDomainBeforeAnyWork => ConsensusCommand::StopDomainBeforeAnyWork {
-            domain_id: arbitrary.rule_name(),
-            mutation: optional_lease(arbitrary),
-            cause: arbitrary.stop_cause(),
-        },
         CommandVariant::RequestDomainStop => ConsensusCommand::RequestDomainStop {
             domain_id: arbitrary.rule_name(),
             request: Box::new(if arbitrary.entropy().flag() {

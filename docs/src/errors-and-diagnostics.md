@@ -2339,13 +2339,14 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 
 ### Whole-Batch And Node Failures
 
-Emitter interaction metrics project the host's existing typed result into a bounded observation:
-success, retryable failure (also an interrupted attempt), invalid connector configuration, or
-terminal preparation/contract violation. An unknown or repeated record answer belongs to the
-last class. The projection does not replace a report, render its cause into a label or change
-retry and acknowledgement policy. A settled record rejection can therefore accompany a
-successful host attempt. The exact label spellings and families belong to
-[Connector Interactions](metrics-and-observability.md#connector-interactions).
+Emitter interaction metrics read the typed outcome at the host boundary. They count a completed
+attempt as `succeeded` even when the destination definitively refused some rows. Each such row
+has its own typed rejection code. Retryable failures and interrupted attempts count as
+`transient`, invalid connector configuration as `misconfigured`, and terminal preparation or
+contract failures as `violation`. An unknown or repeated record answer belongs to `violation`.
+The original cause remains in the diagnostic report. Only the bounded classes reach the metric
+labels. [Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
+owns the families and their exact counting points.
 
 A planned batch that fails as a whole, rather than one message at a time, returns a
 `PlannedGeneralError` report together with the acknowledgements of every message the batch held.

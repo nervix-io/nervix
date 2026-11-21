@@ -34,9 +34,9 @@ depth depends on arrivals during the system-owned 100 µs window. See the
 WASM code compilation is shared while mutable guest state is not. See
 [Module Sharing And Branch Memory](wasm-processor-guests.md#module-sharing-and-branch-memory).
 
-UDF-bearing expressions and JAQ transformations run on the node's extension workers, which
-nothing else uses. Heavy UDF or JAQ use and the number of concurrent paths that run them are
-extension sizing inputs. A native UDF that never returns permanently occupies one extension worker,
+UDF-bearing expressions, JAQ transformations and inferencer model runs use the node's extension
+workers, which nothing else uses. Heavy UDF, JAQ or model use and the number of concurrent paths
+that run them are extension sizing inputs. A native UDF that never returns permanently occupies one extension worker,
 and never a worker another class needs. See the
 [UDF watchdog consequences](udfs.md#nulls-errors-and-volatility).
 
@@ -51,8 +51,8 @@ saturating one cannot take the slots another is entitled to.
 | --- | --- | --- |
 | Control | 1 | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
 | Credentials | 1 | Password hashing and verification for users being created or authenticated |
-| Data | Share of remaining CPUs | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, ingest branch preparation and model inference |
-| Extension | Share of remaining CPUs | Operator-supplied code the node cannot bound: UDF-bearing expressions and JAQ transformations |
+| Data | Share of remaining CPUs | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, and ingest branch preparation |
+| Extension | Share of remaining CPUs | Operator-supplied code the node cannot bound: UDF-bearing expressions, JAQ transformations and inferencer model runs |
 | Bulk | Share of remaining CPUs | Whole-transfer work: resource archives, large read results, and compiling UDFs, WASM modules, protobuf descriptors and ONNX models |
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
 | Filesystem storage | 2 | Every other synchronous filesystem and database operation, including Iceberg's staged files |
@@ -63,9 +63,15 @@ remaining CPU claim, with one place each on small nodes; the total is at most th
 count and five. [Execution Capabilities](node-settings.md#execution-capabilities) lists the per-class
 worker and queue overrides and their validation.
 
-An ONNX binding inspection reserves 16 KiB from the bulk budget for sequential native-image
-preparation. That fixed buffer is read and released on the admitted worker, with cancellation
-checked between reads. Its thirty-second deadline includes waiting for that memory, the worker
+The staged snapshot encoder uses a buffer of one resolved bulk chunk. When sizing bulk memory
+for concurrent backup and restore work, allow that buffer for each encoding job alongside its
+checkpoint or tensor working memory. Persisted checkpoint segments are 64 KiB. The staging and
+installation charges are detailed in [Backup And Restore Architecture](backup-and-restore-architecture.md).
+
+An ONNX binding inspection reserves one bulk chunk (`--execution-bulk-chunk-bytes`, at most
+64 KiB by default) from the bulk budget for sequential native-image preparation. That buffer is
+read and released on the admitted worker, with cancellation checked between reads. Its
+thirty-second deadline includes waiting for that memory, the worker
 queue, image preparation and the native session's build, metadata extraction and release. ONNX
 Runtime's own heap remains outside this buffer charge. Only an absolute `ORT_DYLIB_PATH` naming a
 regular file receives the read hint; other library discovery and load failures remain the external

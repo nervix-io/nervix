@@ -135,6 +135,16 @@ describe the committed acceptance policy captured with that view. `domain` is `N
 {{#include ../../tests/client_conformance/python/suite/cluster/test_entity_labels.py:entity_labels}}
 ```
 
+### Inspect Cluster Nodes
+
+`outcome.node_inspection` holds a `NodeInspection` for either presentation of `SHOW NODES`.
+It returns `None` when the outcome has no node inspection. The report outlives the outcome
+and gives the ordered `names` and full `json` projection of membership and committed records.
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_inspection.py:node_inspection}}
+```
+
 ### Inspect Materialized State
 
 `outcome.state_inspection` returns an independently retained inspection, or `None` when the

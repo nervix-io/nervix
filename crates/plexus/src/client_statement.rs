@@ -797,10 +797,13 @@ mod connector_completion_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{
-        ClientIngestorEntity, CreateStatement, HttpIngestorEntity, KafkaEmitterEntity, Model,
-        MqttIngestorEntity, RequestedResourceVersion, SentryEmitterEntity,
+        BuiltinFunctionName, ClientIngestorEntity, CreateStatement, HttpIngestorEntity,
+        KafkaEmitterEntity, Model, MqttIngestorEntity, RequestedResourceVersion,
+        SentryEmitterEntity, WindowBound, WindowRouteValue, WindowStateLimit,
     };
 
     use super::*;
@@ -943,6 +946,133 @@ mod tests {
                 )),
             ))
         ));
+    }
+
+    /// The builtin scopes completion expects at the end of `input`.
+    fn builtin_scopes(input: &str) -> Vec<BuiltinFunctionScope> {
+        let mut scopes = Vec::new();
+        for expectation in suggest_client_expectations(input, input.len()) {
+            if let CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(scope)) =
+                expectation
+            {
+                scopes.push(scope);
+            }
+        }
+        scopes
+    }
+
+    /// The scope of a window route's value under `width` and `state_limit`, written inside the
+    /// builtin calls `enclosing`, outermost first.
+    fn window_route(
+        width: WindowBound,
+        state_limit: WindowStateLimit,
+        enclosing: &[&str],
+    ) -> BuiltinFunctionScope {
+        let mut enclosing_calls = Vec::new();
+        for name in enclosing {
+            enclosing_calls.push(BuiltinFunctionName::parse(name).expect("a valid builtin name"));
+        }
+        BuiltinFunctionScope::WindowRoute(WindowRouteValue {
+            width,
+            state_limit,
+            enclosing_calls,
+        })
+    }
+
+    #[test]
+    fn a_window_route_value_carries_its_window_and_the_calls_it_is_inside() {
+        let count = "CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 \
+                     MESSAGES UNBRANCHED TO histories SET ";
+        let unbounded = WindowStateLimit::Unbounded;
+        for (tail, enclosing) in [
+            ("cpu_values = ", &[][..]),
+            ("cpu_values = list_flatten(", &["list_flatten"][..]),
+            (
+                "cpu_values = list_flatten(COLLECT_VEC(",
+                &["list_flatten", "COLLECT_VEC"][..],
+            ),
+            (
+                "cpu_values = coalesce(list_mean(COLLECT_VEC(input.cpu)), ",
+                &["coalesce"][..],
+            ),
+            ("cpu_values = `count`(", &["count"][..]),
+            ("cpu_values = abs((", &["abs"][..]),
+            ("device = LAST(input.device), cpu_values = ", &[][..]),
+            ("cpu_values = COUNT(input.cpu) + ", &[][..]),
+            ("cpu_values = (", &[][..]),
+            ("cpu_values = udf::scale(", &[][..]),
+            ("cpu_values = TRY_CAST(", &[][..]),
+            ("cpu_values = COUNT(input.cpu) IN (", &[][..]),
+        ] {
+            assert_eq!(
+                builtin_scopes(&format!("{count}{tail}")),
+                [window_route(
+                    WindowBound::of_messages(3),
+                    unbounded,
+                    enclosing
+                )],
+                "{tail}"
+            );
+        }
+
+        let later_route = format!(
+            "{count}cpu_values = COLLECT_ARRAY(input.cpu) ON MESSAGE ERROR LOG TO others SET \
+             total = "
+        );
+        assert_eq!(
+            builtin_scopes(&later_route),
+            [window_route(WindowBound::of_messages(3), unbounded, &[])]
+        );
+
+        let duration = "CREATE IF NOT EXISTS WINDOW PROCESSOR history FROM readings WIDTH 10s \
+                        DURATION STEP 1s DURATION MAX STATE SIZE 1MiB BRANCHED BY by_device TO \
+                        histories SET cpu_values = ";
+        let one_mebibyte = NonZeroU64::new(1_048_576).expect("one mebibyte is positive");
+        assert_eq!(
+            builtin_scopes(duration),
+            [window_route(
+                WindowBound::of_duration("10s".to_string()),
+                WindowStateLimit::MaxBytes(one_mebibyte),
+                &[]
+            )]
+        );
+
+        let combined = "CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES 10s \
+                        DURATION STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = ";
+        let both = WindowBound {
+            messages: Some(3),
+            duration: Some("10s".to_string()),
+        };
+        assert_eq!(
+            builtin_scopes(combined),
+            [window_route(both, unbounded, &[])]
+        );
+    }
+
+    #[test]
+    fn positions_outside_a_window_route_value_keep_the_ordinary_functions() {
+        let window = "CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 \
+                      MESSAGES UNBRANCHED";
+        for input in [
+            format!(
+                "{window} TO histories SET cpu_values = COLLECT_ARRAY(input.cpu) WHERE \
+                 output.device = "
+            ),
+            format!(
+                "{window} TO histories SET cpu_values = COLLECT_ARRAY(input.cpu) ON MESSAGE ERROR \
+                 SEND TO failures SET reason = "
+            ),
+            "CREATE WINDOW PROCESSOR history FROM readings WHERE ".to_string(),
+            "CREATE WINDOW PROCESSOR history FROM readings FILTER WHERE input.cpu > ".to_string(),
+            "CREATE JUNCTION copy FROM readings UNBRANCHED TO histories SET cpu_values = "
+                .to_string(),
+        ] {
+            assert_eq!(
+                builtin_scopes(&input),
+                [BuiltinFunctionScope::Ordinary],
+                "{input}"
+            );
+        }
     }
 
     /// Bytes that differ from seed to seed, so a generated statement takes more than one shape.

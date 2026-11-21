@@ -2681,7 +2681,7 @@ installation; notices retain their ordinary best-effort delivery contract. No fr
 shape changes. Cluster inspection reports committed and per-node installed values.
 
 The public session listener starts while live cluster policy may still be unavailable. Authenticated
-`SHOW CLUSTER STATUS` and `DESCRIBE CLUSTER` work during that wait; status names the node's
+`SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER` and `SHOW NODES` work during that wait. Status names the node's
 `initializing` or `ready` initialization state. Other command batches are refused before durable
 admission until live policy is caught up and initialization completes. A durable command may be
 resuming an earlier execution, so this wait answers `OutcomeUnknown(NotYetAuthoritative)` under
@@ -2716,6 +2716,25 @@ and invalid metadata are refused. Empty values stay distinct from absent keys. T
 reply-transfer and `ReplyTooLarge` contracts apply to the complete typed outcome and rendering;
 parts never combine separate metadata reads. [Entity Labels](entity-labels.md) owns target,
 transaction and execution semantics.
+
+## Node Inspection
+
+A single-statement `SHOW NODES` command returns `CommandOutcome.node_inspection` for both
+`TEXT` and `JSON`. A successful read carries one `NodeInspection`, with a vector of unique node
+names in ascending order. Each
+row includes the answering node's observations of the node's live, voter, cordoned and
+terminating flags. A row's optional committed record contains the applied revision, optional CPU
+count and memory limit, the detected properties and the exact ordered tag map. Counts, byte sizes
+and revisions use unsigned 64-bit integers.
+
+Typed property choices preserve the differences between a detected value, no GPU device and an
+undetected value with its recorded reason. The GPU inventory retains its per-device model and
+memory detections and driver detection. The ONNX Runtime observation retains its version,
+execution-provider list and CUDA registration state. The decoder validates required flags and
+properties, declared choices, unique names, and the bounds of each record and of the reply. An
+empty successful result still carries its envelope. A selector that fails while evaluating one
+node's record excludes that node and includes its diagnostic with the successful outcome.
+Large replies use the ordinary reply-transfer and `ReplyTooLarge` contracts.
 
 ## State Inspection Envelope
 

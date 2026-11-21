@@ -37,9 +37,8 @@ use crate::{
     registry::{WindowAccumulatorShape, WindowStateSchemas},
     runtime::{
         ArchivedDeduplicatorKeys, ArchivedRows, ArchivedWindow, BranchKey,
-        DeduplicatorArchiveError, PendingArguments, RESTORE_STATE_WORKING_BYTES, Runtime,
-        SnapshotStagingError, StagedArtifact, WindowAccumulatorState, WindowArchiveError,
-        WindowCheckpointBuilder, WindowDelayedRemoval,
+        DeduplicatorArchiveError, PendingArguments, Runtime, SnapshotStagingError, StagedArtifact,
+        WindowAccumulatorState, WindowArchiveError, WindowCheckpointBuilder, WindowDelayedRemoval,
     },
     runtime_schema::{ArrowBodyError, RuntimeRecordBatch},
 };
@@ -361,8 +360,7 @@ async fn convert_keyspace(
         .stage_artifact(keys.encoded_bound())
         .await
         .change_context(BranchStateRestoreError::Storage)?;
-    let charge = executor
-        .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
+    let charge = VerifiedArchive::reserve_native_checkpoint_encoding(executor)
         .await
         .change_context(BranchStateRestoreError::Admission)?;
     writer

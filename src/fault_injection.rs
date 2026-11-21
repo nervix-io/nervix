@@ -906,6 +906,9 @@ impl FaultInjection {
         })?
     }
 
+    /// Gives back the observer `node` registered when it opened its consensus. A node gives its own
+    /// back once its consensus has stopped. The scenario harness gives back the one a node left
+    /// when its task panicked or was cancelled before that point.
     pub fn unregister_consensus(&self, node: &ClusterNodeName) {
         if let Some(mut state) = self.inner.consensus_probes.get_mut(node) {
             state.probe = None;

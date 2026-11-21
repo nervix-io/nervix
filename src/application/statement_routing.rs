@@ -36,6 +36,7 @@ pub(in crate::application) fn requires_request_domain(statement: &Statement) -> 
             | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
+            | Statement::ShowNodes(_)
             | Statement::DescribeCluster(_)
             | Statement::DescribeLicense(_)
             | Statement::ShowTransactions(_)
@@ -66,6 +67,7 @@ pub(in crate::application) fn requires_existing_domain(statement: &Statement) ->
             | Statement::Restore(_)
             | Statement::StopDomain(_)
             | Statement::ShowClusterStatus(_)
+            | Statement::ShowNodes(_)
             | Statement::DescribeCluster(_)
             | Statement::DescribeLicense(_)
             | Statement::ShowTransactions(_)
@@ -81,6 +83,7 @@ pub(in crate::application) fn requires_leader(statement: &Statement) -> bool {
     !matches!(
         statement,
         Statement::ShowClusterStatus(_)
+            | Statement::ShowNodes(_)
             | Statement::DescribeCluster(_)
             | Statement::DescribeLicense(_)
             | Statement::ShowTransactions(_)

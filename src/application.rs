@@ -184,6 +184,7 @@ mod model_validation;
 mod node_detection;
 mod node_identity;
 mod node_initialization;
+mod node_inspection;
 mod node_records;
 mod node_settings;
 mod observability_http;
@@ -629,6 +630,7 @@ impl Application {
             runtime,
             consensus: None,
             interconnect: None,
+            fault_injection: fault_injection.clone(),
         };
         startup
             .runtime
@@ -687,9 +689,7 @@ impl Application {
             operations: settings.consensus_operations,
             database: capabilities.consensus_database,
         };
-        let consensus_result = startup
-            .open_consensus(consensus_settings, &fault_injection)
-            .await;
+        let consensus_result = startup.open_consensus(consensus_settings).await;
         let consensus = match consensus_result {
             Ok(consensus) => consensus,
             Err(error) => {
@@ -853,6 +853,7 @@ impl Application {
             runtime,
             consensus,
             interconnect,
+            fault_injection: _,
         } = startup;
         let consensus =
             consensus.verified("startup assigns this handle before it reaches this point");
@@ -2866,7 +2867,7 @@ impl Application {
         // abandoned at the deadline. A server process whose deadline passes meanwhile is ended by
         // its deadline supervision.
         runtime.shutdown(deadline.remaining()).await;
-        consensus.shutdown().await;
+        ApplicationStartup::stop_consensus(&consensus, &fault_injection).await;
         let cluster_shutdown_result = cluster
             .shutdown()
             .await
