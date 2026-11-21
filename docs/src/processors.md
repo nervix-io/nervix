@@ -654,7 +654,10 @@ the fixed size the declaration supplies.
 for each admitted message, in arrival order, and carries its tensors from one message to the next.
 All state successors advance together after a message the model accepts. A message that fails
 alone leaves the preceding state intact, and `FILTER WHERE` runs before the model, so a filtered
-row changes no state.
+row changes no state. A batch too large for one job runs its messages as several jobs, and its
+state advances only once every job's outputs are joined into the batch's outputs. Messages that
+fail because their outputs cannot be joined leave the preceding state intact as well, so each
+comes again and counts once.
 
 Each admitted batch that advances the state publishes an immutable tensor generation. Nervix
 persists the newest generation on the runtime state snapshot interval and once more during a
