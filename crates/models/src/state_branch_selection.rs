@@ -143,6 +143,10 @@ impl StateBranchField {
             (Literal::Bool(value), ParseAsType::Bool) => {
                 Ok((RemoteRuntimeValue::Bool(*value), JsonValue::Bool(*value)))
             }
+            (Literal::Duration(value), ParseAsType::Duration) => Ok((
+                RemoteRuntimeValue::Duration(value.nanoseconds()),
+                JsonValue::String(value.to_string()),
+            )),
             (Literal::I64(value), ParseAsType::I64) => Ok((
                 RemoteRuntimeValue::I64(*value),
                 JsonValue::Number(JsonNumber::from(*value)),

@@ -19,7 +19,7 @@ use nervix_client_core::{
         SubscriptionRowsEncoder, SubscriptionRowsSkipped, SubscriptionType, WireEncodeError,
     },
 };
-use nervix_models::{ParseAsType, SchemaField, Timestamp};
+use nervix_models::{DurationValue, ParseAsType, SchemaField, Timestamp};
 use nervix_primitives::{sync::Arc, time::Instant};
 
 use crate::{
@@ -126,6 +126,7 @@ fn schema() -> RowSchema {
                     element: Box::new(ParseAsType::I64),
                 },
             ),
+            field("wait", ParseAsType::Duration),
         ],
         branch: Some(
             RowBranch::new(name("tenants"), vec![field("tenant", ParseAsType::String)])
@@ -180,6 +181,11 @@ fn write_row(
     cells.push_bytes(&[0, 255, 0x80])?;
     cells.push_redacted()?;
     cells.push_list(|elements| elements.push_i64(9))?;
+    if extreme {
+        cells.push_duration(DurationValue::MIN)?;
+    } else {
+        cells.push_duration(DurationValue::from_nanoseconds(1_500_000_000))?;
+    }
     Ok(())
 }
 
@@ -440,6 +446,10 @@ fn a_rows_event_copies_every_fixed_width_column_in_one_call_each() {
         fixed::<8>(&event, ROWS, 11, 2),
         [i64::MAX.to_ne_bytes(), 1_i64.to_ne_bytes()]
     );
+    assert_eq!(
+        fixed::<8>(&event, ROWS, 16, 2),
+        [i64::MIN.to_ne_bytes(), 1_500_000_000_i64.to_ne_bytes()]
+    );
     let value = u8::from(CellState::Value);
     let null = u8::from(CellState::Null);
     let redacted = u8::from(CellState::Redacted);
@@ -473,7 +483,8 @@ fn a_redacted_fixed_width_cell_is_written_as_zero_bytes() {
             cells.push_null()?;
             cells.push_bytes(&[])?;
             cells.push_redacted()?;
-            cells.push_list(|_| Ok(()))
+            cells.push_list(|_| Ok(()))?;
+            cells.push_duration(DurationValue::ZERO)
         })
         .assured("the row fits the limits");
     let frame = batch

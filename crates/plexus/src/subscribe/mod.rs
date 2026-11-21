@@ -8,9 +8,9 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, field_ref, into_parse_error, kw, kw_phrase2,
-        lex_input, relay_ref, session_subscription_name, session_subscription_ref, string_lit,
-        suggest_from, tok, where_expression, word_raw,
+        LexedInput, ParseError, ParseFromSourceError, duration_value_literal, field_ref,
+        into_parse_error, kw, kw_phrase2, lex_input, relay_ref, session_subscription_name,
+        session_subscription_ref, string_lit, suggest_from, tok, where_expression, word_raw,
     },
 };
 
@@ -18,6 +18,7 @@ pub(crate) fn subscription_literal_parser<'src>()
 -> impl Parser<'src, &'src [Token], SubscriptionLiteral, extra::Err<ParseError<'src>>> + Clone {
     choice((
         string_lit().map(SubscriptionLiteral::String),
+        duration_value_literal().map(SubscriptionLiteral::Duration),
         select! { Token::NumberLiteral(value) => SubscriptionLiteral::Number(value) }
             .labelled("number_literal"),
         word_raw().try_map(|raw, span| match raw.to_ascii_lowercase().as_str() {

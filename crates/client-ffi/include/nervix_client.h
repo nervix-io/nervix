@@ -200,7 +200,9 @@ typedef enum nx_type {
     /* Signed nanoseconds since the Unix epoch in UTC, read as int64_t. */
     NX_TYPE_DATETIME = 14,
     NX_TYPE_FIXED_LIST = 15,
-    NX_TYPE_LIST = 16
+    NX_TYPE_LIST = 16,
+    /* A DURATION: a signed count of nanoseconds, read as int64_t. */
+    NX_TYPE_DURATION = 17
 } nx_type;
 
 /* Which cells of a schema or a batch an accessor reads. */
@@ -683,8 +685,9 @@ nx_error *nx_event_frame(const nx_event *event, const uint8_t **frame, size_t *f
 nx_error *nx_event_column_states(const nx_event *event, int32_t part, size_t column,
                                  uint8_t *states, size_t states_len);
 /* Copies a fixed-width column in native byte order: 1 byte for U8, I8 and BOOL, 2 for U16 and
-   I16, 4 for U32, I32 and F32, 8 for U64, I64, F64 and DATETIME. `values_len` is the cell count
-   times that width. A null or redacted cell is written as zero bytes; its state tells it apart. */
+   I16, 4 for U32, I32 and F32, 8 for U64, I64, F64, DATETIME and DURATION. `values_len` is the
+   cell count times that width. A null or redacted cell is written as zero bytes; its state tells
+   it apart. */
 nx_error *nx_event_column_fixed(const nx_event *event, int32_t part, size_t column, void *values,
                                 size_t values_len);
 /* Copies a STRING or BYTES column: `offsets` receives cell count + 1 offsets into `data`, and

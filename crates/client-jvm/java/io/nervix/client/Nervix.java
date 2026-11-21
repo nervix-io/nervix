@@ -50,7 +50,7 @@ public final class Nervix {
         public int code() { return code; }
     }
     public enum FieldType implements Coded {
-        U8(1), I8(2), U16(3), I16(4), U32(5), I32(6), U64(7), I64(8), F32(9), F64(10), BOOL(11), STRING(12), BYTES(13), DATETIME(14), FIXED_LIST(15), LIST(16);
+        U8(1), I8(2), U16(3), I16(4), U32(5), I32(6), U64(7), I64(8), F32(9), F64(10), BOOL(11), STRING(12), BYTES(13), DATETIME(14), FIXED_LIST(15), LIST(16), DURATION(17);
         private final int code;
         FieldType(int code) { this.code = code; }
         public int code() { return code; }

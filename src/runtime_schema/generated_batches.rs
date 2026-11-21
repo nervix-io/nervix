@@ -24,9 +24,10 @@
 use std::num::NonZeroU32;
 
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DurationNanosecondArray, FixedSizeListArray,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
+    RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
 };
 use arrow_buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
@@ -65,8 +66,11 @@ pub(crate) enum GeneratedDomain {
     /// batches and remote relay payloads.
     Arrow,
     /// The values the schemaful `JSON` codec promises to preserve. A non-finite float
-    /// has no JSON spelling.
+    /// has no JSON spelling, and no codec carries a `DURATION`.
     Json,
+    /// Every value an Arrow batch of a codec's schema holds: every Arrow value but a `DURATION`,
+    /// which no codec carries. The schemaful `CBOR` codec promises to preserve each of them.
+    Codec,
     /// The values the schemaful `AVRO` codec promises to preserve. A field holds only a type an
     /// Avro wire type binds, at every list depth, and a field name is an Avro name.
     Avro,
@@ -77,7 +81,8 @@ impl GeneratedDomain {
     /// field of its type would, so the Avro domain admits a list only of what a field may hold.
     fn admits_field_type(self, ty: &ParseAsType) -> bool {
         match self {
-            Self::Arrow | Self::Json => true,
+            Self::Arrow => true,
+            Self::Json | Self::Codec => !ty.holds_duration(),
             Self::Avro => matches!(
                 ty.innermost_element(),
                 ParseAsType::Bool
@@ -95,7 +100,7 @@ impl GeneratedDomain {
     /// Whether a float in this domain may hold a non-finite bit pattern.
     fn admits_non_finite_floats(self) -> bool {
         match self {
-            Self::Arrow | Self::Avro => true,
+            Self::Arrow | Self::Codec | Self::Avro => true,
             Self::Json => false,
         }
     }
@@ -129,7 +134,7 @@ impl GeneratedDomain {
     /// rule; an Avro field holds an Avro name.
     fn field_name(self, arbitrary: &mut Arbitrary<'_>, fields: &[SchemaField]) -> FieldName {
         let drawn = match self {
-            Self::Arrow | Self::Json => arbitrary.rule_name::<FieldName>(),
+            Self::Arrow | Self::Json | Self::Codec => arbitrary.rule_name::<FieldName>(),
             Self::Avro => arbitrary.name::<FieldName>(),
         };
         let taken = fields.iter().any(|field| field.name == drawn);
@@ -151,24 +156,28 @@ impl GeneratedDomain {
         if self.admits_field_type(&ty) {
             return ty;
         }
-        Self::avro_bound(ty)
+        self.codec_bound(ty)
     }
 
-    /// `ty` with its innermost element replaced by the signed integer an Avro `int` or `long`
-    /// binds, since Avro declares no narrow or unsigned integer at any depth.
-    fn avro_bound(ty: ParseAsType) -> ParseAsType {
+    /// `ty` with its innermost element replaced by a type this codec domain binds: a `DURATION`,
+    /// which no codec carries, by `I64`, and in the Avro domain a narrow or unsigned integer by the
+    /// signed integer an Avro `int` or `long` binds, since Avro declares neither at any depth.
+    fn codec_bound(self, ty: ParseAsType) -> ParseAsType {
         match ty {
             ParseAsType::Array { element, len } => ParseAsType::Array {
-                element: Box::new(Self::avro_bound(*element)),
+                element: Box::new(self.codec_bound(*element)),
                 len,
             },
             ParseAsType::Vec { element } => ParseAsType::Vec {
-                element: Box::new(Self::avro_bound(*element)),
+                element: Box::new(self.codec_bound(*element)),
             },
-            ParseAsType::U8 | ParseAsType::I8 | ParseAsType::U16 | ParseAsType::I16 => {
+            ParseAsType::Duration => ParseAsType::I64,
+            ParseAsType::U8 | ParseAsType::I8 | ParseAsType::U16 | ParseAsType::I16
+                if self == Self::Avro =>
+            {
                 ParseAsType::I32
             }
-            ParseAsType::U32 | ParseAsType::U64 => ParseAsType::I64,
+            ParseAsType::U32 | ParseAsType::U64 if self == Self::Avro => ParseAsType::I64,
             bound => bound,
         }
     }
@@ -276,6 +285,9 @@ impl GeneratedDomain {
                     });
                 }
                 StdArc::new(TimestampNanosecondArray::from(values).with_timezone("+00:00"))
+            }
+            ParseAsType::Duration => {
+                primitive!(DurationNanosecondArray, signed::<i64>(arbitrary.entropy()))
             }
             ParseAsType::Array { element, len } => {
                 self.fixed_list(arbitrary, ty, element, *len, slots)

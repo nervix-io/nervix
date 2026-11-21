@@ -31,8 +31,8 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, kw_phrase, lex_input,
-        tok,
+        LexedInput, ParseError, ParseFromSourceError, duration_value_literal, into_parse_error, kw,
+        kw_phrase, lex_input, tok,
     },
 };
 
@@ -178,6 +178,7 @@ fn scalar_type<'src>()
             "UTF8" | "STRING" => ParseAsType::String,
             "BYTES" => ParseAsType::Bytes,
             "DATETIME" => ParseAsType::Datetime,
+            "DURATION" => ParseAsType::Duration,
             "FLOAT32" | "F32" => ParseAsType::F32,
             "FLOAT64" | "F64" => ParseAsType::F64,
             _ => return Err(Rich::custom(span, format!("unsupported type '{name}'"))),
@@ -281,31 +282,43 @@ fn json_path<'src>()
 /// is part of the literal only when no space separates it from the digits around it. A number with
 /// an exponent is one token too, and an expression rejects it rather than reading it as another
 /// number.
+///
+/// A number the literal cannot hold is reported at its own token through `validate`, and the
+/// expression goes on with a zero in its place. Failing the literal instead would leave the
+/// refusal behind the duration literal tried before it, which reads the same number and then
+/// expects a unit after it, so the reported error would be about the token after the number.
 fn number_literal<'src>()
 -> impl Parser<'src, &'src [Token], Literal, extra::Err<ParseError<'src>>> + Clone {
     select! { Token::NumberLiteral(raw) => raw }
         .labelled("number_literal")
-        .try_map(|raw: String, span| {
+        .validate(|raw: String, extra, emitter| {
             if raw.contains(['e', 'E']) {
-                return Err(Rich::custom(
-                    span,
+                emitter.emit(Rich::custom(
+                    extra.span(),
                     format!(
                         "number literal '{raw}' has an exponent, which an expression does not \
                          read; write '{raw}' AS F64"
                     ),
                 ));
+                return Literal::I64(0);
             }
             if raw.contains('.') {
                 let value = raw.parse::<f64>().assured(
                     "the lexer writes a fraction as digits, a dot and digits, which always read \
                      as an f64",
                 );
-                return Ok(Literal::F64(Float64Literal::new(value)));
+                return Literal::F64(Float64Literal::new(value));
             }
-            let value = raw.parse::<i64>().map_err(|error| {
-                Rich::custom(span, format!("invalid integer literal '{raw}': {error}"))
-            })?;
-            Ok(Literal::I64(value))
+            match raw.parse::<i64>() {
+                Ok(value) => Literal::I64(value),
+                Err(error) => {
+                    emitter.emit(Rich::custom(
+                        extra.span(),
+                        format!("invalid integer literal '{raw}': {error}"),
+                    ));
+                    Literal::I64(0)
+                }
+            }
         })
 }
 
@@ -533,7 +546,10 @@ fn expression<'src>()
         // A tolerant conversion is an atom whose operand is itself built from atoms, so atoms are
         // recursive in their own right.
         let atom = recursive(|atom| {
+            // A duration literal starts with a number too, so it is tried first: a number that no
+            // unit follows falls through to the number literal.
             let literal = choice((
+                duration_value_literal().map(|value| Expression::Literal(Literal::Duration(value))),
                 number_literal().map(Expression::Literal),
                 kw(Identifier::True).to(Expression::Literal(Literal::Bool(true))),
                 kw(Identifier::False).to(Expression::Literal(Literal::Bool(false))),
@@ -2207,6 +2223,203 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn duration(nanoseconds: i64) -> Expression {
+        Expression::Literal(Literal::Duration(
+            nervix_models::DurationValue::from_nanoseconds(nanoseconds),
+        ))
+    }
+
+    #[test]
+    fn duration_literals_read_alike_at_every_entry_point() {
+        const SECOND: i64 = 1_000_000_000;
+        for (predicate, nanoseconds) in [
+            ("input.x = 30s", 30 * SECOND),
+            ("input.x = 250ms", 250_000_000),
+            ("input.x = 1h 30m", 5_400 * SECOND),
+            ("input.x = 1.5s", 1_500_000_000),
+            ("input.x = 2d 3ns", 2 * 86_400 * SECOND + 3),
+            ("input.x = 7us", 7_000),
+            ("input.x = 0s", 0),
+        ] {
+            assert_eq!(
+                read_at_every_entry_point(predicate),
+                Some(binary(
+                    BinaryOperator::Equal,
+                    field("x"),
+                    duration(nanoseconds)
+                )),
+                "{predicate}"
+            );
+        }
+        // Unary minus applies to the whole literal, as it does to a number.
+        assert_eq!(
+            read_at_every_entry_point("input.x = -1h 30m"),
+            Some(binary(
+                BinaryOperator::Equal,
+                field("x"),
+                Expression::Unary {
+                    operator: UnaryOperator::Negate,
+                    expression: Box::new(duration(5_400 * SECOND)),
+                },
+            ))
+        );
+        // A number no unit follows stays a number, before an operator and before a clause.
+        assert_eq!(
+            read_at_every_entry_point("input.x = 30 AND input.y"),
+            Some(binary(
+                BinaryOperator::And,
+                binary(BinaryOperator::Equal, field("x"), integer(30)),
+                field("y"),
+            ))
+        );
+    }
+
+    #[test]
+    fn a_duration_literal_refuses_units_without_a_fixed_length_and_other_spellings() {
+        for (predicate, refusal) in [
+            ("input.x = 1y", "duration unit 'y' has no fixed length"),
+            ("input.x = 2M", "duration unit 'M' has no fixed length"),
+            (
+                "input.x = 3 months",
+                "duration unit 'months' has no fixed length",
+            ),
+            (
+                "input.x = 1w",
+                "duration unit 'w' is not written in a literal",
+            ),
+            (
+                "input.x = 5min",
+                "duration unit 'min' is not written in a literal",
+            ),
+            (
+                "input.x = 1h 2sec",
+                "duration unit 'sec' is not written in a literal",
+            ),
+            ("input.x = 106752d", "does not fit a DURATION"),
+            ("input.x = 1.5ns", "invalid duration literal '1.5ns'"),
+            (
+                "input.x = 1e3s",
+                "has an exponent, which a duration literal does not read",
+            ),
+        ] {
+            assert_eq!(read_at_every_entry_point(predicate), None, "{predicate}");
+            let error = parse_expression(predicate).expect_err("the literal is refused");
+            assert!(error.to_string().contains(refusal), "{predicate}: {error}");
+        }
+        // Each part keeps its own unit: `h30m` is one word that names no unit.
+        assert_eq!(read_at_every_entry_point("input.x = 1h30m"), None);
+    }
+
+    /// Every length of time a literal can name, from zero to the longest `DURATION`, displays as
+    /// literal text that reads back as the same value, alone and inside a statement.
+    #[test]
+    fn bolero_duration_literal_text_reads_back_as_its_value() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(64)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary =
+                    nervix_arbitrary::Arbitrary::new(bytes, nervix_arbitrary::Domain::Plexus);
+                let value = if arbitrary.entropy().flag() {
+                    arbitrary.duration_literal()
+                } else {
+                    let drawn = arbitrary
+                        .entropy()
+                        .boundary_biased(0..=i64::MAX.cast_unsigned());
+                    let nanoseconds =
+                        i64::try_from(drawn).verified("the draw ends at the largest i64");
+                    nervix_models::DurationValue::from_nanoseconds(nanoseconds)
+                };
+                let predicate = format!("input.x = {value}");
+                assert_eq!(
+                    read_at_every_entry_point(&predicate),
+                    Some(binary(
+                        BinaryOperator::Equal,
+                        field("x"),
+                        duration(value.nanoseconds())
+                    )),
+                    "{predicate}"
+                );
+            });
+    }
+
+    /// The words a malformed duration literal is written from: digits, a decimal point, the
+    /// literal units, units a literal refuses, misspellings and separators.
+    const LITERAL_WORDS: [&str; 24] = [
+        "0",
+        "1",
+        "7",
+        "30",
+        "1.5",
+        "0.0000000001",
+        "106752",
+        "9223372036854775807",
+        "ns",
+        "us",
+        "ms",
+        "s",
+        "m",
+        "h",
+        "d",
+        "w",
+        "y",
+        "M",
+        "min",
+        "sec",
+        "e3",
+        " ",
+        "-",
+        ".",
+    ];
+
+    /// Text assembled from duration words reads, alone and inside a statement, either as a
+    /// `DURATION` literal whose canonical text reads back as the same value, or as anything else
+    /// the expression grammar admits, or is refused with a diagnostic inside the text; it never
+    /// panics or reads differently at the two entry points.
+    #[test]
+    fn bolero_malformed_duration_literal_text_is_refused_or_reads_canonically() {
+        bolero::check!()
+            .with_iterations(512)
+            .with_max_len(128)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary =
+                    nervix_arbitrary::Arbitrary::new(bytes, nervix_arbitrary::Domain::Plexus);
+                let mut text = String::new();
+                for _ in 0..=arbitrary.entropy().count(8) {
+                    text.push_str(arbitrary.entropy().pick(LITERAL_WORDS));
+                }
+                let predicate = format!("input.x = {text}");
+                let read = read_at_every_entry_point(&predicate);
+                match read {
+                    Some(Expression::Binary { right, .. }) => {
+                        if let Expression::Literal(Literal::Duration(value)) = *right {
+                            assert!(value.nanoseconds() >= 0, "{predicate}");
+                            let canonical = format!("input.x = {value}");
+                            assert_eq!(
+                                read_at_every_entry_point(&canonical),
+                                Some(binary(
+                                    BinaryOperator::Equal,
+                                    field("x"),
+                                    duration(value.nanoseconds())
+                                )),
+                                "{predicate} reads as {canonical}"
+                            );
+                        }
+                    }
+                    Some(_) => {}
+                    None => {
+                        let error = parse_expression(&predicate)
+                            .err()
+                            .verified("an expression read at neither entry point is refused");
+                        assert!(
+                            !error.current_context().diagnostics().is_empty(),
+                            "{predicate}"
+                        );
+                    }
+                }
+            });
     }
 
     #[test]

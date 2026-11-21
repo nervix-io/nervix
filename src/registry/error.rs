@@ -189,6 +189,14 @@ pub(crate) enum ConnectorDeclarationIssue {
         expected: nervix_models::MappedValueType,
         actual: arrow_schema::DataType,
     },
+    /// The entity's binding declares a `DURATION`, alone or as a list element, rejected: no
+    /// destination column holds one losslessly.
+    #[error("{section} key '{key}' is a DURATION, which {entity} declares rejected")]
+    RejectedDuration {
+        section: nervix_models::MappedValueSection,
+        key: String,
+        entity: EmitterEntityKind,
+    },
     #[error("{0}")]
     Envelope(nervix_models::EnvelopeDeclarationError),
     #[error(
@@ -538,6 +546,41 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         ingestor: ModelName,
     },
+    /// No codec family reads or writes a `DURATION`, at the top level or as a list element, so a
+    /// codec whose internal schema holds one is refused before any of it is compiled.
+    #[error(
+        "codec '{codec}' in domain '{domain}' cannot carry DURATION field '{field}': no codec \
+         reads or writes a DURATION"
+    )]
+    CodecDurationField {
+        domain: DomainName,
+        codec: ModelName,
+        field: FieldName,
+    },
+    /// The guest protocol has no `DURATION` type, so a WASM processor whose input or output schema
+    /// holds one is refused before its guest is loaded.
+    #[error(
+        "WASM processor '{processor}' in domain '{domain}' cannot pass DURATION field '{field}' \
+         to its guest: a WASM guest does not read or write a DURATION"
+    )]
+    WasmDurationField {
+        domain: DomainName,
+        processor: ModelName,
+        field: FieldName,
+    },
+    /// No column bridge reads a `DURATION` argument, so the UDF is refused before it compiles.
+    #[error(
+        "UDF '{udf}' in domain '{domain}' cannot take DURATION argument '{argument}': a UDF does \
+         not read a DURATION"
+    )]
+    UdfDurationArgument {
+        domain: DomainName,
+        udf: ModelName,
+        argument: FieldName,
+    },
+    /// No column bridge writes a `DURATION` result, so the UDF is refused before it compiles.
+    #[error("UDF '{udf}' in domain '{domain}' cannot return a DURATION: a UDF does not write one")]
+    UdfDurationReturn { domain: DomainName, udf: ModelName },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,

@@ -1159,6 +1159,7 @@ fn type_name(ty: &ParseAsType) -> String {
         ParseAsType::String => "STRING".to_string(),
         ParseAsType::Bytes => "BYTES".to_string(),
         ParseAsType::Datetime => "DATETIME".to_string(),
+        ParseAsType::Duration => "DURATION".to_string(),
         ParseAsType::Array { element, len } => format!("FIXED_LIST<{},{len}>", type_name(element)),
         ParseAsType::Vec { element } => format!("LIST<{}>", type_name(element)),
     }
@@ -1200,6 +1201,7 @@ fn render_cell(cell: CellView<'_>) -> String {
         CellView::String(value) => text(value),
         CellView::Bytes(value) => format!("bytes:{}", hex(value)),
         CellView::Datetime(value) => format!("datetime:{}", value.unix_nanos()),
+        CellView::Duration(value) => format!("duration:{}", value.nanoseconds()),
         CellView::List(elements) => {
             let elements: Vec<String> = elements.iter().map(render_cell).collect();
             format!("list[{}]", elements.join(","))

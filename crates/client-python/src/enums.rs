@@ -185,6 +185,7 @@ host_enum! {
         Datetime = 14 as "DATETIME",
         FixedList = 15 as "FIXED_LIST",
         List = 16 as "LIST",
+        Duration = 17 as "DURATION",
     }
 }
 

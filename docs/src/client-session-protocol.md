@@ -1473,7 +1473,8 @@ schema for. Batches the relay published during the opening are not delivered.
 The subscriber's node encodes Row frames directly from the Arrow batch it received. It validates the
 batch against the announced definition once, then writes each selected cell from its typed column
 into the FlatBuffers builder; no JSON object, map of fields, or intermediate row is built. Every
-Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds, floats keep their
+Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds since the epoch,
+`DURATION` as a signed count of nanoseconds in a `DurationCell`, floats keep their
 exact bits, and `BYTES` travels as raw octets. A sensitive field is written as `RedactedCell` in
 every row, whether or not it held a value, so the frame reveals neither the value nor its nullness.
 A null in a nullable field is `NullCell`; a list element is never null or redacted. A null fixed
@@ -2796,7 +2797,8 @@ single-terminal reply gate still govern that outcome. Other typed reasons are `U
 `NotMaterialized`, `InvalidSelection`, `InvalidLimit`, `StaleContinuation`, `OwnerUnavailable`,
 `NotReady` and `Deadline`.
 
-The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
+The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, duration
+nanoseconds, base64
 bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
 metadata; WASM stages, phases, reasons, readiness, rejections and outcomes render as snake-case
 strings and reset scopes as `{"kind": ..., "branch": ...}`. See

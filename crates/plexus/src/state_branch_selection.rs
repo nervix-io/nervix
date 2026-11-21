@@ -17,7 +17,9 @@ use nervix_models::{Float64Literal, Literal, StateBranchField, StateBranchSelect
 
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, field_ref, kw, kw_phrase2, string_lit, tok},
+    parser_support::{
+        ParseError, duration_value_literal, field_ref, kw, kw_phrase2, string_lit, tok,
+    },
 };
 
 pub(crate) fn branch_selection<'src>()
@@ -57,6 +59,7 @@ fn branch_literal<'src>()
         });
     choice((
         string_lit().map(Literal::String),
+        duration_value_literal().map(Literal::Duration),
         number,
         kw(Identifier::True).to(Literal::Bool(true)),
         kw(Identifier::False).to(Literal::Bool(false)),
@@ -121,6 +124,16 @@ mod tests {
 
             let input = format!("{head} FOR BRANCH ");
             assert_eq!(suggest_statement(&input, input.len()), ["KEY"], "{input}");
+        }
+    }
+
+    #[test]
+    fn a_branch_key_field_is_selected_by_a_duration_literal() {
+        for head in HEADS {
+            let input = format!("{head} FOR BRANCH KEY {{ window = 5m, tenant = 'alpha' }};");
+            assert!(parse_statement(&input).is_ok(), "{input}");
+            let refused = format!("{head} FOR BRANCH KEY {{ window = 5 min }};");
+            assert!(parse_statement(&refused).is_err(), "{refused}");
         }
     }
 

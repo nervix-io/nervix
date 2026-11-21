@@ -530,10 +530,10 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_logs`,
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_meta`,
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_state`, and
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_snapshots`. Opening it validates the
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_duration_logs`,
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_duration_meta`,
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_duration_state`, and
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_duration_snapshots`. Opening it validates the
 complete keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
@@ -552,7 +552,8 @@ count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quali
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
 `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, the ordered `RATE LIMIT` clauses
-an ingestor body writes, an emitter's `INSTANCES` declaration,
+an ingestor body writes, an emitter's `INSTANCES` declaration, the `DURATION` type with the
+duration literals expressions, subscription bindings and branch selections hold,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
 whose signaling data exists only on its WebSockets variant, the branch partition count every
 resolved branch declaration of the committed schedule carries, and the partition epoch the

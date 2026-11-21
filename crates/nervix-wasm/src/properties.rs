@@ -56,17 +56,32 @@ fn bolero_host_schema_preserves_the_complete_abi_projection() {
         .for_each(|bytes| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
             let schema = arbitrary.create_schema();
-            let host = WasmProcessorSchema::from(&schema);
+            let holds_duration = schema
+                .fields
+                .iter()
+                .any(|field| *field.ty.innermost_element() == ParseAsType::Duration);
+            let host = match WasmProcessorSchema::try_from(&schema) {
+                Ok(host) => {
+                    assert!(!holds_duration, "a DURATION has no guest protocol type");
+                    host
+                }
+                Err(refusal) => {
+                    assert!(holds_duration, "only a DURATION is refused: {refusal}");
+                    assert_eq!(refusal, WasmTypeRefusal::Duration);
+                    return;
+                }
+            };
+            let output = arbitrary.create_schema();
+            let Ok(output) = WasmProcessorSchema::try_from(&output) else {
+                return;
+            };
             let mut values = WasmValues::new(bytes);
             let host_init = WasmBranchInit {
                 domain_name: arbitrary.name_text(),
                 domain_type: "runtime".into(),
                 branch_key: values.branch_key(),
                 input_schema: host.clone(),
-                output_schemas: vec![
-                    host.clone(),
-                    WasmProcessorSchema::from(&arbitrary.create_schema()),
-                ],
+                output_schemas: vec![host.clone(), output],
             };
             let protocol = host_init.to_protocol();
             let decoded = protocol::BranchInit::decode(&protocol.encode())
@@ -84,7 +99,7 @@ fn bolero_host_schema_preserves_the_complete_abi_projection() {
             for field in &mut promoted.fields {
                 field.sensitive = true;
             }
-            assert_eq!(WasmProcessorSchema::from(&promoted), host);
+            assert_eq!(WasmProcessorSchema::try_from(&promoted), Ok(host));
             let mut builder = FlatBufferBuilder::with_capacity(1);
             protocol.encode_in(&mut builder);
             assert_eq!(builder.finished_data(), protocol.encode());

@@ -830,6 +830,7 @@ impl Field {
             FieldType::Datetime => "DATETIME",
             FieldType::FixedList => "FIXED_LIST",
             FieldType::List => "LIST",
+            FieldType::Duration => "DURATION",
         }
     }
 
@@ -959,7 +960,11 @@ impl EventReference {
             FieldType::U8 | FieldType::I8 | FieldType::Bool => Some(1),
             FieldType::U16 | FieldType::I16 => Some(2),
             FieldType::U32 | FieldType::I32 | FieldType::F32 => Some(4),
-            FieldType::U64 | FieldType::I64 | FieldType::F64 | FieldType::Datetime => Some(8),
+            FieldType::U64
+            | FieldType::I64
+            | FieldType::F64
+            | FieldType::Datetime
+            | FieldType::Duration => Some(8),
             FieldType::String | FieldType::Bytes => None,
             FieldType::FixedList | FieldType::List => {
                 return Err(io::Error::other("list columns are read from the frame"));
@@ -1097,6 +1102,7 @@ fn render_value(
                 FieldType::F64 => format!("f64:{:016x}", u64::from_ne_bytes(eight(bytes))),
                 FieldType::Bool => format!("bool:{}", bytes[0] != 0),
                 FieldType::Datetime => format!("datetime:{}", i64::from_ne_bytes(eight(bytes))),
+                FieldType::Duration => format!("duration:{}", i64::from_ne_bytes(eight(bytes))),
                 other => return Err(io::Error::other(format!("{other:?} is not fixed-width"))),
             };
             Ok(rendered)

@@ -357,7 +357,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX NODE VIEW` archive signature identifies the current Model layout, including
+The registry's `NERVIX DURATIONS` archive signature identifies the current Model layout, including
 that union, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited branch declaration,
@@ -368,7 +368,8 @@ service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of s
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, inferencer state bindings with their initial expressions, the typed `payload`
-expression scope and an emitter's `INSTANCES` declaration.
+expression scope, an emitter's `INSTANCES` declaration, and the `DURATION` type with the duration
+literals expressions, subscription bindings and branch selections hold.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
@@ -379,7 +380,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_` keyspaces and current
+Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_duration_` keyspaces and current
 `ClusterState` metadata encoding, 42, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity

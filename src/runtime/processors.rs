@@ -1089,6 +1089,8 @@ pub(super) enum ReorderKeyPart {
     Utf8(String),
     Bytes(Vec<u8>),
     Datetime(i64),
+    /// A `DURATION`, as its signed count of nanoseconds.
+    Duration(i64),
 }
 
 impl ReorderKeyPart {
@@ -1106,7 +1108,8 @@ impl ReorderKeyPart {
             | Self::Int64(_)
             | Self::UInt64(_)
             | Self::Float64(_)
-            | Self::Datetime(_) => 0,
+            | Self::Datetime(_)
+            | Self::Duration(_) => 0,
         }
     }
 }

@@ -10,7 +10,7 @@ use std::{fmt, num::NonZeroU32};
 use error_stack::Report;
 use flatbuffers::{ForwardsUOffset, Vector, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{BranchName, FieldName, ParseAsType, SchemaField, Timestamp};
+use nervix_models::{BranchName, DurationValue, FieldName, ParseAsType, SchemaField, Timestamp};
 use thiserror::Error;
 
 use crate::{
@@ -185,6 +185,7 @@ pub(crate) enum ScalarType {
     String,
     Bytes,
     Datetime,
+    Duration,
 }
 
 wire_enum!(ALL_SCALAR_TYPES: ScalarType => wire::ScalarType {
@@ -202,6 +203,7 @@ wire_enum!(ALL_SCALAR_TYPES: ScalarType => wire::ScalarType {
     String,
     Bytes,
     Datetime,
+    Duration,
 });
 
 /// Encodes a field type as a table at `depth`. Its shape is one level deeper, and a list's element
@@ -233,6 +235,7 @@ fn encode_field_type<'fbb>(
         ParseAsType::String => ScalarType::String.encode(encoder),
         ParseAsType::Bytes => ScalarType::Bytes.encode(encoder),
         ParseAsType::Datetime => ScalarType::Datetime.encode(encoder),
+        ParseAsType::Duration => ScalarType::Duration.encode(encoder),
         ParseAsType::Array { element, len } => {
             let element = encode_field_type(encoder, element, element_depth)?;
             let list = wire::FixedListFieldType::create(
@@ -297,6 +300,7 @@ fn decode_field_type(
             ScalarType::String => ParseAsType::String,
             ScalarType::Bytes => ParseAsType::Bytes,
             ScalarType::Datetime => ParseAsType::Datetime,
+            ScalarType::Duration => ParseAsType::Duration,
         };
         return Ok(ty);
     }
@@ -490,6 +494,18 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
             },
         );
         self.push_cell(wire::CellValue::DatetimeCell, cell);
+        Ok(())
+    }
+
+    pub fn push_duration(&mut self, value: DurationValue) -> Result<(), Report<WireEncodeError>> {
+        self.admit(0)?;
+        let cell = wire::DurationCell::create(
+            self.encoder.fbb(),
+            &wire::DurationCellArgs {
+                nanoseconds: value.nanoseconds(),
+            },
+        );
+        self.push_cell(wire::CellValue::DurationCell, cell);
         Ok(())
     }
 
@@ -689,7 +705,8 @@ impl<'a> CellsView<'a> {
                 | wire::CellValue::U64Cell
                 | wire::CellValue::I64Cell
                 | wire::CellValue::BoolCell
-                | wire::CellValue::DatetimeCell => {}
+                | wire::CellValue::DatetimeCell
+                | wire::CellValue::DurationCell => {}
                 wire::CellValue::F32Cell => {
                     let value = checked_variant(cell.value_as_f32_cell()).value();
                     decoder.required("F32Cell.value", value)?;
@@ -792,6 +809,7 @@ pub enum CellView<'a> {
     String(&'a str),
     Bytes(&'a [u8]),
     Datetime(Timestamp),
+    Duration(DurationValue),
     List(CellsView<'a>),
 }
 
@@ -842,6 +860,9 @@ impl<'a> CellView<'a> {
             wire::CellValue::DatetimeCell => Self::Datetime(Timestamp::from_unix_nanos(
                 checked_variant(cell.value_as_datetime_cell()).unix_nanos(),
             )),
+            wire::CellValue::DurationCell => Self::Duration(DurationValue::from_nanoseconds(
+                checked_variant(cell.value_as_duration_cell()).nanoseconds(),
+            )),
             // Batch checking admits only declared discriminants, and every other one is matched
             // above, so this arm reads a list cell.
             _ => Self::List(CellsView {
@@ -869,6 +890,7 @@ impl<'a> CellView<'a> {
             Self::String(_) => "STRING",
             Self::Bytes(_) => "BYTES",
             Self::Datetime(_) => "DATETIME",
+            Self::Duration(_) => "DURATION",
             Self::List(_) => "LIST",
         }
     }
@@ -926,7 +948,8 @@ impl<'a> CellView<'a> {
             | (ParseAsType::Bool, Self::Bool(_))
             | (ParseAsType::String, Self::String(_))
             | (ParseAsType::Bytes, Self::Bytes(_))
-            | (ParseAsType::Datetime, Self::Datetime(_)) => return Ok(()),
+            | (ParseAsType::Datetime, Self::Datetime(_))
+            | (ParseAsType::Duration, Self::Duration(_)) => return Ok(()),
             (ParseAsType::Array { element, len }, Self::List(elements)) => {
                 let expected = usize::try_from(len.get())
                     .assured("a u32 length fits usize on every target this crate builds for");
@@ -977,6 +1000,7 @@ impl PartialEq for CellView<'_> {
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Bytes(left), Self::Bytes(right)) => left == right,
             (Self::Datetime(left), Self::Datetime(right)) => left == right,
+            (Self::Duration(left), Self::Duration(right)) => left == right,
             (Self::List(left), Self::List(right)) => left == right,
             _ => false,
         }

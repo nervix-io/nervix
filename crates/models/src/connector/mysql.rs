@@ -106,6 +106,8 @@ pub enum MySqlValueEncoding {
     Bytes,
     #[strum(serialize = "RFC 3339 timestamp bytes")]
     TimestampBytes,
+    #[strum(serialize = "rejected: no MySQL column holds a DURATION losslessly")]
+    Rejected,
     #[strum(
         serialize = "recursive JSON text; bytes use padded base64 and non-finite floats use null"
     )]
@@ -114,7 +116,11 @@ pub enum MySqlValueEncoding {
 
 impl MySqlValueEncoding {
     /// Every current Plexus scalar or collection has an explicit binding; nullability is separate.
+    /// A `DURATION`, alone or as a list element, is declared rejected.
     pub fn for_type(ty: &ParseAsType) -> Self {
+        if *ty.innermost_element() == ParseAsType::Duration {
+            return Self::Rejected;
+        }
         match ty {
             ParseAsType::Bool => Self::BooleanInteger,
             ParseAsType::U8
@@ -129,6 +135,7 @@ impl MySqlValueEncoding {
             ParseAsType::String => Self::Utf8Bytes,
             ParseAsType::Bytes => Self::Bytes,
             ParseAsType::Datetime => Self::TimestampBytes,
+            ParseAsType::Duration => Self::Rejected,
             ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Self::JsonText,
         }
     }

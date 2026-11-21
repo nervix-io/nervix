@@ -107,7 +107,7 @@ public final class Properties {
                     boolean fixed = input.count(2) == 1;
                     levels.add(new Nervix.FieldLevel(fixed ? Nervix.FieldType.FIXED_LIST : Nervix.FieldType.LIST, fixed ? 1 + input.count(4) : 0));
                 }
-                levels.add(new Nervix.FieldLevel(Nervix.FieldType.values()[input.count(14)], 0));
+                levels.add(new Nervix.FieldLevel(SCALARS[input.count(SCALARS.length)], 0));
                 boolean nullable = input.count(2) == 1, sensitive = input.count(2) == 1;
                 String name = "field_" + index;
                 var first = levels.getFirst(); fields.add(name, first.type(), first.length(), nullable, sensitive);
@@ -125,12 +125,16 @@ public final class Properties {
         }
     }
     private record Column(byte[] states, long[] offsets, byte[] data, boolean variable, int leaf) {}
+    /** Every scalar field type, the types a field's innermost level takes. */
+    private static final Nervix.FieldType[] SCALARS = Arrays.stream(Nervix.FieldType.values())
+        .filter(type -> type != Nervix.FieldType.LIST && type != Nervix.FieldType.FIXED_LIST)
+        .toArray(Nervix.FieldType[]::new);
     private static int width(Nervix.FieldType type) {
         return switch (type) {
             case U8, I8, BOOL -> 1;
             case U16, I16 -> 2;
             case U32, I32, F32 -> 4;
-            case U64, I64, F64, DATETIME -> 8;
+            case U64, I64, F64, DATETIME, DURATION -> 8;
             default -> throw new AssertionError("a fixed scalar has a width");
         };
     }

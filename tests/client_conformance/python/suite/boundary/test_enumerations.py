@@ -86,6 +86,7 @@ STABLE_VALUES: tuple[tuple[SupportsInt, int], ...] = (
     (nx.FieldType.DATETIME, 14),
     (nx.FieldType.FIXED_LIST, 15),
     (nx.FieldType.LIST, 16),
+    (nx.FieldType.DURATION, 17),
     (nx.Part.ROWS, 1),
     (nx.Part.BRANCH_KEY, 2),
     (nx.ClockEventKind.STATE, 1),

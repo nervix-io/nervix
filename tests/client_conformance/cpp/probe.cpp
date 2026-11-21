@@ -126,6 +126,7 @@ std::string type_name(nx_type type) {
     case NX_TYPE_DATETIME: return "DATETIME";
     case NX_TYPE_FIXED_LIST: return "FIXED_LIST";
     case NX_TYPE_LIST: return "LIST";
+    case NX_TYPE_DURATION: return "DURATION";
     }
     throw std::runtime_error("unknown type");
 }
@@ -181,7 +182,8 @@ size_t fixed_width(nx_type type) {
     case NX_TYPE_U8: case NX_TYPE_I8: case NX_TYPE_BOOL: return 1;
     case NX_TYPE_U16: case NX_TYPE_I16: return 2;
     case NX_TYPE_U32: case NX_TYPE_I32: case NX_TYPE_F32: return 4;
-    case NX_TYPE_U64: case NX_TYPE_I64: case NX_TYPE_F64: case NX_TYPE_DATETIME: return 8;
+    case NX_TYPE_U64: case NX_TYPE_I64: case NX_TYPE_F64: case NX_TYPE_DATETIME:
+    case NX_TYPE_DURATION: return 8;
     default: return 0;
     }
 }
@@ -238,6 +240,7 @@ struct Column {
             break;
         case NX_TYPE_BOOL: out << "bool:" << (value_at<uint8_t>(values, row) != 0 ? "true" : "false"); break;
         case NX_TYPE_DATETIME: out << "datetime:" << value_at<int64_t>(values, row); break;
+        case NX_TYPE_DURATION: out << "duration:" << value_at<int64_t>(values, row); break;
         case NX_TYPE_STRING:
         case NX_TYPE_BYTES: {
             std::string copied(reinterpret_cast<const char *>(data.data()) + offsets[row],
@@ -979,6 +982,7 @@ const std::vector<FieldSpec> &input_fields() {
         {"grid", {{NX_TYPE_FIXED_LIST, 2}, {NX_TYPE_FIXED_LIST, 2}, {NX_TYPE_I16, 0}}, false, false},
         {"spans", {{NX_TYPE_LIST, 0}, {NX_TYPE_FIXED_LIST, 2}, {NX_TYPE_DATETIME, 0}}, true, false},
         {"secret", {{NX_TYPE_STRING, 0}}, false, true},
+        {"wait", {{NX_TYPE_DURATION, 0}}, false, false},
     };
     return fields;
 }
@@ -1010,6 +1014,7 @@ struct Row {
     bool has_spans = false;
     std::vector<std::array<int64_t, 2>> spans;
     std::string secret = "s";
+    int64_t wait = 0;
 };
 
 // A row of `tenant` whose every other value is the zero of its type.
@@ -1049,6 +1054,7 @@ std::vector<Row> typed_rows() {
     first.has_spans = true;
     first.spans = {{INT64_MIN, INT64_MAX}};
     first.secret = "s1";
+    first.wait = INT64_MAX;
 
     Row second;
     second.id = 2;
@@ -1066,6 +1072,7 @@ std::vector<Row> typed_rows() {
     second.has_maybe = true;
     second.maybe = 0;
     second.secret = "s2";
+    second.wait = INT64_MIN;
 
     Row third;
     third.id = 3;
@@ -1091,6 +1098,7 @@ std::vector<Row> typed_rows() {
     third.grid[1][1] = -2;
     third.has_spans = true;
     third.secret = "s3";
+    third.wait = 1;
     return {first, second, third};
 }
 
@@ -1153,6 +1161,8 @@ HostColumn column_of(const std::string &name, const std::vector<Row> &rows) {
             column.values.push_back(row.flag ? 1 : 0);
         } else if (name == "at") {
             push_native(column.values, row.at);
+        } else if (name == "wait") {
+            push_native(column.values, row.wait);
         } else if (name == "text" || name == "raw") {
             bool present = name == "text" ? row.has_text : row.has_raw;
             column.varlen = true;
@@ -1382,6 +1392,7 @@ struct ColumnView {
         case NX_TYPE_I64: std::snprintf(buffer, sizeof buffer, "i64:%" PRId64, value_at<int64_t>(values, index)); break;
         case NX_TYPE_F64: std::snprintf(buffer, sizeof buffer, "f64:%016" PRIx64, value_at<uint64_t>(values, index)); break;
         case NX_TYPE_DATETIME: std::snprintf(buffer, sizeof buffer, "datetime:%" PRId64, value_at<int64_t>(values, index)); break;
+        case NX_TYPE_DURATION: std::snprintf(buffer, sizeof buffer, "duration:%" PRId64, value_at<int64_t>(values, index)); break;
         default: throw std::runtime_error("a leaf is not a scalar");
         }
         return buffer;

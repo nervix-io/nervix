@@ -137,6 +137,7 @@ pub(in crate::application) enum ExpectedSubscriptionLiteral {
     Array,
     #[strum(serialize = "RFC3339 datetime string")]
     Datetime,
+    Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -860,6 +861,7 @@ pub(in crate::application) fn render_subscription_literal(literal: &Subscription
         SubscriptionLiteral::String(value) => format!("'{}'", value.replace('\'', "''")),
         SubscriptionLiteral::Number(value) => value.clone(),
         SubscriptionLiteral::Bool(value) => value.to_string(),
+        SubscriptionLiteral::Duration(value) => value.to_string(),
     }
 }
 
@@ -948,6 +950,7 @@ pub(in crate::application) fn parse_subscription_literal(
             }
         }
         (ParseAsType::Bool, SubscriptionLiteral::Bool(v)) => Ok(RuntimeValue::Bool(*v)),
+        (ParseAsType::Duration, SubscriptionLiteral::Duration(v)) => Ok(RuntimeValue::Duration(*v)),
         (ParseAsType::U8, SubscriptionLiteral::Number(v)) => {
             let mapping_input = v.parse().map(RuntimeValue::U8);
             match mapping_input {
@@ -1050,6 +1053,7 @@ pub(in crate::application) fn parse_subscription_literal(
         }
         _ => Err(Report::new(bad(match ty {
             ParseAsType::String | ParseAsType::Datetime => ExpectedSubscriptionLiteral::String,
+            ParseAsType::Duration => ExpectedSubscriptionLiteral::Duration,
             ParseAsType::Bool => ExpectedSubscriptionLiteral::Boolean,
             ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
                 ExpectedSubscriptionLiteral::Array
@@ -1996,6 +2000,59 @@ mod tests {
         )
         .expect_err("string should not satisfy numeric field");
         assert!(err.to_string().contains("expects numeric literal"));
+    }
+
+    #[test]
+    fn a_duration_binding_takes_a_duration_literal_and_nothing_else() {
+        let wait = named("wait");
+        let five_minutes = nervix_models::DurationValue::from_nanoseconds(300_000_000_000);
+        assert_eq!(
+            parse_subscription_literal(
+                &wait,
+                &ParseAsType::Duration,
+                &SubscriptionLiteral::Duration(five_minutes)
+            )
+            .assured("a duration literal binds a DURATION field"),
+            runtime_schema::RuntimeValue::Duration(five_minutes)
+        );
+        for literal in [
+            SubscriptionLiteral::String("5m".to_string()),
+            SubscriptionLiteral::Number("300000000000".to_string()),
+        ] {
+            let error = parse_subscription_literal(&wait, &ParseAsType::Duration, &literal)
+                .err()
+                .assured("only a duration literal binds a DURATION field");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    SubscriptionError::InvalidLiteral {
+                        expected: ExpectedSubscriptionLiteral::Duration,
+                        ..
+                    }
+                ),
+                "{error:?}"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("expects duration literal for type Duration"),
+                "{error}"
+            );
+        }
+        let error = parse_subscription_literal(
+            &named("count"),
+            &ParseAsType::I64,
+            &SubscriptionLiteral::Duration(five_minutes),
+        )
+        .err()
+        .assured("a duration literal binds no numeric field");
+        assert!(matches!(
+            error.current_context(),
+            SubscriptionError::InvalidLiteral {
+                expected: ExpectedSubscriptionLiteral::Numeric,
+                ..
+            }
+        ));
     }
 
     #[test]

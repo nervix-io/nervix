@@ -39,14 +39,15 @@ use crate::{
     CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreatePlacement,
     CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
     CreateWindowProcessor, DeduplicatorName, DescribeInferencer, DescribeWasmProcessor,
-    DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName,
-    EndpointName, FieldName, GeneratorName, InferencerName, IngestQuiesceMode, IngestorName,
-    JsonType, JunctionName, LookupName, ModelName, NodeRef, PlacementName, ProcessorOutput,
-    ProcessorOutputs, RebindResource, RefreshLicense, ReingestorName, RelayName, ReleaseLicense,
-    ReordererName, RequestedResourceVersion, ResetWasmState, ResolvedBranchPartitions,
-    ResourceName, Restore, RotateLicenseClusterKey, SchemaName, ShowWasmProcessorState,
-    SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
-    Unit, UserName, VhostName, WindowProcessorName, WireSchemaName,
+    DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate,
+    DurationValue, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
+    IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
+    PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource, RefreshLicense,
+    ReingestorName, RelayName, ReleaseLicense, ReordererName, RequestedResourceVersion,
+    ResetWasmState, ResolvedBranchPartitions, ResourceName, Restore, RotateLicenseClusterKey,
+    SchemaName, ShowWasmProcessorState, SignalingProtocolName, SubscriptionName, Timestamp,
+    TransactionInspectionRequest, UdfName, Unit, UserName, VhostName, WindowProcessorName,
+    WireSchemaName,
 };
 
 #[derive(
@@ -1182,6 +1183,8 @@ pub enum SubscriptionLiteral {
     String(String),
     Number(String),
     Bool(bool),
+    /// A duration literal such as `30s`, which binds a `DURATION` field.
+    Duration(DurationValue),
 }
 
 /// A model shape that its [`ModelKind`] names, and that names its kind back.

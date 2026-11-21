@@ -39,6 +39,7 @@ pub use data_plane_settings::*;
 mod domain_clock;
 mod domain_stop;
 mod duration_text;
+mod duration_value;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
@@ -284,7 +285,11 @@ pub use domain_stop::{
     LICENSING_STOP_ENFORCE_AFTER, NodeStopReport, OperatorStopRequest, StopCut, StopCutKind,
     StopCutReason, StopEnding, StopRequest, StopRequestAdmission, StopRequestId, StopWithdrawal,
 };
-pub use duration_text::{DurationTextError, parse_duration_text};
+pub use duration_text::{DurationTextError, DurationTextUnit, parse_duration_text};
+pub use duration_value::{
+    DurationLiteralError, DurationLiteralPart, DurationLiteralUnit, DurationLiteralWord,
+    DurationValue,
+};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
     EmitterBatchContractError, EmitterBody, EmitterPublishing, EmitterPublishingModeKind,

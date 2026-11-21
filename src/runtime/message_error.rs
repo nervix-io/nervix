@@ -488,6 +488,7 @@ impl<'a> InvalidOutputRows<'a> {
             VmTypedArray::Utf8(array) => array.is_null(row),
             VmTypedArray::Binary(array) => array.is_null(row),
             VmTypedArray::Datetime(array) => array.is_null(row),
+            VmTypedArray::Duration(array) => array.is_null(row),
             VmTypedArray::Generic(array) => array.is_null(row),
         }
     }

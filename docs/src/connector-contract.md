@@ -211,7 +211,9 @@ not change the applicability of the lifecycle Deloxide lanes.
 Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
 form, codec and header support, and batching legality in the vocabulary. Direct-value entities
 also declare their mapped-value types there: destination columns accept the current Plexus scalar,
-array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
+array and vector types except `DURATION`, which every native store binding declares rejected
+because no column type holds it losslessly, while OTEL protocol fields require their declared exact
+types and refuse a `DURATION` as well. The OTEL
 connector verifies its prepared input schema against that same type table as an internal plan
 guarantee. An impossible mapped type is not a retryable connector initialization failure.
 

@@ -136,6 +136,7 @@ impl<'a> LevelData<'a> {
             | ParseAsType::Bool
             | ParseAsType::String
             | ParseAsType::Datetime
+            | ParseAsType::Duration
             | ParseAsType::F32
             | ParseAsType::F64
             | ParseAsType::Bytes => None,

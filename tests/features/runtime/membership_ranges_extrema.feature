@@ -585,7 +585,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these Plexus commands fail with "function 'clamp' requires numeric, STRING or DATETIME input, found Boolean"
+    And these Plexus commands fail with "function 'clamp' requires numeric, STRING, DATETIME or DURATION input, found Boolean"
       """
       CREATE JUNCTION boolean_clamp
         FROM samples

@@ -202,6 +202,8 @@ pub enum UnsupportedFieldKind {
     FloatPrecision { precision: &'static str },
     #[strum(to_string = "a timestamp in {unit} units")]
     TimestampUnit { unit: &'static str },
+    #[strum(to_string = "a duration in {unit} units")]
+    DurationUnit { unit: &'static str },
     #[strum(to_string = "a list of {children} child fields")]
     ListChildren { children: usize },
     #[strum(to_string = "a fixed-size list of {size} values")]
@@ -296,6 +298,19 @@ impl FieldLayout {
                     other => {
                         let unit = other.variant_name().unwrap_or("unknown");
                         Err(UnsupportedFieldKind::TimestampUnit { unit })
+                    }
+                }
+            }
+            Type::Duration => {
+                let duration = field.type_as_duration().verified(
+                    "the message verifier admits a union type only beside its value, and this arm \
+                     matched the duration type",
+                );
+                match duration.unit() {
+                    TimeUnit::NANOSECOND => Ok(Self::Values),
+                    other => {
+                        let unit = other.variant_name().unwrap_or("unknown");
+                        Err(UnsupportedFieldKind::DurationUnit { unit })
                     }
                 }
             }

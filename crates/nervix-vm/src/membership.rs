@@ -29,8 +29,8 @@ use std::{borrow::Borrow, hash::Hash};
 
 use ahash::{HashSet, HashSetExt};
 use arrow_array::{
-    Array, ArrowPrimitiveType, BooleanArray, Float32Array, Float64Array, PrimitiveArray,
-    StringArray, TimestampNanosecondArray,
+    Array, ArrowPrimitiveType, BooleanArray, DurationNanosecondArray, Float32Array, Float64Array,
+    PrimitiveArray, StringArray, TimestampNanosecondArray,
     types::{
         Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
@@ -75,6 +75,8 @@ enum Elements {
     Utf8(Members<Box<str>>),
     /// Datetime elements as nanoseconds since the Unix epoch.
     Datetime(Members<i64>),
+    /// Duration elements as signed counts of nanoseconds.
+    Duration(Members<i64>),
 }
 
 /// Distinct elements of one type, compared one by one or looked up by key.
@@ -206,6 +208,11 @@ impl MembershipSet {
                     element_values(elements, |array: &TimestampNanosecondArray| array.value(0))?;
                 Elements::Datetime(Members::collect(values))
             }
+            RegisterType::Duration => {
+                let values =
+                    element_values(elements, |array: &DurationNanosecondArray| array.value(0))?;
+                Elements::Duration(Members::collect(values))
+            }
             RegisterType::Generic => return None,
         };
         Some(Self {
@@ -261,6 +268,9 @@ impl MembershipSet {
                 Some(primitive_membership(members, values, f64_member))
             }
             (Elements::Datetime(members), TypedArray::Datetime(values)) => {
+                Some(primitive_membership(members, values, Some))
+            }
+            (Elements::Duration(members), TypedArray::Duration(values)) => {
                 Some(primitive_membership(members, values, Some))
             }
             (Elements::Boolean(members), TypedArray::Boolean(values)) => {

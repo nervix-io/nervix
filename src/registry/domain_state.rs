@@ -66,8 +66,9 @@ use crate::registry::{
             add_processor_output_edges, effective_processor_output_filter_map_schema,
             ensure_deduplicator_key_compiles, ensure_inferencer_input_mappings,
             ensure_processor_output_flush_policies, ensure_processor_output_schemas,
-            ensure_wasm_processor_output_schemas, ensure_window_processor_output_schemas,
-            parse_window_bound_duration, processor_input_schemas, validate_correlator,
+            ensure_wasm_processor_output_schemas, ensure_wasm_processor_schemas_carry_no_duration,
+            ensure_window_processor_output_schemas, parse_window_bound_duration,
+            processor_input_schemas, validate_correlator,
             validate_correlator_input_sides_do_not_overlap, validate_correlator_output,
             validate_filter_where_for_internal_schemas, validate_from_where_for_internal_schemas,
             validate_generator_output, validate_inferencer_output_filter_map,
@@ -314,6 +315,23 @@ impl DomainState {
                             reason: "UDF arity must be between 1 and 8".to_string(),
                         }));
                     }
+                    // No column bridge reads or writes a DURATION, so the signature is refused
+                    // before the UDF compiles.
+                    for argument in &udf.arguments {
+                        if argument.ty.holds_duration() {
+                            return Err(Report::new(RegistryError::UdfDurationArgument {
+                                domain: domain.clone(),
+                                udf: identifier.clone(),
+                                argument: argument.name.clone(),
+                            }));
+                        }
+                    }
+                    if udf.returns.ty.holds_duration() {
+                        return Err(Report::new(RegistryError::UdfDurationReturn {
+                            domain: domain.clone(),
+                            udf: identifier.clone(),
+                        }));
+                    }
                 }
                 Model::ClientPrometheus(client) => {
                     if !client.config.iter().any(|entry| entry.value.contains("{{")) {
@@ -516,6 +534,13 @@ impl DomainState {
                         source,
                         &processor.from,
                         "wasm processor input",
+                    )?;
+                    ensure_wasm_processor_schemas_carry_no_duration(
+                        domain,
+                        identifier,
+                        models,
+                        processor,
+                        &input_schemas,
                     )?;
                     let first_input_relay = processor_first_input_relay(
                         domain,

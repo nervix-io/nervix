@@ -93,7 +93,8 @@ module RubySuite
         [NX::FieldType::F32, 'L', [0x80000000, 0x7fc01234]],
         [NX::FieldType::F64, 'Q', [0x8000000000000000, 0x7ff8000000001234]],
         [NX::FieldType::BOOL, 'C', [0, 1]],
-        [NX::FieldType::DATETIME, 'q', [-1, (1 << 63) - 1]]
+        [NX::FieldType::DATETIME, 'q', [-1, (1 << 63) - 1]],
+        [NX::FieldType::DURATION, 'q', [-(1 << 63), (1 << 63) - 1]]
       ]
       descriptions.each_with_index { |(type, _, _), index| fields.add("f#{index}", type) }
       builder = NX::BatchBuilder.new(fields.schema, 2)
@@ -107,6 +108,7 @@ module RubySuite
       assert_equal [0, (1 << 64) - 1], decoded.column(6)
       assert_equal [-1, (1 << 63) - 1], decoded.column(11)
       assert_equal [false, true], decoded.column(10)
+      assert_equal [-(1 << 63), (1 << 63) - 1], decoded.column(12)
     end
 
     def test_an_ipc_slice_keeps_its_owner_until_the_last_view_is_collected

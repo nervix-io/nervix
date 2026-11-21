@@ -135,6 +135,7 @@ U8 = 1 as "U8",
         Datetime = 14 as "DATETIME",
         FixedList = 15 as "FIXED_LIST",
         List = 16 as "LIST",
+        Duration = 17 as "DURATION",
 } }
 
 host_enum! { Part from Part {

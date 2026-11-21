@@ -40,7 +40,7 @@ public final class VocabularyTests {
         assertEquals(2, Nervix.TlsRequirement.REQUIRED.code());
 
         assertArrayEquals(new Nervix.FieldType[] {
-            Nervix.FieldType.U8, Nervix.FieldType.I8, Nervix.FieldType.U16, Nervix.FieldType.I16, Nervix.FieldType.U32, Nervix.FieldType.I32, Nervix.FieldType.U64, Nervix.FieldType.I64, Nervix.FieldType.F32, Nervix.FieldType.F64, Nervix.FieldType.BOOL, Nervix.FieldType.STRING, Nervix.FieldType.BYTES, Nervix.FieldType.DATETIME, Nervix.FieldType.FIXED_LIST, Nervix.FieldType.LIST
+            Nervix.FieldType.U8, Nervix.FieldType.I8, Nervix.FieldType.U16, Nervix.FieldType.I16, Nervix.FieldType.U32, Nervix.FieldType.I32, Nervix.FieldType.U64, Nervix.FieldType.I64, Nervix.FieldType.F32, Nervix.FieldType.F64, Nervix.FieldType.BOOL, Nervix.FieldType.STRING, Nervix.FieldType.BYTES, Nervix.FieldType.DATETIME, Nervix.FieldType.FIXED_LIST, Nervix.FieldType.LIST, Nervix.FieldType.DURATION
         }, Nervix.FieldType.values());
         assertEquals(1, Nervix.FieldType.U8.code());
         assertEquals(2, Nervix.FieldType.I8.code());
@@ -58,6 +58,7 @@ public final class VocabularyTests {
         assertEquals(14, Nervix.FieldType.DATETIME.code());
         assertEquals(15, Nervix.FieldType.FIXED_LIST.code());
         assertEquals(16, Nervix.FieldType.LIST.code());
+        assertEquals(17, Nervix.FieldType.DURATION.code());
 
         assertArrayEquals(new Nervix.Part[] {
             Nervix.Part.ROWS, Nervix.Part.BRANCH

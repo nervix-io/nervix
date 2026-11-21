@@ -6,7 +6,7 @@ module RubyProperties
   NX = Nervix::Client
   SCALARS = [
     ['U8', 1], ['I8', 1], ['U16', 2], ['I16', 2], ['U32', 4], ['I32', 4],
-    ['U64', 8], ['I64', 8], ['F32', 4], ['F64', 8], ['BOOL', 1], ['DATETIME', 8]
+    ['U64', 8], ['I64', 8], ['F32', 4], ['F64', 8], ['BOOL', 1], ['DATETIME', 8], ['DURATION', 8]
   ].freeze
 
   def self.check(condition, message)
@@ -21,7 +21,7 @@ module RubyProperties
     fields = NX::Fields.new
     expected = []
     (byte(input, 0) % 8).times do |index|
-      scalar = NX::FieldType.const_get((SCALARS.map(&:first) + %w[STRING BYTES])[byte(input, index + 1) % 14])
+      scalar = NX::FieldType.const_get((SCALARS.map(&:first) + %w[STRING BYTES])[byte(input, index + 1) % 15])
       levels = []
       (byte(input, index + 2) % 4).times do |depth|
         if byte(input, index + depth + 3).even?
@@ -95,7 +95,8 @@ module RubyProperties
         states = current.states(column)
         directive = { 'U8' => 'C', 'I8' => 'c', 'U16' => 'S', 'I16' => 's',
                       'U32' => 'L', 'I32' => 'l', 'U64' => 'Q', 'I64' => 'q',
-                      'F32' => 'f', 'F64' => 'd', 'BOOL' => 'C', 'DATETIME' => 'q' }.fetch(name)
+                      'F32' => 'f', 'F64' => 'd', 'BOOL' => 'C', 'DATETIME' => 'q',
+                      'DURATION' => 'q' }.fetch(name)
         expected = scalar_bytes[column].unpack("#{directive}*")
         rows.times do |row|
           check(states[row] == (presence[row] ? NX::CellState::VALUE : NX::CellState::NULL), 'scalar validity changed')

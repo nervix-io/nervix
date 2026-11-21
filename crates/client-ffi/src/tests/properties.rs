@@ -17,7 +17,7 @@ use nervix_client_core::{
     SubscriptionEvent, SubscriptionRowsEvent,
     wire::{CellView, ServerEvent, ServerMessage, SessionLimits, SubscriptionRowsEncoder},
 };
-use nervix_models::Timestamp;
+use nervix_models::{DurationValue, Timestamp};
 use nervix_primitives::sync::Arc;
 
 use super::{Shared, handle, name, schema, succeeded};
@@ -94,7 +94,8 @@ fn check(bytes: &[u8]) {
                 }
                 writer.push_bytes(&raw)?;
                 writer.push_redacted()?;
-                writer.push_list(|items| items.push_i64(signed))
+                writer.push_list(|items| items.push_i64(signed))?;
+                writer.push_duration(DurationValue::from_nanoseconds(signed))
             })
             .assured("bounded row fits");
     }
@@ -228,6 +229,9 @@ fn check(bytes: &[u8]) {
                         CellView::Bool(value) => expected_bytes.push(u8::from(value)),
                         CellView::Datetime(value) => {
                             expected_bytes.extend_from_slice(&value.unix_nanos().to_ne_bytes())
+                        }
+                        CellView::Duration(value) => {
+                            expected_bytes.extend_from_slice(&value.nanoseconds().to_ne_bytes())
                         }
                         _ => panic!("a fixed column has its declared exact type"),
                     }

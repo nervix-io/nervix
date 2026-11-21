@@ -12,6 +12,7 @@ function catalog. It covers:
 - which kernels compute each function family, and how far each one vectorizes
 - how window aggregates and sketches keep branch-local state
 - how to add a function without weakening any of these contracts
+- what adding an internal type takes, in the VM and in every layer beside it
 
 [Expression Functions](./filter-map-functions.md) owns every contract a user relies on: signatures,
 exact types, nulls, errors, limits, and measured costs. This chapter explains how the
@@ -326,8 +327,8 @@ for every row:
 
 Registers are typed. The types are:
 
-- the thirteen scalar types: eight integer widths, two float widths, `Boolean`, `Utf8`, and
-  `Binary`
+- the fourteen scalar types: eight integer widths, two float widths, `Boolean`, `Utf8`, `Binary`,
+  and `Duration`, a signed count of nanoseconds
 - `Datetime`, a nanosecond UTC timestamp
 - `Generic`, for lists
 
@@ -605,6 +606,7 @@ Each Plexus type has one Arrow representation, and the VM executes over all of t
 | `STRING` | `Utf8` |
 | `BYTES` | `Binary`. Its values may be empty or hold any octets, and are never read as UTF-8 without an explicit conversion. |
 | `DATETIME` | `Timestamp(Nanosecond, "+00:00")`. RFC 3339 is only a wire representation of it. |
+| `DURATION` | `Duration(Nanosecond)`: signed nanoseconds. The literal form `1h 30m` is only how text shows it. |
 | `ARRAY<T, n>`, `VEC<T>` | `FixedSizeList` and `List` of the element type |
 
 Execution checks the schema once and then works through these steps:
@@ -842,7 +844,7 @@ about vector instructions it supports.
 
 | Class | Examples | Claim |
 | --- | --- | --- |
-| Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
+| Arrow compute kernel | Boolean logic, `STRING`/`BYTES`/`DATETIME`/`DURATION` comparisons, `LIKE`/`ILIKE`, `contains`/`starts_with`/`ends_with`, casts, `CASE`/`coalesce`/`nullif` selection, filter/take/zip/interleave, UTC `date_part`, `bitwise_and`/`or`/`xor`, list `sum` per row | Whatever Arrow 58.4's kernels do; Nervix adds none of its own |
 | Explicit SIMD lanes | Checked `+` and `-` over `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, and `U64`, checked `*` below 64 bits, integer column-by-scalar `/` and `%` below 64 bits, and `I64` column-by-scalar `/` | `nervix-simd-kernels` selects the vector instructions once per process, with a scalar fallback, and every level computes the same lanes; the [SIMD kernels 07 report](https://app.clickup.com/t/86bc85vc3) and [08 report](https://app.clickup.com/t/86bc85vcf) inspect the generated code |
 | One pass over value buffers | Integer division by a column, `U64` column-by-scalar `/` and `%` and `I64` column-by-scalar `%` with a prepared reciprocal, checked `*` over `I64` and `U64`, checked float arithmetic, numeric comparisons, fixed-width `IN`, `abs`/`sign`/negation, `ceil`/`floor`/`round`/`trunc`, `sqrt`, shifts, classification, fixed-unit `date_trunc`/`date_bin`/`date_add`/`date_diff`, `to_unix`/`from_unix`, `length`/`octet_length`/`bit_length`, ASCII `lower`/`upper`, list `count` | Written so LLVM may auto-vectorize the loop for the target CPU; no claim that it does |
 | Library with runtime SIMD dispatch | JSON structure (simd-json), base64 (base64-simd), hexadecimal (faster-hex), `sha256` (AWS-LC through the [cryptography boundary](cryptography.md#digests-and-randomness), with CPU instruction detection) | The library selects instructions at run time; `xxh3_64` selects them when the binary is built |
@@ -1038,6 +1040,9 @@ The reference owns each family's contract. These notes describe its implementati
     branch-free lanes for shifts.
   - Classification never fails.
 - **Temporal.** A `DATETIME` is signed nanoseconds since the epoch in an Arrow UTC timestamp.
+  A `DURATION` is a signed count of nanoseconds in an Arrow `Duration(Nanosecond)` array. It
+  compares and orders through Arrow's comparison kernels, as a `DATETIME` does, and takes no
+  arithmetic and no conversion.
   - Fixed units compute in checked lanes.
   - Calendar units and zones use Jiff with the IANA database it bundles, and never read the host's
     zone or locale.
@@ -1487,6 +1492,51 @@ A result that does not fit its type fails the window when it emits:
 
 That failure fails every retained row's acknowledgement and clears the window. The routes the
 window emitted before the failing one keep their output.
+
+## Adding An Internal Type
+
+An internal type reaches every layer that lists the types, and a statement Nervix accepts must not
+fail later in a corner that forgot it. Treat this as the checklist for a new internal type, the
+way `DURATION` was added; every step lands in the same change.
+
+1. **Vocabulary.** Add the `ParseAsType` variant, its place in `scalar_variants()`, its `Display`
+   and canonical spelling, and its one Arrow data type in `arrow_data_type()`. A value of the type
+   that crosses layers as a scalar, such as a literal, a branch key field or a binding, is one
+   semantic vocabulary type, as `DurationValue` is, never a raw integer.
+2. **Language.** Add the type keyword to the shared token definition, the schema type parser and
+   the expression's declared types. A literal for the type is one shared grammar primitive, read by
+   expressions and relay bindings alike, with positive, negative and completion-context tests and
+   a clean `just plexus-completion-walk`.
+3. **Stored shapes and the interconnect.** A new `ParseAsType` or `Literal` variant changes the
+   registry's Model archive header, the consensus keyspace namespace and the interconnect's
+   `WIRE_CONTRACT` fingerprint in the same change. Every other archived enum the type reaches
+   either changes its own marker, as backup state values change their record version, or appends
+   the new variant after every earlier one, as remote branch-key values and deduplicator key
+   snapshots do, so that no stored or peer archive of an earlier variant is read as the new one.
+4. **The VM.** Add its register type and `TypedArray` variant through `with_typed_registers!`, its
+   comparisons, its place in the ordered types if it orders, its set elements, list item
+   selection and extremes, window ordering, and the conversions it performs or refuses. Decide
+   every catch-all arm the type would otherwise fall into in silence: a generic array, the cast
+   kernel, a JSON target.
+5. **Runtime values.** Add the `RuntimeValue` variant with its remote, serializable, backup and
+   key-text forms, the reverse Arrow mapping, the IPC field layouts a peer's stream is held to,
+   the client Row encoder, deduplication and reorder key parts, and window argument values.
+6. **Decisions.** Every boundary that cannot carry the type refuses it when the statement is
+   created, with a typed error naming the field: codecs and their wire bindings, WASM guest schemas,
+   UDF signatures, and connector mapped values, which declare it rejected.
+7. **Clients.** Add the session cell to `session.fbs`, its row views and its text and JSON
+   renderings, the host `FieldType`, every binding with its typed stub and the C header, every
+   conformance probe and host suite, the conformance ledger and the client-wire corpus.
+8. **Generators and properties.** Add the type to every generator in `nervix-arbitrary` and to the
+   generators that enumerate the value variants themselves (interconnect, backup, runtime-state and
+   client properties), keep it out of the domains of the boundaries that refuse it, such as the
+   codec domains, register the round-trip and malformed-input properties it needs, and advance the
+   domain version of every target whose generated domain grows.
+9. **Documentation.** The internal type list in [Schemas And
+   Codecs](./schemas-and-codecs.md#internal-schemas), the literal and each function's type list in
+   [Expression Functions](./filter-map-functions.md), the binding table in [Wire Schema
+   Binding](./wire-schema-binding.md#the-binding-rule), the client manuals and host guides, and the
+   Plexus skill.
 
 ## Adding A Function
 
