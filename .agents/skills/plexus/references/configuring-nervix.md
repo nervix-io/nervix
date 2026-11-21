@@ -679,7 +679,10 @@ current connection, retry and deadline limits.
   follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,
   pending output, timeout handles, or latched error state, and reports a failed save with a
-  negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects
+  negative code, after which Nervix keeps the state saved last. It exports the required
+  `nervix_describe_state`, which the SDK's `Processor::describe_state` provides; a module without
+  it fails `instantiation` naming the export, and a failed description is reported only in the
+  inspected branch's entry under the `state description` stage. Its `nervix_load_state` rejects
   unusable saved state only with the reserved `-7` or `-8` codes; read a WASM failure by its
   `<stage> failed` diagnostic, and treat only `snapshot envelope decoding` and `application state
   restoration` as a verdict on the saved state, which Nervix keeps unless the processor declares
@@ -741,7 +744,8 @@ Choose checks relevant to the configured graph:
   `SENSITIVE` payload fields and branch-key fields on both the owner and other nodes.
 - `SHOW WASM PROCESSOR <processor> STATE;` reads guest-state lifetimes, resets, recoveries and
   every selected branch's checkpoint at each unit's owner, with the same selection and paging
-  clauses.
+  clauses, and the guest's own description of each committed checkpoint: section names, fields,
+  types and row counts, never a value, because guest state is always sensitive.
 - `DESCRIBE INGESTOR`, `DESCRIBE JUNCTION`, other processor-specific `DESCRIBE` commands, and
   `DESCRIBE EMITTER` inspect runtime state and edge metrics. `SHOW INGESTORS;` lists every ingestor
   with the connector and entity it reads (`from=<CONNECTOR> <ENTITY>`), its owner and state, and a

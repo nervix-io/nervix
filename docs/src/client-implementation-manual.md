@@ -1487,10 +1487,10 @@ from the presence of `state` or parse text to reconstruct rows.
 Clients MUST preserve the inspection entity's typed scope. `DomainNodeInspectionEntity` contains
 a domain and node reference; `ClusterLicenseInspectionEntity` contains neither. Native host
 domain/name accessors return absent values for a cluster-license observation, and its entity kind
-is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's `transitions`
-section uses that generic contract for committed grants; preserve its complete schema and typed
-rows, including datetime precision and all original/target values. The section's rows contribute
-to the page and unit counts. Native and console warnings render the same licensing transition
+is `LICENSE`. The page and Row-section contract is shared by both scopes. Licensing's
+`capabilities` and `transitions` sections use that generic contract for capability states and
+committed grants; preserve their complete schemas and typed rows, including datetime precision and
+all original/target values. Their rows contribute to the page and unit counts. Native and console warnings render the same licensing transition
 codes and parameters supplied by the server.
 
 Embedded `NXRB` frames use the existing verified Row/Cell representation and the session transfer
@@ -1511,9 +1511,13 @@ A `SHOW WASM PROCESSOR ... STATE` page carries typed WASM tables instead of row 
 MUST decode the page's `WasmStateBinding` and every unit's `WasmUnitStateFacts` into typed values:
 the default generation, the latest reset with its request reference, scope union, phase, reason,
 generation and readiness, the complete entry, checkpoint-stage and recovery-outcome counts, and every
-returned branch entry in order with its optional fingerprint, checkpoint and recovery. Clients MUST
-refuse a zero generation or revision, an unordered or stateless entry, more returned entries than
-the complete count, and undeclared enum values or union members, as for every other table. An
+returned branch entry in order with its optional fingerprint, checkpoint, recovery and guest-state
+description: the restored generation and optional revision, and either the sections with their
+names, fields and row counts or the failed render's stage and diagnostic. Guest state is always
+sensitive: clients MUST present every guest section field as withheld and MUST NOT expect a value.
+Clients MUST refuse a zero generation or revision, an unordered or stateless entry, more returned
+entries than the complete count, a description beside no checkpoint, a guest section field that is
+not sensitive, and undeclared enum values or union members, as for every other table. An
 absent fingerprint is the unbranched execution, never an empty or zero fingerprint. Resume a WASM
 continuation with the same domain, processor and selector; a refused resume starts a new read, and
 entries of the abandoned sequence are not combined with the new one.

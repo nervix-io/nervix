@@ -1209,8 +1209,8 @@ public final class Probe {
         }
         try (var outcome = session.handle.command("DESCRIBE LICENSE;", null); var license = outcome.stateInspection()) {
             require(license.domain() == null && license.entityName() == null, "cluster licensing scope");
-            require(license.entityKind().equals("LICENSE") && license.counts().rows() == 3 && license.counts().branches() == 0, "typed licensing observation");
-            report("INSPECTION license rows=3");
+            require(license.entityKind().equals("LICENSE") && license.counts().rows() == 4 && license.counts().branches() == 0, "typed licensing observation");
+            report("INSPECTION license rows=4");
         }
         Nervix.Inspection inspection;
         try (var outcome = session.handle.command(

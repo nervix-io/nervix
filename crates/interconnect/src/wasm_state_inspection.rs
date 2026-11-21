@@ -1,8 +1,9 @@
 //! The bounded owner-page operation for WASM processor guest-state inspection.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Typed WASM state page requests, their replies and the archived bound of one branch
-//!   entry that keeps a reply within its request class.
+//! - **Owns.** Typed WASM state page requests, their replies, the archived bound of one branch
+//!   entry's own facts, and the archived measures that keep a reply carrying guest-state
+//!   descriptions within its request class.
 //! - **Depends on.** State and WASM inspection vocabulary, the execution limits and the
 //!   interconnect request contract.
 //! - **Must not know.** Plexus, session envelopes, rendering, checkpoint storage or owner selection.
@@ -12,29 +13,36 @@
     nervix::layer(engine, reason = "owns the boundary declared above")
 )]
 
+use std::time::Duration;
+
+use meticulous::ResultExt as _;
 use nervix_execution::Executor;
 use nervix_models::{
     ClusterNodeIdentity, DomainName, StateInspectionBranchSelection, StateInspectionOrigin,
-    StateInspectionRejection, Unit, WasmProcessorName, WasmStateEntryKey, WasmUnitStatePage,
+    StateInspectionRejection, Unit, WasmBranchStateInspection, WasmProcessorName,
+    WasmStateEntryKey, WasmUnitStatePage,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::{InterconnectRequest, PoolClass};
 
-/// The archived size one branch entry cannot exceed: its optional 32-byte fingerprint, checkpoint
-/// and recovery with the longest command reference the vocabulary admits, and alignment padding.
+/// The archived size one branch entry's own facts cannot exceed: its optional 32-byte fingerprint,
+/// checkpoint and recovery with the longest command reference the vocabulary admits, an absent
+/// guest-state description, and alignment padding. A description the owner rendered takes the
+/// room it measures on top.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
         reason = "the archived layout of WasmBranchStateInspection with a 128-byte command \
-                  reference fits 512 bytes; the reply bound test pins it"
+                  reference and no description fits 512 bytes; the reply bound test pins it"
     )
 )]
 const MAX_ARCHIVED_ENTRY_BYTES: u64 = 512;
 
 /// Reads one execution unit's WASM guest-state facts at its owner, with at most `max_entries` of
-/// the selected branch entries that follow `after`.
+/// the selected branch entries that follow `after`, and the guest's description of each returned
+/// entry's committed checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct ReadWasmStatePage {
     pub domain: DomainName,
@@ -45,6 +53,14 @@ pub struct ReadWasmStatePage {
     pub selection: StateInspectionBranchSelection,
     pub after: Option<WasmStateEntryKey>,
     pub max_entries: u64,
+    /// The most guest-state sections the returned descriptions may carry together.
+    pub max_sections: u64,
+    /// The most session-encoded bytes the returned entries may take together, so the coordinator's
+    /// reply stays within the session's transfer bound.
+    pub max_bytes: u64,
+    /// How long the owner may spend rendering the descriptions of the entries it returns. An owner
+    /// that runs out stops the page before the next render and reports that entries remain.
+    pub render_budget: Duration,
     /// The exact owner process the coordinator resolved for the unit.
     pub target: ClusterNodeIdentity,
 }
@@ -63,6 +79,19 @@ impl ReadWasmStatePage {
             entries.saturating_sub(2)
         )
     }
+
+    /// The archived bytes one reply leaves for its branch entries, descriptions included: the
+    /// request class's payload limit less the room of two entries, which the unit's own facts and
+    /// the reply around them take less than. A limit too small for them leaves no room.
+    pub fn entry_room(executor: &Executor) -> u64 {
+        let limit = <Self as InterconnectRequest>::CLASS.payload_limit(executor);
+        let facts = 2 * MAX_ARCHIVED_ENTRY_BYTES;
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a payload no larger than the unit's own facts leaves no room for branch entries",
+            limit.saturating_sub(facts)
+        )
+    }
 }
 
 /// One unit's facts as its owner read them, and the origin of that read.
@@ -72,9 +101,36 @@ pub struct WasmStatePage {
     pub page: WasmUnitStatePage,
 }
 
+impl WasmStatePage {
+    /// The archived bytes `entry` takes on its own. An owner sums them to stop rendering before
+    /// its reply fills, within [`ReadWasmStatePage::entry_room`]; inside a reply an entry's parts
+    /// may pad differently, so [`ReadWasmStatePageResponse::fits`] is the exact verdict.
+    pub fn archived_entry_bytes(entry: &WasmBranchStateInspection) -> u64 {
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(entry).assured(
+            "an in-memory branch entry serializes into a growable buffer: none of its parts \
+             refuses, and every count fits the u64 it is archived as",
+        );
+        u64::try_from(archived.len()).assured("an in-memory archive's length fits u64")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct ReadWasmStatePageResponse {
     pub result: Result<WasmStatePage, StateInspectionRejection>,
+}
+
+impl ReadWasmStatePageResponse {
+    /// Whether this reply, archived, fits the payload limit of its request class, which is what
+    /// sending it requires.
+    pub fn fits(&self, executor: &Executor) -> bool {
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(self).assured(
+            "an in-memory reply serializes into a growable buffer: none of its parts refuses, and \
+             every count fits the u64 it is archived as",
+        );
+        let bytes = u64::try_from(archived.len()).assured("an in-memory archive's length fits u64");
+        let limit = <ReadWasmStatePage as InterconnectRequest>::CLASS.payload_limit(executor);
+        bytes <= limit
+    }
 }
 
 impl InterconnectRequest for ReadWasmStatePage {
@@ -92,13 +148,15 @@ impl InterconnectRequest for ReadWasmStatePage {
 mod tests {
     use std::num::NonZeroU64;
 
-    use meticulous::ResultExt as _;
+    use meticulous::OptionExt as _;
     use nervix_arbitrary::Arbitrary;
     use nervix_models::{
-        BranchKeyFingerprint, ClusterNodeIncarnation, CommandExecutionReference,
-        StateInspectionStage, WasmBranchStateInspection, WasmCheckpointCounts, WasmCheckpointStage,
-        WasmCheckpointState, WasmRecoveryCounts, WasmRecoveryInspection, WasmSavedStateRejection,
-        WasmStateGeneration, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetInspection,
+        BranchKeyFingerprint, ClusterNodeIncarnation, CommandExecutionReference, FieldName,
+        ParseAsType, StateInspectionStage, WasmCheckpointCounts, WasmCheckpointStage,
+        WasmCheckpointState, WasmGuestStateDescription, WasmGuestStateField, WasmGuestStateRender,
+        WasmGuestStateRenderStage, WasmGuestStateSection, WasmRecoveryCounts,
+        WasmRecoveryInspection, WasmSavedStateRejection, WasmStateGeneration,
+        WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetInspection,
         WasmStateResetReadiness, WasmStateResetReason, WasmStateResetScope,
         WasmUnitStateInspection,
     };
@@ -177,6 +235,66 @@ mod tests {
         }
     }
 
+    /// Every stage at which a render can fail.
+    const RENDER_STAGES: [WasmGuestStateRenderStage; 7] = [
+        WasmGuestStateRenderStage::ModuleCompilation,
+        WasmGuestStateRenderStage::Instantiation,
+        WasmGuestStateRenderStage::Initialization,
+        WasmGuestStateRenderStage::SnapshotEnvelopeDecoding,
+        WasmGuestStateRenderStage::ApplicationStateRestoration,
+        WasmGuestStateRenderStage::StateRestore,
+        WasmGuestStateRenderStage::StateDescription,
+    ];
+
+    /// `count` guest-state sections, each a generated schema's fields under a generated name.
+    fn sections(arbitrary: &mut Arbitrary<'_>, count: usize) -> Vec<WasmGuestStateSection> {
+        let mut sections = Vec::with_capacity(count);
+        for _ in 0..count {
+            let schema = arbitrary.create_schema();
+            let fields = schema
+                .fields
+                .into_iter()
+                .map(|field| WasmGuestStateField {
+                    name: field.name,
+                    ty: field.ty,
+                    optional: field.optional,
+                })
+                .collect();
+            sections.push(WasmGuestStateSection {
+                name: arbitrary.name(),
+                fields,
+                rows: usize::from(arbitrary.entropy().byte()),
+            });
+        }
+        sections
+    }
+
+    fn described(
+        arbitrary: &mut Arbitrary<'_>,
+        render: WasmGuestStateRender,
+    ) -> WasmGuestStateDescription {
+        WasmGuestStateDescription {
+            generation: generation(arbitrary),
+            revision: optional_revision(arbitrary),
+            render,
+        }
+    }
+
+    fn description(arbitrary: &mut Arbitrary<'_>) -> WasmGuestStateDescription {
+        let render = if arbitrary.entropy().flag() {
+            let count = arbitrary.entropy().count(3);
+            WasmGuestStateRender::Described {
+                sections: sections(arbitrary, count),
+            }
+        } else {
+            WasmGuestStateRender::Failed {
+                stage: arbitrary.entropy().pick(RENDER_STAGES),
+                diagnostic: arbitrary.name_text(),
+            }
+        };
+        described(arbitrary, render)
+    }
+
     fn entries(arbitrary: &mut Arbitrary<'_>) -> Vec<WasmBranchStateInspection> {
         let mut keys = std::collections::BTreeSet::new();
         if arbitrary.entropy().flag() {
@@ -192,10 +310,49 @@ mod tests {
                 1 => (None, Some(recovery(arbitrary))),
                 _ => (Some(checkpoint(arbitrary)), Some(recovery(arbitrary))),
             };
+            let description = if checkpoint.is_some() && arbitrary.entropy().flag() {
+                Some(description(arbitrary))
+            } else {
+                None
+            };
             entries.push(WasmBranchStateInspection {
                 branch,
                 checkpoint,
                 recovery,
+                description,
+            });
+        }
+        // However short the input, every page also carries a description of at least one section
+        // beside a recovery, and a failed render at every stage, each on a fingerprint of its own
+        // after the drawn entries, so each shape of a description and a recovery cross the codec
+        // in every case.
+        let mut renders = Vec::with_capacity(RENDER_STAGES.len() + 1);
+        let count = arbitrary.entropy().positive_count(
+            std::num::NonZeroUsize::new(3).assured("three is a nonzero section bound"),
+        );
+        renders.push(WasmGuestStateRender::Described {
+            sections: sections(arbitrary, count),
+        });
+        for stage in RENDER_STAGES {
+            renders.push(WasmGuestStateRender::Failed {
+                stage,
+                diagnostic: arbitrary.name_text(),
+            });
+        }
+        for (index, render) in renders.into_iter().enumerate() {
+            let mut fingerprint = [0xf0; 32];
+            fingerprint[1] = u8::try_from(index).assured("eight renders index below 256");
+            let entry_checkpoint = checkpoint(arbitrary);
+            // The described entry is the one that also reports a recovery.
+            let mut recovered = None;
+            if index == 0 {
+                recovered = Some(recovery(arbitrary));
+            }
+            entries.push(WasmBranchStateInspection {
+                branch: Some(BranchKeyFingerprint::new(fingerprint)),
+                checkpoint: Some(entry_checkpoint),
+                recovery: recovered,
+                description: Some(described(arbitrary, render)),
             });
         }
         entries
@@ -327,11 +484,29 @@ mod tests {
                         branch: None,
                         checkpoint: Some(checkpoint),
                         recovery: None,
+                        description: Some(WasmGuestStateDescription {
+                            generation: generation(2),
+                            revision: NonZeroU64::new(4),
+                            render: WasmGuestStateRender::Described {
+                                sections: vec![WasmGuestStateSection {
+                                    name: FieldName::parse("counters")
+                                        .assured("a literal section name"),
+                                    fields: vec![WasmGuestStateField {
+                                        name: FieldName::parse("count")
+                                            .assured("a literal field name"),
+                                        ty: ParseAsType::U32,
+                                        optional: false,
+                                    }],
+                                    rows: 1,
+                                }],
+                            },
+                        }),
                     },
                     WasmBranchStateInspection {
                         branch: Some(branch),
                         checkpoint: None,
                         recovery: Some(recovery),
+                        description: None,
                     },
                 ],
             },
@@ -397,6 +572,9 @@ mod tests {
                         _ => Some(WasmStateEntryKey(Some(arbitrary.branch_fingerprint()))),
                     },
                     max_entries: arbitrary.positive_u64().get(),
+                    max_sections: arbitrary.entropy().any_u64(),
+                    max_bytes: arbitrary.entropy().any_u64(),
+                    render_budget: Duration::from_nanos(arbitrary.entropy().any_u64()),
                     target: target.clone(),
                 };
                 let reply = ReadWasmStatePageResponse {
@@ -520,6 +698,7 @@ mod tests {
                     request: longest.clone(),
                     outcome: WasmStateRecoveryOutcome::Recovered,
                 }),
+                description: None,
             });
         }
         let mut reset = WasmStateReset::publishing(
@@ -564,6 +743,106 @@ mod tests {
                 .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
                 .await
                 .assured("a reply of the entry capacity fits the class payload limit");
+        });
+    }
+
+    /// A reply whose one entry carries a failed render with a diagnostic of `length` bytes.
+    fn reply_with_diagnostic(length: usize) -> ReadWasmStatePageResponse {
+        let generation = WasmStateGeneration::try_from(1).assured("a positive generation");
+        let entry = WasmBranchStateInspection {
+            branch: Some(BranchKeyFingerprint::new([7; 32])),
+            checkpoint: Some(WasmCheckpointState {
+                generation,
+                committed_revision: NonZeroU64::new(1),
+                latest_revision: NonZeroU64::new(1),
+                stage: WasmCheckpointStage::ReplicaConfirmed,
+                required_replicas: Some(0),
+                confirmed_replicas: Some(0),
+            }),
+            recovery: None,
+            description: Some(WasmGuestStateDescription {
+                generation,
+                revision: NonZeroU64::new(1),
+                render: WasmGuestStateRender::Failed {
+                    stage: WasmGuestStateRenderStage::StateDescription,
+                    diagnostic: "d".repeat(length),
+                },
+            }),
+        };
+        ReadWasmStatePageResponse {
+            result: Ok(WasmStatePage {
+                origin: StateInspectionOrigin {
+                    node: ClusterNodeIdentity::new(
+                        nervix_models::ClusterNodeName::parse("node-a")
+                            .assured("a literal node name"),
+                        ClusterNodeIncarnation::new(1),
+                    ),
+                    fingerprint: [1; 32],
+                    generation: 1,
+                    revision: 1,
+                    stage: StateInspectionStage::Live,
+                },
+                page: WasmUnitStatePage {
+                    state: WasmUnitStateInspection {
+                        default_generation: generation,
+                        reset: None,
+                        entries: 1,
+                        checkpoints: WasmCheckpointCounts::default(),
+                        recoveries: WasmRecoveryCounts::default(),
+                        branches: vec![entry],
+                    },
+                    more: false,
+                },
+            }),
+        }
+    }
+
+    /// `fits` is the encoder's own verdict: at the exact size where a reply stops fitting the class
+    /// payload limit, the encoder accepts the last reply `fits` admits and refuses the first it
+    /// does not.
+    #[test]
+    fn fits_agrees_with_the_encoder_at_the_payload_limit() {
+        let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .assured("ordinary fixture runtime");
+        let executor = Executor::default();
+        let class = <ReadWasmStatePage as InterconnectRequest>::CLASS;
+        let limit = usize::try_from(class.payload_limit(&executor))
+            .assured("the class payload limit fits usize");
+        let mut fitting = 0;
+        let mut refused = limit;
+        assert!(reply_with_diagnostic(fitting).fits(&executor));
+        assert!(!reply_with_diagnostic(refused).fits(&executor));
+        while refused - fitting > 1 {
+            let middle = fitting + (refused - fitting) / 2;
+            if reply_with_diagnostic(middle).fits(&executor) {
+                fitting = middle;
+            } else {
+                refused = middle;
+            }
+        }
+        let entry_bytes = WasmStatePage::archived_entry_bytes(
+            &reply_with_diagnostic(fitting)
+                .result
+                .assured("the reply is a page")
+                .page
+                .state
+                .branches[0],
+        );
+        assert!(entry_bytes > ReadWasmStatePage::entry_room(&executor) / 2);
+        runtime.block_on(async {
+            reply_with_diagnostic(fitting)
+                .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
+                .await
+                .assured("the encoder accepts the largest reply fits admits");
+            let refusal = reply_with_diagnostic(refused)
+                .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
+                .await;
+            assert!(
+                refusal.is_err(),
+                "the encoder refuses the first reply fits refuses"
+            );
         });
     }
 }

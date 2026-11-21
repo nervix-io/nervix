@@ -756,6 +756,7 @@ use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
     ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary, WasmGuestState,
 };
+pub(crate) use wasm_state_description::{WasmDescriptionSize, WasmDescriptionSource};
 use wasm_state_recovery::RaisedWasmStateRecoveries;
 pub(crate) use wasm_state_recovery::WasmStateRecoveryRequest;
 pub(crate) use wasm_state_reset::WasmStateResetPreparation;
@@ -801,6 +802,7 @@ mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;
+mod wasm_state_description;
 mod wasm_state_recovery;
 mod wasm_state_reset;
 mod window_accumulator;

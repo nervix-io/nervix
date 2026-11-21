@@ -1193,11 +1193,13 @@ mod tests {
                     branch: Some(branch(1)),
                     checkpoint: Some(checkpoints[1].state),
                     recovery: None,
+                    description: None,
                 },
                 WasmBranchStateInspection {
                     branch: Some(branch(2)),
                     checkpoint: Some(checkpoints[2].state),
                     recovery: None,
+                    description: None,
                 },
             ]
         );
@@ -1256,6 +1258,7 @@ mod tests {
                     request,
                     outcome: WasmStateRecoveryOutcome::Failed,
                 }),
+                description: None,
             }]
         );
     }

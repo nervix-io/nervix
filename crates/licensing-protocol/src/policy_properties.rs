@@ -51,6 +51,12 @@ fn bolero_conditions_resolution() {
             assert_eq!(suspended.values().operating, plan.operating);
             // Reversing insertion history cannot change the canonical digest.
             let mut reordered = empty_conditions();
+            for (name, value) in expected.usage.capabilities.iter().rev() {
+                reordered
+                    .usage
+                    .capabilities
+                    .insert(name.clone(), value.clone());
+            }
             for (name, value) in expected.usage.quotas.iter().rev() {
                 reordered.usage.quotas.insert(name.clone(), value.clone());
             }

@@ -150,7 +150,7 @@ For node tags and detected properties, read [Selecting Nodes](../../../docs/src/
 and [Node Selectors](../../../docs/src/filter-map-functions.md#node-selectors). Use `SHOW NODES WHERE ...`
 to preview the selector against the committed node records and `FORMAT JSON` for scripts.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
-effective policy, credential handling and quota usage, read
+effective policy, capabilities, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 For grace, replacement allowances and over-limit outcomes, also read
@@ -973,7 +973,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - To inspect WASM guest-state progress, use
   `SHOW WASM PROCESSOR <processor> STATE [FOR ...] [LIMIT <n> [AFTER '<continuation>']] [FORMAT TEXT|JSON];`.
   Read each unit's reset phase, generation and readiness beside every selected branch's checkpoint
-  revision, stage and replica counts; follow a returned continuation with `AFTER` to page the rest.
+  revision, stage and replica counts and the guest's description of that checkpoint, whose values
+  are always withheld; follow a returned continuation with `AFTER` to page the rest.
   `DESCRIBE WASM PROCESSOR <processor>;` prints only the binding and per-unit summary counts. See
   `Runtime Nodes` and `WASM Processor Guests` for the meaning of each stage.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
