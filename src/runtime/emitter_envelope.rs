@@ -413,6 +413,7 @@ impl CompiledEnvelope {
     pub(in crate::runtime) async fn evaluate(
         &self,
         executor: &Executor,
+        ack_timing: &SharedRemoteAckTiming,
         source_relay: &RelayName,
         published: &mut RelayRecordBatch,
         input: EnvelopeInput<'_>,
@@ -494,6 +495,7 @@ impl CompiledEnvelope {
             ProgramRun {
                 executor,
                 now: execution_now,
+                ack_timing,
             },
             &computed.program,
             FilterMapBatchInputs {

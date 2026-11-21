@@ -1263,6 +1263,7 @@ async fn branched_entrypoint_batch_groups_and_filters_each_branch() {
             .expect("the fixture inputs share one schema");
     let prepared = prepare_branched_entrypoint_input(
         &executor,
+        &SharedRemoteAckTiming::default(),
         two_tenants,
         BranchInstanceAckBoundary::Preserve,
     )
@@ -1317,6 +1318,7 @@ async fn branched_root_without_children_acks_success() {
         });
     let mut root = BranchRuntime {
         key: root_key.clone(),
+        remote_ack_timing: runtime.remote_ack_timing().clone(),
         runtime: runtime.clone(),
         domain: root_domain.clone(),
         routing: None,
@@ -1637,8 +1639,10 @@ async fn accepted_work_branched_input_waits_for_room_and_keeps_its_acknowledgeme
     let executor = single_worker_executor();
     let filled = FilledCpuClass::fill(&executor, CpuClass::Data).await;
 
+    let ack_timing = SharedRemoteAckTiming::default();
     let mut prepared = Box::pin(prepare_branched_entrypoint_input(
         &executor,
+        &ack_timing,
         branched_input("acme", 10),
         BranchInstanceAckBoundary::Preserve,
     ));
@@ -1677,8 +1681,10 @@ async fn accepted_work_branch_input_keeps_acknowledgements_alive_during_wait() {
     // Empty sidecars surround the live root, so its retained renewal presence must include the
     // whole input, rather than only its first or last row.
     input.acks[1] = acks;
+    let ack_timing = SharedRemoteAckTiming::default();
     let mut prepared = Box::pin(prepare_branched_entrypoint_input(
         &executor,
+        &ack_timing,
         input,
         BranchInstanceAckBoundary::Preserve,
     ));
@@ -1687,7 +1693,7 @@ async fn accepted_work_branch_input_keeps_acknowledgements_alive_during_wait() {
         let progress = nervix_primitives::select! {
             biased;
             _ = &mut prepared => panic!("accepted input keeps waiting while its class is full"),
-            progress = timeout(REMOTE_ACK_ALIVE_INTERVAL * 2, completion.wait_for_progress()) => {
+            progress = timeout(ack_timing.ack_alive_interval() * 2, completion.wait_for_progress()) => {
                 progress.assured("the retained acknowledgement is renewed while admission waits")
             }
         };

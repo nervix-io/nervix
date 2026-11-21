@@ -103,6 +103,14 @@ pub enum JsonPathError {
 
 impl JsonPath {
     /// The most steps a path may take.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the Expression Functions chapter fixes a JSON path at 64 steps, and parsing \
+                      rejects a longer one"
+        )
+    )]
     pub const MAX_STEPS: usize = 64;
 
     /// Parses the written form of a path.

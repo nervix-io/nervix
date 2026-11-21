@@ -189,7 +189,10 @@ impl CheckpointStreamWriter {
 pub(super) mod tests {
     use std::io::Cursor;
 
+    use nervix_models::SettingDefinition as _;
+
     use super::*;
+    use crate::runtime::RestoreStagingMaxBytes;
 
     fn metadata(revision: u64, bytes: &[u8]) -> CheckpointMetadata {
         CheckpointMetadata {
@@ -208,7 +211,7 @@ pub(super) mod tests {
                 .open()
                 .assured("database opens"),
             Executor::default(),
-            super::super::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .assured("store opens");
         let placement = RuntimeStatePlacement {
@@ -351,7 +354,7 @@ pub(super) mod tests {
                 .open()
                 .assured("database reopens"),
             Executor::default(),
-            super::super::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .assured("store reopens");
         let mut actual = Vec::new();

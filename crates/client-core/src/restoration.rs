@@ -56,6 +56,7 @@ use nervix_primitives::{
 use tracing::debug;
 
 use crate::{
+    ClientCapabilities,
     consumer::ConsumerHandle,
     domain_clock::{
         ClockRestorationAttempt, ClockRestorationScope, ClockRestorationStep,
@@ -109,45 +110,60 @@ struct RetriedAttempt<C> {
     message: String,
 }
 
-/// The wait before a restoration its exchange refused is sent again. It starts at one second and
-/// doubles after each refusal on the same exchange up to thirty seconds, so a refusal that clears
-/// soon, such as a relay that is still starting, is retried promptly, while one that lasts, such
-/// as a removed relay, costs one request every thirty seconds.
+/// The waits between the attempts of a restoration its exchange refused: the client's
+/// `restoration-backoff` first, doubled after each refusal up to its `restoration-max-backoff`.
+/// The client's capabilities validate that the first wait is within the limit.
+#[derive(Clone, Copy)]
+struct RestorationBackoff {
+    first: Duration,
+    limit: Duration,
+}
+
+impl RestorationBackoff {
+    fn of(capabilities: ClientCapabilities) -> Self {
+        Self {
+            first: capabilities.restoration_backoff(),
+            limit: capabilities.restoration_max_backoff(),
+        }
+    }
+}
+
+/// The wait before a restoration its exchange refused is sent again. It starts at the first
+/// backoff and doubles after each refusal on the same exchange up to the limit, one second and
+/// thirty seconds by default, so a refusal that clears soon, such as a relay that is still
+/// starting, is retried promptly, while one that lasts, such as a removed relay, costs one request
+/// per limit.
 struct RestorationDelay {
     next: Duration,
+    limit: Duration,
 }
 
 impl RestorationDelay {
-    const FIRST: Duration = Duration::from_secs(1);
-    const LIMIT: Duration = Duration::from_secs(30);
+    fn starting(backoff: RestorationBackoff) -> Self {
+        Self {
+            next: backoff.first,
+            limit: backoff.limit,
+        }
+    }
 
     /// The wait before the next attempt. Each call doubles the wait after it, up to the limit.
     fn advance(&mut self) -> Duration {
         let current = self.next;
         let doubled = current
             .checked_mul(2)
-            .assured("a wait of at most thirty seconds doubles within Duration's range");
-        self.next = doubled.min(Self::LIMIT);
+            .assured("a validated wait of at most one day doubles within Duration's range");
+        self.next = doubled.min(self.limit);
         current
     }
 }
-
-impl Default for RestorationDelay {
-    fn default() -> Self {
-        Self { next: Self::FIRST }
-    }
-}
-
-const _: () = assert!(
-    RestorationDelay::FIRST.as_nanos() <= RestorationDelay::LIMIT.as_nanos(),
-    "the first wait of a refused restoration is within the limit of every later wait",
-);
 
 /// The exchange a restoration is sent on.
 #[derive(Clone)]
 struct RestorationChannel {
     requests: Arc<ExchangeRequests>,
     request_timeout: Duration,
+    /// The waits between the attempts this exchange refuses.
+    backoff: RestorationBackoff,
 }
 
 impl RestorationChannel {
@@ -263,11 +279,12 @@ struct ConsumerRestoration {
 }
 
 impl Restoration {
-    pub(crate) fn new(exchange: &Exchange, request_timeout: Duration) -> Self {
+    pub(crate) fn new(exchange: &Exchange, capabilities: ClientCapabilities) -> Self {
         Self {
             channel: RestorationChannel {
                 requests: exchange.requests(),
-                request_timeout,
+                request_timeout: capabilities.request_timeout(),
+                backoff: RestorationBackoff::of(capabilities),
             },
             generation: exchange.generation.clone(),
             emitters: exchange.emitters.clone(),
@@ -439,7 +456,7 @@ struct ConsumerFollower {
 impl ConsumerFollower {
     async fn run(self, sent: error_stack::Result<PendingRequest, ClientError>) {
         let mut sent = sent;
-        let mut delay = RestorationDelay::default();
+        let mut delay = RestorationDelay::starting(self.channel.backoff);
         loop {
             nervix_primitives::task::consume_budget().await;
             let request_id = sent.as_ref().ok().map(|pending| pending.request_id);
@@ -532,7 +549,7 @@ struct ProducerFollower {
 impl ProducerFollower {
     async fn run(self, sent: error_stack::Result<PendingRequest, ClientError>) {
         let mut sent = sent;
-        let mut delay = RestorationDelay::default();
+        let mut delay = RestorationDelay::starting(self.channel.backoff);
         loop {
             nervix_primitives::task::consume_budget().await;
             let request_id = sent.as_ref().ok().map(|pending| pending.request_id);
@@ -658,7 +675,7 @@ impl ClockFollower {
                 sent
             }
         };
-        let mut delay = RestorationDelay::default();
+        let mut delay = RestorationDelay::starting(self.channel.backoff);
         loop {
             nervix_primitives::task::consume_budget().await;
             let Some(retry_after) = self.refusal(sent, &mut delay).await else {
@@ -780,7 +797,7 @@ impl SubscriptionFollower {
         let name = attempt.contract.create.name.clone();
         let mut attempt = attempt;
         let mut sent = sent;
-        let mut delay = RestorationDelay::default();
+        let mut delay = RestorationDelay::starting(self.channel.backoff);
         loop {
             nervix_primitives::task::consume_budget().await;
             let reply = self.channel.reply(sent, RequestKind::Subscribe).await;
@@ -862,11 +879,37 @@ mod tests {
 
     #[test]
     fn a_refused_restoration_waits_twice_as_long_each_time_up_to_the_limit() {
-        let mut delay = RestorationDelay::default();
+        let mut delay =
+            RestorationDelay::starting(RestorationBackoff::of(ClientCapabilities::default()));
         let mut waits = Vec::new();
         for _ in 0..7 {
             waits.push(delay.advance().as_secs());
         }
         assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
+    }
+
+    #[test]
+    fn configured_restoration_waits_start_at_the_first_backoff_and_stop_at_the_ceiling() {
+        let options = crate::ConnectOptions {
+            restoration_backoff: Duration::from_millis(250),
+            restoration_max_backoff: Duration::from_millis(900),
+            ..crate::ConnectOptions::default()
+        };
+        let capabilities = ClientCapabilities::from_options(&options)
+            .assured("the configured restoration waits validate");
+        let mut delay = RestorationDelay::starting(RestorationBackoff::of(capabilities));
+        let mut waits = Vec::new();
+        for _ in 0..4 {
+            waits.push(delay.advance());
+        }
+        assert_eq!(
+            waits,
+            [
+                Duration::from_millis(250),
+                Duration::from_millis(500),
+                Duration::from_millis(900),
+                Duration::from_millis(900),
+            ]
+        );
     }
 }

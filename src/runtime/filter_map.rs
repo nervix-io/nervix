@@ -23,6 +23,9 @@ use super::*;
 pub(super) struct ProgramRun<'a> {
     pub(super) executor: &'a Executor,
     pub(super) now: Timestamp,
+    /// The installed remote acknowledgement timing the owner kept, which the run reports the
+    /// accepted data's acknowledgements alive by while its program waits.
+    pub(super) ack_timing: &'a SharedRemoteAckTiming,
 }
 
 /// The outcome of one filter-map program over a single record.
@@ -40,6 +43,7 @@ pub(super) async fn execute_filter_map_on_record(
     let carrier = record.one_row_batch();
     let outcome = evaluate_filter_map_on_batch(
         &Executor::default(),
+        &SharedRemoteAckTiming::default(),
         filter_map,
         FilterMapOutcomeInputs {
             carrier: &carrier,
@@ -81,6 +85,7 @@ pub(super) struct FilterMapOutcomeInputs<'a> {
 )]
 pub(super) async fn evaluate_filter_map_on_batch(
     executor: &Executor,
+    ack_timing: &SharedRemoteAckTiming,
     filter_map: &CompiledProgramWithMaterializedInterest,
     inputs: FilterMapOutcomeInputs<'_>,
     execution_now: Timestamp,
@@ -129,6 +134,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
         ProgramRun {
             executor,
             now: execution_now,
+            ack_timing,
         },
         filter_map,
         FilterMapBatchInputs {
@@ -339,20 +345,24 @@ pub(super) async fn plan_filter_map_messages(
 ) -> Result<FilterMapPlan, PlannedGeneralFailure> {
     let processor = processor.into();
     let program_name = ProgramName::of(&operation);
-    let lookup_columns = match batch
-        .keep_alive_while_pending(compute_lookup_hash_map_columns(
-            run.executor,
-            program,
-            &FilterMapBatchInputs {
-                carrier: &batch.batch,
-                namespace_batches: &[],
-                keys: &batch.keys,
-                side_inputs,
-                ingest_metadata: None,
-            },
-            run.now,
-            None,
-        ))
+    let lookup_columns = match run
+        .ack_timing
+        .keep_alive_while_pending(
+            &batch,
+            compute_lookup_hash_map_columns(
+                run.executor,
+                program,
+                &FilterMapBatchInputs {
+                    carrier: &batch.batch,
+                    namespace_batches: &[],
+                    keys: &batch.keys,
+                    side_inputs,
+                    ingest_metadata: None,
+                },
+                run.now,
+                None,
+            ),
+        )
         .await
     {
         Ok(columns) => columns,
@@ -396,17 +406,20 @@ pub(super) async fn plan_filter_map_messages(
     let metadata = batch.metadata.clone();
     let mut acks = std::mem::take(&mut batch.acks);
     let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
-    let result = match acks
-        .as_slice()
-        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-            run.executor.accepted_work(),
-            &program.compiled,
-            &vm_batch,
-            &VmExecutionContext {
-                now: run.now,
-                injector: None,
-            },
-        ))
+    let result = match run
+        .ack_timing
+        .keep_alive_while_pending(
+            acks.as_slice(),
+            execute_accepted_program_with_selection_in_context(
+                run.executor.accepted_work(),
+                &program.compiled,
+                &vm_batch,
+                &VmExecutionContext {
+                    now: run.now,
+                    injector: None,
+                },
+            ),
+        )
         .await
     {
         Ok(result) => result,
@@ -589,6 +602,7 @@ pub(super) struct EmitterFilterMapPlan {
 )]
 pub(super) async fn plan_emitter_filter_map_batch(
     executor: &Executor,
+    ack_timing: &SharedRemoteAckTiming,
     emitter: &EmitterName,
     program: &CompiledEmitterFilterMapProgram,
     mut input: RelayRecordBatch,
@@ -601,6 +615,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
         ProgramRun {
             executor,
             now: execution_now,
+            ack_timing,
         },
         &program.body,
         FilterMapBatchInputs {
@@ -824,17 +839,20 @@ pub(super) async fn execute_prepared_filter_map(
     acks: Vec<AckSet>,
     injector: Option<Arc<Box<dyn VmFunctionInjector>>>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralFailure> {
-    let result = match acks
-        .as_slice()
-        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-            run.executor.accepted_work(),
-            &program.compiled,
-            &vm_batch,
-            &VmExecutionContext {
-                now: run.now,
-                injector,
-            },
-        ))
+    let result = match run
+        .ack_timing
+        .keep_alive_while_pending(
+            acks.as_slice(),
+            execute_accepted_program_with_selection_in_context(
+                run.executor.accepted_work(),
+                &program.compiled,
+                &vm_batch,
+                &VmExecutionContext {
+                    now: run.now,
+                    injector,
+                },
+            ),
+        )
         .await
     {
         Ok(result) => result,
@@ -876,15 +894,18 @@ pub(super) async fn execute_filter_map_program_on_batch(
     mut shared: Option<&mut SharedBatchColumns>,
 ) -> Result<ExecutedFilterMap, PlannedGeneralFailure> {
     let operation = MessageErrorOperation::Set;
-    let lookup_columns = match acks
-        .as_slice()
-        .keep_alive_while_pending(compute_lookup_hash_map_columns(
-            run.executor,
-            program,
-            &inputs,
-            run.now,
-            shared.as_mut().map(|shared| &mut shared.lookups),
-        ))
+    let lookup_columns = match run
+        .ack_timing
+        .keep_alive_while_pending(
+            acks.as_slice(),
+            compute_lookup_hash_map_columns(
+                run.executor,
+                program,
+                &inputs,
+                run.now,
+                shared.as_mut().map(|shared| &mut shared.lookups),
+            ),
+        )
         .await
     {
         Ok(columns) => columns,
@@ -931,6 +952,7 @@ pub(super) async fn execute_filter_map_program_on_batch(
         ProgramRun {
             executor: run.executor,
             now: run.now,
+            ack_timing: run.ack_timing,
         },
         program,
         vm_batch,
@@ -1648,6 +1670,7 @@ mod tests {
         let side_inputs = HashMap::default();
         let outcomes = evaluate_filter_map_on_batch(
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &empty_carrier,
@@ -1664,6 +1687,7 @@ mod tests {
 
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
@@ -1693,6 +1717,7 @@ mod tests {
 
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
@@ -1719,6 +1744,7 @@ mod tests {
         let empty_ingest_metadata = ingest_metadata_for_test(IngestMetadataProjection::none(), &[]);
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
@@ -1764,6 +1790,7 @@ mod tests {
             nervix_execution::CpuClass::Data,
             evaluate_filter_map_on_batch(
                 &executor,
+                &SharedRemoteAckTiming::default(),
                 &program,
                 FilterMapOutcomeInputs {
                     carrier: &carrier,
@@ -2082,6 +2109,7 @@ mod tests {
             ProgramRun {
                 executor: &Executor::default(),
                 now: Timestamp::now(),
+                ack_timing: &SharedRemoteAckTiming::default(),
             },
             "deduplicator",
             &named::<ModelName>("project_notifications"),
@@ -2180,6 +2208,7 @@ mod tests {
             ProgramRun {
                 executor: &Executor::default(),
                 now: Timestamp::now(),
+                ack_timing: &SharedRemoteAckTiming::default(),
             },
             "processor",
             &named::<ModelName>("project_notifications"),
@@ -2270,6 +2299,7 @@ mod tests {
             ProgramRun {
                 executor: &Executor::default(),
                 now: Timestamp::now(),
+                ack_timing: &SharedRemoteAckTiming::default(),
             },
             "junction",
             &named::<ModelName>("copy_vectors"),
@@ -2345,6 +2375,7 @@ mod tests {
             ProgramRun {
                 executor: &Executor::default(),
                 now: Timestamp::now(),
+                ack_timing: &SharedRemoteAckTiming::default(),
             },
             "junction",
             &named::<ModelName>("calculate_amount"),
@@ -2546,6 +2577,7 @@ mod tests {
 
         let plan = plan_emitter_filter_map_batch(
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             &emitter.name,
             &program,
             batch,

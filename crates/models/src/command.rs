@@ -20,6 +20,14 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::Timestamp;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client implementation manual's command rule E-1 limits an execution \
+                  reference to 1 to 128 ASCII bytes"
+    )
+)]
 const MAX_COMMAND_EXECUTION_REFERENCE_BYTES: usize = 128;
 
 /// A reference is decoded through [`CommandExecutionReference::parse`], so its serde and archived

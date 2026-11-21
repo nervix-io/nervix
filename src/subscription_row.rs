@@ -470,8 +470,12 @@ pub mod benchmark {
     use super::*;
     use crate::runtime_schema::RuntimeRecordBatch;
 
-    /// The session host's current row count cap for one frame.
-    const ROWS_PER_FRAME: usize = 256;
+    /// The session host's row count cap for one frame at its default settings.
+    fn host_rows_per_frame() -> usize {
+        let rows = nervix_models::SessionCapabilities::default().subscription_rows_per_frame();
+        usize::try_from(rows.get())
+            .assured("the session class validates the subscription row count as a native count")
+    }
 
     /// Fixed Arrow input for the typed Row encoding measurement.
     pub struct SubscriptionRowBenchmark {
@@ -663,7 +667,7 @@ pub mod benchmark {
                 },
                 schema,
                 SessionLimits::DEFAULT,
-                NonZeroUsize::new(rows.get().min(ROWS_PER_FRAME))
+                NonZeroUsize::new(rows.get().min(host_rows_per_frame()))
                     .assured("every benchmark batch has at least one row"),
             )
             .assured("the benchmark row count fits the default collection limit");

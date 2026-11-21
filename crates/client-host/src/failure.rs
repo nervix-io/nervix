@@ -127,6 +127,7 @@ impl Failure {
             | ClientError::InvalidDeadline { .. }
             | ClientError::InvalidFrameCapacity { .. }
             | ClientError::InvalidRetryBackoff
+            | ClientError::InvalidRestorationBackoff
             | ClientError::InvalidSubscriptionRetention
             | ClientError::TooManySeedServers { .. }
             | ClientError::NoActiveDomain
@@ -293,6 +294,7 @@ mod endpoint_recovery_tests {
                 capacity: usize::MAX,
             },
             ClientError::InvalidRetryBackoff,
+            ClientError::InvalidRestorationBackoff,
             ClientError::InvalidSubscriptionRetention,
         ] {
             assert_eq!(Failure::from(error).kind(), FailureKind::InvalidArgument);

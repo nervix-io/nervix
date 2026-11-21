@@ -291,6 +291,19 @@ const SAME_ARGUMENT_TYPE: &str = "keys of one demand argument share the type the
                                   and every argument column was checked against it";
 
 impl ArgumentColumn {
+    /// The bytes the reusable sketch key buffer starts with: the longest fixed-width key, one tag
+    /// byte and an eight-byte value, rounded up to the allocator's size class.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the longest fixed-width sketch key is one tag byte and an eight-byte value, \
+                      rounded up to the allocator's power-of-two size class"
+        )
+    )]
+    const FIXED_WIDTH_SKETCH_KEY_BYTES: usize =
+        (size_of::<u8>() + size_of::<u64>()).next_power_of_two();
+
     fn new(array: ArrayRef) -> Self {
         let values = match array.data_type() {
             ArrowDataType::UInt8 => ArgumentValues::UInt8(
@@ -655,7 +668,7 @@ impl ArgumentColumn {
         mut visit: impl FnMut(usize, &[u8]),
     ) {
         let valid = self.validity(&rows);
-        let mut key = Vec::with_capacity(16);
+        let mut key = Vec::with_capacity(Self::FIXED_WIDTH_SKETCH_KEY_BYTES);
         macro_rules! fixed_keys {
             ($values:expr, $tag:expr, $bytes:expr) => {
                 for row in rows.clone() {

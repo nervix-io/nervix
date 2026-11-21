@@ -520,8 +520,13 @@ pub struct PerRecordOutcomeParts<Id> {
 }
 
 impl<Id> PerRecordOutcome<Id> {
+    /// An outcome that holds nothing and allocates nothing until a write records into it.
     pub fn empty() -> Self {
-        Self::with_capacity(0)
+        Self {
+            delivered: Vec::new(),
+            rejected: Vec::new(),
+            infrastructure_error: None,
+        }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {

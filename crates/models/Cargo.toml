@@ -19,6 +19,7 @@ arrow-schema = { workspace = true, optional = true }
 blake3 = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
+faster-hex = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 meticulous = { workspace = true }

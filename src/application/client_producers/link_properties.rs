@@ -35,8 +35,8 @@ use nervix_models::{
     AckWindow, ClientAttachmentId, ClientBatchDefect, ClientEndpointContract,
     ClientOutcomeUncertainty, ClientProcessingFailure, ClientProducerAdmission,
     ClientProducerDescription, ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits,
-    ClientProducerPolicy, ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    ClusterNodeName, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, DomainName, IngestorName,
+    ClientProducerPolicy, ClientProducerRefusal, ClientProducerSessionBytes,
+    ClientSubmissionOutcome, ClientSubmissionRefusal, ClusterNodeName, DomainName, IngestorName,
     MAX_CLIENT_PRODUCER_BATCHES, UserName,
 };
 use strum::{EnumIter, IntoEnumIterator as _};
@@ -489,7 +489,7 @@ fn boundary_frames() -> Vec<LinkFrame> {
     let declared_most = ClientProducerLimits {
         batches: NonZeroU32::new(MAX_CLIENT_PRODUCER_BATCHES)
             .assured("a producer may hold a batch outstanding"),
-        bytes: NonZeroU64::new(DEFAULT_CLIENT_PRODUCER_SESSION_BYTES)
+        bytes: NonZeroU64::new(ClientProducerSessionBytes::DEFAULT)
             .assured("a producer may hold bytes outstanding"),
     };
     let least = ClientProducerLimits {

@@ -270,6 +270,7 @@ pub(super) async fn evaluate_processor_output_events(
         ProgramRun {
             executor: context.branch.runtime.executor(),
             now: scope.execution_now,
+            ack_timing: &context.branch.remote_ack_timing,
         },
         program,
         FilterMapBatchInputs {

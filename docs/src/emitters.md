@@ -157,7 +157,8 @@ means Nervix collects an in-memory Arrow batch before handing it to the external
 is a domain-logical duration, so a paced domain's `TIME RATE` accelerates or slows it; retry
 backoff, acknowledgement keepalive, and emitter acknowledgement timeouts stay on the physical clock.
 While a partial buffer or staging connector holds acknowledged work, the host keeps its source
-alive every 100 physical milliseconds, including while another input waits for materialized state.
+alive every committed `REMOTE_ACK_ALIVE_INTERVAL` of physical time, 100 milliseconds by default,
+including while another input waits for materialized state. A committed change reaches the next beat.
 New input does not postpone this beat. The beat acknowledges no records and stops when no work
 remains; an active retry supplies its own keepalive instead.
 See [Domains And Time](domains-and-time.md) for the full clock split. The
@@ -3978,7 +3979,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |
-| Network waits | catalog requests: unbounded<br>object-store metadata and delete operations: `timeout_ms`; 1m when omitted<br>object-store reads and writes: `timeout_ms`; 10s when omitted |
+| Network waits | catalog requests: unbounded<br>object-store metadata operations: stat, directory creation, rename and presign: `timeout_ms`; 1m when omitted<br>object-store reads, writes, lists, copies and deletes: `timeout_ms`; 10s when omitted |
 | Driver limits | None declared. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -4365,8 +4366,8 @@ makes one attempt: OpenDAL has no retry layer, and the object-store HTTP client 
 
 Set `timeout_ms` in the `S3`, `GCS` or `AZURE_BLOB` client's `CONFIG` to bound each object-store
 operation, including DNS, connection, TLS and credential requests. It also bounds each read or
-write call of a streaming object. If omitted, metadata and delete operations allow 60 seconds and
-reads and writes allow 10 seconds. A call that runs out of its deadline fails the attempt it
+write call of a streaming object. If omitted, metadata operations (stat, directory creation, rename
+and presign) allow 60 seconds, and reads, writes, lists, copies and deletes allow 10 seconds. A call that runs out of its deadline fails the attempt it
 belongs to, and with `timeout_ms` set the failure names the key and its bound. Nervix sets no
 deadline on REST catalog requests: a request the catalog accepts and never answers waits until its
 connection fails or a stop ends the wait. The operator and the initial table's effective storage

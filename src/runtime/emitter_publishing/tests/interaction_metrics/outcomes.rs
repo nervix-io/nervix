@@ -266,7 +266,7 @@ async fn emitter_outcomes_count_the_first_drain_attempt_of_an_already_pending_re
         .err()
         .assured("the first destination attempt fails");
     connector.reconnect_after(&failure, &context);
-    let mut retry = EmitterRetrySchedule::default();
+    let mut retry = EmitterRetrySchedule::new(context.remote_ack_timing.clone());
     retry.defer(
         &context,
         EmitterRetryDeferral {
@@ -403,7 +403,7 @@ fn emitter_outcomes_classify_confirmation_timeout_once_through_a_typed_report_ch
 #[test]
 fn emitter_outcomes_record_only_successfully_scheduled_retry_delays() {
     let context = emitter_context();
-    let mut schedule = EmitterRetrySchedule::default();
+    let mut schedule = EmitterRetrySchedule::new(context.remote_ack_timing.clone());
     for (cause, wait) in [
         (EmitterRetryCause::Publish, 125),
         (EmitterRetryCause::Connect, 250),

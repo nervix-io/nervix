@@ -411,6 +411,7 @@ async fn ownership_handoff_flushes_the_route_before_freezing_its_state() {
     let (_route_sender, route_input) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let mut route_task = IngestorRouteTask {
+        remote_ack_timing: runtime.remote_ack_timing().clone(),
         runtime_handle: runtime.clone(),
         domain: domain.clone(),
         ingestor: ingestor.clone(),
@@ -562,6 +563,7 @@ async fn force_flush_releases_held_ingestor_route_buffers() {
     let (route_sender, route_input) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
     let (shutdown, shutdown_rx) = watch::channel(false);
     let route_task = IngestorRouteTask {
+        remote_ack_timing: runtime.remote_ack_timing().clone(),
         runtime_handle: runtime.clone(),
         domain: domain.clone(),
         ingestor: ingestor.clone(),

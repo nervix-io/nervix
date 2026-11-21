@@ -41,26 +41,64 @@ use crate::runtime_schema::batch_payload_bytes;
 pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration =
     nervix_models::RemoteRelayInstantiationWait::DEFAULT;
 
-pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration =
-    nervix_models::RemoteAckAliveInterval::DEFAULT;
+/// The remote acknowledgement timing this node has installed, published whole.
+///
+/// The node installs each committed timing group here. A delivery loads the group it captures as it
+/// starts. An owner of held work keeps this handle from its creation and loads the alive interval
+/// only once that work waits, so a committed change reaches a running owner at its next keepalive
+/// without rebuilding it.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct SharedRemoteAckTiming(Arc<ArcSwap<nervix_models::RemoteAckTiming>>);
+
+impl Default for SharedRemoteAckTiming {
+    /// The default timing, which a node holds until it installs its committed parameters.
+    fn default() -> Self {
+        Self(Arc::new(ArcSwap::from_pointee(
+            nervix_models::RemoteAckTiming::default(),
+        )))
+    }
+}
+
+impl SharedRemoteAckTiming {
+    pub(super) fn load(&self) -> nervix_models::RemoteAckTiming {
+        **self.0.load()
+    }
+
+    pub(super) fn install(&self, timing: nervix_models::RemoteAckTiming) {
+        self.0.store(StdArc::new(timing));
+    }
+
+    /// The committed `REMOTE_ACK_ALIVE_INTERVAL`: how often held work reports the acknowledgements
+    /// it holds alive, as a receiver reports the records of a delivery it holds.
+    pub(in crate::runtime) fn ack_alive_interval(&self) -> Duration {
+        self.0.load().remote_ack_alive_interval
+    }
+}
+
+// The silence and sweep values below are the default acknowledgement timing the tests exercise. A
+// delivery reports, sweeps and falls silent under the timing it captured.
 
 /// Silence bound for a forwarded record ACK after admission. The next report starts
 /// `REMOTE_ACK_ALIVE_INTERVAL` after delivery or giving up at `DISPATCH_TIMEOUT`; two exhausted
 /// reports fit this bound. Longer silence means a lost outcome, ended run or missing registrar.
 /// A live-view gap ends held reports only after this bound plus one sweep.
+#[cfg(test)]
 pub(super) const REMOTE_ACK_SILENCE_TIMEOUT: Duration =
     nervix_models::RemoteAckSilenceTimeout::DEFAULT;
 
 /// How often a node looks for forwarded record acknowledgements whose receiver fell silent.
+#[cfg(test)]
 pub(super) const REMOTE_ACK_SILENCE_SWEEP_INTERVAL: Duration =
     nervix_models::RemoteAckSweepInterval::DEFAULT;
 
 /// The sweeps that may find a forwarded acknowledgement unreported before the next one fails it. A
 /// report can land just after a sweep, so the acknowledgement fails between
 /// `REMOTE_ACK_SILENCE_TIMEOUT` and one sweep interval later.
+#[cfg(test)]
 pub(super) const REMOTE_ACK_SILENT_SWEEPS: u64 =
     REMOTE_ACK_SILENCE_TIMEOUT.as_secs() / REMOTE_ACK_SILENCE_SWEEP_INTERVAL.as_secs();
 
+#[cfg(test)]
 const _: () = {
     assert!(REMOTE_ACK_SILENCE_TIMEOUT.subsec_nanos() == 0);
     assert!(REMOTE_ACK_SILENCE_SWEEP_INTERVAL.subsec_nanos() == 0);
@@ -74,7 +112,7 @@ const _: () = {
     // Two consecutive reports that each exhaust their dispatch deadline stay inside the bound.
     assert!(
         2 * (RemoteDispatcher::DISPATCH_TIMEOUT.as_millis()
-            + REMOTE_ACK_ALIVE_INTERVAL.as_millis())
+            + nervix_models::RemoteAckAliveInterval::DEFAULT.as_millis())
             < REMOTE_ACK_SILENCE_TIMEOUT.as_millis()
     );
 };
@@ -422,6 +460,7 @@ impl std::fmt::Debug for RemoteDispatcher {
 impl RemoteDispatcher {
     #[cfg(test)]
     pub(super) const DISPATCH_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+    #[cfg(test)]
     pub(super) const DISPATCH_TIMEOUT: Duration = nervix_models::RemoteAckDispatchTimeout::DEFAULT;
 
     /// The node's bounded execution and memory admission, which every body this dispatcher
@@ -1245,6 +1284,12 @@ pub(in crate::runtime) struct RemoteRelayTarget {
 }
 
 impl Runtime {
+    /// The remote acknowledgement timing this node installed. An owner of held work keeps a clone
+    /// from its creation, and reads its committed alive interval only once that work waits.
+    pub(in crate::runtime) fn remote_ack_timing(&self) -> &SharedRemoteAckTiming {
+        self.inner.remote_dispatch.ack_timing()
+    }
+
     pub(crate) async fn wait_for_domain_routing(
         &self,
         domain: &DomainName,

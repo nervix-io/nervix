@@ -39,6 +39,16 @@ use crate::{
 /// Client clocks may lead the serving node by this much when the reference is first admitted.
 /// Future-dated references remain represented by a compact tombstone until the retry fence passes
 /// their embedded time, so this allowance cannot reopen a reclaimed identity.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol admits a new execution reference created at most \
+                  five minutes ahead of the leader's clock, and rule E-4 of the client \
+                  implementation manual's Commands And Execution Identity section keeps client \
+                  clocks within that skew"
+    )
+)]
 const COMMAND_EXECUTION_REFERENCE_FUTURE_SKEW: Duration = Duration::from_secs(5 * 60);
 
 /// The byte range of a command's Plexus source a diagnostic points at. `start` is not after `end`.

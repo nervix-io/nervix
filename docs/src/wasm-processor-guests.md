@@ -730,7 +730,8 @@ branch's stop grace, and whatever it held is negatively acknowledged when the no
 
 A guest can call `nervix_timeout_after_nanos(delay)` while processing. The request is anchored at
 that operation's supplied domain snapshot, and `delay` is a logical duration. The host returns a
-monotonically increasing handle for that branch instance. When the same bound domain and `START`
+monotonically increasing handle for that branch instance, counting from one, and answers a negative
+`delay` with `-1`, which no granted handle can be. When the same bound domain and `START`
 generation reach the requested instant, the host calls:
 
 ```text

@@ -1249,7 +1249,7 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the current `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_*` consensus namespace and `ClusterState`
+This revision requires the current `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_*` consensus namespace and `ClusterState`
 encoding 42. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.

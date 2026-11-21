@@ -24,16 +24,12 @@ const BASELINE: &str = "debt-baseline.json";
 const LARGE_FILE_LINES: usize = 3000;
 const COMPLEXITY_LIMIT: f64 = 30.0;
 const BRANCH_INVERSIONS: &str = "branch_inversions";
-const COUNTS: [(&str, &str); 7] = [
+const COUNTS: [(&str, &str); 6] = [
     ("files_over_3000_lines", "Rust files longer than 3000 lines"),
     ("as_casts", "Rust cast expressions"),
     (
         BRANCH_INVERSIONS,
         "collections that hold branch identities or branch-owned parts",
-    ),
-    (
-        "hidden_tunables",
-        "numeric policy outside class-typed settings or fixed contracts",
     ),
     (
         "testing_feature_struct_fields",

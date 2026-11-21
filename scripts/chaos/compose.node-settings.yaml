@@ -1,0 +1,30 @@
+# Added to the deployment of the node-settings scenarios. Every node starts through node-launch.sh
+# instead of the image's own command: it applies the settings the controller chose for that node's
+# next process from the node's own directory of the run, then executes the packaged server. The
+# controller changes a node's settings only while that node is stopped and starts the same container
+# again, so the node keeps the image, named volume and address it was created with, and every
+# existing restart and Docker event check applies to it unchanged.
+x-node-launch: &node-launch
+  - /bin/sh
+  - /opt/chaos/node-launch.sh
+  - /opt/chaos/node-launch/settings.env
+  - /usr/local/bin/nervix-server
+
+services:
+  nervix-1:
+    command: *node-launch
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/node-launch.sh:/opt/chaos/node-launch.sh:ro
+      - ${CHAOS_NODE_LAUNCH_DIR:?CHAOS_NODE_LAUNCH_DIR is required}/nervix-1:/opt/chaos/node-launch:ro
+
+  nervix-2:
+    command: *node-launch
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/node-launch.sh:/opt/chaos/node-launch.sh:ro
+      - ${CHAOS_NODE_LAUNCH_DIR:?CHAOS_NODE_LAUNCH_DIR is required}/nervix-2:/opt/chaos/node-launch:ro
+
+  nervix-3:
+    command: *node-launch
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/node-launch.sh:/opt/chaos/node-launch.sh:ro
+      - ${CHAOS_NODE_LAUNCH_DIR:?CHAOS_NODE_LAUNCH_DIR is required}/nervix-3:/opt/chaos/node-launch:ro

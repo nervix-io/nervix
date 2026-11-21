@@ -125,6 +125,7 @@ async fn evaluate(
     envelope
         .evaluate(
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             &named("source"),
             published,
             input,
@@ -553,6 +554,7 @@ async fn evaluated_envelopes_stay_with_the_publish_batch_they_were_evaluated_ove
         .with_evaluated_envelopes(
             &envelope,
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             EnvelopeInput::Published,
             &HashMap::default(),
             Timestamp::from_unix_nanos(1),
@@ -817,6 +819,7 @@ async fn partition_only_envelopes_select_each_source_count_without_a_value_progr
         let envelopes = compiled
             .evaluate(
                 &Executor::default(),
+                &SharedRemoteAckTiming::default(),
                 &named(source),
                 &mut published,
                 EnvelopeInput::Published,

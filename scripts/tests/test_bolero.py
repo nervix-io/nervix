@@ -268,7 +268,7 @@ class InventoryTests(unittest.TestCase):
             "cluster-parameters",
             "restore-installation-storage",
             "restore-staging-kept-measurement",
-            "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax", "typed-hidden-tunables",
+            "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax",
             "typed-non-aws-lc-crypto",
             "crypto-sha2-digests",
             "nats-user-authentication",

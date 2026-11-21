@@ -26,8 +26,10 @@
 
 use error_stack::ResultExt as _;
 use futures_util::StreamExt as _;
+use nervix_models::SettingDefinition as _;
 
 use super::*;
+use crate::RelayChannelSweep;
 
 /// Whether the sends of one relay delivery started an exchange with its receiver.
 ///
@@ -522,7 +524,8 @@ impl TransportState {
             let mut cadence = self.options.relay_retention.sweep();
             for owner in owners.owners.values() {
                 owner.sweep(Instant::now());
-                cadence = cadence.min((owner.retention() / 10).max(Duration::from_nanos(1)));
+                // An owner sweeps as the sweep derivation gives for its own channel retention.
+                cadence = cadence.min(RelayChannelSweep::default_value(&owner.retention()));
             }
             self.prune_ended_relay_owners();
             nervix_primitives::select! {

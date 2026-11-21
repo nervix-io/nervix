@@ -125,9 +125,11 @@ pub(crate) fn nervix_type<'src>()
                         .collect::<Vec<_>>(),
                 )
                 .map(|((element, first_len), remaining_lengths)| {
-                    let mut lengths = Vec::with_capacity(remaining_lengths.len() + 1);
-                    lengths.push(first_len);
-                    lengths.extend(remaining_lengths);
+                    // The first length leads the remaining ones, and the vector is allocated once
+                    // at exactly their combined count.
+                    let lengths: Vec<NonZeroU32> = std::iter::once(first_len)
+                        .chain(remaining_lengths)
+                        .collect();
                     lengths
                         .into_iter()
                         .rev()

@@ -655,8 +655,14 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
             Some(shape) => shape,
             None => self.shape_from_dimensions_without_values(remaining)?,
         };
-        let mut shape = Vec::with_capacity(child_shape.len() + 1);
-        shape.push(size);
+        // This level's dimension, ahead of its children's.
+        let leading = [size];
+        let dimensions = child_shape
+            .len()
+            .checked_add(leading.len())
+            .assured("a shape holds at most isize::MAX dimensions, so one more fits usize");
+        let mut shape = Vec::with_capacity(dimensions);
+        shape.extend(leading);
         shape.extend(child_shape);
         Ok(RuntimeTensorSlice {
             shape,

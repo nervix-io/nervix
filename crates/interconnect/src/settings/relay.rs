@@ -87,8 +87,9 @@ impl RelayRetentionSettings {
     }
 }
 impl Default for RelayRetentionSettings {
+    /// The retention of the default total relay admission budget.
     fn default() -> Self {
-        Self::for_host_admission(nervix_models::HOST_RELAY_ADMISSION_BOUND)
+        Self::for_host_admission(nervix_models::RemoteRelayTotalTimeout::DEFAULT)
             .assured("the host admission contract is positive and fits doubled retention")
     }
 }
@@ -105,5 +106,12 @@ mod tests {
         assert_eq!(settings.sweep(), Duration::from_secs(6));
         assert!(RelayRetentionSettings::for_host_admission(Duration::ZERO).is_err());
         assert!(RelayRetentionSettings::for_host_admission(Duration::MAX).is_err());
+    }
+
+    #[test]
+    fn default_retention_follows_the_default_total_relay_admission_budget() {
+        let settings = RelayRetentionSettings::default();
+        assert_eq!(settings.retention(), Duration::from_secs(600));
+        assert_eq!(settings.sweep(), Duration::from_secs(60));
     }
 }

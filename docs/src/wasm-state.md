@@ -304,7 +304,9 @@ it would save is the state the reset discards.
 The whole checkpoint, from the guest's save to the last replica's confirmation, has the local
 `--runtime-wasm-checkpoint-timeout` budget, ninety seconds by default.
 While it is under way, the branch reports every input the callback holds back alive to its ingestor
-every 100 milliseconds, as a remote receiver reports an acknowledgement it holds. A checkpoint is
+every committed `REMOTE_ACK_ALIVE_INTERVAL`, 100 milliseconds by default, as a remote receiver
+reports an acknowledgement it holds; the checkpoint reads the interval once it is under way and keeps
+it until it ends. A checkpoint is
 progress of those inputs: an ingestor whose `ACK TIMEOUT` is shorter than the checkpoint does not time
 them out and send them again while the checkpoint can still commit them, whether the ingestor runs on
 the owner's node or on another. Input the guest keeps undecided past its callback is not held for a

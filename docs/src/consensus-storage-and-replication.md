@@ -129,6 +129,16 @@ staging. A second storage operation waits for the Bulk turn without taking the r
 permits. Commands and Bulk turns do not serialize each other. Both return their memory before
 passing the turn; cancellation while waiting retains neither a turn nor a memory queue place.
 
+Management storage operations save a vote or the committed log position; read the vote, the
+committed position, the log's state, whether any Raft state exists and the covered log a retention
+pass keeps; and run the idle barrier that joins cancelled storage work once Raft has stopped. Each
+reserves four times the largest management event from the Management class:
+256 KiB with the 64 KiB management event. A durable write charges at most half of that
+reservation, two events, to the records and keys it writes, which holds a record as large as a
+whole management event while its encoding buffer doubles; the votes and log positions it writes are
+far smaller. The other half is retained for Fjall's journal encoding and moving batch descriptors,
+as in the Commands working set. Management storage operations take no turns.
+
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
 later leader may discard it. In either case, the client had not yet received an applied response.
@@ -530,16 +540,17 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_logs`,
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_meta`,
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_state`, and
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_snapshots`. Opening it validates the
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_logs`,
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_meta`,
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_state`, and
+`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_snapshots`. Opening it validates the
 complete keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
-group and payload unfold policy. Their durations use validated, lossless seconds and nanoseconds
-projections so ordinary Raft records keep their inline footprint bound. Admitted node capabilities
-carry runtime capacities, local shutdown budgets and listener bounds.
+group, payload unfold policy and UDF compile budget. Their durations use validated, lossless seconds
+and nanoseconds projections so ordinary Raft records keep their inline footprint bound. Admitted node
+capabilities carry runtime capacities, the UDF watchdog among the engine capabilities, local shutdown
+budgets and listener bounds.
 This namespace also includes durable cluster identity rotation and activation release operations.
 It identifies the current Model and stored transaction statement layouts, including
 `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE`,
@@ -713,27 +724,28 @@ safe: [Node Settings](node-settings.md) gives the class of each argument, and th
 prerequisite that every two nodes keep within a factor of two of each other, so that one rolling
 change moves it by less than that. The snapshot and retention bounds are node capabilities.
 
-Replication batch and memory limits are fixed by the current server execution policy; the server
-does not expose flags for them:
+Replication batch and memory limits, with the node capability that sets each one where it has one;
+[Node Settings](node-settings.md#consensus-capacities) and [Sizing A Node](sizing.md) give their
+validation and derivations, and the rest are fixed by the encoded operation and storage layouts:
 
-| Limit | Current value |
-| --- | --- |
-| Replication batch target | 1 MiB or 256 entries; whole commands are never split |
-| Encoded replication operation | 2 MiB |
-| Leader window per follower | 16 batches and a 16 MiB target byte budget |
-| Follower decoded resident window | 4 batches per live append stream |
-| Commands memory budget | 24 MiB per node |
-| Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
-| Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them |
-| Append stream setup / progress idle bound | 5 seconds / 5 seconds |
-| Snapshot section / transport chunk | 8 MiB / 64 KiB |
-| Complete snapshot transfer | 30 seconds |
+| Limit | Default | Set by |
+| --- | --- | --- |
+| Replication batch target | 1 MiB or 256 entries; whole commands are never split | `--raft-append-batch-entries` for the entry count; the byte target is fixed |
+| Encoded replication operation | 2 MiB | fixed |
+| Leader window per follower | 16 batches and a 16 MiB target byte budget | `--raft-outstanding-append-batches` and `--raft-outstanding-append-bytes` |
+| Follower decoded resident window | 4 batches per live append stream | `--execution-resident-replication-batches` |
+| Commands memory budget | 1/32 of the node's memory, at least 24 MiB | `--execution-commands-memory-bytes` |
+| Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation | fixed |
+| Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them | fixed |
+| Append stream setup / progress idle bound | 5 seconds / 5 seconds | half of `--interconnect-request-timeout` / `--raft-append-idle-bound` |
+| Snapshot section / transport chunk | 8 MiB / 64 KiB | fixed |
+| Complete snapshot transfer | 30 seconds | `--raft-snapshot-transfer-timeout` |
 
 The heartbeat sets the whole timing policy: lowering it shortens the election timeouts with it, and
 raising it lengthens them. Change it across a cluster by less than a factor of two per rolling
 restart; a node outside that bound of a live peer is refused as it joins. Raising the heartbeat
-interval does not allow slower append storage because append liveness is progress-based and fixed
-at five seconds.
+interval does not allow slower append storage because append liveness is progress-based and set
+by `--raft-append-idle-bound`, five seconds by default.
 
 Snapshot and covered-log settings trade storage and catch-up method. Smaller thresholds build and
 transfer snapshots more often; smaller covered suffixes make a lagging follower switch to a snapshot

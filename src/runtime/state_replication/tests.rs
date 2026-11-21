@@ -20,7 +20,8 @@ use nervix_models::{
     CreateSchema, DomainNodeRef, DomainSchedule, DomainStatus, MaterializedRelayState, ModelKind,
     ModelName, NodeRef, NodeUnitRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
-    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
+    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName,
+    SettingDefinition as _, Timestamp,
 };
 use nervix_primitives::{
     sync::{
@@ -36,7 +37,10 @@ use tempfile::tempdir;
 use super::*;
 use crate::{
     metrics::RuntimeMetrics,
-    runtime::branch_checkpoint_catalog::{CatalogedCheckpoint, CheckpointListing},
+    runtime::{
+        RestoreStagingMaxBytes,
+        branch_checkpoint_catalog::{CatalogedCheckpoint, CheckpointListing},
+    },
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
@@ -1088,7 +1092,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should open");
         store
@@ -1153,7 +1157,7 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should reopen");
         let replayed_kafka_recovery = ForcedRuntimeStateRecoveryTransition {
@@ -1255,7 +1259,7 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     let store = RuntimeStateStore::from_database(
         db,
         Executor::default(),
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .expect("state store should open");
     let placement = RuntimeStatePlacement {
@@ -1731,7 +1735,7 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
     let store = RuntimeStateStore::from_database(
         db,
         Executor::default(),
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .expect("state store should open");
     let base = RuntimeStatePlacement {
@@ -1803,7 +1807,7 @@ fn runtime_state_store_purges_only_the_requested_entity() {
     let store = RuntimeStateStore::from_database(
         db,
         Executor::default(),
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .expect("state store should open");
     let removed = RuntimeStatePlacement {
@@ -1861,7 +1865,7 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let store = RuntimeStateStore::from_database(
         db,
         Executor::default(),
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .expect("state store should open");
     let placement = RuntimeStatePlacement {

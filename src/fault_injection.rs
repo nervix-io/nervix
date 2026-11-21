@@ -151,6 +151,34 @@ use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
+/// How many scenario requests one node's task queues: a WASM state reset or an application
+/// progress query. The scenario awaits each request's answer, so one queued request keeps the
+/// task busy without letting the scenario run ahead of it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "every scenario request to a node's task awaits its answer, so a single queued \
+                  request makes the channel a handoff that keeps the scenario from running ahead"
+    )
+)]
+const SCENARIO_REQUEST_CAPACITY: usize = 1;
+
+/// How many leadership transfer requests the channel keeps for a node that has not read them yet.
+/// A leadership move asks one leader to transfer and asks again only once the target reports a new
+/// leadership, so a scenario has a single request outstanding. Every node reads each request and
+/// acts on it only when it names that node as the leader to transfer from.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a leadership move asks one leader to transfer and asks again only after the \
+                  target reports a new leadership, so a scenario has at most one transfer request \
+                  outstanding"
+    )
+)]
+const LEADERSHIP_TRANSFER_CAPACITY: usize = 1;
+
 /// A consensus storage failure a scenario armed for a node before that node started.
 ///
 /// Storage belongs to the node, so the failure can only be armed once the node builds it. Keeping
@@ -201,7 +229,9 @@ struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     /// Construction counts only for emitters explicitly observed by a scenario.
     observed_emitter_opens: DashMap<EmitterName, usize, RandomState>,
-    failed_ingestors: DashMap<String, (), RandomState>,
+    /// The ingestors a scenario holds failed, each with how often its task rechecks whether it may
+    /// run again.
+    failed_ingestors: DashMap<String, Duration, RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
     /// One-shot, emitter-scoped emitter stalls: the next write of the emitter keeps the emitter's answers
     /// for this many of its records, and the answers for the rest are lost.
@@ -395,6 +425,8 @@ struct FaultInjectionState {
     wasm_state_reset_fresh_initialization_failing: AtomicBool,
     /// While set, every node refuses to install a runtime-state checkpoint it replicates.
     state_replica_installation_failing: AtomicBool,
+    /// While set, every node that starts skips draining its admitted work when it shuts down.
+    shutdown_drain_skipped: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     /// A scenario can fail one stream accept on a selected bound address, and observe that the
     /// source consumed the fault before checking its established connections. The armed request
@@ -540,7 +572,7 @@ pub(crate) struct LeadershipTransferRequest {
 
 impl Default for FaultInjection {
     fn default() -> Self {
-        let (leadership_transfers, _) = broadcast::channel(16);
+        let (leadership_transfers, _) = broadcast::channel(LEADERSHIP_TRANSFER_CAPACITY);
         let (syslog_listener_faults, _) = watch::channel(None);
         let (listener_accept_failures, _) = watch::channel(ListenerAcceptFailures::default());
         let (session_backpressure, _) = watch::channel(None);
@@ -627,6 +659,7 @@ impl Default for FaultInjection {
                 wasm_checkpoint_storage_failing: AtomicBool::new(false),
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
+                shutdown_drain_skipped: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 syslog_listener_faults,
                 listener_accept_failures,
@@ -813,7 +846,7 @@ impl FaultInjection {
         &self,
         node: ClusterNodeName,
     ) -> mpsc::Receiver<WasmStateResetRequest> {
-        let (sender, receiver) = mpsc::channel(1);
+        let (sender, receiver) = mpsc::channel(SCENARIO_REQUEST_CAPACITY);
         self.inner
             .wasm_state_reset_coordinators
             .insert(node, sender);
@@ -1159,10 +1192,13 @@ impl FaultInjection {
         keyspace.rotate_memtable_and_wait()
     }
 
-    pub fn fail_ingestor(&self, ingestor: &str) {
+    /// Holds `ingestor` failed until [`Self::clear_ingestor_fault`]. Its task reports the failed
+    /// intake with `recheck` as its retry backoff and checks every `recheck` whether it may run
+    /// again.
+    pub fn fail_ingestor(&self, ingestor: &str, recheck: Duration) {
         self.inner
             .failed_ingestors
-            .insert(ingestor.to_ascii_lowercase(), ());
+            .insert(ingestor.to_ascii_lowercase(), recheck);
     }
 
     pub fn clear_ingestor_fault(&self, ingestor: &str) {
@@ -2163,6 +2199,25 @@ impl FaultInjection {
         self.inner
             .failed_ingestors
             .contains_key(&ingestor.as_str().to_ascii_lowercase())
+    }
+
+    /// How often `ingestor` rechecks whether it may run again while the scenario holds it failed,
+    /// absent while it is not failed.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario selects one retained ingestor failure seam",
+            key = "one test ingestor",
+            bound = "one keyed read of a copied recheck cadence with no retained guard"
+        )
+    )]
+    pub(crate) fn failed_ingestor_recheck(&self, ingestor: &IngestorName) -> Option<Duration> {
+        let recheck = self
+            .inner
+            .failed_ingestors
+            .get(&ingestor.as_str().to_ascii_lowercase())?;
+        Some(*recheck)
     }
 
     #[cfg_attr(

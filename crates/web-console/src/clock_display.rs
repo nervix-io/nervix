@@ -21,6 +21,14 @@ use nervix_models::{
     Timestamp,
 };
 
+/// How often the panel projects the attached clock's logical now from the browser's UTC.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter refreshes the projected logical now four times a second"
+    )
+)]
 pub(super) const CLOCK_REFRESH: Duration = Duration::from_millis(250);
 
 /// The browser's actual UTC is an external observation used only to display the attached paced

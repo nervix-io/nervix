@@ -96,16 +96,28 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_logs";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_logs";
 const KEYSPACE_META: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_meta";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_state";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_snapshots";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
-/// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
+/// The working memory one Management storage operation reserves, in largest management events. A
+/// durable batch charges at most half of its reservation, two events, to the records and keys it
+/// writes, which holds a record as large as a whole event while its encoding buffer doubles; the
+/// other half is kept for Fjall's journal encoding and the moving batch descriptors.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the consensus storage chapter's Management working set is four largest \
+                  management events: two for a durable batch's records and keys, two for Fjall's \
+                  journal encoding beside them"
+    )
+)]
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
 /// The budget one storage operation is charged against. Storage writes votes and metadata as

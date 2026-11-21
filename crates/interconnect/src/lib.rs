@@ -102,7 +102,7 @@ pub use request::{
     DomainClockAttachRequest, HandlerRegistrationError, HttpsListenerInstallation,
     HttpsListenerInstallationRequest, HttpsListenerInstallationResponse, InterconnectDuplexRequest,
     InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure, RequestContext,
-    RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
+    RequestError, RequestFitError, RequestSubquota, StreamHandlerError, StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
@@ -207,7 +207,7 @@ impl TransportOptions {
     pub(crate) fn relay_progress_send_timeout(&self, captured: Duration) -> Duration {
         (self.request_timeout / 10)
             .min(self.progress_timeout)
-            .max(Duration::from_nanos(1))
+            .max(settings::SHORTEST_POSITIVE_DURATION)
             .min(captured)
     }
 
@@ -224,7 +224,7 @@ impl TransportOptions {
             .verified("at most one thousand thousandths fit the original delay");
         base.checked_sub(reduction)
             .verified("a jitter fraction of at most one thousand cannot exceed its base")
-            .max(Duration::from_nanos(1))
+            .max(settings::SHORTEST_POSITIVE_DURATION)
     }
 
     pub(crate) fn validate(&self) -> Result<(), Report<TransportError>> {

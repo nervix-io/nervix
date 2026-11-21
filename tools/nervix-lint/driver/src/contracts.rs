@@ -453,7 +453,30 @@ impl Flow {
                                     && item.path.segments[1].ident.name.as_str()
                                         == "branch_inversion"
                         });
+                // A retained hidden tunable is one constant declaration, named with its debt.
+                let tunable_declaration = matches!(
+                    cx.tcx.hir_node(node),
+                    rustc_hir::Node::Item(rustc_hir::Item {
+                        kind: rustc_hir::ItemKind::Const(..),
+                        ..
+                    }) | rustc_hir::Node::ImplItem(rustc_hir::ImplItem {
+                        kind: rustc_hir::ImplItemKind::Const(..),
+                        ..
+                    }) | rustc_hir::Node::TraitItem(rustc_hir::TraitItem {
+                        kind: rustc_hir::TraitItemKind::Const(..),
+                        ..
+                    })
+                ) && arguments
+                    .iter()
+                    .filter_map(|item| item.meta_item())
+                    .all(|item| {
+                        item.has_name(Symbol::intern("reason"))
+                            || item.path.segments.len() == 2
+                                && item.path.segments[0].ident.name.as_str() == "nervix"
+                                && item.path.segments[1].ident.name.as_str() == "hidden_tunable"
+                    });
                 let narrow = branch_declaration
+                    || tunable_declaration
                     || matches!(
                         cx.tcx.hir_node(node),
                         rustc_hir::Node::Expr(_)

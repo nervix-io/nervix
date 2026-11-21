@@ -106,6 +106,7 @@ pub enum Identifier {
     ClientProducerSessionBytes,
     ClientConsumerSessionBytes,
     UdfCodeBytes,
+    UdfCompileBudget,
     Labels,
     EntityLabelsMaxCount,
     EntityLabelsMaxKeyBytes,

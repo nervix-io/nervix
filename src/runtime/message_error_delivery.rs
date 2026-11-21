@@ -102,6 +102,10 @@ struct MessageErrorRouteTask {
         )
     )]
     pending: HashMap<Option<BranchKey>, PendingMessageErrorDelivery>,
+    /// The node's installed remote acknowledgement timing, kept from the task's start. The beat
+    /// that keeps buffered errors' source acknowledgements alive reads its committed alive interval
+    /// here as the beat is armed.
+    remote_ack_timing: SharedRemoteAckTiming,
 }
 
 impl MessageErrorRouteRuntime {
@@ -158,6 +162,7 @@ impl MessageErrorRouteRuntime {
             .assured("only a buffered prepared message-error route creates a delivery task");
         let task = nervix_primitives::task::spawn(
             MessageErrorRouteTask {
+                remote_ack_timing: runtime.remote_ack_timing().clone(),
                 runtime,
                 route: plan.key.clone(),
                 target: plan.target.clone(),
@@ -249,13 +254,17 @@ impl MessageErrorRouteTask {
                 return;
             }
         };
-        if pending_acks
-            .keep_alive_while(self.runtime.ingest_stream_boundary_message(
-                &self.route.domain,
-                &self.route.error_relay,
-                &self.target.services,
-                &batch,
-            ))
+        if self
+            .remote_ack_timing
+            .keep_alive_while(
+                &pending_acks,
+                self.runtime.ingest_stream_boundary_message(
+                    &self.route.domain,
+                    &self.route.error_relay,
+                    &self.target.services,
+                    &batch,
+                ),
+            )
             .await
             .is_err()
         {
@@ -450,10 +459,17 @@ impl MessageErrorRouteTask {
                 return;
             }
         };
+        // The alive interval the beat of the buffered errors waits, read when the beat is first
+        // armed and read again for the beat after it fires.
+        let remote_ack_timing = self.remote_ack_timing.clone();
+        let mut beat_interval = None;
         loop {
             nervix_primitives::task::consume_budget().await;
             let flush_deadlines = self.flush_deadlines();
             let has_flush_deadlines = !flush_deadlines.is_empty();
+            if !has_flush_deadlines {
+                beat_interval = None;
+            }
             nervix_primitives::select! {
                 biased;
                 // A signalled stop and a dropped sender both mean the owner is gone, and this
@@ -504,8 +520,11 @@ impl MessageErrorRouteTask {
                         break;
                     }
                 }
-                _ = sleep(REMOTE_ACK_ALIVE_INTERVAL), if has_flush_deadlines => {
+                _ = remote_ack_timing.ack_alive_beat(&mut beat_interval),
+                    if has_flush_deadlines =>
+                {
                     self.ack_pending_alive();
+                    beat_interval = None;
                 }
                 delivery = input.recv() => {
                     let Some(delivery) = delivery else {
@@ -604,11 +623,16 @@ impl Runtime {
                 sent = route.sender.send(delivery) => sent.map_err(|_| ()),
             }
         };
-        source_acks.keep_alive_while(admitted).await.map_err(|()| {
-            Report::new(MessageErrorHandlingError::DeliveryStopped {
-                route: plan.key.clone(),
+        plan.target
+            .services
+            .remote_ack_timing
+            .keep_alive_while(&source_acks, admitted)
+            .await
+            .map_err(|()| {
+                Report::new(MessageErrorHandlingError::DeliveryStopped {
+                    route: plan.key.clone(),
+                })
             })
-        })
     }
 
     pub(super) async fn stop_message_error_routes_for_domain(&self, domain: &DomainName) {
@@ -717,6 +741,7 @@ mod tests {
             unpaced_domain_state(domain.as_str()),
         )]));
         let task = MessageErrorRouteTask {
+            remote_ack_timing: runtime.remote_ack_timing().clone(),
             runtime,
             route: MessageErrorRouteKey {
                 domain,
@@ -873,7 +898,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn buffered_message_error_refreshes_source_ack_before_flush_deadline() {
-        let interval = REMOTE_ACK_ALIVE_INTERVAL * 4;
+        let interval = nervix_models::RemoteAckAliveInterval::DEFAULT * 4;
         let fanout = RelayBoundaryFanout::direct_with_capacity(
             NonZeroUsize::new(1).expect("non-zero test capacity"),
         );
@@ -901,12 +926,67 @@ mod tests {
 
         assert_eq!(
             nervix_primitives::time::timeout(
-                REMOTE_ACK_ALIVE_INTERVAL * 2,
+                nervix_models::RemoteAckAliveInterval::DEFAULT * 2,
                 completion.wait_for_progress(),
             )
             .await
             .expect("pending message error must refresh its source ACK before flushing"),
             AckProgress::Alive
+        );
+
+        shutdown.send_replace(true);
+        task.await.expect("message-error task must stop cleanly");
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner should stop");
+    }
+
+    /// A buffered message error reports its source acknowledgement alive at the cluster's committed
+    /// `REMOTE_ACK_ALIVE_INTERVAL`, not at the parameter's default.
+    #[nervix_primitives::test]
+    async fn buffered_message_error_refreshes_source_ack_at_the_committed_alive_interval() {
+        let committed = Duration::from_millis(300);
+        let fanout = RelayBoundaryFanout::direct_with_capacity(
+            NonZeroUsize::new(1).expect("non-zero test capacity"),
+        );
+        // The flush comes long after the beat, so a delayed beat still refreshes the source ACK
+        // before the flush acknowledges it.
+        let (task, owner_task) = test_task(
+            RuntimeFlushPolicy::Each {
+                interval: committed * 20,
+                max_batch_size: u64::MAX,
+            },
+            fanout,
+        );
+        crate::runtime::test_fixtures::commit_remote_ack_alive_interval(&task.runtime, committed);
+        let (sender, input) = mpsc::channel(1);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let force_flush = task.runtime.force_flush_participant(
+            &task.route.domain,
+            task.runtime
+                .node_quiesce_counters(&task.route.domain, task.route.node.clone()),
+        );
+        let task = nervix_primitives::task::spawn(task.run(input, shutdown_rx, force_flush));
+        let (delivery, mut completion) = test_delivery();
+
+        let sent = Instant::now();
+        sender
+            .send(delivery)
+            .await
+            .expect("message-error task must accept delivery");
+        assert_eq!(
+            timeout(committed * 10, completion.wait_for_progress())
+                .await
+                .expect("pending message error must refresh its source ACK before flushing"),
+            AckProgress::Alive
+        );
+        assert!(
+            sent.elapsed() >= committed,
+            "the source ACK was refreshed {:?} after the message error was sent, before one \
+             committed alive interval of {committed:?}",
+            sent.elapsed(),
         );
 
         shutdown.send_replace(true);
@@ -1120,7 +1200,7 @@ mod tests {
 
         assert_eq!(
             nervix_primitives::time::timeout(
-                REMOTE_ACK_ALIVE_INTERVAL * 2,
+                nervix_models::RemoteAckAliveInterval::DEFAULT * 2,
                 completion.wait_for_progress(),
             )
             .await

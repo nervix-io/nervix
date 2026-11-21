@@ -859,6 +859,7 @@ impl Runtime {
             ProgramRun {
                 executor: self.executor(),
                 now: execution_now,
+                ack_timing: &route_plan.target.services.remote_ack_timing,
             },
             &route_plan.program,
             message,
@@ -960,21 +961,24 @@ impl Runtime {
             "error.occurred_at".to_string(),
             RuntimeValue::Datetime(error.occurred_at.as_datetime().fixed_offset()),
         );
-        let lookup_columns = message
-            .acks
-            .keep_alive_while_pending(compute_lookup_hash_map_columns(
-                run.executor,
-                program,
-                &FilterMapBatchInputs {
-                    carrier: &carrier,
-                    namespace_batches: &namespace_batches,
-                    keys: &keys,
-                    side_inputs: &side_inputs,
-                    ingest_metadata,
-                },
-                run.now,
-                None,
-            ))
+        let lookup_columns = run
+            .ack_timing
+            .keep_alive_while_pending(
+                &message.acks,
+                compute_lookup_hash_map_columns(
+                    run.executor,
+                    program,
+                    &FilterMapBatchInputs {
+                        carrier: &carrier,
+                        namespace_batches: &namespace_batches,
+                        keys: &keys,
+                        side_inputs: &side_inputs,
+                        ingest_metadata,
+                    },
+                    run.now,
+                    None,
+                ),
+            )
             .await
             .map_err(|lookup_error| {
                 MessageErrorHandlingError::record_construction(
@@ -1016,20 +1020,23 @@ impl Runtime {
                 },
             )
         })?;
-        let result = message
-            .acks
-            .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-                run.executor.accepted_work(),
-                &program.compiled,
-                &batch,
-                &VmExecutionContext {
-                    now: run.now,
-                    injector: Some(IngestHeaderFunctionInjector::from_metadata(
-                        ingest_metadata,
-                        batch.row_count(),
-                    )),
-                },
-            ))
+        let result = run
+            .ack_timing
+            .keep_alive_while_pending(
+                &message.acks,
+                execute_accepted_program_with_selection_in_context(
+                    run.executor.accepted_work(),
+                    &program.compiled,
+                    &batch,
+                    &VmExecutionContext {
+                        now: run.now,
+                        injector: Some(IngestHeaderFunctionInjector::from_metadata(
+                            ingest_metadata,
+                            batch.row_count(),
+                        )),
+                    },
+                ),
+            )
             .await
             .map_err(|report| {
                 MessageErrorHandlingError::record_construction(
@@ -1679,6 +1686,7 @@ mod tests {
                 ProgramRun {
                     executor: &executor,
                     now: occurred_at,
+                    ack_timing: &SharedRemoteAckTiming::default(),
                 },
                 &program,
                 &message,
@@ -1761,6 +1769,7 @@ mod tests {
             ProgramRun {
                 executor: &Executor::default(),
                 now: Timestamp::now(),
+                ack_timing: &SharedRemoteAckTiming::default(),
             },
             &program,
             &message,

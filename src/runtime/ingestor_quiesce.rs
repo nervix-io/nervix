@@ -1533,20 +1533,19 @@ impl Runtime {
         ingestor: &IngestorName,
         shutdown_rx: &mut watch::Receiver<bool>,
     ) -> bool {
-        if !self.inner.fault_injection.ingestor_is_failed(ingestor) {
+        let Some(recheck) = self.inner.fault_injection.failed_ingestor_recheck(ingestor) else {
             return false;
-        }
-        let backoff = Duration::from_millis(250);
+        };
         status.fail(
             "ingestor fault injector failed intake".into(),
             Some(RuntimeReconnectStatus {
-                backoff,
-                retry_at: Instant::now() + backoff,
+                backoff: recheck,
+                retry_at: Instant::now() + recheck,
             }),
         );
         nervix_primitives::select! {
             changed = shutdown_rx.changed() => changed.is_err() || *shutdown_rx.borrow(),
-            _ = sleep(Duration::from_millis(250)) => false,
+            _ = sleep(recheck) => false,
         }
     }
 

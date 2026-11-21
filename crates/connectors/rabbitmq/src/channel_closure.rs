@@ -55,6 +55,15 @@ use lapin::{
 /// How long the emitter waits for its connection to report why the broker closed a channel. Lapin
 /// reports the reason as soon as it has answered the broker's close, so the wait normally ends at
 /// once; the bound covers only a close that reports no reason.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "lapin reports a closed channel's reason as soon as it answers the broker's \
+                  close, so this bound only ends a reasonless close, which RabbitMQ never sends a \
+                  publisher"
+    )
+)]
 const CLOSE_REASON_BUDGET: Duration = Duration::from_secs(5);
 
 /// What every reply text of the broker's size refusal begins with, up to the refused size.

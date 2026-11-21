@@ -72,10 +72,16 @@ mod wasm_properties;
 
 use durability::DurabilityBarrier;
 use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
-pub(crate) use maintenance::DEFAULT_RESTORE_STAGING_MAX_BYTES;
 
 /// The byte that opens the generation segment of a WASM guest state key. A key without it was not
 /// written in the current shape and fails to decode instead of addressing the current lifetime.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the stored WASM guest state key format opens its generation segment with g"
+    )
+)]
 const STATE_GENERATION_KEY_MARKER: u8 = b'g';
 
 /// The byte that opens the pinned model fingerprint segment of an inferencer state key.
@@ -89,6 +95,14 @@ const STATE_GENERATION_KEY_MARKER: u8 = b'g';
 const STATE_MODEL_KEY_MARKER: u8 = b'm';
 
 /// The byte that opens the schema fingerprint segment of every schema-bound state key.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the stored state key format opens a schema-bound key's fingerprint segment with \
+                  s"
+    )
+)]
 const STATE_SCHEMA_KEY_MARKER: u8 = b's';
 /// The current key's unit segment. A missing marker is an invalid stored shape.
 #[cfg_attr(

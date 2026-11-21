@@ -1328,6 +1328,7 @@ impl AcknowledgementKeepalive for BranchInputAcknowledgements {
 /// preserves every acknowledgement it carried; a branch that fails preserves the input's.
 pub(super) async fn prepare_branched_entrypoint_input(
     executor: &Executor,
+    ack_timing: &SharedRemoteAckTiming,
     input: BranchedEntrypointInput,
     ack_boundary: BranchInstanceAckBoundary,
 ) -> Result<Vec<PreparedBranch>, IngestGroupFailure<Vec<AckSet>>> {
@@ -1337,8 +1338,8 @@ pub(super) async fn prepare_branched_entrypoint_input(
         Some(bytes) => bytes.min(decoded_limit),
         None => decoded_limit,
     };
-    let reservation = match acks
-        .keep_alive_while_pending(executor.reserve(MemoryClass::Relay, charge))
+    let reservation = match ack_timing
+        .keep_alive_while_pending(&acks, executor.reserve(MemoryClass::Relay, charge))
         .await
     {
         Ok(reservation) => reservation,
@@ -1351,31 +1352,38 @@ pub(super) async fn prepare_branched_entrypoint_input(
             ));
         }
     };
-    let prepared = acks
-        .keep_alive_while_pending(executor.accepted_work().run_cpu(
-            CpuClass::Data,
-            reservation,
-            move |_charge, cancellation| {
-                let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
-                let selections = match batch.branch_selections() {
-                    Ok(selections) => selections,
-                    Err(error) => return Err(IngestGroupFailure::new(error, batch.acks.clone())),
-                };
-                let mut branches = Vec::with_capacity(selections.len());
-                for selection in selections {
-                    if let Err(cancelled) = cancellation.check() {
-                        return Err(IngestGroupFailure::new(
-                            Report::new(cancelled).change_context(IngestGroupError::Execution {
-                                operation: IngestGroupAdmittedOperation::PrepareBranchInput,
-                            }),
-                            batch.acks.clone(),
-                        ));
+    let prepared = ack_timing
+        .keep_alive_while_pending(
+            &acks,
+            executor.accepted_work().run_cpu(
+                CpuClass::Data,
+                reservation,
+                move |_charge, cancellation| {
+                    let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
+                    let selections = match batch.branch_selections() {
+                        Ok(selections) => selections,
+                        Err(error) => {
+                            return Err(IngestGroupFailure::new(error, batch.acks.clone()));
+                        }
+                    };
+                    let mut branches = Vec::with_capacity(selections.len());
+                    for selection in selections {
+                        if let Err(cancelled) = cancellation.check() {
+                            return Err(IngestGroupFailure::new(
+                                Report::new(cancelled).change_context(
+                                    IngestGroupError::Execution {
+                                        operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+                                    },
+                                ),
+                                batch.acks.clone(),
+                            ));
+                        }
+                        branches.push(batch.filter_branch(selection, ack_boundary));
                     }
-                    branches.push(batch.filter_branch(selection, ack_boundary));
-                }
-                Ok(branches)
-            },
-        ))
+                    Ok(branches)
+                },
+            ),
+        )
         .await;
     match prepared {
         Ok(prepared) => prepared,
@@ -1749,21 +1757,25 @@ impl Runtime {
                     ingestor: ingestor.clone(),
                 })?;
             let keys = vec![None; rows.len()];
-            let outcomes = rows
-                .acks
-                .as_slice()
-                .keep_alive_while_pending(evaluate_filter_map_on_batch(
-                    self.executor(),
-                    filter_where,
-                    FilterMapOutcomeInputs {
-                        carrier: &rows.batch,
-                        record_metadata: &rows.record_metadata,
-                        keys: &keys,
-                        filter_map_metadata: rows.metadata_rows(),
-                        side_inputs: &side_inputs,
-                    },
-                    execution_now,
-                ))
+            let outcomes = context
+                .handles
+                .remote_ack_timing()
+                .keep_alive_while_pending(
+                    rows.acks.as_slice(),
+                    evaluate_filter_map_on_batch(
+                        self.executor(),
+                        context.handles.remote_ack_timing(),
+                        filter_where,
+                        FilterMapOutcomeInputs {
+                            carrier: &rows.batch,
+                            record_metadata: &rows.record_metadata,
+                            keys: &keys,
+                            filter_map_metadata: rows.metadata_rows(),
+                            side_inputs: &side_inputs,
+                        },
+                        execution_now,
+                    ),
+                )
                 .await
                 .change_context(IngestGroupError::FilterWhere {
                     ingestor: ingestor.clone(),
@@ -1947,21 +1959,25 @@ impl Runtime {
                     relay: output.relay.clone(),
                 })?;
             let keys = vec![None; rows.len()];
-            let outcomes = rows
-                .acks
-                .as_slice()
-                .keep_alive_while_pending(evaluate_filter_map_on_batch(
-                    self.executor(),
-                    &output.program,
-                    FilterMapOutcomeInputs {
-                        carrier: &rows.batch,
-                        record_metadata: &rows.record_metadata,
-                        keys: &keys,
-                        filter_map_metadata: rows.metadata_rows(),
-                        side_inputs: &side_inputs,
-                    },
-                    execution_now,
-                ))
+            let outcomes = context
+                .handles
+                .remote_ack_timing()
+                .keep_alive_while_pending(
+                    rows.acks.as_slice(),
+                    evaluate_filter_map_on_batch(
+                        self.executor(),
+                        context.handles.remote_ack_timing(),
+                        &output.program,
+                        FilterMapOutcomeInputs {
+                            carrier: &rows.batch,
+                            record_metadata: &rows.record_metadata,
+                            keys: &keys,
+                            filter_map_metadata: rows.metadata_rows(),
+                            side_inputs: &side_inputs,
+                        },
+                        execution_now,
+                    ),
+                )
                 .await
                 .change_context(IngestGroupError::RouteProgram {
                     ingestor: ingestor.clone(),
@@ -2044,21 +2060,25 @@ impl Runtime {
                         }
                         None => None,
                     };
-                    let evaluated = rows
-                        .acks
-                        .as_slice()
-                        .keep_alive_while_pending(evaluate_output_branch_program(
-                            ProgramRun {
-                                executor: self.executor(),
-                                now: execution_now,
-                            },
-                            branch_program,
-                            &input_batch,
-                            &output_batch,
-                            &input_keys,
-                            &side_inputs,
-                            external_partitions.as_deref(),
-                        ))
+                    let evaluated = context
+                        .handles
+                        .remote_ack_timing()
+                        .keep_alive_while_pending(
+                            rows.acks.as_slice(),
+                            evaluate_output_branch_program(
+                                ProgramRun {
+                                    executor: self.executor(),
+                                    now: execution_now,
+                                    ack_timing: context.handles.remote_ack_timing(),
+                                },
+                                branch_program,
+                                &input_batch,
+                                &output_batch,
+                                &input_keys,
+                                &side_inputs,
+                                external_partitions.as_deref(),
+                            ),
+                        )
                         .await
                         .change_context(IngestGroupError::BranchProgram {
                             ingestor: ingestor.clone(),

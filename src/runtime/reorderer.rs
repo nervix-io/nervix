@@ -112,6 +112,18 @@ pub(super) fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPa
     }
 }
 
+/// The text or byte value bytes a key column builder reserves before its parts are appended:
+/// none.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a text or byte key column learns its parts' lengths only as they arrive, so the \
+                  builder reserves offsets for its rows and no value bytes it cannot know yet"
+    )
+)]
+const RESERVED_VALUE_BYTES: usize = 0;
+
 /// A key part that is not a value of the column type its key expression produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(super) enum ReorderKeyColumnError {
@@ -204,7 +216,7 @@ impl ReorderKeyPart {
                 Ok(array)
             }
             DataType::Utf8 => {
-                let mut builder = StringBuilder::with_capacity(rows, 0);
+                let mut builder = StringBuilder::with_capacity(rows, RESERVED_VALUE_BYTES);
                 for part in parts {
                     match part {
                         ReorderKeyPart::Null => builder.append_null(),
@@ -216,7 +228,7 @@ impl ReorderKeyPart {
                 Ok(array)
             }
             DataType::Binary => {
-                let mut builder = BinaryBuilder::with_capacity(rows, 0);
+                let mut builder = BinaryBuilder::with_capacity(rows, RESERVED_VALUE_BYTES);
                 for part in parts {
                     match part {
                         ReorderKeyPart::Null => builder.append_null(),

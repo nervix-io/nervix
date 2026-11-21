@@ -129,6 +129,11 @@ impl ConfiguredFaultInjection {
     ) -> Option<std::time::Duration> {
         None
     }
+
+    /// A node built without the test harness always drains its admitted work when it shuts down.
+    pub(crate) const fn runs_shutdown_drain(&self) -> bool {
+        true
+    }
 }
 
 pub use application::licensing::ConfiguredLicensingTestSupport;

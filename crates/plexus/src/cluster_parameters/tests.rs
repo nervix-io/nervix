@@ -248,6 +248,18 @@ fn completion_after_assignments_offers_only_the_parameters_they_leave(
     "ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 13m 49s, DOMAIN_DRAIN_T",
     &[]
 )]
+#[case::udf_family(
+    "ALTER CLUSTER SET HTTP_HEADER_BYTES = 8KiB, udf_",
+    &["UDF_CODE_BYTES", "UDF_COMPILE_BUDGET"]
+)]
+#[case::udf_sibling_of_the_code_cap(
+    "ALTER CLUSTER SET UDF_CODE_BYTES = 1KiB, UDF_C",
+    &["UDF_COMPILE_BUDGET"]
+)]
+#[case::udf_sibling_of_the_compile_budget(
+    "ALTER CLUSTER SET UDF_COMPILE_BUDGET = 30s, UDF_",
+    &["UDF_CODE_BYTES"]
+)]
 fn completion_of_a_partial_parameter_offers_the_unassigned_keywords_it_begins(
     #[case] input: &str,
     #[case] expected: &[&str],
@@ -292,6 +304,11 @@ fn completion_offers_the_one_parameter_the_others_leave() {
     "ALTER CLUSTER SET UDF_CODE_BYTES = 1KiB, UDF_CODE_BYTES",
     "UDF_CODE_BYTES",
     ClusterParameterKey::UdfCodeBytes
+)]
+#[case::repeated_compile_budget(
+    "ALTER CLUSTER SET UDF_COMPILE_BUDGET = 10s, UDF_CODE_BYTES = 1KiB, udf_compile_budget = 1m;",
+    "udf_compile_budget",
+    ClusterParameterKey::UdfCompileBudget
 )]
 fn a_repeated_parameter_is_refused_where_it_is_written(
     #[case] input: &str,
@@ -389,6 +406,86 @@ fn multi_span_cluster_durations_parse_and_reparse_canonically(
         statement,
         "{canonical}"
     );
+}
+
+#[rstest::rstest]
+#[case::single_span("ALTER CLUSTER SET UDF_COMPILE_BUDGET = 30s;", "30s")]
+#[case::multi_span_in_any_case("alter cluster set Udf_Compile_Budget = 1m 30s 5ms;", "1m 30s 5ms")]
+#[case::beside_the_code_cap(
+    "ALTER CLUSTER SET UDF_CODE_BYTES = 1KiB, UDF_COMPILE_BUDGET = 250ms;",
+    "250ms"
+)]
+fn the_udf_compile_budget_takes_a_duration_and_renders_it_canonically(
+    #[case] input: &str,
+    #[case] canonical_value: &str,
+) {
+    let statement = parse_statement(input).assured("the compile budget is a duration parameter");
+    let Statement::AlterCluster(alter) = &statement else {
+        panic!("the statement must be cluster administration, got {statement:?}");
+    };
+    assert!(
+        alter.parameters.iter().any(|change| matches!(
+            change,
+            ClusterParameterChange::UdfCompileBudget(budget) if !budget.is_zero()
+        )),
+        "{input}"
+    );
+    let canonical = statement
+        .to_canonical_plexus()
+        .assured("cluster parameters have canonical Plexus");
+    assert!(
+        canonical.contains(&format!("UDF_COMPILE_BUDGET = {canonical_value}")),
+        "{canonical}"
+    );
+    assert_eq!(
+        parse_statement(&canonical).assured("canonical Plexus parses"),
+        statement,
+        "{canonical}"
+    );
+}
+
+#[test]
+fn the_udf_compile_budget_value_completes_only_as_a_duration() {
+    let prefix = "ALTER CLUSTER SET UDF_COMPILE_BUDGET = ";
+    let suggestions = suggest_statement(prefix, prefix.len());
+    assert!(
+        suggestions.contains(&"duration_literal".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        !suggestions.contains(&"byte_size_literal".to_string()),
+        "{suggestions:?}"
+    );
+    let prefix = "ALTER CLUSTER SET UDF_COMPILE_BUDGET = 10s, ";
+    let suggestions = suggest_statement(prefix, prefix.len());
+    assert!(
+        suggestions.contains(&"UDF_CODE_BYTES".to_string()),
+        "{suggestions:?}"
+    );
+    assert!(
+        !suggestions.contains(&"UDF_COMPILE_BUDGET".to_string()),
+        "{suggestions:?}"
+    );
+}
+
+#[test]
+fn the_udf_compile_budget_refuses_every_literal_but_a_duration() {
+    assert!(
+        parse_statement("ALTER CLUSTER SET UDF_COMPILE_BUDGET = 10s;").is_ok(),
+        "the duration form is the budget's grammar"
+    );
+    for input in [
+        "ALTER CLUSTER SET UDF_COMPILE_BUDGET = 10;",
+        "ALTER CLUSTER SET UDF_COMPILE_BUDGET = 1KiB;",
+        "ALTER CLUSTER SET UDF_COMPILE_BUDGET = '10s';",
+        "ALTER CLUSTER SET UDF_COMPILE_BUDGET =;",
+        "ALTER CLUSTER SET UDF_COMPILE_BUDGET = 10s 5;",
+        "ALTER CLUSTER SET UDF_COMPILE_BUDGET = 10messages;",
+        "ALTER CLUSTER SET UDF_COMPILE_BUDGET 10s;",
+        "ALTER CLUSTER SET UDF_COMPILE = 10s;",
+    ] {
+        assert!(parse_statement(input).is_err(), "{input}");
+    }
 }
 
 #[test]

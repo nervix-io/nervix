@@ -963,9 +963,10 @@ pub(in crate::registry) fn validate_http_request_expressions(
         return Ok(());
     };
 
-    let mut fields = Vec::with_capacity(2);
-    let mut assignments = Vec::with_capacity(2);
-    for (name, expression) in [("method", method), ("path", path)] {
+    let request_expressions = [("method", method), ("path", path)];
+    let mut fields = Vec::with_capacity(request_expressions.len());
+    let mut assignments = Vec::with_capacity(request_expressions.len());
+    for (name, expression) in request_expressions {
         let target = FieldName::parse(name).assured("HTTP request field names are valid literals");
         fields.push(SchemaField {
             name: target.clone(),

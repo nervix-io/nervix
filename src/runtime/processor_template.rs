@@ -723,6 +723,7 @@ impl RelayProcessorTemplate {
                 }
             },
             applied_revision: revision.clone(),
+            remote_ack_timing: runtime.remote_ack_timing().clone(),
         })
     }
 }
@@ -947,6 +948,7 @@ impl BranchInstanceTemplate {
         }
         let state = Mutex::new(BranchRuntime {
             key,
+            remote_ack_timing: runtime.remote_ack_timing().clone(),
             runtime: runtime.clone(),
             domain: domain.clone(),
             routing: runtime.domain_routing_cache(domain),

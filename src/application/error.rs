@@ -150,6 +150,8 @@ pub enum AppError {
     InvalidConnectorHostSettings,
     #[error("invalid WASM engine capabilities")]
     InvalidWasmEngineSettings,
+    #[error("invalid UDF capabilities")]
+    InvalidUdfSettings,
     #[error("invalid shutdown timeouts")]
     InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]

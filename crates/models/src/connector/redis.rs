@@ -63,6 +63,14 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 };
 
 /// The longest channel or channel pattern Nervix subscribes or publishes to, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual publishes 1 to 1,024 bytes as the Redis channel and \
+                  pattern rule, which the Emitters manual applies to a published channel"
+    )
+)]
 const REDIS_CHANNEL_MAX: usize = 1024;
 
 external_names! {

@@ -4055,8 +4055,10 @@ impl Cluster {
             )
     }
 
-    pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str) {
-        self.fault_injection.fail_ingestor(ingestor);
+    /// Holds `ingestor` failed on every node, each rechecking every `recheck` whether it may run
+    /// again.
+    pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str, recheck: Duration) {
+        self.fault_injection.fail_ingestor(ingestor, recheck);
     }
 
     pub(crate) fn clear_ingestor_fault_on_all_nodes(&self, ingestor: &str) {
@@ -4954,13 +4956,18 @@ impl NodeHandle {
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_TEMP_DIR)),
             )
             .build();
+        // A node reads whether it drains as it starts, so the choice of this launch is made first.
+        if self.config.graceful_shutdown_drain {
+            self.fault_injection.run_shutdown_drain();
+        } else {
+            self.fault_injection.skip_shutdown_drain();
+        }
         let application = Application::builder()
             .identity(identity)
             .settings(settings)
             .detection(self.config.node_detection(&self.spec.node_id)?)
             .fault_injection(self.fault_injection.clone())
             .licensing_test_support(self.config.licensing_test_support.clone())
-            .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
             .build();
         let shutdown = application.shutdown.clone();
         self.launched_settings = Some(settings);

@@ -108,12 +108,12 @@ instead for its command wait and reply (ten minutes), shared across every domain
 reconnect. Every request asks the server for progress reports while it serves the request, and
 each report starts the request's and its call's deadlines again, so these deadlines bound how long a
 wait goes without its answer or a report rather than how long the command may run: a `STOP` that
-waits for the domain's work in motion is answered however long it takes. All deadline and
-retry-backoff durations must be between one millisecond and 24 hours. A call whose deadline passes before a
-command's outcome is known fails with `ClientError::UncertainCommand`, which names the execution
-reference. An `https://` server is verified only against `ca_certificate_pem`: the client loads no
-system roots, so a TLS connection needs the certificate authority that signed the server's
-certificate.
+waits for the domain's work in motion is answered however long it takes. All deadline, retry
+backoff and restoration backoff durations must be between one millisecond and 24 hours. A call
+whose deadline passes before a command's outcome is known fails with
+`ClientError::UncertainCommand`, which names the execution reference. An `https://` server is
+verified only against `ca_certificate_pem`: the client loads no system roots, so a TLS connection
+needs the certificate authority that signed the server's certificate.
 
 Every call returns its failure as an `error_stack::Report<ClientError>`. The report's current
 context, `report.current_context()`, is the failure a caller acts on, and the frames beneath it
@@ -128,14 +128,28 @@ uncertainty from those typed contexts, and a caller needs no text to decide eith
 renders the whole chain for display.
 
 `ConnectOptions` also owns `retry_backoff` and `retry_max_backoff` (100 ms and 1 s by default),
-positive subscription record/frame retention and aggregate retention multipliers, and upload and
-restore frame queue capacities. The native client's `ClientCapabilities::from_options` validates
-these values and all derived byte bounds once. Retry delays double within the selected ceiling;
-the base cannot exceed it. Subscription defaults retain 32 events and one frame per subscription,
-with four times those bounds in total. Upload and restore each queue eight frames by default.
-The [CLI capability table](client-tools-cli.md#connection-capabilities) lists the corresponding
-Rust field names with hyphens in place of underscores and their complete bounds.
+`restoration_backoff` and `restoration_max_backoff` (1 s and 30 s), positive subscription
+record/frame retention and aggregate retention multipliers, upload, restore and request frame queue
+capacities, and the server notice bounds `notice_capacity` and `notice_bytes`. These are local to
+the client process and never sent to the server. The native client's
+`ClientCapabilities::from_options` validates these values and all derived byte bounds once. Retry
+and restoration delays each double within the selected ceiling; neither base can exceed its
+ceiling. A call that is redirected or waits for an election makes at most as many attempts as its
+budget (`retry_timeout`, or `backup_wait_timeout` for a `BACKUP` command) holds waits of
+`retry_backoff`, 1,200 by default for any call other than a `BACKUP`; every wait lasts at least
+`retry_backoff`, so a shorter backoff schedule never runs out of attempts before the call's deadline.
+Subscription defaults retain 32 events and one frame per subscription, with four times those bounds
+in total. Upload and restore each queue eight frames by default, and each session's requests queue
+32 frames. The client retains at most 128 unread server notices and 1 MiB of them by default, each
+notice charged its text and its in-memory header. The
+[CLI capability table](client-tools-cli.md#connection-capabilities) lists the corresponding Rust
+field names with hyphens in place of underscores and their complete bounds.
 
+`ConnectOptions::seed_servers` lists the further servers the client opens its first session on,
+after the server it connects to, and reconnects through later. It holds at most
+`ConnectOptions::MAX_SEED_SERVERS`, 32 servers, the same bound as the endpoints the client learns
+from redirects and leadership observations: `Client::connect_with_options` refuses a longer list
+with `ClientError::TooManySeedServers` before it connects.
 
 Native connections resolve a hostname through Hickory. By default the client loads the host's
 resolver configuration and hosts file once at connection setup. `ConnectOptions::dns` can name a
@@ -211,9 +225,10 @@ again on its own. When the session refuses it for any other reason, `next_subscr
 before the next attempt: the session holds a transaction, the statement, name or filter was refused,
 the serving node could not open it now, the session rejected the request without serving it, or the
 attempt failed in the client. The client keeps trying on that session, after a wait that starts at
-one second and doubles up to thirty seconds, until the subscription opens, the session ends, or the
-subscription is deleted. `Client::subscription_lifecycle(&name)` reads the state a subscription is
-in. `subscribe` and `unsubscribe` reopen a closed session like every other call. Deleting a
+`restoration_backoff` and doubles up to `restoration_max_backoff` (one second and thirty seconds by
+default), until the subscription opens, the session ends, or the subscription is deleted.
+`Client::subscription_lifecycle(&name)` reads the state a subscription is in. `subscribe` and
+`unsubscribe` reopen a closed session like every other call. Deleting a
 subscription that no open session holds, because its session ended or the current session refused to
 open it again, completes without a request and releases the name.
 
@@ -415,9 +430,9 @@ committed domains, so a restart never ends an attachment. When the new session r
 for any other reason, the event is `RestorationFailed` with its `DomainClockRestorationCause`, the
 server's message and the wait before the client sends the attach again on the same session: the
 session holds a transaction, it rejected the request without serving it, or the attempt failed in
-the client. The wait starts at one second on
-each new session and doubles up to thirty seconds. An attach the session leaves unanswered past
-`request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
+the client. The wait starts at `restoration_backoff` on each new session and doubles up to
+`restoration_max_backoff`, one second and thirty seconds by default. An attach the session leaves
+unanswered past `request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
 next event reopens a closed session when a followed clock waits for it, including a call already
 waiting when the unanswered attach ends its session; a failure to open one is returned while the
 clock keeps waiting, and the next call tries again. A detach, or an end, stops following the

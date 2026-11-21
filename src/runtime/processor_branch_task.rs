@@ -558,7 +558,7 @@ pub(super) async fn run_processor_node_runtime(
         }
 
         let maintenance_timeout = if ownership_frozen {
-            (runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))
+            runtime_handle.ownership_freeze_recheck()
         } else {
             let mut next_maintenance = match pending_restore.as_ref() {
                 Some(restore) => restore.retry_at(),
@@ -1634,7 +1634,7 @@ async fn run_processor_branch_task(
                     break;
                 }
             }
-            _ = sleep((runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))), if ownership_frozen => {}
+            _ = sleep(runtime_handle.ownership_freeze_recheck()), if ownership_frozen => {}
         }
     }
     while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {

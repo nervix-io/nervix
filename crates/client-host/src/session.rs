@@ -33,6 +33,14 @@ use crate::{
 
 /// The threads the runtime of one session drives its exchange with. The exchange is one stream
 /// and its reader, so a second thread only keeps a busy decoder from delaying a timer.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Client Host Bindings gives each connected session a native runtime of two \
+                  worker threads, and a blocking call runs its future on the host's own thread"
+    )
+)]
 const RUNTIME_THREADS: usize = 2;
 
 /// An open session, as the host holds it.

@@ -276,6 +276,11 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    membership: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_membership_capabilities(),
                     listeners: nervix_arbitrary::Arbitrary::new(
                         &[],
                         nervix_arbitrary::Domain::Vocabulary,
@@ -427,6 +432,16 @@ mod tests {
             .capabilities
             .connector_host
             .retry_jitter_percent = 20;
+        changed
+            .claim
+            .capabilities
+            .connector_host
+            .mqtt_read_ahead_headroom = NonZeroU64::new(7).expect("positive headroom");
+        changed
+            .claim
+            .capabilities
+            .membership
+            .gossip_receive_queue_capacity = NonZeroU64::new(9).expect("positive queue");
         announce(&mut state, &changed);
         assert_eq!(state, unchanged);
         changed.claim.identity = record(8).claim.identity;

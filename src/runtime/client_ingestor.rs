@@ -1951,6 +1951,7 @@ impl AdmissionWorker {
         let run = ProgramRun {
             executor: self.intake.runtime.executor(),
             now: actual_utc_now(),
+            ack_timing: self.intake.handles.remote_ack_timing(),
         };
         let costs = allowance.costs(run, &[metadata], Some(rows)).await;
         let cost = match costs {

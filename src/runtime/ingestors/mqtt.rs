@@ -172,6 +172,7 @@ impl MqttTopicIngestorStartPlan {
                     acknowledgement_window: self.mode.acknowledgement_window(),
                     dns: dns.clone(),
                     read_ahead_overflow: read_ahead_overflow.clone(),
+                    read_ahead: runtime.inner.connector_host.mqtt,
                 });
                 let rendered = Arc::new(RenderedMqttClient {
                     connector,

@@ -220,6 +220,7 @@ impl EmitterPublishBatch {
         mut self,
         envelope: &CompiledEnvelope,
         executor: &Executor,
+        ack_timing: &SharedRemoteAckTiming,
         input: EnvelopeInput<'_>,
         side_inputs: &HashMap<String, RuntimeValue>,
         execution_now: Timestamp,
@@ -227,6 +228,7 @@ impl EmitterPublishBatch {
         let envelopes = envelope
             .evaluate(
                 executor,
+                ack_timing,
                 &self.source_relay,
                 &mut self.batch,
                 input,

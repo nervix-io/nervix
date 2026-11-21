@@ -15,10 +15,11 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use arch_into::ArchInto as _;
 use nervix_connector::{ConnectorRetryJitterPercent, ConnectorRetryMultiplier};
 use nervix_connector_kafka::KafkaDomainAssignmentRetry;
+use nervix_connector_mqtt::MqttReadAheadHeadroom;
 use nervix_connector_syslog::{SyslogIntakeQueueCapacity, SyslogReadChunkBytes};
 use nervix_models::SettingDefinition as _;
 
-use super::settings::CommandLine;
+use super::settings::{CommandLine, capability_help};
 use crate::{
     application::cli_values::{HumanBytes, HumanDuration},
     runtime::{
@@ -42,6 +43,17 @@ pub struct ConnectorHostArgs {
     pub syslog_intake_queue_capacity: Option<NonZeroUsize>,
     #[arg(long = SyslogReadChunkBytes::NAME, env = "NERVIX_SYSLOG_READ_CHUNK_BYTES", help = format!("Bytes appended by one Syslog stream read, also bounded by the frame limit. Default: {}", SyslogReadChunkBytes::default_value(&())))]
     pub syslog_read_chunk_bytes: Option<HumanBytes>,
+    #[arg(
+        long = MqttReadAheadHeadroom::NAME,
+        env = "NERVIX_MQTT_READ_AHEAD_HEADROOM",
+        help = capability_help::<MqttReadAheadHeadroom>(
+            "Publishes an MQTT ingestor connection reads ahead beyond its acknowledgement window: \
+             the extra Receive Maximum every ACK-mode CONNECT advertises, up to 65,535, the \
+             ACK-mode QoS 0 quota and the whole NO ACK read-ahead",
+            MqttReadAheadHeadroom::default_value(&()),
+        )
+    )]
+    pub mqtt_read_ahead_headroom: Option<NonZeroUsize>,
 }
 impl ConnectorHostArgs {
     pub(super) fn settings(
@@ -56,6 +68,7 @@ impl ConnectorHostArgs {
                 .map(|value| value.0),
             syslog_queue_capacity: self.syslog_intake_queue_capacity,
             syslog_read_chunk_bytes: self.syslog_read_chunk_bytes.map(|value| value.0.as_u64()),
+            mqtt_read_ahead_headroom: self.mqtt_read_ahead_headroom,
         })
     }
     pub(super) fn from_settings(settings: &ConnectorHostSettings) -> Self {
@@ -70,6 +83,7 @@ impl ConnectorHostArgs {
             syslog_read_chunk_bytes: Some(HumanBytes(ubyte::ByteUnit::Byte(
                 settings.syslog.read_chunk_bytes().arch_into(),
             ))),
+            mqtt_read_ahead_headroom: Some(settings.mqtt.headroom()),
         }
     }
     pub(super) fn render(&self, command: &mut CommandLine) {
@@ -94,5 +108,6 @@ impl ConnectorHostArgs {
             self.syslog_intake_queue_capacity,
         );
         command.optional(SyslogReadChunkBytes::NAME, self.syslog_read_chunk_bytes);
+        command.optional(MqttReadAheadHeadroom::NAME, self.mqtt_read_ahead_headroom);
     }
 }

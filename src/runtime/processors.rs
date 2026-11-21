@@ -36,8 +36,9 @@ use super::{
     DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, HeldReordererRow, HeldRowsBudget,
     PendingMaterializedBatch, RelayBoundaryServices, RelayMessage, RelayRecordBatch,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
-    RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance,
-    WindowAccumulatorPlan, WindowProcessorState, held_row_bytes,
+    RuntimeInputCollectPolicy, RuntimeInputCollector, SharedRemoteAckTiming,
+    WasmGuestStateResetFence, WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState,
+    held_row_bytes,
     inferencer::{InferenceSession, PreparedInference},
 };
 use crate::{
@@ -273,6 +274,10 @@ pub(super) struct RelayProcessorNode {
     pub(super) compiled_filter_where: HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
     pub(super) applied_revision: ProcessorPlanRevision,
+    /// The node's installed remote acknowledgement timing, kept from the branch's creation. The
+    /// processor reads its committed alive interval here once work it holds waits. It is the
+    /// processor's own handle because its correlator dispatch borrows the whole branch meanwhile.
+    pub(super) remote_ack_timing: SharedRemoteAckTiming,
 }
 
 #[derive(Debug)]

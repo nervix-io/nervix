@@ -2,7 +2,7 @@
   "ci_reserve_minutes": 21,
   "suites": {
     "smoke": {
-      "description": "Three-node baseline, a leader crash with its restart, connector counters across ingestor and emitter owner crashes, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, the lifetimes workloads through a three-node owner crash, and the Python binding through graceful stop, crash and restart",
+      "description": "Three-node baseline, a leader crash with its restart, connector counters across ingestor and emitter owner crashes, the recovery from an isolated follower's partition, endpoint intake on one node and through a three-node owner crash, the lifetimes workloads through a three-node owner crash, the Python binding through graceful stop, crash and restart, and the rolling node-settings changes: a relay receive bound rolled across every node, a parameter change a returning node adopts and one applied live under load, and a node refused over a prerequisite",
       "entries": [
         {
           "id": "stateful-partitions-3-owner-crash",
@@ -81,6 +81,34 @@
           "shard": 6,
           "budget_minutes": 10,
           "run": ["emitter-owner-crash", "--connector-metrics", "--nodes", "3"]
+        },
+        {
+          "id": "capability-roll",
+          "shard": 7,
+          "budget_minutes": 10,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["capability-roll"]
+        },
+        {
+          "id": "parameter-return",
+          "shard": 7,
+          "budget_minutes": 9,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["parameter-return"]
+        },
+        {
+          "id": "parameter-live",
+          "shard": 7,
+          "budget_minutes": 7,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["parameter-live"]
+        },
+        {
+          "id": "prerequisite-refusal",
+          "shard": 7,
+          "budget_minutes": 10,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["prerequisite-refusal"]
         }
       ]
     },
@@ -588,6 +616,34 @@
           "budget_minutes": 12,
           "note": "the chaos reproduction of Graceful Lifecycle 01",
           "run": ["graceful-stop"]
+        },
+        {
+          "id": "capability-roll",
+          "shard": 18,
+          "budget_minutes": 10,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["capability-roll"]
+        },
+        {
+          "id": "parameter-return",
+          "shard": 18,
+          "budget_minutes": 9,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["parameter-return"]
+        },
+        {
+          "id": "parameter-live",
+          "shard": 18,
+          "budget_minutes": 7,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["parameter-live"]
+        },
+        {
+          "id": "prerequisite-refusal",
+          "shard": 18,
+          "budget_minutes": 10,
+          "note": "budget estimated before the first CI measurement",
+          "run": ["prerequisite-refusal"]
         }
       ]
     }

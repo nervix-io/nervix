@@ -16823,10 +16823,16 @@ async fn when_emitter_connector_stalls_after_resolving(
         .stall_emitter_connector_after_resolving_on_all_nodes(&emitter, resolved);
 }
 
+/// How often an ingestor in fault mode rechecks whether it may run again, which its
+/// `DESCRIBE INGESTOR` reports as the reconnect backoff.
+const INGESTOR_FAULT_RECHECK: Duration = Duration::from_millis(250);
+
 #[when(expr = "ingestor {string} enters fault mode")]
 async fn when_ingestor_enters_fault_mode(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = expand_placeholders(world, &ingestor);
-    world.cluster().fail_ingestor_on_all_nodes(&ingestor);
+    world
+        .cluster()
+        .fail_ingestor_on_all_nodes(&ingestor, INGESTOR_FAULT_RECHECK);
 }
 
 #[when(expr = "ingestor {string} leaves fault mode")]

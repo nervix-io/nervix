@@ -3934,6 +3934,14 @@ impl Observer {
         }
     }
 
+    /// The retention policy this node runs: the retained log cap above which a mutation waits for
+    /// reclamation, and how long it waits before it fails. A test harness refuses a write against
+    /// it the way this node's retention would.
+    #[cfg(feature = "testing")]
+    pub fn raft_retention_policy(&self) -> RaftRetentionPolicy {
+        self.inner.raft_retention
+    }
+
     pub async fn status_lines(&self) -> Vec<String> {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         let mut lines = Vec::new();

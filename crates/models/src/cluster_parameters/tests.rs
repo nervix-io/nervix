@@ -46,6 +46,7 @@ fn parameters(input: &[u8; 384]) -> ClusterParameterValues {
         client_producer_session_bytes: Some(generated.client_producer_session_bytes()),
         client_consumer_session_bytes: Some(generated.client_consumer_session_bytes()),
         udf_code_bytes: Some(generated.udf_code_bytes()),
+        udf_compile_budget: Some(generated.udf_compile_budget()),
         entity_labels_max_count: Some(generated.entity_labels_max_count()),
         entity_labels_max_key_bytes: Some(generated.entity_labels_max_key_bytes()),
         entity_labels_max_value_bytes: Some(generated.entity_labels_max_value_bytes()),
@@ -135,6 +136,7 @@ fn every_duration_refuses_zero_at_its_definition_boundary() {
         ClusterParameterChange::TransactionTombstoneRetention(Duration::ZERO),
         ClusterParameterChange::CommandRetryValidity(Duration::ZERO),
         ClusterParameterChange::StateSnapshotInterval(Duration::ZERO),
+        ClusterParameterChange::UdfCompileBudget(Duration::ZERO),
     ];
     for change in changes {
         let parameter = change.parameter();
@@ -380,7 +382,7 @@ fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
 
 #[test]
 fn bounded_durations_preserve_nanoseconds_at_both_ends_of_their_domain() {
-    let definitions: [fn(Duration) -> ClusterParameterChange; 15] = [
+    let definitions: [fn(Duration) -> ClusterParameterChange; 16] = [
         ClusterParameterChange::LicensingRequestTimeout,
         ClusterParameterChange::LicensingRetryBackoffMax,
         ClusterParameterChange::LicensingStreamIdleTimeout,
@@ -396,6 +398,7 @@ fn bounded_durations_preserve_nanoseconds_at_both_ends_of_their_domain() {
         ClusterParameterChange::TransactionTombstoneRetention,
         ClusterParameterChange::CommandRetryValidity,
         ClusterParameterChange::StateSnapshotInterval,
+        ClusterParameterChange::UdfCompileBudget,
     ];
     let maximum = Duration::from_secs(u64::from(u32::MAX));
     for value in [

@@ -103,6 +103,14 @@ where
 
 impl BatchMessageLimit {
     /// The largest member count an emitter may declare.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a batch member limit is stored as a nonzero u32, so u32::MAX is the largest \
+                      count its representation holds"
+        )
+    )]
     pub const MAX: u32 = u32::MAX;
 
     pub const fn get(self) -> NonZeroU32 {

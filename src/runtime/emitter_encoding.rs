@@ -342,11 +342,13 @@ async fn encode_broker_records(
         nervix_primitives::task::consume_budget().await;
         let pending_rows = batch.pending_record_rows();
         let batch_acks = batch.merged_acks();
-        let payloads = await_emitter_confirmation(
-            &batch_acks,
-            encode_pending_broker_payloads(codec.clone(), context, batch, pending_rows),
-        )
-        .await?;
+        let payloads = context
+            .remote_ack_timing
+            .keep_alive_while(
+                &batch_acks,
+                encode_pending_broker_payloads(codec.clone(), context, batch, pending_rows),
+            )
+            .await?;
 
         for PendingRowPayload { row_index, payload } in payloads {
             nervix_primitives::task::consume_budget().await;
@@ -470,11 +472,13 @@ async fn pack_batch_records(
         });
     }
     let acks = AckSet::merged(batches.iter().map(EmitterPublishBatch::merged_acks));
-    let packing = await_emitter_confirmation(
-        &acks,
-        pack_pending_rows(codec.clone(), policy, context, carriers),
-    )
-    .await?;
+    let packing = context
+        .remote_ack_timing
+        .keep_alive_while(
+            &acks,
+            pack_pending_rows(codec.clone(), policy, context, carriers),
+        )
+        .await?;
     if packing.subdivisions > 0 {
         context.interactions.record_splits(packing.subdivisions);
         tracing::debug!(

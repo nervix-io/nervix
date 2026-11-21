@@ -126,6 +126,7 @@ impl CompiledOrderingGroup {
     pub(super) async fn evaluate(
         &self,
         executor: &Executor,
+        ack_timing: &SharedRemoteAckTiming,
         source_relay: &RelayName,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
@@ -142,6 +143,7 @@ impl CompiledOrderingGroup {
             ProgramRun {
                 executor,
                 now: execution_now,
+                ack_timing,
             },
             program,
             FilterMapBatchInputs {
@@ -381,6 +383,17 @@ impl EvaluatedOrderingGroups {
     }
 }
 
+/// The group bytes a builder reserves before its rows are appended: none.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a group is as long as its row's expression makes it, so the builder reserves \
+                  offsets for its known rows and no value bytes it cannot know yet"
+    )
+)]
+const RESERVED_GROUP_BYTES: usize = 0;
+
 /// Writes each row's group, or its null and the reason for it, in row order.
 struct EvaluatedOrderingGroupsBuilder {
     groups: StringBuilder,
@@ -390,7 +403,7 @@ struct EvaluatedOrderingGroupsBuilder {
 impl EvaluatedOrderingGroupsBuilder {
     fn with_capacity(rows: usize) -> Self {
         Self {
-            groups: StringBuilder::with_capacity(rows, 0),
+            groups: StringBuilder::with_capacity(rows, RESERVED_GROUP_BYTES),
             failures: BTreeMap::new(),
         }
     }
@@ -478,6 +491,7 @@ mod tests {
         group
             .evaluate(
                 &Executor::default(),
+                &SharedRemoteAckTiming::default(),
                 &named("source"),
                 batch,
                 Timestamp::from_unix_nanos(1),
@@ -588,6 +602,7 @@ mod tests {
             let groups = group
                 .evaluate(
                     &Executor::default(),
+                    &SharedRemoteAckTiming::default(),
                     &named(source),
                     &batch,
                     Timestamp::from_unix_nanos(1),

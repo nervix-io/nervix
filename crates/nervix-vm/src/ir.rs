@@ -242,7 +242,25 @@ impl InstructionKind {
             Self::Select {
                 arms, otherwise, ..
             } => {
-                let mut operands = Vec::with_capacity(arms.len() * 2 + 1);
+                #[cfg_attr(
+                    nervix_lint,
+                    nervix::constant(
+                        fixed,
+                        reason = "a select arm reads exactly two registers, its mask and its value"
+                    )
+                )]
+                const ARM_OPERANDS: usize = 2;
+                #[cfg_attr(
+                    nervix_lint,
+                    nervix::constant(
+                        fixed,
+                        reason = "a select reads exactly one register besides its arms, its \
+                                  otherwise"
+                    )
+                )]
+                const OTHERWISE_OPERANDS: usize = 1;
+                let mut operands =
+                    Vec::with_capacity(arms.len() * ARM_OPERANDS + OTHERWISE_OPERANDS);
                 for arm in arms {
                     operands.push(arm.mask);
                     operands.push(arm.value);

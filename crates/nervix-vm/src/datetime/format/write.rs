@@ -33,7 +33,10 @@ use super::{
     DatetimeFormat, DayPadding, FormatDirective, FormatItem, FractionDigits, NameLength, Padding,
     ZoneDirective,
 };
-use crate::datetime::zone::{OffsetStyle, ShortText, Zone, ZoneOffsets, ascii_digit, timestamp};
+use crate::{
+    datetime::zone::{OffsetStyle, ShortText, Zone, ZoneOffsets, ascii_digit, timestamp},
+    program::FixedTimeUnit,
+};
 
 const MONTH_NAMES: [&str; 12] = [
     "January",
@@ -61,7 +64,17 @@ const WEEKDAY_NAMES: [&str; 7] = [
     "Sunday",
 ];
 
-const NANOSECONDS_PER_SECOND: i64 = 1_000_000_000;
+/// The offsets a string array holds beyond one end for each of its values: the start of its first
+/// value.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an Arrow string array of n values holds n + 1 offsets, its first value's start \
+                  before each value's end"
+    )
+)]
+const LEADING_START_OFFSETS: usize = 1;
 
 /// A DATETIME column written as text, or a column whose text could exceed what one Arrow string
 /// array holds.
@@ -169,7 +182,7 @@ impl<'z> ColumnLayout<'z> {
         let mut ends = Vec::with_capacity(
             values
                 .len()
-                .checked_add(1)
+                .checked_add(LEADING_START_OFFSETS)
                 .assured("a column holding lanes in memory has fewer than usize::MAX of them"),
         );
         ends.push(0_i32);
@@ -311,7 +324,10 @@ impl LocalValue {
                 text.extend_from_slice(ShortText::offset(self.offset.seconds(), style).as_bytes());
             }
             VaryingField::UnixSeconds => {
-                push_signed(text, self.instant.div_euclid(NANOSECONDS_PER_SECOND));
+                push_signed(
+                    text,
+                    self.instant.div_euclid(FixedTimeUnit::Second.nanoseconds()),
+                );
             }
         }
     }

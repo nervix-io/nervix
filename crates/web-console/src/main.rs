@@ -101,9 +101,52 @@ use tab_restoration::{RetryTick, RetryWait, TabRestoration};
 use transaction_inspector::{InspectorSignals, TransactionInspector};
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
+/// How long typing must pause before the REPL asks the server for completions, so a burst of
+/// keystrokes sends one request instead of one for each.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how many completion requests a burst of typing may send trades against the \
+                  server's round trip, which depends on the network, and the console has no \
+                  settings carrier yet https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 const SUGGESTION_REQUEST_DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
+/// The first wait before the console connects or retries again, which doubles with each failed
+/// attempt up to [`WEBSOCKET_MAX_RECONNECT_DELAY`].
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how soon to try again depends on the network and the cluster, and the console \
+                  has no settings carrier yet; it stays fixed until its repair task serves the \
+                  retry backoff https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 const WEBSOCKET_INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+/// The longest wait the doubling reconnect and retry backoff reaches.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long the backoff may grow depends on the network and the cluster, and the \
+                  console has no settings carrier yet; it stays fixed until its repair task serves \
+                  the maximum backoff https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 const WEBSOCKET_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// The period of a session's retry timer, which retries interrupted subscriptions and checks
+/// whether the credentials changed while the session waits.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how soon an interrupted subscription is retried depends on the cluster, and the \
+                  console has no settings carrier yet; it stays fixed until its repair task serves \
+                  it with the session opening https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 const SUBSCRIPTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Explicit default bounds for isolated console fixtures.
@@ -119,6 +162,14 @@ const SESSION_UNAVAILABLE: &str = "websocket session is not available";
 
 /// The most requests of the console's controls its session keeps outstanding: held until the
 /// session can serve them, or sent and awaiting their reply.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter's bounded buffers let the console's controls admit at \
+                  most 256 outstanding requests once connected"
+    )
+)]
 const MAX_OUTSTANDING_REQUESTS: usize = 256;
 // Everything the hand-off holds fits a session that has nothing else outstanding.
 const _: () = assert!(request_handoff::MAX_WAITING_REQUESTS <= MAX_OUTSTANDING_REQUESTS);
@@ -1625,8 +1676,26 @@ const THEMES: [ThemeView; 4] = [
 ];
 
 /// How long a snapshot stays fresh before the freshness pill reports a stall.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how often snapshots arrive is the serving node's session snapshot interval, \
+                  which the console has no carrier to learn yet; it stays fixed until its repair \
+                  task derives it from the announced interval https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 const GRAPH_FRESHNESS_TIMEOUT: Duration = Duration::from_millis(2_500);
 /// How often the freshness pill re-evaluates the age of the last snapshot.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "the freshness tick follows the serving node's session snapshot interval, which \
+                  the console has no carrier to learn yet; it stays fixed until its repair task \
+                  derives it from the announced interval https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 const GRAPH_FRESHNESS_TICK: Duration = Duration::from_millis(500);
 
 fn main() {
@@ -2530,8 +2599,8 @@ async fn run_websocket_session(
         domains_loaded.set(false);
         let mut opened_this_attempt = false;
         match WebSocket::open(&url) {
-            Ok(socket) => {
-                wait_for_websocket_open(&socket).await;
+            Ok(mut socket) => {
+                wait_for_websocket_open(&mut socket).await;
                 if auth_token.get_untracked().as_deref() != Some(current_auth_token.as_str()) {
                     requests.end_connection();
                     signals.create.connection_lost();
@@ -2622,6 +2691,19 @@ async fn run_websocket_session(
     }
 }
 
+/// How long the console waits for the authentication probe's answer before it leaves the token in
+/// place for the next reconnect attempt.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long the probe's answer may take depends on the network, and the console \
+                  has no settings carrier yet; it stays fixed until its repair task derives it \
+                  from a served connect capability https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
+const CREDENTIAL_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// A failed WebSocket handshake does not tell browser JavaScript whether the server rejected the
 /// credentials or was unreachable. The same-origin authentication probe does: a valid
 /// credential gets `204 No Content`, and a rejected credential gets `401 Unauthorized` without a
@@ -2637,7 +2719,7 @@ async fn credentials_invalid(auth_token: &str) -> bool {
     url.set_path("/console/auth");
     url.query_pairs_mut().append_pair("auth", auth_token);
     let response = gloo_net::http::Request::get(url.as_str()).send().fuse();
-    let timeout = wait_for_browser_delay(Duration::from_secs(3)).fuse();
+    let timeout = wait_for_browser_delay(CREDENTIAL_PROBE_TIMEOUT).fuse();
     futures_util::pin_mut!(response, timeout);
     match nervix_primitives::unmodeled::futures::select! {
         result = response => Some(result),
@@ -3023,10 +3105,19 @@ fn receive_frame(
     }
 }
 
-async fn wait_for_websocket_open(socket: &WebSocket) {
-    while matches!(socket.state(), WebSocketState::Connecting) {
-        wait_for_browser_delay(Duration::from_millis(50)).await;
-    }
+/// Waits until `socket` leaves CONNECTING, because it opened or because it failed or closed first.
+///
+/// gloo-net's sink is ready once the socket is no longer CONNECTING, and while it connects it
+/// wakes on the socket's `open` or `error` event. A connection that cannot be established fires
+/// `error` before `close`, so the wait ends either way, and the caller reads the state the socket
+/// reached.
+async fn wait_for_websocket_open(socket: &mut WebSocket) {
+    std::future::poll_fn(|context| SinkExt::<WebSocketMessage>::poll_ready_unpin(socket, context))
+        .await
+        .discarded(
+            "readiness only says the socket left CONNECTING; the caller reads the state it \
+             reached next",
+        );
 }
 
 async fn wait_for_browser_delay(delay: Duration) {
@@ -6493,6 +6584,20 @@ fn GraphPanel(
     }
 }
 
+/// How often a reconnect countdown redraws its remaining wait. A remaining wait of a second or more
+/// is labelled in tenths of a second, which this period redraws at each step; a shorter one is
+/// labelled in whole milliseconds, which it only samples ten times a second.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a reconnect countdown labels a remaining wait of a second or more in tenths of \
+                  a second, and a redraw every tenth shows each of those steps; below a second \
+                  its whole milliseconds are sampled at that pace"
+    )
+)]
+const RECONNECT_COUNTDOWN_REFRESH: Duration = Duration::from_millis(100);
+
 #[component]
 fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
     let Some(wait_millis) = wait_millis.filter(|value| *value > 0) else {
@@ -6510,7 +6615,7 @@ fn ReconnectTimer(wait_millis: Option<u64>) -> impl IntoView {
                 .unwrap_or(u64::MAX);
             remaining.set(millis);
         },
-        Duration::from_millis(100),
+        RECONNECT_COUNTDOWN_REFRESH,
     )
     .ok();
     on_cleanup(move || {
@@ -6964,8 +7069,24 @@ struct CompletionCycle {
 }
 
 /// The most commands the REPL keeps for `ArrowUp` and `ArrowDown`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter's bounded buffers keep the latest 256 commands in the \
+                  REPL's command history"
+    )
+)]
 const MAX_COMMAND_HISTORY_RECORDS: usize = 256;
 /// The most bytes of command text the REPL keeps for them.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter's bounded buffers keep at most 256 KiB of commands in \
+                  the REPL's command history"
+    )
+)]
 const MAX_COMMAND_HISTORY_BYTES: usize = 256 * 1024;
 const COMMAND_HISTORY_MARKER: &str = "command history limit reached; earlier commands were omitted";
 const COMMAND_TOO_LARGE_FOR_HISTORY: &str =
@@ -7987,6 +8108,13 @@ struct GraphViewEdge {
 impl GraphViewEdge {
     /// The radius of a drawn corner. A corner between two short segments uses half of it so the
     /// curve can never eat the segment it turns out of.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the live graph's designed radius for the rounded corners of its edges"
+        )
+    )]
     const CORNER_RADIUS: i32 = 10;
 
     fn path(&self) -> String {
@@ -8449,11 +8577,43 @@ struct TermLine {
     text: String,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter keeps the latest 256 lines of the REPL and of every \
+                  subscription tab, and the newest 256 cluster events"
+    )
+)]
 const MAX_HISTORY_RECORDS: usize = 256;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter's bounded buffers keep at most 256 KiB of text in the \
+                  REPL and in every subscription tab"
+    )
+)]
 const MAX_HISTORY_BYTES: usize = 256 * 1024;
 const HISTORY_MARKER: &str = "history limit reached; earlier lines were omitted";
 const HISTORY_SUFFIX: &str = "… [line truncated]";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a history reserves one of its kept lines for the notice that earlier lines were \
+                  omitted"
+    )
+)]
 const HISTORY_PAYLOAD_RECORDS: usize = MAX_HISTORY_RECORDS - 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a history reserves room in its kept text for the notice that earlier lines were \
+                  omitted"
+    )
+)]
 const HISTORY_PAYLOAD_BYTES: usize = MAX_HISTORY_BYTES - HISTORY_MARKER.len();
 const _: () = assert!(HISTORY_PAYLOAD_RECORDS > 0);
 const _: () = assert!(HISTORY_PAYLOAD_BYTES > HISTORY_SUFFIX.len());

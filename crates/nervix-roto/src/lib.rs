@@ -2,8 +2,9 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Compiling a planned UDF program, the watchdog that bounds a call, and the
-//!   `FunctionInjector` that returns results to the VM as typed Arrow arrays.
+//! - **Owns.** Compiling a planned UDF program within the compile budget its caller commits, the
+//!   watchdog setting and the check that bounds a call, and the `FunctionInjector` that returns
+//!   results to the VM as typed Arrow arrays.
 //! - **Depends on.** The VM, the vocabulary, and the node's bounded executor, whose bulk workers
 //!   compile its programs off the caller's task.
 //! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
@@ -15,6 +16,8 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
+
+mod settings;
 
 use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, time::Duration};
 
@@ -55,10 +58,9 @@ use roto::{
     runtime::{RegistrationError, context::NoCtx, items::Registerable},
     value::{RotoString, Val},
 };
+pub use settings::{UdfSettings, UdfSettingsError, UdfWatchdog};
 use thiserror::Error;
 
-const DEFAULT_WATCHDOG: Duration = Duration::from_secs(5);
-const COMPILE_TEST_BUDGET: Duration = Duration::from_secs(10);
 const RESERVED_PREFIX: &str = "__nervix_";
 
 /// Engine input selected from a validated UDF declaration before runtime activation.
@@ -111,7 +113,10 @@ pub enum UdfError {
     Compile { diagnostics: String },
     #[error("Roto test block failed")]
     TestsFailed,
-    #[error("Roto compile and test budget of {limit:?} was exceeded")]
+    #[error(
+        "Roto compile and test budget {} ({limit:?}) was exceeded",
+        nervix_models::ClusterParameterKey::UdfCompileBudget
+    )]
     CompileBudgetExceeded { limit: Duration },
     #[error("the node's bounded execution did not compile the UDFs")]
     CompileExecution,
@@ -1252,17 +1257,37 @@ pub struct UdfExecutor {
     signatures: UdfSignatures,
 }
 
+/// What one compilation of a domain's UDFs runs under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UdfCompileLimits {
+    /// The compiling node's UDF settings, whose watchdog every function it compiles keeps.
+    pub settings: UdfSettings,
+    /// The committed `UDF_COMPILE_BUDGET`: how long compiling one function and running its `test`
+    /// blocks may take on the compiling node's wall clock.
+    pub budget: Duration,
+}
+
 /// What compiling a domain's UDFs is charged. Roto's compiler allocates the code it generates
 /// itself and the executor keeps it for as long as the domain does, which no transient budget can
 /// stand for, so the charge only admits the compilation onto the bulk workers.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the charge is an admission token for the bulk workers, not a memory estimate, \
+                  since the domain keeps the code Roto generates, so it is the least nonzero \
+                  reservation"
+    )
+)]
 const COMPILE_RESERVATION_BYTES: u64 = 1;
 
 impl UdfExecutor {
-    /// Compile `models` on the node's bulk workers, checking between two programs whether the
-    /// caller stopped waiting.
+    /// Compile `models` on the node's bulk workers under `limits`, checking between two programs
+    /// whether the caller stopped waiting.
     pub async fn compile(
         executor: &Executor,
         models: Vec<UdfProgram>,
+        limits: UdfCompileLimits,
     ) -> error_stack::Result<Self, UdfError> {
         let reservation = match executor
             .reserve(MemoryClass::Bulk, COMPILE_RESERVATION_BYTES)
@@ -1273,7 +1298,7 @@ impl UdfExecutor {
         };
         let compiled = executor
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                Self::compile_sync(models, Some(cancellation))
+                Self::compile_sync(models, limits, Some(cancellation))
             })
             .await;
         match compiled {
@@ -1282,10 +1307,13 @@ impl UdfExecutor {
         }
     }
 
-    /// Compile `models` on the calling thread. An admitted compilation passes the `cancellation`
+    /// Compile `models` on the calling thread under `limits`. Each function's compilation and
+    /// `test` blocks are measured on this thread's wall clock once they finish, so the budget
+    /// cannot interrupt a test that never ends. An admitted compilation passes the `cancellation`
     /// its worker checks between programs; a test has none.
     fn compile_sync(
         models: impl IntoIterator<Item = UdfProgram>,
+        limits: UdfCompileLimits,
         cancellation: Option<&Cancellation>,
     ) -> error_stack::Result<Self, UdfError> {
         let mut functions = HashMap::new();
@@ -1297,10 +1325,10 @@ impl UdfExecutor {
                 return Err(Report::new(UdfError::CompileCancelled));
             }
             let started = Instant::now();
-            let compiled = compile_udf(model.clone(), DEFAULT_WATCHDOG)?;
-            if started.elapsed() > COMPILE_TEST_BUDGET {
+            let compiled = compile_udf(model.clone(), limits.settings.watchdog())?;
+            if started.elapsed() > limits.budget {
                 return Err(Report::new(UdfError::CompileBudgetExceeded {
-                    limit: COMPILE_TEST_BUDGET,
+                    limit: limits.budget,
                 }));
             }
             signatures.insert(model.name.as_str(), signature_for(&model));
@@ -1609,6 +1637,18 @@ mod tests {
         )
     }
 
+    /// The limits a node compiles under with every default: the five-second watchdog and the
+    /// ten-second compile budget the cluster commits unless an operator changes it.
+    fn default_limits() -> UdfCompileLimits {
+        UdfCompileLimits {
+            settings: UdfSettings::default(),
+            budget:
+                <nervix_models::UdfCompileBudget as nervix_models::SettingDefinition>::default_value(
+                    &(),
+                ),
+        }
+    }
+
     #[test]
     fn a_failed_runtime_registration_names_its_cause_once() {
         // Without the base library the column types are unregistered, so an impl block for one of
@@ -1664,8 +1704,8 @@ mod tests {
 
     #[test]
     fn compiles_and_executes_i64_column_udf() {
-        let executor =
-            UdfExecutor::compile_sync([add_one_model()], None).expect("UDF should compile");
+        let executor = UdfExecutor::compile_sync([add_one_model()], default_limits(), None)
+            .expect("UDF should compile");
         let function = FunctionName::Udf("add_one".to_string());
         assert_eq!(
             executor.execution_policy(&function),
@@ -1706,6 +1746,7 @@ mod tests {
                 false,
                 "fn copy_bytes(value: BytesColumn) -> BytesColumn { value }",
             )],
+            default_limits(),
             None,
         )
         .assured("the BYTES bridge registers a Roto column type");
@@ -1748,7 +1789,7 @@ mod tests {
                     let barrier = barrier.clone();
                     scope.spawn(move || {
                         barrier.wait();
-                        UdfExecutor::compile_sync([add_one_model()], None)
+                        UdfExecutor::compile_sync([add_one_model()], default_limits(), None)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1767,14 +1808,14 @@ mod tests {
         let mut model = add_one_model();
         model.code = "fn add_one(value: I64Column) -> I64Column { value.add_s(now()) }".to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model], None),
+            UdfExecutor::compile_sync([model], default_limits(), None),
             Err(error) if matches!(error.current_context(), UdfError::VolatileRequired { function: "now" })
         ));
     }
 
     #[test]
     fn udf_execution_reports_invalid_argument_shapes_with_function_context() {
-        let executor = UdfExecutor::compile_sync([add_one_model()], None)
+        let executor = UdfExecutor::compile_sync([add_one_model()], default_limits(), None)
             .assured("the fixed add_one function and its wrapper compile");
         let function = FunctionName::Udf("add_one".to_string());
         let rows = RowSelection::All(2);
@@ -1834,7 +1875,7 @@ mod tests {
 
         let mut guest = add_one_model();
         guest.code.push_str("\n// __nervix_entry is reserved");
-        let report = UdfExecutor::compile_sync([guest], None)
+        let report = UdfExecutor::compile_sync([guest], default_limits(), None)
             .expect_err("guest source cannot claim the host's private namespace");
         assert!(matches!(
             report.current_context(),
@@ -1892,7 +1933,7 @@ test increments_by_one {
 "#
         .to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model], None),
+            UdfExecutor::compile_sync([model], default_limits(), None),
             Err(error) if matches!(error.current_context(), UdfError::TestsFailed)
         ));
     }
@@ -1902,7 +1943,7 @@ test increments_by_one {
         let mut model = add_one_model();
         model.code = "fn add_one(value: StringColumn) -> StringColumn { value.trim() }".to_string();
         assert!(matches!(
-            UdfExecutor::compile_sync([model], None),
+            UdfExecutor::compile_sync([model], default_limits(), None),
             Err(error) if matches!(error.current_context(), UdfError::Compile { .. })
         ));
     }
@@ -2035,14 +2076,125 @@ test increments_by_one {
             ),
         ];
 
-        UdfExecutor::compile_sync(models, None).expect("documented UDF shapes should compile");
+        UdfExecutor::compile_sync(models, default_limits(), None)
+            .expect("documented UDF shapes should compile");
+    }
+
+    fn i64_model(name: &str, code: &str) -> UdfProgram {
+        model(
+            name,
+            [TestArgument {
+                name: "value",
+                ty: ParseAsType::I64,
+                optional: false,
+            }],
+            ParseAsType::I64,
+            false,
+            code,
+        )
+    }
+
+    /// Counts to a hundred million before it returns its argument, which no host does within a
+    /// millisecond.
+    const SLOW_COPY: &str = r#"fn slow_copy(value: I64Column) -> I64Column {
+    let count = 0;
+    while count < 100000000 {
+        count = count + 1;
+    }
+    value.add_s(count - 100000000)
+}"#;
+
+    /// Its test block counts to a hundred million, which no host compiles and runs within a
+    /// millisecond.
+    const COUNTED: &str = r#"fn counted(value: I64Column) -> I64Column {
+    value
+}
+
+fn count_to(limit: i64) -> i64 {
+    let count = 0;
+    while count < limit {
+        count = count + 1;
+    }
+    count
+}
+
+test counts_to_its_limit {
+    if count_to(100000000) == 100000000 {
+        accept
+    } else {
+        reject
+    }
+}"#;
+
+    fn call_slow_copy(executor: &UdfExecutor) -> error_stack::Result<InjectedResult, RuntimeError> {
+        executor.inject_with_context(
+            &FunctionName::Udf("slow_copy".to_string()),
+            &[TypedArray::Int64(Int64Array::from(vec![41]))],
+            &RowSelection::All(1),
+            (0..9).into(),
+            Timestamp::from_unix_nanos(123),
+            RowErrorMask::none(1),
+        )
+    }
+
+    #[test]
+    fn a_call_that_outlasts_the_node_watchdog_fails_its_batch() {
+        let watchdog = Duration::from_millis(1);
+        let limits = UdfCompileLimits {
+            settings: UdfSettings::resolve(Some(watchdog))
+                .assured("a millisecond is a positive watchdog"),
+            ..default_limits()
+        };
+        let executor = UdfExecutor::compile_sync([i64_model("slow_copy", SLOW_COPY)], limits, None)
+            .assured("the counting function compiles");
+        let report = call_slow_copy(&executor)
+            .expect_err("no host counts to a hundred million within a millisecond");
+        assert!(
+            matches!(
+                report.current_context(),
+                RuntimeError::InjectedFunctionFailed { function, message }
+                    if function == "slow_copy" && message == "watchdog expired after 1ms"
+            ),
+            "{report:#}"
+        );
+
+        let executor =
+            UdfExecutor::compile_sync([i64_model("slow_copy", SLOW_COPY)], default_limits(), None)
+                .assured("the counting function compiles");
+        let result =
+            call_slow_copy(&executor).assured("the count ends well within the default watchdog");
+        assert_eq!(result.output, TypedArray::Int64(Int64Array::from(vec![41])));
+    }
+
+    #[test]
+    fn the_compile_budget_refuses_a_function_whose_tests_outlast_it() {
+        let budget = Duration::from_millis(1);
+        let report = UdfExecutor::compile_sync(
+            [i64_model("counted", COUNTED)],
+            UdfCompileLimits {
+                budget,
+                ..default_limits()
+            },
+            None,
+        )
+        .expect_err("no host counts to a hundred million within a millisecond");
+        assert!(matches!(
+            report.current_context(),
+            UdfError::CompileBudgetExceeded { limit } if *limit == budget
+        ));
+        assert_eq!(
+            format!("{report:#}"),
+            "Roto compile and test budget udf-compile-budget (1ms) was exceeded"
+        );
+        UdfExecutor::compile_sync([i64_model("counted", COUNTED)], default_limits(), None)
+            .assured("the tests end well within the default budget");
     }
 
     #[nervix_primitives::test]
     async fn udfs_compile_on_the_bulk_workers() {
         let executor = Executor::default();
 
-        let compiled = UdfExecutor::compile(&executor, vec![add_one_model()])
+        let compiled = UdfExecutor::compile(&executor, vec![add_one_model()], default_limits())
             .await
             .expect("the bulk workers compile the UDF");
 

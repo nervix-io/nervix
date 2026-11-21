@@ -22,7 +22,8 @@ use super::{
     RelayRuntimeFanIn, RuntimeInputCollectPolicy, RuntimeWake,
     force_flush::DomainForceFlush,
     relay_interaction::{
-        RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
+        RELAY_INTERACTION_COMMAND_CAPACITY, RelayInteraction, RelayInteractionCommand,
+        RelayInteractionEvent, RelayInteractionInput,
     },
 };
 use crate::{
@@ -136,7 +137,8 @@ impl RelayInteractionBenchmark {
             sources.push(broadcast);
         }
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (commands, command_rx) = mpsc::channel(1);
+        // Sized as the owner tasks size theirs, so the measured interaction queues as they do.
+        let (commands, command_rx) = mpsc::channel(RELAY_INTERACTION_COMMAND_CAPACITY);
         let force_flush = DomainForceFlush::new();
         let quiesce_counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let participant = DomainForceFlush::subscribe(&force_flush, Some(quiesce_counters.clone()));

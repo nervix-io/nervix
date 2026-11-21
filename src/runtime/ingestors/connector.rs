@@ -1418,6 +1418,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
                 let run = ProgramRun {
                     executor: self.runtime.executor(),
                     now: actual_utc_now(),
+                    ack_timing: self.handles.remote_ack_timing(),
                 };
                 allowance
                     .costs(run, &metadata_rows(&messages), None)
@@ -1469,6 +1470,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
                 let run = ProgramRun {
                     executor: self.runtime.executor(),
                     now: actual_utc_now(),
+                    ack_timing: self.handles.remote_ack_timing(),
                 };
                 allowance
                     .costs(run, &metadata_rows(&messages), None)

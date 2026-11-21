@@ -976,21 +976,25 @@ pub(super) async fn dispatch_wasm_output_route(
             .map(|field| format!("generated.{}", field.name()))
             .collect(),
     };
-    let lookup_columns = match decoded
-        .batch
-        .keep_alive_while_pending(compute_lookup_hash_map_columns(
-            context.branch.runtime.executor(),
-            program,
-            &FilterMapBatchInputs {
-                carrier: &decoded.batch.batch,
-                namespace_batches: &[],
-                keys: &decoded.batch.keys,
-                side_inputs: &side_inputs,
-                ingest_metadata: None,
-            },
-            execution_now,
-            None,
-        ))
+    let lookup_columns = match context
+        .branch
+        .remote_ack_timing
+        .keep_alive_while_pending(
+            &decoded.batch,
+            compute_lookup_hash_map_columns(
+                context.branch.runtime.executor(),
+                program,
+                &FilterMapBatchInputs {
+                    carrier: &decoded.batch.batch,
+                    namespace_batches: &[],
+                    keys: &decoded.batch.keys,
+                    side_inputs: &side_inputs,
+                    ingest_metadata: None,
+                },
+                execution_now,
+                None,
+            ),
+        )
         .await
     {
         Ok(columns) => columns,
@@ -1043,17 +1047,21 @@ pub(super) async fn dispatch_wasm_output_route(
             return None;
         }
     };
-    let executed = match decoded
-        .batch
-        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-            context.branch.runtime.executor().accepted_work(),
-            &program.compiled,
-            &vm_input,
-            &VmExecutionContext {
-                now: execution_now,
-                injector: None,
-            },
-        ))
+    let executed = match context
+        .branch
+        .remote_ack_timing
+        .keep_alive_while_pending(
+            &decoded.batch,
+            execute_accepted_program_with_selection_in_context(
+                context.branch.runtime.executor().accepted_work(),
+                &program.compiled,
+                &vm_input,
+                &VmExecutionContext {
+                    now: execution_now,
+                    injector: None,
+                },
+            ),
+        )
         .await
     {
         Ok(executed) => executed,
@@ -1585,6 +1593,7 @@ mod tests {
             nervix_execution::CpuClass::Data,
             crate::runtime::wasm_processor::wasm_envelope_from_relay_batch(
                 &executor,
+                &SharedRemoteAckTiming::default(),
                 &batch,
                 &mut next_token,
             ),

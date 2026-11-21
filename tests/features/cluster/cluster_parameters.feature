@@ -237,6 +237,106 @@ Feature: Committed cluster parameters
       | 1            |
       | 3            |
 
+  # The test block counts to a hundred million, which no node does within a millisecond, so the
+  # lowered budget refuses the UDF whatever the load of the node that compiles it.
+  @udf_compile_budget
+  Scenario Outline: The UDF compile budget refuses a UDF whose test blocks outlast it on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    Then node "node-1" eventually reports status containing "udf-compile-budget committed=10s"
+    When these Plexus statements fail with "udf-compile-budget must be greater than zero"
+      """
+      ALTER CLUSTER SET UDF_COMPILE_BUDGET = 0s;
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      ALTER CLUSTER SET UDF_COMPILE_BUDGET = 1ms;
+      """
+    Then node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> udf-compile-budget running=1ms"
+    When these Plexus commands fail with "Roto compile and test budget udf-compile-budget (1ms) was exceeded"
+      """
+      CREATE UDF counted
+        WITH ROTO_0_13
+        ARGS (value I64)
+        RETURNS I64
+        CODE $roto$
+          fn counted(value: I64Column) -> I64Column {
+              value
+          }
+
+          fn count_to(limit: i64) -> i64 {
+              let count = 0;
+              while count < limit {
+                  count = count + 1;
+              }
+              count
+          }
+
+          test counts_to_its_limit {
+              if count_to(100000000) == 100000000 {
+                  accept
+              } else {
+                  reject
+              }
+          }
+        $roto$;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW UDFS;
+      """
+    Then the last command output does not contain
+      """
+      counted
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER CLUSTER SET UDF_COMPILE_BUDGET = 1m;
+      """
+    Then node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> udf-compile-budget running=1m"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UDF counted
+        WITH ROTO_0_13
+        ARGS (value I64)
+        RETURNS I64
+        CODE $roto$
+          fn counted(value: I64Column) -> I64Column {
+              value
+          }
+
+          fn count_to(limit: i64) -> i64 {
+              let count = 0;
+              while count < limit {
+                  count = count + 1;
+              }
+              count
+          }
+
+          test counts_to_its_limit {
+              if count_to(100000000) == 100000000 {
+                  accept
+              } else {
+                  reject
+              }
+          }
+        $roto$;
+      SHOW UDFS;
+      """
+    Then the last command output contains
+      """
+      counted
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @cluster_parameter_completion
   Scenario Outline: Completing a parameter change offers only the parameters it has not assigned on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
@@ -288,6 +388,7 @@ Feature: Committed cluster parameters
       TRANSACTION_MAX_SOURCE_BYTES
       TRANSACTION_MAX_STATEMENTS
       TRANSACTION_TOMBSTONE_RETENTION
+      UDF_COMPILE_BUDGET
       """
     When the active session collects completion pages for "ALTER CLUSTER SET HTTP_HEADER_BYTES = 8KiB, http_header_" at byte 56 with page size 8
     Then the collected completion candidates are

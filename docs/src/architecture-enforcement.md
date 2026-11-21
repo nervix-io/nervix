@@ -61,7 +61,7 @@ contract and a violated contract require different corrections.
 
 | Family | Purpose and owning fact | Allowed example | Rejected example | Enforcement and qualification |
 | --- | --- | --- | --- | --- |
-| `hidden_tunables` | Numeric policy belongs to a class-typed setting or an explicitly fixed constant. [Node Settings](node-settings.md) owns the classification. | One definition default; a constant with its fixed-format reason; a capacity derived from typed input. | A numeric constant or literal policy call outside that boundary. | Stable source parser; governed-type, alias, exclusion, tracked/new-source, inactive and macro controls; fixed-contract compiler fixtures and the registered bounded `typed-hidden-tunables` property. |
+| `hidden_tunables` | Numeric policy belongs to a class-typed setting, a derivation from typed input or an explicitly fixed constant. [Node Settings](node-settings.md) owns the classification. | One definition default; a constant with its fixed-format reason; a capacity derived from typed input. | A numeric constant or literal policy call outside that boundary, however its type or callee is spelled. | Compiler `hidden_tunable`; governed and ungoverned types, aliases, glob imports, reexported renames and associated types, policy calls and same-named lookalikes, setting, group and fixed-contract exclusions, exact sorted spans, and fulfilled, unfulfilled, widened and invalid expectation fixtures. |
 | `data_plane_lock_acquisitions` | Resolve synchronization APIs and the execution contract of their callers. [Concurrency](data-plane-concurrency.md#source-contracts) owns contexts, effects and bounds. | A task-local `HashMap::entry`; a registry acquisition with a lifecycle contract. | A recurring callback reaching a DashMap shard or a lifecycle-only helper. | Compiler `sync_acquisition`, `lifecycle_call`, `unknown_effect`; resolved receiver, helper, callback, trait, foreign item, macro and expectation fixtures. |
 | `bare_error_signatures` | A Nervix failure contract carries its complete contextual report. [Errors](errors-and-diagnostics.md) owns outcome, library and foreign-interface classifications. | `Result<T, Report<DomainError>>`; an exact reason-bearing outcome contract. | An owned failure in an alias, inferred future or stream without its report. | Compiler `bare_error_signature`; associated-output, alias, inference, metadata and report-carrier fixtures. |
 | `discarded_results` | Preserve a failure or classify recovery at its consuming operation; a replacement retains an informative cause. | A propagated failure, contextualized cause or the recovery owner's explicit `Discarded` operation. | A failed outcome discarded through a binding, projection or `drop`, or replaced with a fresh error that loses its cause. | Compiler `discarded_outcome` and `replaced_error`; complete and partial-discard, replacement, outcome, alias, macro and metadata fixtures. |
@@ -201,7 +201,7 @@ recognition the new compiler changes is a rule change and ships its fixtures. It
 a `fuzz`-labeled run of the sanitizer campaigns. The new compiler identity re-establishes every
 report, so no evidence from the previous compiler is reused.
 
-Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The six
+Source discovery includes tracked Rust and newly authored Rust not ignored by Git. The source
 counts retain their product-debt scope: directory components named `tests`, `benches` or
 `examples` are excluded. In-crate `tests.rs`, `*_tests.rs` and `test_fixtures.rs` count toward
 file size and function complexity but are excluded from cast/field debt. Test-only items are excluded from those two
@@ -224,42 +224,54 @@ dependencies, including browser and ordinary release graphs.
 
 ## Hidden Tunables
 
-`hidden_tunables` counts one site for each numeric `const` item typed as `Duration`, `usize`,
-`u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`, `NonZero*` or `ByteUnit`. Associated constants
-count too. A counted initializer contributes no further policy-call sites. Names are read from
-the source type, following explicit import renames and type aliases within their lexical scope,
-independent of their declaration order.
-This syntax rule does not resolve custom types, glob imports or cross-file reexports; the
-eventual compiler rule owns those semantic facts.
+`nervix::hidden_tunable` refuses numeric policy outside its declared owners. It diagnoses two
+kinds of site in every declared configuration the gate compiles.
 
-The count also includes a call with a numeric literal in its arguments when it constructs a
-Duration through `from_*`, chooses `with_capacity*`, a `channel` capacity (excluding a watch
-channel's initial value), `bounded` or `sync_channel`, constructs `Semaphore` or `ArrayQueue`,
-or calls `add_permits`. Numeric arithmetic inside an argument counts; a capacity supplied
-entirely by a named value does not add a call site. These names deliberately describe source
-syntax, including same-spelled custom calls; they do not claim resolved API recognition.
-Raw identifier spellings retain the same recognized type, policy call and definition owner.
+A constant is a site when its normalized type is `u8`, `u16`, `u32`, `u64`, `usize`, `i32`, `i64`,
+`f64`, `core::time::Duration`, `core::num::NonZero<_>` or `ubyte::ByteUnit`. Free and associated
+constants count, and so does a trait constant that supplies its own value; a trait constant
+without a value decides nothing. Normalization resolves type aliases, glob imports, reexported
+renames and associated-type projections, so a governed type is found however it is spelled. A
+constant is diagnosed once, at its name, together with its whole initializer.
 
-The shared source discovery excludes test directories and in-crate test files. This count also
-excludes `tools/`, the `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates,
-test-only items and test functions. Other inactive configurations remain visible. Authored
-macro fragments use the same token substitution and parsing owner as the cast count.
+A call is a site when a numeric literal appears anywhere in its arguments, arithmetic included,
+and its resolved callee constructs a `Duration` (`Duration::new` or a `Duration::from_*`
+constructor), chooses a `with_capacity*` capacity, constructs a `channel` (not a watch
+channel, whose argument is its initial value), `bounded` or `sync_channel` channel, constructs a
+`Semaphore` or an `ArrayQueue`, or calls `add_permits`. A capacity supplied entirely by a named
+value or computed from typed input, such as `header.len() + size_of::<u32>()`, is not a site. A
+call is diagnosed at its callee's token. The same names on an unrelated owner choose nothing.
 
-An exact `SettingDefinition::default_value` implementation owns its one default. A `Default`
-implementation of a nonempty struct whose fields are all `Setting<D>` owns its group defaults.
-Their bodies are outside the count; unrelated `Default` bodies and other definition methods
-remain counted. A fixed constant is excluded only with one valid
-`#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "..."))]` annotation. The source check
-refuses invalid contracts before measuring. The compiler independently checks exact placement,
-kind, reason and duplication on compiled constants. A reason is reviewed justification, not a
-proof that the literal is fixed. No filename or per-site allowance substitutes for it.
+These are outside the rule:
 
-The baseline is introduced at the measured repository count and may only decrease. The area
-owners classify the counted values while preserving their existing defaults. The settings
-compiler-rule cutover removes this detector and its numeric baseline entry in the same change.
-`tools/nervix-lint/ratchet` tests pin eligibility and the gate; compiler fixtures qualify the
-constant contract; the registered `typed-hidden-tunables` property checks complete source/site
-representations and every generated location in ordinary and sanitizer execution.
+- An exact `SettingDefinition::default_value` implementation, which owns its setting's one
+  default, and an associated constant of the definition's own type that this implementation
+  reads, which writes that one default beside the definition so a constant context can name it.
+  The definition's other constants, such as its bounds, and another type's constants stay sites.
+- `Default` for a nonempty struct whose every field is a `Setting<D>`, which owns its group's
+  defaults through those definitions.
+- A constant carrying exactly one valid
+  `#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "..."))]` contract. The contract
+  validation refuses a missing or empty reason, another kind, a duplicate and any placement but a
+  constant, as `nervix::invalid_contract`.
+- The `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates, whose numbers shape
+  test inputs and measurements.
+- Code the matrix does not compile: test targets and `cfg(test)` modules, and any configuration
+  that `configurations.toml` does not declare, as for every compiler rule. Derive and attribute
+  macros' generated items, whose tokens are not the item's name, are generated rather than
+  authored. Authored `macro_rules!` bodies are checked in every expansion.
+
+A reason is reviewed justification, not a proof that the literal is fixed; review owns it, as it
+owns every source contract. An exception for one retained value is a narrow, reason-bearing
+`expect(nervix::hidden_tunable, reason = "...")` on that constant's declaration or that one
+operation, naming its repair task. An expectation without a meaningful reason, covering two
+operations, or unfulfilled fails like any other Nervix expectation.
+
+The `tunables_*` compiler fixtures qualify the rule: governed and ungoverned types, the policy
+calls and their same-named lookalikes, the exact sorted span of every site, the resolution-only
+cases a spelling cannot follow, the setting, group and fixed-contract exclusions, and the
+fulfilled, unfulfilled, widened and invalid expectations. [Node Settings](node-settings.md) owns the
+classification a site takes: a setting of its class, a derivation, or a fixed value.
 
 ## Host Memory Admission
 
@@ -375,11 +387,14 @@ the repair. Extracting a forwarding wrapper only to move the number is the worka
 
 ## Exceptions And Ownership Review
 
-A semantic exception is a reason-bearing `expect` at one operation or binding, gated through
-`cfg_attr(nervix_lint, ...)` or `nervix_primitives::expect_lint!`. A module or function allowance,
-blanket warning suppression, missing reason, unused expectation or expectation covering another
-operation fails. Arithmetic reasons state the actual ceiling, capacity or modular computation;
+A semantic exception is a reason-bearing `expect` at one operation, binding or declaration that
+its rule names, gated through `cfg_attr(nervix_lint, ...)` or `nervix_primitives::expect_lint!`. A
+module or function allowance, blanket warning suppression, missing reason, unused expectation or
+expectation covering another operation fails. Arithmetic reasons state the actual ceiling, capacity or modular computation;
 “cannot overflow” does not justify wrapping. A retained defect names its repair task.
+
+A retained hidden tunable carries its expectation on the constant's declaration or on its one
+policy call, and its reason names the repair task.
 
 A retained branch ownership defect carries its expectation on the field or binding that declares
 the collection. The compiler reports the resolved declaration and the reason even when its

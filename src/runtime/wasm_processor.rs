@@ -501,23 +501,27 @@ pub(super) async fn flush_branch_wasm_processor(
         return;
     }
 
-    let (envelope, input_ack_map) =
-        match wasm_envelope_from_relay_batch(branch.runtime.executor(), &forwarded, next_ack_token)
-            .await
-        {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                branch.runtime.handle_general_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    forwarded.acks.iter(),
-                    &error,
-                );
-                return;
-            }
-        };
+    let (envelope, input_ack_map) = match wasm_envelope_from_relay_batch(
+        branch.runtime.executor(),
+        &branch.remote_ack_timing,
+        &forwarded,
+        next_ack_token,
+    )
+    .await
+    {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            branch.runtime.handle_general_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                forwarded.acks.iter(),
+                &error,
+            );
+            return;
+        }
+    };
     ack_map.extend(input_ack_map);
     let live = instance
         .as_mut()
@@ -604,7 +608,14 @@ pub(super) async fn flush_branch_wasm_processor(
         error_policies,
     };
     reporting
-        .complete_callback(replicated_state, instance, ack_map, holds, execution_now)
+        .complete_callback(
+            &branch.remote_ack_timing,
+            replicated_state,
+            instance,
+            ack_map,
+            holds,
+            execution_now,
+        )
         .await;
 }
 
@@ -860,11 +871,13 @@ pub(super) async fn ensure_wasm_processor_instance(
 )]
 pub(super) async fn wasm_envelope_from_relay_batch(
     executor: &Executor,
+    ack_timing: &SharedRemoteAckTiming,
     batch: &RelayRecordBatch,
     next_ack_token: &mut u64,
 ) -> error_stack::Result<(WasmEnvelope, WasmAckMap), WasmInstanceError> {
-    let arrow_ipc_batch = batch
+    let arrow_ipc_batch = ack_timing
         .keep_alive_while_pending(
+            batch,
             batch
                 .batch
                 .encode_arrow_ipc(executor, nervix_execution::QueueAdmission::WaitForPlace),

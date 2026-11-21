@@ -44,9 +44,40 @@ mod properties;
 pub const FILE_IDENTIFIER: &str = wire::MESSAGE_IDENTIFIER;
 pub const SERIALIZATION_NAME: &str = "FlatBuffers";
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM guest ABI reserves nervix_load_state's return code -7 for saved bytes \
+                  that are not a snapshot envelope the guest can decode"
+    )
+)]
 const SNAPSHOT_ENVELOPE_REJECTED: i32 = -7;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM guest ABI reserves nervix_load_state's return code -8 for application \
+                  state the guest refuses inside a decoded snapshot envelope"
+    )
+)]
 const APPLICATION_STATE_REJECTED: i32 = -8;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM guest ABI answers a nervix_request_state_reset the host takes with 0"
+    )
+)]
 const STATE_RESET_ACCEPTED: i32 = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM guest ABI answers a nervix_request_state_reset the guest operation in \
+                  progress cannot carry with -9"
+    )
+)]
 const STATE_RESET_REFUSED: i32 = -9;
 
 /// A guest's verdict that the saved state `nervix_load_state` handed it cannot be restored.
@@ -439,7 +470,17 @@ fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
             actual,
         }));
     }
-    const HEADER_BYTES: usize = 2 * size_of::<u32>() + FILE_IDENTIFIER.len();
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a size-prefixed FlatBuffer starts with its 4-byte size prefix, 4-byte root \
+                      offset and 4-byte file identifier, so a shorter message carries no \
+                      identifier"
+        )
+    )]
+    const HEADER_BYTES: usize =
+        flatbuffers::SIZE_SIZEPREFIX + flatbuffers::SIZE_UOFFSET + FILE_IDENTIFIER.len();
     if bytes.len() < HEADER_BYTES || !wire::message_size_prefixed_buffer_has_identifier(bytes) {
         return Err(Report::new(ProtocolError::InvalidIdentifier));
     }

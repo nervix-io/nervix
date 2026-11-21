@@ -294,24 +294,6 @@ impl EmitterPublishFailure {
     }
 }
 
-pub(super) async fn await_emitter_confirmation<F>(
-    acks: &impl AcknowledgementKeepalive,
-    future: F,
-) -> F::Output
-where
-    F: std::future::Future,
-{
-    tokio::pin!(future);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        acks.keep_alive();
-        nervix_primitives::select! {
-            result = &mut future => return result,
-            _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
-        }
-    }
-}
-
 /// A connector as the emitter task drives it, whichever emitter contract it implements.
 ///
 /// The composition root pairs every connector with what the host prepares its input with, so the
@@ -838,6 +820,7 @@ impl EmitterConnectorState {
                         context.interactions.record_retry(cause, wait);
                         RuntimeReconnectBackoff::wait_duration_with_ack_alive(
                             wait,
+                            &context.remote_ack_timing,
                             control.shutdown_rx,
                             &acks,
                         )
@@ -957,7 +940,9 @@ impl EmitterConnectorState {
             let acks = self.pending_acks(buffer);
             await_until_emitter_stop_deadline(
                 control.stop_rx,
-                await_emitter_confirmation(&acks, self.resume_transport(context)),
+                context
+                    .remote_ack_timing
+                    .keep_alive_while(&acks, self.resume_transport(context)),
             )
             .await
             .map_err(|()| emitter_stop_deadline_elapsed())??;
@@ -985,7 +970,9 @@ impl EmitterConnectorState {
             let acks = self.pending_acks(buffer);
             await_until_emitter_stop_deadline(
                 control.stop_rx,
-                await_emitter_confirmation(&acks, self.resume_transport(context)),
+                context
+                    .remote_ack_timing
+                    .keep_alive_while(&acks, self.resume_transport(context)),
             )
             .await
             .map_err(|()| emitter_stop_deadline_elapsed())??;
@@ -1008,7 +995,9 @@ impl EmitterConnectorState {
                 Box::pin(self.publish_buffered_batches(context, buffer.publication_mut()));
             let published = await_until_emitter_stop_deadline(
                 control.stop_rx,
-                await_emitter_confirmation(&pending_acks, publish),
+                context
+                    .remote_ack_timing
+                    .keep_alive_while(&pending_acks, publish),
             )
             .await;
             buffer.report_staged_messages(self.staged_messages());
@@ -1112,7 +1101,7 @@ impl EmitterConnectorState {
                 .record_retry(EmitterRetryCause::Commit, wait);
             control
                 .backoff
-                .wait_with_ack_alive(control.shutdown_rx, acks)
+                .wait_with_ack_alive(&context.remote_ack_timing, control.shutdown_rx, acks)
                 .await
         };
         await_until_emitter_stop_deadline(control.stop_rx, retry_wait)
@@ -1158,7 +1147,7 @@ impl OpenEmitterConnector {
             let commit = Box::pin(self.connector.lifecycle_mut().commit());
             await_until_emitter_stop_deadline(
                 control.stop_rx,
-                await_emitter_confirmation(&acks, commit),
+                context.remote_ack_timing.keep_alive_while(&acks, commit),
             )
             .await
             .map_err(|()| emitter_stop_deadline_elapsed())?
@@ -1457,8 +1446,9 @@ mod tests {
             );
             let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
             let (acks, _completion) = AckSet::root();
+            let timing = SharedRemoteAckTiming::default();
             task_retry_started.notify_one();
-            let retry = backoff.wait_with_ack_alive(&mut shutdown_rx, &acks);
+            let retry = backoff.wait_with_ack_alive(&timing, &mut shutdown_rx, &acks);
             assert!(
                 await_until_emitter_stop_deadline(&mut stop_rx, retry)
                     .await

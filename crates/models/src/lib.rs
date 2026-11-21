@@ -116,16 +116,14 @@ pub use canonical::{
     ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
-    ClientConsumerLimits, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES, MAX_CLIENT_CONSUMER_BATCHES,
-    MAX_CLIENT_CONSUMERS_PER_SESSION,
+    ClientConsumerLimits, MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_CONSUMERS_PER_SESSION,
 };
 pub use client_producer::{
     ClientAttachmentId, ClientBatchDefect, ClientEndpointContract, ClientOutcomeUncertainty,
     ClientProcessingFailure, ClientProducerAdmission, ClientProducerDescription,
     ClientProducerEndReason, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    DEFAULT_CLIENT_BATCH_ROWS, DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, MAX_CLIENT_PRODUCER_BATCHES,
-    MAX_CLIENT_PRODUCERS_PER_SESSION,
+    MAX_CLIENT_PRODUCER_BATCHES, MAX_CLIENT_PRODUCERS_PER_SESSION,
 };
 pub use cluster_node::{ClusterNodeIdentity, ClusterNodeIncarnation, CoordinationIdentity};
 pub use cluster_parameters::*;
@@ -183,15 +181,15 @@ pub use connector::{
     IngestorEntityKind, IngestorEntityMetadata, IngestorEntityModel, IngestorExternalPartitions,
     IngestorInstances, IngestorInstancingCapability, IngestorMetadataDeclaration,
     IngestorMetadataField, IngestorMetadataType, IngestorPayloadDeclaration, IngestorPayloadField,
-    IngestorReference, IngestorReferenceKind, KafkaConfigEntry, KafkaConsumerGroupName,
-    KafkaEmitter, KafkaEmitterChange, KafkaEmitterEntity, KafkaIngestMode, KafkaIngestor,
-    KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterChange,
-    KafkaTopicEmitterMode, KafkaTopicIngestor, KafkaTopicIngestorAlteration,
-    KafkaTopicIngestorChange, KafkaTopicName, KafkaTopicPublishingMode, LiteralHeaderWrite,
-    LocatorDeclaration, LocatorName, MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES,
-    MQTT_MAXIMUM_PACKET_BYTES, MQTT_SHARED_SUBSCRIPTION_LEVEL, MQTT_SOURCE_READ_AHEAD_HEADROOM,
-    MYSQL_MAX_PLACEHOLDERS, MappedValueField, MappedValueSection, MappedValueType,
-    MappedValueTypes, MongoDbCollectionEmitter, MongoDbCollectionEmitterChange,
+    IngestorReference, IngestorReferenceKind, KAFKA_COMMIT_ANSWER_DEADLINE, KafkaConfigEntry,
+    KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterChange, KafkaEmitterEntity, KafkaIngestMode,
+    KafkaIngestor, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter,
+    KafkaTopicEmitterChange, KafkaTopicEmitterMode, KafkaTopicIngestor,
+    KafkaTopicIngestorAlteration, KafkaTopicIngestorChange, KafkaTopicName,
+    KafkaTopicPublishingMode, LiteralHeaderWrite, LocatorDeclaration, LocatorName,
+    MONGODB_MAX_DOCUMENT_BYTES, MONGODB_NAMESPACE_MAX_BYTES, MQTT_MAXIMUM_PACKET_BYTES,
+    MQTT_SHARED_SUBSCRIPTION_LEVEL, MYSQL_MAX_PLACEHOLDERS, MappedValueField, MappedValueSection,
+    MappedValueType, MappedValueTypes, MongoDbCollectionEmitter, MongoDbCollectionEmitterChange,
     MongoDbCollectionEmitterMode, MongoDbCollectionName, MongoDbCollectionPublishingMode,
     MongoDbConfigEntry, MongoDbConflictAction, MongoDbConflictError, MongoDbEmitter,
     MongoDbEmitterChange, MongoDbEmitterEntity, MongoDbValueMapping, MqttBroker, MqttClientConfig,
@@ -220,12 +218,12 @@ pub use connector::{
     OtelMetricsPublishingMode, OtelScope, OtelTracesEmitter, OtelTracesEmitterChange,
     OtelTracesPublishingMode, OtelUnsupportedFeature, OtelValueField, OtelValueMapping,
     OtelValuePresence, OtelValueRule, OwnedQueryOption, POSTGRES_MESSAGE_SIZE_MAXIMUM,
-    PROMETHEUS_DEFAULT_MAX_BODY_SIZE, PROMETHEUS_VECTOR_RESULT, PercentEncodedHeaders,
-    PositionClass, PostgresConfigEntry, PostgresConflictAction, PostgresConflictError,
-    PostgresEmitter, PostgresEmitterChange, PostgresEmitterEntity, PostgresSslMode,
-    PostgresTableEmitter, PostgresTableEmitterChange, PostgresTableEmitterMode, PostgresTableName,
-    PostgresTablePublishingMode, PostgresValueEncoding, PostgresValueMapping, PrometheusApiRoot,
-    PrometheusApiRootError, PrometheusClientConfigError, PrometheusConfigEntry,
+    PROMETHEUS_DEFAULT_MAX_BODY_SIZE, PROMETHEUS_VECTOR_RESULT, PULSAR_OUTBOUND_CAPACITY,
+    PercentEncodedHeaders, PositionClass, PostgresConfigEntry, PostgresConflictAction,
+    PostgresConflictError, PostgresEmitter, PostgresEmitterChange, PostgresEmitterEntity,
+    PostgresSslMode, PostgresTableEmitter, PostgresTableEmitterChange, PostgresTableEmitterMode,
+    PostgresTableName, PostgresTablePublishingMode, PostgresValueEncoding, PostgresValueMapping,
+    PrometheusApiRoot, PrometheusApiRootError, PrometheusClientConfigError, PrometheusConfigEntry,
     PrometheusIngestMode, PrometheusIngestor, PrometheusIngestorEntity, PrometheusNonFiniteValue,
     PrometheusQueryIngestor, PrometheusQueryIngestorAlteration, PrometheusQueryIngestorChange,
     PrometheusSample, PrometheusSampleValue, PrometheusSampleValueError,
@@ -333,8 +331,9 @@ pub use names::{
 pub use nervix_licensing_vocabulary::ActivationKind;
 pub use node_capabilities::{
     ConnectorHostCapabilities, ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities,
-    EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers, NodeCapabilities,
-    NodeCapabilityRecord, PeerReceiveBounds, ShutdownCapabilities,
+    EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers,
+    MembershipCapabilities, NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds,
+    ShutdownCapabilities,
 };
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
@@ -499,10 +498,3 @@ pub use licensing::{
     LicensingConnectivityPublication, LicensingStopReason, LicensingTransportFailure,
     RefreshLicense, ReleaseLicense, RotateLicenseClusterKey,
 };
-
-/// The existing host's single relay admission budget. The runtime settings owner adopts this
-/// policy input; transport retention consumes it rather than choosing another timeout.
-pub const HOST_RELAY_ADMISSION_BOUND: std::time::Duration = RemoteRelayTotalTimeout::DEFAULT;
-
-/// The host's existing keep-alive cadence for unresolved relay acknowledgement admission.
-pub const HOST_RELAY_ALIVE_INTERVAL: std::time::Duration = RemoteAckAliveInterval::DEFAULT;

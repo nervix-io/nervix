@@ -121,6 +121,7 @@ impl EmitterConnector for MappedRowEmitter {
                     .projection
                     .project(
                         context.runtime.executor(),
+                        &context.remote_ack_timing,
                         batch_index,
                         batch.relay_batch(),
                         batch.execution_now(),
@@ -289,6 +290,7 @@ impl EmitterConnector for MappedRequestEmitter {
                 self.projection
                     .project(
                         context.runtime.executor(),
+                        &context.remote_ack_timing,
                         batch_index,
                         batch.relay_batch(),
                         batch.execution_now(),
@@ -587,12 +589,15 @@ impl MappedValuesProjection {
     pub(in crate::runtime) async fn project(
         &self,
         executor: &Executor,
+        ack_timing: &SharedRemoteAckTiming,
         batch_index: usize,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
         pending_rows: &[usize],
     ) -> EmitterRuntimeResult<ProjectedValueRows> {
-        let output = self.execute(executor, batch, execution_now).await?;
+        let output = self
+            .execute(executor, ack_timing, batch, execution_now)
+            .await?;
         let mut selected_rows = Vec::with_capacity(pending_rows.len());
         let mut rejected = Vec::new();
         for row in pending_rows {
@@ -642,6 +647,7 @@ impl MappedValuesProjection {
     async fn execute(
         &self,
         executor: &Executor,
+        ack_timing: &SharedRemoteAckTiming,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
     ) -> EmitterRuntimeResult<VmTypedBatch> {
@@ -669,16 +675,19 @@ impl MappedValuesProjection {
                     self.program.label
                 ))
         })?;
-        let result = batch
-            .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-                executor.accepted_work(),
-                &self.program.program,
-                &input,
-                &VmExecutionContext {
-                    now: execution_now,
-                    injector: None,
-                },
-            ))
+        let result = ack_timing
+            .keep_alive_while_pending(
+                batch,
+                execute_accepted_program_with_selection_in_context(
+                    executor.accepted_work(),
+                    &self.program.program,
+                    &input,
+                    &VmExecutionContext {
+                        now: execution_now,
+                        injector: None,
+                    },
+                ),
+            )
             .await
             .map_err(|error| {
                 error
@@ -884,6 +893,7 @@ mod tests {
         let projected = projection
             .project(
                 &Executor::default(),
+                &SharedRemoteAckTiming::default(),
                 4,
                 &batch,
                 Timestamp::from_unix_nanos(7),
@@ -918,6 +928,7 @@ mod tests {
             nervix_execution::CpuClass::Data,
             projection.project(
                 &executor,
+                &SharedRemoteAckTiming::default(),
                 4,
                 &batch,
                 Timestamp::from_unix_nanos(7),
@@ -1004,6 +1015,7 @@ mod tests {
         let mut projected = projection
             .project(
                 &Executor::default(),
+                &SharedRemoteAckTiming::default(),
                 0,
                 &batch,
                 Timestamp::from_unix_nanos(7),
@@ -1041,7 +1053,12 @@ mod tests {
         )
         .expect("the unrelated relay batch still has a valid schema");
         let report = projection
-            .execute(&Executor::default(), &batch, Timestamp::from_unix_nanos(7))
+            .execute(
+                &Executor::default(),
+                &SharedRemoteAckTiming::default(),
+                &batch,
+                Timestamp::from_unix_nanos(7),
+            )
             .await
             .expect_err("the VALUES program requires fields the relay batch lacks");
         assert!(matches!(
@@ -1067,6 +1084,7 @@ mod tests {
         projection
             .project(
                 &Executor::default(),
+                &SharedRemoteAckTiming::default(),
                 0,
                 &narrow,
                 execution_now,
@@ -1082,6 +1100,7 @@ mod tests {
             projection
                 .project(
                     &Executor::default(),
+                    &SharedRemoteAckTiming::default(),
                     0,
                     &narrow,
                     execution_now,
@@ -1092,7 +1111,14 @@ mod tests {
         nervix_primitives::task::yield_now().await;
         let (wide_allocations, wide_projected) = alloc_count::alloc_count!({
             projection
-                .project(&Executor::default(), 0, &wide, execution_now, &wide_rows)
+                .project(
+                    &Executor::default(),
+                    &SharedRemoteAckTiming::default(),
+                    0,
+                    &wide,
+                    execution_now,
+                    &wide_rows,
+                )
                 .now_or_never()
         });
 

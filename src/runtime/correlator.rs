@@ -478,15 +478,18 @@ pub(super) async fn correlate_incoming_message(
         store_correlator_unmatched_incoming(state, incoming_side, incoming, opposite_pending);
         return Ok(None);
     }
-    let evaluated = state
-        .keep_alive_while_pending(evaluate_correlator_where_matches(
-            run.executor,
-            program,
-            incoming_side,
-            &incoming,
-            &opposite_pending,
-            run.now,
-        ))
+    let evaluated = run
+        .ack_timing
+        .keep_alive_while_pending(
+            &*state,
+            evaluate_correlator_where_matches(
+                run,
+                program,
+                incoming_side,
+                &incoming,
+                &opposite_pending,
+            ),
+        )
         .await?;
 
     let mut matching = Vec::new();
@@ -528,13 +531,17 @@ pub(super) async fn correlate_incoming_message(
     )
 )]
 pub(super) async fn evaluate_correlator_where_matches(
-    executor: &Executor,
+    run: ProgramRun<'_>,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     incoming: &CorrelatorPendingMessage,
     candidates: &[CorrelatorPendingMessage],
-    execution_now: Timestamp,
 ) -> Result<BooleanBuffer, CorrelatorFailure> {
+    let ProgramRun {
+        executor,
+        now: execution_now,
+        ack_timing,
+    } = run;
     let failure = |error: Report<CorrelatorError>| CorrelatorFailure {
         error,
         acks: vec![AckSet::merged(
@@ -601,20 +608,22 @@ pub(super) async fn evaluate_correlator_where_matches(
     .map_err(|error| failure(error.change_context(CorrelatorError::ProjectMatchInput)))?;
     #[cfg(test)]
     CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
-    let result = incoming
-        .message
-        .acks
-        .keep_alive_while_pending(candidates.keep_alive_while_pending(
-            execute_accepted_program_with_selection_in_context(
-                executor.accepted_work(),
-                &program.program,
-                &input,
-                &VmExecutionContext {
-                    now: execution_now,
-                    injector: None,
-                },
+    let result = ack_timing
+        .keep_alive_while_pending(
+            &incoming.message.acks,
+            ack_timing.keep_alive_while_pending(
+                candidates,
+                execute_accepted_program_with_selection_in_context(
+                    executor.accepted_work(),
+                    &program.program,
+                    &input,
+                    &VmExecutionContext {
+                        now: execution_now,
+                        injector: None,
+                    },
+                ),
             ),
-        ))
+        )
         .await
         .map_err(|error| failure(error.change_context(CorrelatorError::EvaluateMatch)))?;
     let mut matching = BooleanBufferBuilder::new(candidates.len());
@@ -741,13 +750,17 @@ pub(super) fn correlator_output_batch_errors(
     )
 )]
 pub(super) async fn evaluate_correlator_output_batch(
-    executor: &Executor,
+    run: ProgramRun<'_>,
     processor: &ModelName,
     program: &CompiledCorrelatorOutputProgram,
     matched: &CorrelatorMatchedBatch,
     acks: Vec<AckSet>,
-    execution_now: Timestamp,
 ) -> Result<Vec<CorrelatorOutputOutcome>, CorrelatorFailure> {
+    let ProgramRun {
+        executor,
+        now: execution_now,
+        ack_timing,
+    } = run;
     let row_count = matched.row_count();
     if matched.keys.len() != row_count
         || matched.metadata.len() != row_count
@@ -764,21 +777,23 @@ pub(super) async fn evaluate_correlator_output_batch(
         return Err(CorrelatorFailure { error, acks });
     }
     let side_inputs = HashMap::default();
-    let lookup_columns = match acks
-        .as_slice()
-        .keep_alive_while_pending(compute_lookup_hash_map_columns(
-            executor,
-            &program.program,
-            &FilterMapBatchInputs {
-                carrier: &matched.carrier,
-                namespace_batches: &[],
-                keys: &matched.keys,
-                side_inputs: &side_inputs,
-                ingest_metadata: None,
-            },
-            execution_now,
-            None,
-        ))
+    let lookup_columns = match ack_timing
+        .keep_alive_while_pending(
+            acks.as_slice(),
+            compute_lookup_hash_map_columns(
+                executor,
+                &program.program,
+                &FilterMapBatchInputs {
+                    carrier: &matched.carrier,
+                    namespace_batches: &[],
+                    keys: &matched.keys,
+                    side_inputs: &side_inputs,
+                    ingest_metadata: None,
+                },
+                execution_now,
+                None,
+            ),
+        )
         .await
     {
         Ok(columns) => columns,
@@ -834,17 +849,19 @@ pub(super) async fn evaluate_correlator_output_batch(
     };
     #[cfg(test)]
     CORRELATOR_OUTPUT_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
-    let result = match acks
-        .as_slice()
-        .keep_alive_while_pending(execute_accepted_program_with_selection_in_context(
-            executor.accepted_work(),
-            &program.program.compiled,
-            &input,
-            &VmExecutionContext {
-                now: execution_now,
-                injector: None,
-            },
-        ))
+    let result = match ack_timing
+        .keep_alive_while_pending(
+            acks.as_slice(),
+            execute_accepted_program_with_selection_in_context(
+                executor.accepted_work(),
+                &program.program.compiled,
+                &input,
+                &VmExecutionContext {
+                    now: execution_now,
+                    injector: None,
+                },
+            ),
+        )
         .await
     {
         Ok(result) => result,
@@ -1423,6 +1440,7 @@ mod tests {
                 ProgramRun {
                     executor: &executor,
                     now,
+                    ack_timing: &SharedRemoteAckTiming::default(),
                 },
                 &program,
                 CorrelatorSide::Right,
@@ -1476,12 +1494,15 @@ mod tests {
             &executor,
             nervix_execution::CpuClass::Data,
             evaluate_correlator_where_matches(
-                &executor,
+                ProgramRun {
+                    executor: &executor,
+                    now,
+                    ack_timing: &SharedRemoteAckTiming::default(),
+                },
                 &program,
                 CorrelatorSide::Left,
                 &incoming_left,
                 &right_candidates,
-                now,
             ),
         )
         .await
@@ -1608,12 +1629,15 @@ mod tests {
             &executor,
             nervix_execution::CpuClass::Data,
             evaluate_correlator_output_batch(
-                &executor,
+                ProgramRun {
+                    executor: &executor,
+                    now,
+                    ack_timing: &SharedRemoteAckTiming::default(),
+                },
                 &named("join_profiles"),
                 &program,
                 &matched,
                 vec![AckSet::empty(); 1025],
-                now,
             ),
         )
         .await
@@ -1665,12 +1689,15 @@ mod tests {
 
         let (held, held_completion) = AckSet::root();
         let Err(shape) = evaluate_correlator_output_batch(
-            &Executor::default(),
+            ProgramRun {
+                executor: &Executor::default(),
+                now,
+                ack_timing: &SharedRemoteAckTiming::default(),
+            },
             &named("join_profiles"),
             &program,
             &matched,
             vec![held],
-            now,
         )
         .await
         else {

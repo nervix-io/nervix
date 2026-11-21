@@ -74,6 +74,14 @@ const MEASURED_REQUEST: &str = "MongoDB write";
 /// The `_id` MongoDB gives a document that carries none: its element type, the name `_id` and its
 /// terminator, and a twelve-byte ObjectId. The driver prepends it to an inserted document before
 /// sending it, and the server adds it to a document an upsert inserts.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "BSON encodes an ObjectId _id element as its one-byte element type, the name _id \
+                  with its terminator byte and the twelve-byte ObjectId"
+    )
+)]
 const GENERATED_ID_BYTES: u64 = 17;
 
 impl nervix_connector::EmitterConnector for MongoDbCollectionEmitter {

@@ -25,7 +25,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-use std::{num::NonZeroU64, ops::Range, time::Duration};
+use std::{ops::Range, time::Duration};
 
 use ahash::HashMap;
 use arrow_array::{
@@ -67,22 +67,28 @@ const POSTGRES: &str = "postgres";
 /// What `MAX SIZE` measures on a Postgres write, which an oversized row's rejection names.
 const MEASURED_REQUEST: &str = "Postgres insert";
 
-/// The longest protocol message the Postgres server reads, which the vocabulary declares as the
-/// largest `BATCH MAX SIZE` a Postgres emitter accepts. A Bind message above it closes the
-/// connection.
-///
-/// A write's measured size — its statement text and the arrays it binds — is never smaller than
-/// the Bind message that carries those arrays: the statement names every column several times,
-/// while the message adds a few bytes per parameter around them. Keeping the measured size within
-/// this limit therefore keeps every message within it, and every bound array within the 1 GB a
-/// single value may hold.
-const MESSAGE_LIMIT: NonZeroU64 = POSTGRES_MESSAGE_SIZE_MAXIMUM.bytes();
-
 /// The binary header of a one-dimensional array parameter: its dimension count, flags, element
 /// type, length and lower bound, four bytes each.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "PostgreSQL's binary array format heads a one-dimensional array with five \
+                  four-byte words: its dimension count, flags, element type, length and lower \
+                  bound"
+    )
+)]
 const ARRAY_HEADER_BYTES: u64 = 20;
 
 /// The length word before every element of an array parameter, which alone encodes a NULL.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "PostgreSQL's binary array format precedes each element with a four-byte length, \
+                  which alone encodes a NULL"
+    )
+)]
 const ELEMENT_LENGTH_BYTES: u64 = 4;
 
 /// The node's shared Postgres pool for one named client.
@@ -135,6 +141,15 @@ pub struct PostgresTableEmitter {
     connections: Box<dyn PostgresConnections>,
     table: PostgresTableName,
     conflict_action: PostgresConflictAction,
+    /// The emitter's `BATCH` limits, narrowed to the longest protocol message the Postgres server
+    /// reads, which the vocabulary declares as the largest `BATCH MAX SIZE` a Postgres emitter
+    /// accepts. A Bind message above it closes the connection.
+    ///
+    /// A write's measured size — its statement text and the arrays it binds — is never smaller
+    /// than the Bind message that carries those arrays: the statement names every column several
+    /// times, while the message adds a few bytes per parameter around them. Keeping the measured
+    /// size within that limit therefore keeps every message within it, and every bound array within
+    /// the 1 GB a single value may hold.
     limits: RowRequestLimits,
 }
 
@@ -508,7 +523,8 @@ impl PostgresTableEmitter {
             connections,
             table,
             conflict_action,
-            limits: RowRequestLimits::from(batch).with_native_bytes(MESSAGE_LIMIT),
+            limits: RowRequestLimits::from(batch)
+                .with_native_bytes(POSTGRES_MESSAGE_SIZE_MAXIMUM.bytes()),
             host,
         })
     }

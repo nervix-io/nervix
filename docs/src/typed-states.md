@@ -208,7 +208,8 @@ semantic value, name, one default, optional derivation and validation against ty
 typed validation report on failure, and provides no mutable access around that boundary.
 `Prerequisites`, `ClusterParameters` and `NodeCapabilities` classify the fields; omitting the
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
-carriers, defaults, change procedures and source ratchet.
+carriers, defaults, change procedures and the compiler rule that refuses numeric policy outside
+them.
 
 `NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
 `PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`,
@@ -379,7 +380,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_` keyspaces and current
+Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_` keyspaces and current
 `ClusterState` metadata encoding, 42, identify its stored shapes, including the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity

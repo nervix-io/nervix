@@ -2234,13 +2234,9 @@ fn manifest_checksum(
     Ok(encode_hex(hash.as_bytes()))
 }
 
+/// A checksum's text: the lowercase hexadecimal digits of its bytes.
 fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
-    }
-    out
+    faster_hex::hex_string(bytes)
 }
 
 #[cfg(test)]
