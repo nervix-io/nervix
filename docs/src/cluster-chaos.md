@@ -81,7 +81,7 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/run-baseline.sh` | The controller of every scenario. It owns the arguments and their bounds, preflight, image and tool identity, TLS, the Compose deployment, graph installation, traffic, the final ledger, findings, diagnostics and the exit trap |
 | `scripts/chaos/run-*.sh` | Scenario entry points that set each scenario's default fixture size and whole-run bound |
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
-| `label-probe.sh` | The [label probe](#the-label-probe) of the restart and recovery scenarios: its owners, edits, reads through every node and verdict |
+| `label-probe.sh` | The [label probe](#the-label-probe) of the restart, recovery and follower-partition scenarios: its owners, edits, reads through every node and verdict |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
 | `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, graceful-stop, outward TLS and diagnostic evidence |
@@ -1606,6 +1606,9 @@ heartbeat and unavailability settings and records them.
 - The follower case also SIGKILLs and restarts the isolated follower inside the partition. It
   requires the same container, volume and address, and measures the unchanged isolation and the
   node's status route again.
+- The follower case carries the [label probe](#the-label-probe). It installs the probe before it
+  selects its roles. While the follower is isolated, the connected majority commits one label edit
+  on every probed owner.
 
 **After healing.**
 
@@ -1614,6 +1617,8 @@ heartbeat and unavailability settings and records them.
 - Within 90 seconds, Kafka membership must converge on the scheduled ingestor owner, and within
   another 90 seconds output must advance.
 - A canary through the rejoined node must be acknowledged.
+- In the follower case, every node, the rejoined follower included, must report the label probe's
+  maps with every acknowledged edit. The verdict is `partitions/<ordinal>-follower/labels.json`.
 - The node events of the case must be none at all, or exactly the planned kill and restart.
 
 `partitions/` keeps each case's plan, rules, link matrices, injector commands and logs, status
@@ -1819,8 +1824,8 @@ nothing about host power loss or storage corruption.
 
 #### The Label Probe
 
-The stale-follower and cluster-restart scenarios carry the label probe of
-[Entity Labels](./entity-labels.md), in `label-probe.sh`. Before the fault, it creates the cluster
+The stale-follower and cluster-restart scenarios and the follower case of partition recovery carry
+the label probe of [Entity Labels](./entity-labels.md), in `label-probe.sh`. Before the fault, it creates the cluster
 user `chaos_label_user` and the logical resource `chaos_label_resource` with labels. It labels the
 baseline domain, the user, the resource and four models of the graph: the record schema, the relay,
 the ingestor and the emitter. It sets a label key on every one of them in each later edit, one CLI

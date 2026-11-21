@@ -3,7 +3,8 @@
 # external cluster and graph are ready. Owns what the three restart and recovery cases share:
 # traffic around the fault, administration batches through the packaged CLI, node metric and status
 # records, committed-configuration captures, the label probe, product findings and the final
-# traffic boundary.
+# traffic boundary. The partition-recovery scenario sources it too, for the administration batches
+# and the label probe its follower case carries.
 
 # shellcheck source=partition-scenario.sh
 source "${script_dir}/partition-scenario.sh"

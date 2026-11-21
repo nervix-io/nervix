@@ -1072,6 +1072,14 @@ partition_case_follower() {
     local ordinal="$1"
     local case_dir="${artifact_dir}/partitions/${ordinal}-follower"
     mkdir -p "${case_dir}"
+    # The label probe commits through the leader before the case selects its roles, so its edits
+    # fall outside the window in which the case requires the leader and every owner to stay put.
+    phase "partition ${ordinal}: label probe installation"
+    wait_for 'settled public roles before the label probe' 150 \
+        observe_partition_roles "${case_dir}/label-probe-roles" \
+        || partition_fail product 'public roles were unavailable before the label probe'
+    label_probe_install "${case_dir}" \
+        "nervix-$(jq -r '.leader | ltrimstr("node-")' "${case_dir}/label-probe-roles/role.json")"
     begin_partition_case "${case_dir}" "${ordinal}" 'isolation of an observed follower that owns execution'
     local follower
     follower="$(jq -r '.follower' "${case_dir}/before/role.json")"
@@ -1095,6 +1103,9 @@ partition_case_follower() {
         || partition_fail product 'the majority named the isolated follower as its leader'
     majority_commits "${case_dir}" "chaos_partition_${ordinal}_majority" "${majority_leader_host}" false \
         "${survivors[@]}"
+    # The connected majority commits one label edit on every probed owner while the follower
+    # cannot see it.
+    label_probe_edit "${case_dir}" "${majority_leader_host}" "partition_${ordinal}" "${ordinal}"
     partition_canary "chaos_partition_${ordinal}_minority" "${isolated}" "${case_dir}" \
         "${partition_minority_attempt_bound}" during true
     failover_ms=null
@@ -1122,6 +1133,14 @@ partition_case_follower() {
     check_isolation_invariants "${case_dir}"
     heal_partition "${case_dir}" "${ordinal}"
     recover_partition "${case_dir}" "${ordinal}" "${isolated}" "${isolated}"
+    phase "partition ${ordinal}: labels through every node"
+    local label_host
+    for label_host in "${node_hosts[@]}"; do
+        wait_for "every probed owner's labels through ${label_host}" 60 \
+            label_probe_read "${label_host}" "${case_dir}/labels/${label_host}" || true
+    done
+    label_probe_judge "${case_dir}" "${case_dir}/labels" "${case_dir}/labels.json" "${node_hosts[@]}" \
+        || partition_finding "${case_dir}" "the nodes do not report the same complete labels with every acknowledged edit: $(jq -c '{unanswered, disagreements, missing}' "${case_dir}/labels.json" 2>/dev/null)"
     write_partition_result "${case_dir}" follower "$(jq -n \
         --arg isolated "${isolated}" \
         --arg majority_leader "node-${majority_leader_host##*-}" \
