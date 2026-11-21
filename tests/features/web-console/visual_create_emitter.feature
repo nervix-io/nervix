@@ -16,7 +16,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT visual_api CONFIG {
@@ -122,7 +122,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT visual_client CONFIG {'bootstrap.servers' = '{{kafka_addr}}'};
@@ -131,7 +131,7 @@ Feature: Web console visual emitter creation
       CREATE RELAY visual_branched SCHEMA visual_event BRANCHED BY visual_branch;
       CREATE HTTP ENDPOINT visual_other_endpoint ON visual_host PATH '/other';
       CREATE HTTP ENDPOINT INGESTOR visual_other_ingest FROM visual_other_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_branched INHERIT ALL BRANCHED BY visual_branch SET user_id = message.user_id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -217,7 +217,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT visual_client POOL SIZE MIN 1 MAX 2 CONFIG {'addr' = '{{postgres_addr}}'};
@@ -291,7 +291,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE S3 CLIENT visual_client CONFIG {
@@ -370,7 +370,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_input_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT visual_api CONFIG {
@@ -452,7 +452,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT visual_api CONFIG {
@@ -527,7 +527,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT visual_api CONFIG {
@@ -592,7 +592,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT visual_api CONFIG {
@@ -676,7 +676,7 @@ Feature: Web console visual emitter creation
       CREATE VHOST visual_host visual-emitter-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_endpoint ON visual_host PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR visual_ingest FROM visual_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_codec
         TO visual_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT visual_api CONFIG {

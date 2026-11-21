@@ -114,6 +114,12 @@ protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classificatio
 changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
 external system's behavior under a hold; it is distinct from the step's quiesce level.
 
+An endpoint ingestor can retain a complete request during a model alteration. With
+`RESPOND AFTER RESUME`, it keeps the response open and takes the retained body in when it resumes.
+Requests that leave or reach their acknowledgement deadline while waiting are removed. A stop
+ends waiting requests and discards their bodies. The quiesce setting in effect when the pause
+begins governs that pause. See [Quiesce Modes](ingestors.md#quiesce-modes).
+
 An entity drain's `node_work_items` includes unfinished force-flush obligations as well as
 admitted and parked data. One batch parked on `REQUIRED WAIT` therefore counts as one item after
 its processor's flush settles, and as two while that flush's completion remains outstanding.

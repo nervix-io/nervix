@@ -253,6 +253,7 @@ mod emitter_task_programs;
 mod emitter_values;
 mod endpoint;
 mod endpoint_acknowledgement;
+mod endpoint_pause;
 mod endpoint_route_table;
 mod entity_gate;
 mod entrypoint_routes;
@@ -493,12 +494,13 @@ use emitter_values::{
     MappedRequestEmitter, MappedRowEmitter, MappedValuesProjection, MappedValuesProjectionInit,
 };
 pub(crate) use endpoint::{
-    EndpointDispatchOutcome, HttpEndpointRequestMetadata, ResolvedEndpointRoute,
+    EndpointDispatchOutcome, EndpointPayload, HttpEndpointRequestMetadata, ResolvedEndpointRoute,
     WebsocketsEndpointFrameMetadata,
 };
 use endpoint::{EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint};
 use endpoint_acknowledgement::EndpointRequestPolicy;
 pub(crate) use endpoint_acknowledgement::{EndpointRequestOutcome, EndpointRequestReply};
+pub(crate) use endpoint_pause::EndpointFramePause;
 pub(crate) use endpoint_route_table::EndpointResolution;
 use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeRoutes};
 use entity_gate::{

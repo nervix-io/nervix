@@ -2,9 +2,7 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The families the console creates: each statement outside the Model vocabulary and
-//!   each Model kind, their keys, names and Create-menu presentation, and which shared form a
-//!   family uses.
+//! - **Owns.** The console's form families, their keys and names, and the Create menu.
 //! - **Depends on.** The vocabulary's Model kinds and the form families the dialog's drafts define.
 //! - **Must not know.** Draft contents, choice lookups, statement dispatch, or browser transport.
 
@@ -17,8 +15,8 @@ use nervix_models::ModelKind;
 
 use super::{processor_draft::ProcessorFamily, schema_draft::WireFormat};
 
-/// A creation family the console has a form for. The statements outside the Model vocabulary
-/// have their own variants, and every Model kind is one family, so the dispatch is keyed by the
+/// A form family the console can open. The statements outside the Model vocabulary and
+/// contextual actions have their own variants, and every Model kind is one creation family, so the dispatch is keyed by the
 /// vocabulary's own identity: a kind added to it does not compile here until the console decides
 /// its form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,6 +26,8 @@ pub(crate) enum CreateKind {
     Resource,
     /// A session subscription, created by the client statement rather than stored.
     Subscription,
+    /// The quiesce settings of an existing endpoint ingestor, opened from the graph.
+    EndpointPause,
     Model(ModelKind),
 }
 
@@ -88,6 +88,7 @@ impl CreateKind {
             Self::User => "user".to_string(),
             Self::Resource => "resource".to_string(),
             Self::Subscription => "subscription".to_string(),
+            Self::EndpointPause => "endpoint-pause".to_string(),
             Self::Model(kind) => kind.keyword_phrase().to_ascii_lowercase().replace(' ', "-"),
         }
     }
@@ -98,6 +99,7 @@ impl CreateKind {
             Self::User => "user",
             Self::Resource => "resource",
             Self::Subscription => "subscription",
+            Self::EndpointPause => "pause settings",
             Self::Model(kind) => Self::model_label(kind),
         }
     }
@@ -152,6 +154,10 @@ impl CreateKind {
                 name: "Subscription",
                 summary: "Read-only relay tab",
             },
+            Self::EndpointPause => MenuEntry {
+                name: "Change pause settings",
+                summary: "Response timing during a pause",
+            },
             Self::Model(kind) => Self::model_menu_entry(kind),
         }
     }
@@ -200,7 +206,7 @@ impl CreateKind {
     /// Whether the created statement takes `IF NOT EXISTS`. A session subscription is not a stored
     /// entity, so its statement has no such modifier.
     pub(super) fn takes_if_not_exists(self) -> bool {
-        self != Self::Subscription
+        !matches!(self, Self::Subscription | Self::EndpointPause)
     }
 
     pub(super) fn wire_format(self) -> Option<WireFormat> {
@@ -208,7 +214,11 @@ impl CreateKind {
             Self::Model(ModelKind::WireJsonSchema) => Some(WireFormat::Json),
             Self::Model(ModelKind::WireCborSchema) => Some(WireFormat::Cbor),
             Self::Model(ModelKind::WireAvroSchema) => Some(WireFormat::Avro),
-            Self::Domain | Self::User | Self::Resource | Self::Subscription => None,
+            Self::Domain
+            | Self::User
+            | Self::Resource
+            | Self::Subscription
+            | Self::EndpointPause => None,
             Self::Model(
                 ModelKind::Placement
                 | ModelKind::Schema
@@ -248,7 +258,11 @@ impl CreateKind {
             Self::Model(ModelKind::Generator) => Some(ProcessorFamily::Generator),
             Self::Model(ModelKind::Inferencer) => Some(ProcessorFamily::Inferencer),
             Self::Model(ModelKind::WasmProcessor) => Some(ProcessorFamily::Wasm),
-            Self::Domain | Self::User | Self::Resource | Self::Subscription => None,
+            Self::Domain
+            | Self::User
+            | Self::Resource
+            | Self::Subscription
+            | Self::EndpointPause => None,
             Self::Model(
                 ModelKind::Placement
                 | ModelKind::Schema

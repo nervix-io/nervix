@@ -54,7 +54,7 @@ Feature: Placement rules are created through the console's visual forms
       CREATE VHOST visual_place_host place-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_place_endpoint ON visual_place_host PATH '/place';
       CREATE HTTP ENDPOINT INGESTOR visual_place_listener FROM visual_place_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_place_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_place_codec
         TO visual_place_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE JUNCTION visual_place_junction FROM visual_place_input UNBRANCHED

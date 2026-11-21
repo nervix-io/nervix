@@ -1,8 +1,8 @@
 //! Retained request outcomes of the ingestor units that answer endpoint requests.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The endpoint request family, its bounded `outcome` children for every unit of an
-//!   entity that reads an endpoint, and their inspection lines.
+//! - **Owns.** Endpoint request and pause observations for each endpoint ingestor unit and their
+//!   inspection lines.
 //! - **Depends on.** The entity declaration's reference kind, the shared counter with wall rates and
 //!   Prometheus.
 //! - **Must not know.** HTTP or WebSocket framing, request admission, quiesce, decoding or
@@ -16,12 +16,30 @@
 use meticulous::ResultExt as _;
 use nervix_models::IngestorEntityKind;
 use nervix_primitives::sync::Arc;
-use prometheus::{IntCounterVec, Opts, Registry};
+use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator as _};
 
 use super::ingestor_reads::ReadCounter;
+use crate::metrics::IngestorQuiesceMetrics;
 
 const REQUESTS: &str = "nervix_ingestor_endpoint_requests_total";
+const PAUSE_WAITING: &str = "nervix_ingestor_endpoint_pause_waiting_requests";
+const PAUSE_WAITING_BYTES: &str = "nervix_ingestor_endpoint_pause_waiting_bytes";
+const PAUSE_REFUSALS: &str = "nervix_ingestor_endpoint_pause_refusals_total";
+
+impl IngestorQuiesceMetrics {
+    pub(crate) fn endpoint(&self) -> Option<&IngestorEndpointMetrics> {
+        self.series.endpoint.as_ref()
+    }
+}
+
+#[derive(Debug, Clone, Copy, AsRefStr, EnumIter)]
+#[strum(serialize_all = "snake_case")]
+pub(crate) enum EndpointPauseRefusal {
+    BufferFull,
+    Deadline,
+    IntakeEnded,
+}
 
 /// What became of one request or WebSocket data frame at one endpoint ingestor, as its counter's
 /// bounded `outcome` label names it.
@@ -31,11 +49,11 @@ pub(crate) enum EndpointIntakeOutcome {
     /// The ingestor took it in: it dispatched it into its graph or its endpoint buffer retained
     /// it, or its acknowledgement completed.
     Accepted,
-    /// Every slot of the ingestor's response window was taken.
+    /// The ingestor's response window or its acknowledged pause buffer was full.
     Busy,
     /// The ingestor's quiesce refused new intake, or one of its routes refused the decoded input.
     Refused,
-    /// The node's extension workers had no room to unfold it.
+    /// The node could not unfold the request, or its deadline or intake ended while it waited.
     NotAdmitted,
     /// The ingestor's codec refused it, and the ingestor consumed it as a decode rejection.
     DecodeRejected,
@@ -48,6 +66,9 @@ pub(crate) enum EndpointIntakeOutcome {
 #[derive(Debug)]
 pub(super) struct EndpointRequestFamily {
     requests: IntCounterVec,
+    waiting: IntGaugeVec,
+    waiting_bytes: IntGaugeVec,
+    pause_refusals: IntCounterVec,
 }
 
 impl EndpointRequestFamily {
@@ -69,7 +90,47 @@ impl EndpointRequestFamily {
         registry
             .register(Box::new(requests.clone()))
             .assured("the endpoint request family is registered once");
-        Self { requests }
+        let waiting = IntGaugeVec::new(
+            Opts::new(
+                PAUSE_WAITING,
+                "Endpoint requests waiting for the pause buffer to admit their bodies.",
+            ),
+            labels,
+        )
+        .assured("fixed metric names and label names satisfy Prometheus");
+        registry
+            .register(Box::new(waiting.clone()))
+            .assured("the waiting request family is registered once");
+        let waiting_bytes = IntGaugeVec::new(
+            Opts::new(
+                PAUSE_WAITING_BYTES,
+                "Bytes of endpoint requests still waiting to enter the graph.",
+            ),
+            labels,
+        )
+        .assured("fixed metric names and label names satisfy Prometheus");
+        registry
+            .register(Box::new(waiting_bytes.clone()))
+            .assured("the waiting byte family is registered once");
+        let mut refusal_labels = labels.to_vec();
+        refusal_labels.push("cause");
+        let pause_refusals = IntCounterVec::new(
+            Opts::new(
+                PAUSE_REFUSALS,
+                "Endpoint requests refused by the pause buffer, by cause.",
+            ),
+            &refusal_labels,
+        )
+        .assured("fixed metric names and label names satisfy Prometheus");
+        registry
+            .register(Box::new(pause_refusals.clone()))
+            .assured("the pause refusal family is registered once");
+        Self {
+            requests,
+            waiting,
+            waiting_bytes,
+            pause_refusals,
+        }
     }
 
     /// Whether the units of `kind` answer endpoint requests: an entity whose body names an
@@ -103,6 +164,11 @@ impl EndpointRequestFamily {
                 not_admitted: self.child(identity, EndpointIntakeOutcome::NotAdmitted),
                 decode_rejected: self.child(identity, EndpointIntakeOutcome::DecodeRejected),
                 processing_failed: self.child(identity, EndpointIntakeOutcome::ProcessingFailed),
+                waiting: self.waiting.with_label_values(identity),
+                waiting_bytes: self.waiting_bytes.with_label_values(identity),
+                pause_full: self.pause_child(identity, EndpointPauseRefusal::BufferFull),
+                pause_expired: self.pause_child(identity, EndpointPauseRefusal::Deadline),
+                pause_ended: self.pause_child(identity, EndpointPauseRefusal::IntakeEnded),
             }),
         })
     }
@@ -116,6 +182,12 @@ impl EndpointRequestFamily {
         let mut labels = identity.to_vec();
         labels.push(outcome.as_ref());
         ReadCounter::retained(self.requests.with_label_values(&labels))
+    }
+
+    fn pause_child(&self, identity: &[&str], cause: EndpointPauseRefusal) -> ReadCounter {
+        let mut labels = identity.to_vec();
+        labels.push(cause.as_ref());
+        ReadCounter::retained(self.pause_refusals.with_label_values(&labels))
     }
 
     /// Withdraws every outcome child of a retired unit of `kind`, with `identity` its identity
@@ -135,6 +207,19 @@ impl EndpointRequestFamily {
                 .remove_label_values(&labels)
                 .assured("registration installs every outcome child of an endpoint unit");
         }
+        self.waiting
+            .remove_label_values(identity)
+            .assured("registration installs the endpoint's waiting-request child");
+        self.waiting_bytes
+            .remove_label_values(identity)
+            .assured("registration installs the endpoint's waiting-byte child");
+        for cause in EndpointPauseRefusal::iter() {
+            let mut labels = identity.to_vec();
+            labels.push(cause.as_ref());
+            self.pause_refusals
+                .remove_label_values(&labels)
+                .assured("registration installs every pause-refusal child of an endpoint unit");
+        }
     }
 }
 
@@ -145,7 +230,7 @@ pub(crate) struct IngestorEndpointMetrics {
     series: Arc<EndpointRequestSeries>,
 }
 
-/// One child for each outcome a request can reach.
+/// The children for request outcomes and pause observations.
 #[derive(Debug)]
 struct EndpointRequestSeries {
     accepted: ReadCounter,
@@ -154,6 +239,11 @@ struct EndpointRequestSeries {
     not_admitted: ReadCounter,
     decode_rejected: ReadCounter,
     processing_failed: ReadCounter,
+    waiting: IntGauge,
+    waiting_bytes: IntGauge,
+    pause_full: ReadCounter,
+    pause_expired: ReadCounter,
+    pause_ended: ReadCounter,
 }
 
 impl EndpointRequestSeries {
@@ -167,9 +257,31 @@ impl EndpointRequestSeries {
             EndpointIntakeOutcome::ProcessingFailed => &self.processing_failed,
         }
     }
+
+    fn pause_refusal(&self, cause: EndpointPauseRefusal) -> &ReadCounter {
+        match cause {
+            EndpointPauseRefusal::BufferFull => &self.pause_full,
+            EndpointPauseRefusal::Deadline => &self.pause_expired,
+            EndpointPauseRefusal::IntakeEnded => &self.pause_ended,
+        }
+    }
 }
 
 impl IngestorEndpointMetrics {
+    pub(crate) fn begin_pause_wait(&self, bytes: i64) {
+        self.series.waiting.inc();
+        self.series.waiting_bytes.add(bytes);
+    }
+
+    pub(crate) fn end_pause_wait(&self, bytes: i64) {
+        self.series.waiting.dec();
+        self.series.waiting_bytes.sub(bytes);
+    }
+
+    pub(crate) fn record_pause_refusal(&self, cause: EndpointPauseRefusal) {
+        self.series.pause_refusal(cause).record(1);
+    }
+
     /// Counts one request or frame that reached `outcome`.
     #[cfg_attr(
         nervix_lint,
@@ -179,12 +291,12 @@ impl IngestorEndpointMetrics {
         self.series.of(outcome).record(1);
     }
 
-    /// Appends one line for every outcome under `selector`, the unit's identity label selector.
+    /// Appends request outcomes and pause observations under the unit's identity selector.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             observer,
-            reason = "renders retained counters and their rate summaries"
+            reason = "renders retained metric values and counter rate summaries"
         )
     )]
     pub(super) fn describe_lines(&self, selector: &str, lines: &mut Vec<String>) {
@@ -192,6 +304,18 @@ impl IngestorEndpointMetrics {
             lines.push(self.series.of(outcome).describe(
                 REQUESTS,
                 &format!("{selector},outcome=\"{}\"", outcome.as_ref()),
+            ));
+        }
+        for (name, gauge) in [
+            (PAUSE_WAITING, &self.series.waiting),
+            (PAUSE_WAITING_BYTES, &self.series.waiting_bytes),
+        ] {
+            lines.push(format!("{name}{{{selector}}} value={}", gauge.get()));
+        }
+        for cause in EndpointPauseRefusal::iter() {
+            lines.push(self.series.pause_refusal(cause).describe(
+                PAUSE_REFUSALS,
+                &format!("{selector},cause=\"{}\"", cause.as_ref()),
             ));
         }
     }
@@ -318,6 +442,9 @@ mod tests {
         http_requests.record(EndpointIntakeOutcome::Accepted);
         http_requests.record(EndpointIntakeOutcome::Accepted);
         http_requests.record(EndpointIntakeOutcome::Busy);
+        http_requests.begin_pause_wait(14);
+        http_requests.begin_pause_wait(14);
+        http_requests.record_pause_refusal(EndpointPauseRefusal::BufferFull);
         websockets_requests.record(EndpointIntakeOutcome::DecodeRejected);
         let children = gathered(&metrics);
         assert_eq!(
@@ -340,8 +467,8 @@ mod tests {
         let lines = metrics.describe_ingestor_interactions(&unit(&http));
         assert_eq!(
             lines.len(),
-            31,
-            "seven read lines, six request lines and eighteen acknowledgement and lifecycle lines"
+            36,
+            "seven read lines, eleven endpoint lines and eighteen lifecycle lines"
         );
         assert!(lines[7].starts_with(
             "nervix_ingestor_endpoint_requests_total{domain=\"endpoint_requests\",ingestor=\"\
@@ -349,9 +476,15 @@ mod tests {
              ENDPOINT\",outcome=\"accepted\"} total=2 "
         ));
         assert!(lines[8].contains("outcome=\"busy\"} total=1 "));
+        assert!(lines[13].starts_with(PAUSE_WAITING));
+        assert!(lines[13].ends_with("} value=2"));
+        assert!(lines[14].starts_with(PAUSE_WAITING_BYTES));
+        assert!(lines[14].ends_with("} value=28"));
+        assert!(lines[15].starts_with(PAUSE_REFUSALS));
+        assert!(lines[15].contains("cause=\"buffer_full\"} total=1 "));
         assert!(
-            lines[13].starts_with("nervix_ingestor_ack_outcomes_total{"),
-            "the request lines precede the acknowledgement and lifecycle lines"
+            lines[18].starts_with("nervix_ingestor_ack_outcomes_total{"),
+            "the endpoint lines precede the acknowledgement and lifecycle lines"
         );
         assert_eq!(
             metrics.describe_ingestor_interactions(&unit(&kafka)).len(),

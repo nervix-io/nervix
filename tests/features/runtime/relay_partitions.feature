@@ -109,7 +109,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -313,7 +313,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -445,7 +445,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -550,7 +550,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -561,7 +561,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_short_lived
         FROM short_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO short_lived
         INHERIT ALL
         BRANCHED BY by_tenant_short
@@ -687,7 +687,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_held
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -698,7 +698,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_flowing
         FROM flowing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -801,7 +801,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -904,7 +904,7 @@ Feature: Relay partitions
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant

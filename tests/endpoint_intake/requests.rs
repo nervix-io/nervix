@@ -126,6 +126,18 @@ async fn post(
     world.endpoint_requests.post(name, uri, host, payload);
 }
 
+#[when(expr = "endpoint request {string} disconnects")]
+#[then(expr = "endpoint request {string} disconnects")]
+async fn disconnect(world: &mut ScenarioWorld, name: String) {
+    let request = world
+        .endpoint_requests
+        .requests
+        .remove(&name)
+        .assured("the scenario posted this endpoint request");
+    assert!(matches!(request, RequestState::Pending(_)));
+    drop(request);
+}
+
 #[when("the endpoint response boundary is recorded")]
 async fn record_boundary(world: &mut ScenarioWorld) {
     world.endpoint_requests.boundary = Some(Instant::now());
@@ -170,8 +182,27 @@ async fn after_boundary(world: &mut ScenarioWorld, name: String) {
     );
 }
 
+#[then(expr = "endpoint request {string} answers before the recorded response boundary")]
+async fn before_boundary(world: &mut ScenarioWorld, name: String) {
+    let boundary = world
+        .endpoint_requests
+        .boundary
+        .assured("the scenario recorded its response boundary");
+    let response = world.endpoint_requests.collect(&name).await;
+    assert!(
+        response.received_at <= boundary,
+        "the endpoint answer was still waiting"
+    );
+}
+
 #[then(expr = "endpoint request {string} asks to retry after {string}")]
 async fn retry_after(world: &mut ScenarioWorld, name: String, expected: String) {
     let response = world.endpoint_requests.collect(&name).await;
     assert_eq!(response.retry_after.as_deref(), Some(expected.as_str()));
+}
+
+#[then(expr = "endpoint request {string} supplies no retry delay")]
+async fn no_retry_after(world: &mut ScenarioWorld, name: String) {
+    let response = world.endpoint_requests.collect(&name).await;
+    assert_eq!(response.retry_after, None);
 }

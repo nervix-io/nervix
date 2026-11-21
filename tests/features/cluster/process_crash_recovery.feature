@@ -20,7 +20,7 @@ Feature: Real process crash recovery
       CREATE HTTP ENDPOINT window_ingress ON window_edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR window_ingestor
         FROM window_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING window_codec
         TO window_inputs INHERIT ALL BRANCHED BY by_window_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -105,7 +105,7 @@ Feature: Real process crash recovery
       CREATE HTTP ENDPOINT reading_ingress ON reading_edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_reading_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -227,7 +227,7 @@ Feature: Real process crash recovery
       CREATE HTTP ENDPOINT crash_ingress ON crash_edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR crash_ingestor
         FROM crash_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING crash_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING crash_event_codec
         TO crash_input
           INHERIT ALL
           BRANCHED BY by_crash_tenant

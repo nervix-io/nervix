@@ -33,9 +33,9 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     CanonicalPlexusError, CreateDomain, CreateResource, CreateStatement, CreateSubscription,
-    CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace, Model,
-    ModelKind, ModelName, RelayName, RequestedResourceVersion, ResourceName, Statement,
-    SubscriptionName, UserName,
+    CreateUser, DomainClockPeriod, DomainClockSkew, DomainConfig, DomainName, DomainPace,
+    IngestorName, Model, ModelKind, ModelName, RelayName, RequestedResourceVersion, ResourceName,
+    Statement, SubscriptionName, UserName,
 };
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_recovery::Discarded as _;
@@ -73,6 +73,7 @@ mod emitter_rows;
 mod emitter_state_editor;
 mod endpoint_draft;
 mod endpoint_editor;
+mod endpoint_pause_editor;
 
 mod hash_map_draft;
 mod hash_map_editor;
@@ -155,11 +156,14 @@ use emitter_draft::{EmitterDraft, EmitterDraftError};
 use emitter_editor::EmitterEditor;
 use endpoint_draft::{EndpointDraft, EndpointDraftError};
 use endpoint_editor::EndpointEditor;
+pub(crate) use endpoint_pause_editor::EndpointPauseSettingsResponse;
+use endpoint_pause_editor::{EndpointPauseDraft, EndpointPauseEditor};
 use hash_map_draft::{HashMapDraft, HashMapDraftError};
 use hash_map_editor::HashMapEditor;
 use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
 use ingestor_editor::IngestorEditor;
 use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
+use ingestor_source_draft::IngestorEntityDraftError;
 use placement_draft::{PlacementCoverage, PlacementDraft, PlacementDraftError};
 use placement_editor::PlacementEditor;
 use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
@@ -912,6 +916,10 @@ enum CreateDraftError {
     #[error("{0}")]
     Ingestor(#[from] IngestorDraftError),
     #[error("{0}")]
+    EndpointPause(#[from] IngestorEntityDraftError),
+    #[error("Load the endpoint's pause settings before saving")]
+    EndpointPauseUnavailable,
+    #[error("{0}")]
     Emitter(#[from] EmitterDraftError),
     #[error("{0}")]
     Processor(#[from] ProcessorDraftError),
@@ -1078,6 +1086,7 @@ pub(crate) struct CreateSignals {
     hash_map: RwSignal<HashMapDraft>,
     udf: RwSignal<UdfDraft>,
     ingestor: RwSignal<IngestorDraft>,
+    endpoint_pause: RwSignal<Option<EndpointPauseDraft>>,
     emitter: RwSignal<EmitterDraft>,
     junction: RwSignal<ProcessorDraft>,
     deduplicator: RwSignal<ProcessorDraft>,
@@ -1167,6 +1176,7 @@ impl CreateSignals {
             hash_map: RwSignal::new(HashMapDraft::default()),
             udf: RwSignal::new(UdfDraft::default()),
             ingestor: RwSignal::new(IngestorDraft::default()),
+            endpoint_pause: RwSignal::new(None),
             emitter: RwSignal::new(EmitterDraft::default()),
             junction: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Junction)),
             deduplicator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Deduplicator)),
@@ -1279,6 +1289,46 @@ impl CreateSignals {
             .assured("lower-case letters, underscores and at most 20 digits form a valid name")
     }
 
+    /// Opens the pause form in the selected ingestor's domain and returns the revision its
+    /// configuration read belongs to.
+    pub(crate) fn open_endpoint_pause(
+        self,
+        scope: DomainName,
+        ingestor: IngestorName,
+    ) -> Option<u64> {
+        const RETURN_FOCUS: &str = "graph-search";
+        if self.reopen_pending(RETURN_FOCUS) {
+            return None;
+        }
+        let kind = CreateKind::EndpointPause;
+        self.endpoint_pause
+            .set(Some(EndpointPauseDraft::loading(ingestor)));
+        self.captured_scopes.update(|scopes| {
+            scopes.insert(kind, Some(scope.clone()));
+        });
+        self.open(kind, Some(scope), RETURN_FOCUS);
+        Some(self.revision.get_untracked())
+    }
+
+    pub(crate) fn endpoint_pause_loaded(
+        self,
+        revision: u64,
+        response: EndpointPauseSettingsResponse,
+    ) {
+        if self.open.get_untracked() != Some(CreateKind::EndpointPause)
+            || self.revision.get_untracked() != revision
+        {
+            return;
+        }
+        self.endpoint_pause.update(|draft| {
+            if let Some(draft) = draft {
+                draft.loaded(response);
+            }
+        });
+        // The canonical preview depends on the draft revision.
+        self.advance_revision();
+    }
+
     fn close(self) {
         self.open.set(None);
         self.advance_revision();
@@ -1311,7 +1361,7 @@ impl CreateSignals {
         let Some(kind) = self.open.get_untracked() else {
             return;
         };
-        if !kind.domain_scoped() {
+        if !kind.domain_scoped() || kind == CreateKind::EndpointPause {
             return;
         }
         if self.captured_domain.get_untracked() != domain {
@@ -1383,6 +1433,7 @@ impl CreateSignals {
                 CreateKind::Domain
                 | CreateKind::User
                 | CreateKind::Resource
+                | CreateKind::EndpointPause
                 | CreateKind::Model(ModelKind::Schema)
                 | CreateKind::Model(ModelKind::WireJsonSchema)
                 | CreateKind::Model(ModelKind::WireCborSchema)
@@ -2114,6 +2165,16 @@ impl CreateSignals {
                     dispatch: CreateDispatch::Subscription(dispatch),
                 })
             }
+            CreateKind::EndpointPause => {
+                let scope = captured_domain
+                    .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
+                self.endpoint_pause.with_untracked(|draft| {
+                    draft
+                        .as_ref()
+                        .ok_or_else(|| Report::new(CreateDraftError::EndpointPauseUnavailable))?
+                        .submission(scope)
+                })
+            }
         }
     }
 }
@@ -2242,6 +2303,7 @@ fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
 fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
     match kind {
         CreateKind::Domain => vec![ChoiceControl::DomainPace],
+        CreateKind::EndpointPause => Vec::new(),
         CreateKind::Model(ModelKind::Placement) => {
             match signals.placement.get_untracked().coverage {
                 PlacementCoverage::DomainWide => vec![ChoiceControl::PlacementPolicy],
@@ -2385,10 +2447,10 @@ pub(crate) fn CreateDialog(
     let name_input = NodeRef::<leptos::html::Input>::new();
     let close_button = NodeRef::<leptos::html::Button>::new();
     Effect::new(move |_| {
-        if signals.open.get().is_none() {
+        let Some(kind) = signals.open.get() else {
             return;
-        }
-        if signals.progress.get_untracked().is_pending() {
+        };
+        if signals.progress.get_untracked().is_pending() || kind == CreateKind::EndpointPause {
             if let Some(button) = close_button.get() {
                 button
                     .focus()
@@ -2421,8 +2483,12 @@ pub(crate) fn CreateDialog(
     });
     let scope_changed = move || {
         signals.captured_domain.get() != active_domain.get()
-            && signals.open.get().is_some_and(CreateKind::domain_scoped)
+            && signals
+                .open
+                .get()
+                .is_some_and(|kind| kind.domain_scoped() && kind != CreateKind::EndpointPause)
     };
+    let changes_pause = move || signals.open.get() == Some(CreateKind::EndpointPause);
     // The drafts own validation and report it inline, so the form is `novalidate`: the browser's
     // constraint checks, such as a number input's minimum, never keep a submit from reaching them.
     let submit_form = move |event: ev::SubmitEvent| {
@@ -2466,16 +2532,16 @@ pub(crate) fn CreateDialog(
                 >
                     <header class="create-head">
                         <div>
-                            <span>"Create"</span>
+                            <span>{move || if changes_pause() { "Change" } else { "Create" }}</span>
                             <h2 id="create-dialog-title">{move || {
-                                let label = match signals.open.get() {
-                                    Some(kind) => kind.label(),
-                                    None => "entity",
-                                };
-                                format!("Create {label}")
+                                match signals.open.get() {
+                                    Some(CreateKind::EndpointPause) => "Change pause settings".to_string(),
+                                    Some(kind) => format!("Create {}", kind.label()),
+                                    None => "Create entity".to_string(),
+                                }
                             }}</h2>
                         </div>
-                        <button node_ref=close_button class="dialog-close create-close" type="button" title="Close" aria-label="Close create dialog" on:click=move |_| signals.close()>"×"</button>
+                        <button node_ref=close_button class="dialog-close create-close" type="button" title="Close" aria-label=move || if changes_pause() { "Close pause settings" } else { "Close create dialog" } on:click=move |_| signals.close()>"×"</button>
                     </header>
                     <form novalidate on:submit=submit_form>
                         <div class="create-scope-row">
@@ -2527,7 +2593,10 @@ pub(crate) fn CreateDialog(
                         </Show>
                         <footer class="create-actions">
                             <button class="create-cancel" type="button" on:click=move |_| signals.close()>"Close"</button>
-                            <button class="create-submit" type="submit" disabled=move || signals.progress.get().blocks_repeat_submit()>"Create"</button>
+                            <button class="create-submit" type="submit" disabled=move || {
+                                signals.progress.get().blocks_repeat_submit()
+                                    || (changes_pause() && !signals.endpoint_pause.with(|draft| draft.as_ref().is_some_and(EndpointPauseDraft::ready)))
+                            }>{move || if changes_pause() { "Save" } else { "Create" }}</button>
                         </footer>
                     </form>
                 </section>
@@ -2641,6 +2710,9 @@ fn CreateKindFields(
         <Show when=move || signals.open.get() == Some(CreateKind::Subscription) fallback=|| ()>
             <SubscriptionEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::EndpointPause) fallback=|| ()>
+            <EndpointPauseEditor signals=signals />
+        </Show>
         <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Codec)) fallback=|| ()>
             <CodecEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
@@ -2737,7 +2809,7 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                         Some(CreateKind::Model(ModelKind::Generator)) => signals.generator.get().if_not_exists,
                         Some(CreateKind::Model(ModelKind::Inferencer)) => signals.inferencer.get().if_not_exists,
                         Some(CreateKind::Model(ModelKind::WasmProcessor)) => signals.wasm.get().if_not_exists,
-                        Some(CreateKind::Subscription) | None => false,
+                        Some(CreateKind::Subscription | CreateKind::EndpointPause) | None => false,
                     }
                     disabled=move || signals.progress.get().is_pending()
                     on:change=move |event| {
@@ -2771,7 +2843,7 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                             Some(CreateKind::Model(ModelKind::Generator)) => signals.generator.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::Inferencer)) => signals.inferencer.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::WasmProcessor)) => signals.wasm.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Subscription) | None => {}
+                            Some(CreateKind::Subscription | CreateKind::EndpointPause) | None => {}
                         }
                         signals.edit();
                     }

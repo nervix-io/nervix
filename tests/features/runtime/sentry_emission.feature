@@ -15,7 +15,7 @@ Feature: Sentry emission
       CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING declared_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING declared_codec
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SENTRY CLIENT sentry_main CONFIG {
@@ -130,7 +130,7 @@ Feature: Sentry emission
       PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_ingestor
       FROM error_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING error_event_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING error_event_codec
       TIMESTAMP NOW
       TO errors
       INHERIT ALL
@@ -198,7 +198,7 @@ Feature: Sentry emission
       CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SENTRY CLIENT sentry_main CONFIG {
@@ -265,7 +265,7 @@ Feature: Sentry emission
       CREATE HTTP ENDPOINT error_ingress ON edge PATH '/errors';
       CREATE HTTP ENDPOINT INGESTOR error_ingestor
         FROM error_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_ingest
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retry_ingest
         TO errors INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SENTRY CLIENT sentry_main CONFIG {

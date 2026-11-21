@@ -893,7 +893,8 @@ mod tests {
     #[test]
     fn header_function_expectations_carry_the_transport_kind() {
         let endpoint = "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE \
-                        BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_";
+                        BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec TO outgoing SET \
+                        value = read_";
         assert!(
             suggest_client_expectations(endpoint, endpoint.len()).contains(
                 &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(

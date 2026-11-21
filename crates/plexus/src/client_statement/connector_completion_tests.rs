@@ -131,12 +131,12 @@ fn connector_expression_positions_keep_their_declared_function_scope() {
         ),
         (
             "CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-             1MiB DECODE USING codec FILTER WHERE read_",
+             1MiB RESPOND IMMEDIATE DECODE USING codec FILTER WHERE read_",
             endpoint.clone(),
         ),
         (
             "CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-             1MiB DECODE USING codec FILTER WHERE coalesce(read_",
+             1MiB RESPOND IMMEDIATE DECODE USING codec FILTER WHERE coalesce(read_",
             endpoint.clone(),
         ),
         (
@@ -175,7 +175,7 @@ fn connector_expression_positions_keep_their_declared_function_scope() {
 fn connector_completion_does_not_escape_the_composed_grammar() {
     for input in [
         "CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB \
-         DECODE USING codec TO outgoing FLUSH EACH co",
+         RESPOND IMMEDIATE DECODE USING codec TO outgoing FLUSH EACH co",
         "CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'GET' PATH '/' MODE co",
         "CREATE HTTP REQUEST EMITTER e FROM incoming WHERE input.value IS co",
         "ALTER HTTP ENDPOINT INGESTOR i SET FROM read_",

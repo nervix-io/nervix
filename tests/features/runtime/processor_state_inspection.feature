@@ -18,7 +18,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE VHOST edge reorderer-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REORDERER held_notifications
@@ -158,11 +158,11 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE HTTP ENDPOINT order_ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
       CREATE HTTP ENDPOINT INGESTOR order_ingestor FROM order_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_codec
         TO orders INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR payment_ingestor FROM payment_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING payment_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING payment_codec
         TO payments INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CORRELATOR settle_orders
@@ -277,7 +277,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE VHOST edge steady-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REORDERER steady_notifications
@@ -350,7 +350,7 @@ Feature: Bounded typed reorderer and correlator state inspection
       CREATE VHOST edge stopped-state-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REORDERER held_notifications

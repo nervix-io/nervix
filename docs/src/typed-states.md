@@ -357,8 +357,8 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX NODE VIEW` archive signature identifies the current Model layout, including
-that union, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
+The registry's `NERVIX PAUSE ACK` archive signature identifies the current Model layout, including
+that union, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited branch declaration,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
@@ -379,8 +379,9 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_` keyspaces and current
-`ClusterState` metadata encoding, 42, identify its stored shapes, including the partition count of every resolved
+Consensus's `raft_endpoint_pause_domain_resource_user_labels_` keyspaces and `ClusterState`
+metadata encoding 44 identify its stored shapes, including endpoint pause response choices,
+domain, resource and user labels, node selector statements and the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each
 branch whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
