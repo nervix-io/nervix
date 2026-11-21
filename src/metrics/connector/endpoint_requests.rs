@@ -20,11 +20,18 @@ use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator as _};
 
 use super::ingestor_reads::ReadCounter;
+use crate::metrics::IngestorQuiesceMetrics;
 
 const REQUESTS: &str = "nervix_ingestor_endpoint_requests_total";
 const PAUSE_WAITING: &str = "nervix_ingestor_endpoint_pause_waiting_requests";
 const PAUSE_WAITING_BYTES: &str = "nervix_ingestor_endpoint_pause_waiting_bytes";
 const PAUSE_REFUSALS: &str = "nervix_ingestor_endpoint_pause_refusals_total";
+
+impl IngestorQuiesceMetrics {
+    pub(crate) fn endpoint(&self) -> Option<&IngestorEndpointMetrics> {
+        self.series.endpoint.as_ref()
+    }
+}
 
 #[derive(Debug, Clone, Copy, AsRefStr, EnumIter)]
 #[strum(serialize_all = "snake_case")]

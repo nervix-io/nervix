@@ -1905,12 +1905,6 @@ struct IngestorQuiesceSeries {
     endpoint: Option<IngestorEndpointMetrics>,
 }
 
-impl IngestorQuiesceMetrics {
-    pub(crate) fn endpoint(&self) -> Option<&IngestorEndpointMetrics> {
-        self.series.endpoint.as_ref()
-    }
-}
-
 struct JemallocMetricsCollector {
     epoch: epoch_mib,
     active: stats::active_mib,
