@@ -277,7 +277,7 @@ fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
         );
         schedule
             .partition_topology
-            .branches
+            .parametrizers
             .insert(branch.clone(), InheritedPartitionLayout::Identity(count));
         schedule.partition_epochs.insert(
             branch,
@@ -300,7 +300,7 @@ fn shuttle_partition_observation_and_instance_assignment_publish_one_epoch() {
             .assured("the initial schedule stays installed");
         let count = schedule
             .partition_topology
-            .branches
+            .parametrizers
             .values()
             .next()
             .assured("the fixture declares a layout")

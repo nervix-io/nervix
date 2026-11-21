@@ -680,12 +680,12 @@ fn text_names_every_operation_reason_effect_and_outcome() {
         "  pause: DOMAIN domain=payments",
         "  effect: configuration DROPPED kind=relay name=retired_events operations=1",
         "  effect: topology before nodes=1 edges=0 after nodes=0 edges=0",
-        "  effect: ownership move kind=junction name=enrich branches=ALL_OF_PARAMETRIZER parametrizer=tenant \
-         from=node-1 to=node-2 operations=1",
+        "  effect: ownership move kind=junction name=enrich branches=ALL_OF_PARAMETRIZER \
+         parametrizer=tenant from=node-1 to=node-2 operations=1",
         "  effect: activation DEACTIVATE kind=relay name=retired_events branches=UNBRANCHED \
          operations=1",
-        "  effect: rebuild OWNERSHIP kind=junction name=enrich branches=SELECTED parametrizer=tenant \
-         keys=2 operations=1",
+        "  effect: rebuild OWNERSHIP kind=junction name=enrich branches=SELECTED \
+         parametrizer=tenant keys=2 operations=1",
         "  effect: state reset WINDOW_ACCUMULATOR kind=junction name=enrich branches=ALL \
          operations=1",
         "  effect: force flush kind=junction name=enrich operations=1",

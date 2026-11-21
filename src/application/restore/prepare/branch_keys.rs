@@ -625,8 +625,8 @@ mod tests {
             .expect_err("a key whose field holds another type is refused");
         assert_eq!(
             format!("{retyped:#}"),
-            "it is not a key of parametrizer 'by_tenant_shard': field 'shard' does not hold a value of \
-             its declared type: expected I32, found STRING"
+            "it is not a key of parametrizer 'by_tenant_shard': field 'shard' does not hold a \
+             value of its declared type: expected I32, found STRING"
         );
 
         let not_a_key = router
