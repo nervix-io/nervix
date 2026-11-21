@@ -29,8 +29,8 @@ use meticulous::OptionExt as _;
 use nervix_backup::{DescribedRuntimeState, DescribedSection, StateField};
 use nervix_execution::{Cancellation, CpuClass, MemoryClass};
 use nervix_models::{
-    BranchName, DomainName, DomainSchedule, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
-    ProcessorOutput, ResolvedBranching, ScheduledNode, SchemaDefinition,
+    DomainName, DomainSchedule, Model, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    ParametrizerName, ProcessorOutput, ResolvedBranching, ScheduledNode, SchemaDefinition,
 };
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
@@ -53,7 +53,7 @@ pub(in crate::application) struct RestoredBranchDeclarations {
     /// writes an unbranched relay.
     unbranched: bool,
     /// Every branch a concrete archived key may belong to, with the schema of its keys.
-    branches: BTreeMap<BranchName, SchemaDefinition>,
+    parametrizers: BTreeMap<ParametrizerName, SchemaDefinition>,
 }
 
 /// Why the restored schedule gives an entity no branching its archived keys could belong to.
@@ -73,26 +73,26 @@ pub(in crate::application) enum RestoredBranchDeclarationError {
 pub(in crate::application) enum ArchivedBranchKeyError {
     #[error("it is not a valid typed branch key")]
     NotABranchKey,
-    #[error("it is unbranched, where the entity runs in {branches}")]
-    Unbranched { branches: BranchNames },
+    #[error("it is unbranched, where the entity runs under {parametrizers}")]
+    Unbranched { parametrizers: ParametrizerNames },
     #[error("it names a concrete branch, where the entity runs unbranched")]
     Concrete,
-    #[error("it is not a key of branch '{}'", .branch.as_str())]
-    NotOfBranch { branch: BranchName },
-    #[error("it is a key of none of {branches}")]
-    NotOfAnyBranch { branches: BranchNames },
+    #[error("it is not a key of parametrizer '{}'", .parametrizer.as_str())]
+    NotOfParametrizer { parametrizer: ParametrizerName },
+    #[error("it is a key of none of {parametrizers}")]
+    NotOfAnyParametrizer { parametrizers: ParametrizerNames },
 }
 
 /// The branches an archived key could have belonged to, as a refusal names them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::application) struct BranchNames(Vec<BranchName>);
+pub(in crate::application) struct ParametrizerNames(Vec<ParametrizerName>);
 
-impl fmt::Display for BranchNames {
+impl fmt::Display for ParametrizerNames {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0.len() == 1 {
-            formatter.write_str("branch ")?;
+            formatter.write_str("parametrizer ")?;
         } else {
-            formatter.write_str("branches ")?;
+            formatter.write_str("parametrizers ")?;
         }
         let mut separator = "";
         for branch in &self.0 {
@@ -133,7 +133,7 @@ impl RestoredBranchDeclarations {
         let node = Self::scheduled(schedule, entity)?;
         let mut declarations = Self {
             unbranched: false,
-            branches: BTreeMap::new(),
+            parametrizers: BTreeMap::new(),
         };
         match node.config.as_ref() {
             Model::Ingestor(ingestor) => {
@@ -181,9 +181,17 @@ impl RestoredBranchDeclarations {
         };
         match branching {
             ResolvedBranching::Unbranched => self.unbranched = true,
-            ResolvedBranching::Branched { branch, schema, .. }
-            | ResolvedBranching::AwaitingTopology { branch, schema } => {
-                self.branches.insert(branch.clone(), schema.clone());
+            ResolvedBranching::Branched {
+                parametrizer,
+                schema,
+                ..
+            }
+            | ResolvedBranching::AwaitingTopology {
+                parametrizer,
+                schema,
+            } => {
+                self.parametrizers
+                    .insert(parametrizer.clone(), schema.clone());
             }
         }
         Ok(())
@@ -218,36 +226,36 @@ impl RestoredBranchDeclarations {
                 return Ok(None);
             }
             return Err(Report::new(ArchivedBranchKeyError::Unbranched {
-                branches: self.branch_names(),
+                parametrizers: self.parametrizer_names(),
             }));
         };
-        let mut branches = self.branches.iter();
+        let mut branches = self.parametrizers.iter();
         let Some((branch, schema)) = branches.next() else {
             return Err(Report::new(ArchivedBranchKeyError::Concrete));
         };
         if branches.next().is_none() {
             concrete
                 .conform_to(&schema.fields)
-                .change_context_lazy(|| ArchivedBranchKeyError::NotOfBranch {
-                    branch: branch.clone(),
+                .change_context_lazy(|| ArchivedBranchKeyError::NotOfParametrizer {
+                    parametrizer: branch.clone(),
                 })?;
             return Ok(key);
         }
         // The routes of an ingestor or reingestor write several branches, and the key belongs to
         // whichever its route wrote. The walk is bounded by the distinct branches those routes
         // write, which the relays of one domain bound.
-        for schema in self.branches.values() {
+        for schema in self.parametrizers.values() {
             if concrete.conform_to(&schema.fields).is_ok() {
                 return Ok(key);
             }
         }
-        Err(Report::new(ArchivedBranchKeyError::NotOfAnyBranch {
-            branches: self.branch_names(),
+        Err(Report::new(ArchivedBranchKeyError::NotOfAnyParametrizer {
+            parametrizers: self.parametrizer_names(),
         }))
     }
 
-    fn branch_names(&self) -> BranchNames {
-        BranchNames(self.branches.keys().cloned().collect())
+    fn parametrizer_names(&self) -> ParametrizerNames {
+        ParametrizerNames(self.parametrizers.keys().cloned().collect())
     }
 }
 
@@ -403,7 +411,7 @@ impl VerifiedArchive {
             // A branch's partitions place an archived key in the unit the restored count gives it,
             // whichever unit archived it, so every archived unit of such an entity is restored.
             if node.schema_fingerprint != schema
-                || (!node.units.contains_key(&unit) && node.partition_branch().is_none())
+                || (!node.units.contains_key(&unit) && node.partition_parametrizer().is_none())
             {
                 continue;
             }
@@ -461,8 +469,8 @@ mod tests {
         DomainName::parse("orders").assured("the test domain is a valid literal name")
     }
 
-    fn branch(name: &str) -> BranchName {
-        BranchName::parse(name).assured("the test branch is a valid literal name")
+    fn parametrizer(name: &str) -> ParametrizerName {
+        ParametrizerName::parse(name).assured("the test branch is a valid literal name")
     }
 
     fn field(name: &str) -> FieldName {
@@ -487,20 +495,20 @@ mod tests {
 
     fn tenant_shard() -> ResolvedBranching {
         ResolvedBranching::branched(
-            branch("by_tenant_shard"),
+            parametrizer("by_tenant_shard"),
             key_schema(
                 "tenant_shard",
                 &[("tenant", ParseAsType::String), ("shard", ParseAsType::I32)],
             ),
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         )
     }
 
     fn region() -> ResolvedBranching {
         ResolvedBranching::branched(
-            branch("by_region"),
+            parametrizer("by_region"),
             key_schema("region_key", &[("region", ParseAsType::String)]),
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         )
     }
 
@@ -601,8 +609,8 @@ mod tests {
             .expect_err("a key without a declared field is refused");
         assert_eq!(
             missing.current_context(),
-            &ArchivedBranchKeyError::NotOfBranch {
-                branch: branch("by_tenant_shard"),
+            &ArchivedBranchKeyError::NotOfParametrizer {
+                parametrizer: parametrizer("by_tenant_shard"),
             }
         );
         assert_eq!(

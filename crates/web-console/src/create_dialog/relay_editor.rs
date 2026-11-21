@@ -74,20 +74,20 @@ pub(super) fn RelayEditor(
             </div>
         </fieldset>
         <Show when=move || signals.relay.get().branching.is_branched() fallback=|| ()>
-            <ChoiceGroup class_name="create-branch-ref" label="Branch"
-                control=ChoiceControl::RelayBranch signals=signals request_tx=request_tx
+            <ChoiceGroup class_name="create-parametrizer-ref" label="Parametrizer"
+                control=ChoiceControl::RelayParametrizer signals=signals request_tx=request_tx
                 session_generation=session_generation />
         </Show>
-        <Show when=move || signals.relay.get().branching.selected_branch().is_some() fallback=|| ()>
-            <p class="create-selected-branch">{move || {
+        <Show when=move || signals.relay.get().branching.selected_parametrizer().is_some() fallback=|| ()>
+            <p class="create-selected-parametrizer">{move || {
                 let draft = signals.relay.get();
-                match draft.branching.selected_branch() {
+                match draft.branching.selected_parametrizer() {
                     Some(branch) => format!("Selected branch: {}", branch.name()),
                     None => String::new(),
                 }
             }}</p>
         </Show>
-        <Show when=move || signals.relay.get().branching.selected_branch().is_some_and(|branch| !branch.is_current()) fallback=|| ()>
+        <Show when=move || signals.relay.get().branching.selected_parametrizer().is_some_and(|branch| !branch.is_current()) fallback=|| ()>
             <p class="create-reference-invalid" role="alert">"The selected branch's domain changed. Select a branch again."</p>
         </Show>
         <label class="create-field">

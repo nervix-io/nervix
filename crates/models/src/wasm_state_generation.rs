@@ -779,7 +779,8 @@ mod tests {
         let Model::WasmProcessor(processor) = node.config.as_mut() else {
             unreachable!("the fixture constructs a WASM processor");
         };
-        let branch = crate::BranchName::try_from("tenants").assured("tenants is a valid name");
+        let branch =
+            crate::ParametrizerName::try_from("tenants").assured("tenants is a valid name");
         processor.branched_by = BranchSelection::branched_by(branch.clone());
         let schema = crate::CreateSchema {
             labels: Default::default(),
@@ -793,7 +794,7 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let partitions = crate::ResolvedBranchPartitions::Direct(nonzero!(2u16));
+        let partitions = crate::ResolvedParametrizerPartitions::Direct(nonzero!(2u16));
         let node = node.with_resolved_branching(Some(crate::ResolvedBranching::branched(
             branch, schema, partitions,
         )));
@@ -1712,7 +1713,7 @@ mod tests {
         else {
             unreachable!("the fixture has a concrete branch");
         };
-        *partitions = crate::ResolvedBranchPartitions::Inherited(nonzero!(2u16));
+        *partitions = crate::ResolvedParametrizerPartitions::Inherited(nonzero!(2u16));
         let held = crate::Unit::partition(0);
         let key = branch(1);
         let scope = WasmStateResetScope::Branch(key);

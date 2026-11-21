@@ -13,8 +13,8 @@
 )]
 
 use crate::{
-    BranchName, BuiltinFunctionName, CodecWireFormat, CreateRelay, EmitterEntityKind,
-    IngestorEntityKind, IngestorReferenceKind, ModelKind, RelayBranching, RelayName, SchemaName,
+    BuiltinFunctionName, CodecWireFormat, CreateRelay, EmitterEntityKind, IngestorEntityKind,
+    IngestorReferenceKind, ModelKind, ParametrizerName, RelayBranching, RelayName, SchemaName,
     WindowBound, WindowStateLimit, WireSchemaName,
 };
 
@@ -110,10 +110,10 @@ pub enum RelayQuestion {
     EmitterError { inputs: Vec<RelayName> },
     /// A relay on exactly `branch`, or an unbranched one for `None`: the relay of an ingestor
     /// route on a chosen branch, and an ingestor's error relay, which is never branched.
-    OnBranch(Option<BranchName>),
+    OnBranch(Option<ParametrizerName>),
     /// A generator's materialized relay once the generator's branch is chosen: a relay with
     /// materialized state on exactly `branch`, or an unbranched one for `None`.
-    MaterializedOnBranch(Option<BranchName>),
+    MaterializedOnBranch(Option<ParametrizerName>),
     /// A generator's materialized relay where its statement names it, before the branch clause that
     /// the relay must then match: a relay with materialized state on any branching.
     GeneratorState,
@@ -182,9 +182,9 @@ pub enum RelayRule<'a> {
     /// [`RelayQuestion::EmitterError`] beside every configured input.
     EmitterError { inputs: Vec<&'a CreateRelay> },
     /// [`RelayQuestion::OnBranch`].
-    OnBranch(Option<&'a BranchName>),
+    OnBranch(Option<&'a ParametrizerName>),
     /// [`RelayQuestion::MaterializedOnBranch`].
-    MaterializedOnBranch(Option<&'a BranchName>),
+    MaterializedOnBranch(Option<&'a ParametrizerName>),
     /// [`RelayQuestion::GeneratorState`].
     GeneratorState,
 }
@@ -208,9 +208,10 @@ impl<'a> RelayRule<'a> {
             Self::EmitterError { inputs } => {
                 Self::shared_branching(inputs) == Some(&candidate.branching)
             }
-            Self::OnBranch(branch) => candidate.branching.branch() == *branch,
+            Self::OnBranch(branch) => candidate.branching.parametrizer() == *branch,
             Self::MaterializedOnBranch(branch) => {
-                candidate.materialized_state.is_some() && candidate.branching.branch() == *branch
+                candidate.materialized_state.is_some()
+                    && candidate.branching.parametrizer() == *branch
             }
             Self::GeneratorState => candidate.materialized_state.is_some(),
         }

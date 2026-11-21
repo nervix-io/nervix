@@ -964,7 +964,7 @@ mod tests {
             parsed.output_routes.routes[0]
                 .branch
                 .as_ref()
-                .and_then(nervix_models::OutputBranch::branch)
+                .and_then(nervix_models::OutputBranch::parametrizer)
                 .map(|branch| branch.as_str()),
             Some("notification_params")
         );
@@ -1045,7 +1045,7 @@ mod tests {
             parsed.output_routes.routes[0]
                 .branch
                 .as_ref()
-                .and_then(nervix_models::OutputBranch::branch)
+                .and_then(nervix_models::OutputBranch::parametrizer)
                 .map(|branch| branch.as_str()),
             Some("u_branch")
         );

@@ -265,9 +265,9 @@ Feature: Web console visual ingestor creation
     When selector ".create-ingestor-codec [data-value='visual_branch_codec']" is clicked
     And selector ".create-ingestor-timestamp [data-timestamp='now']" is clicked
     And selector ".create-ingestor-route .create-ingestor-branching [data-branch='named']" is clicked
-    And selector ".create-ingestor-route .create-ingestor-branch .create-choice-search" is filled with "visual_branch"
-    Then selector ".create-ingestor-route .create-ingestor-branch [data-value='visual_branch']" exists
-    When selector ".create-ingestor-route .create-ingestor-branch [data-value='visual_branch']" is clicked
+    And selector ".create-ingestor-route .create-ingestor-parametrizer .create-choice-search" is filled with "visual_branch"
+    Then selector ".create-ingestor-route .create-ingestor-parametrizer [data-value='visual_branch']" exists
+    When selector ".create-ingestor-route .create-ingestor-parametrizer [data-value='visual_branch']" is clicked
     Then selector ".create-ingestor-branch-fields [data-value='tenant']" exists
     When selector ".create-ingestor-branch-fields [data-value='tenant']" is clicked
     And selector ".create-ingestor-branch-assignments .create-ingestor-assignment-expression" is filled with "message.tenant"

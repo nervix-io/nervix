@@ -106,7 +106,7 @@ enum ModelKind : ubyte {
   Codec,
   Client,
   Vhost,
-  Branch,
+  Parametrizer,
   Endpoint,
   SignalingProtocol,
   Generator,
@@ -138,7 +138,7 @@ enum ChoiceTarget : ubyte {
   DomainPace,
   PlacementPolicy,
   Schema,
-  Branch,
+  Parametrizer,
   Relay,
   /// The fields of one relay's records. Requires a domain and then a relay model reference.
   RelayField,
@@ -173,10 +173,10 @@ enum ChoiceTarget : ubyte {
   IngestSyslogSource,
   /// Codecs whose wire format can decode an ingestor payload.
   IngestCodec,
-  /// Relays with the exact route branch declaration; branched requires a branch reference.
+  /// Relays with the exact route branch declaration; branched requires a parametrizer reference.
   IngestUnbranchedRelay,
   IngestBranchedRelay,
-  /// Fields of the key schema selected by one branch reference.
+  /// Fields of the key schema selected by one parametrizer reference.
   BranchField,
   /// Relays with the same declared schema and exact branch as one selected input relay.
   ProcessorCompatibleInputRelay,
@@ -410,14 +410,14 @@ table AllBranchCoverage {}
 /// The node's single unbranched execution participates.
 table UnbranchedCoverage {}
 
-/// Every current and later concrete key of the declared branch participates.
-table DeclaredBranchCoverage {
-  branch: string (required);
+/// Every current and later concrete key of the parametrizer participates.
+table AllOfParametrizerCoverage {
+  parametrizer: string (required);
 }
 
-/// Only the selected concrete keys of the declared branch participate.
+/// Only the selected concrete keys of the parametrizer participate.
 table SelectedBranchCoverage {
-  branch: string (required);
+  parametrizer: string (required);
   /// Branch key fingerprints; a non-empty set.
   keys: [Fingerprint] (required);
 }
@@ -426,7 +426,7 @@ table SelectedBranchCoverage {
 union BranchCoverage {
   AllBranchCoverage,
   UnbranchedCoverage,
-  DeclaredBranchCoverage,
+  AllOfParametrizerCoverage,
   SelectedBranchCoverage
 }
 
@@ -435,7 +435,7 @@ union NodeBranchCoverage {
   ConfigurationCoverage,
   AllBranchCoverage,
   UnbranchedCoverage,
-  DeclaredBranchCoverage,
+  AllOfParametrizerCoverage,
   SelectedBranchCoverage
 }
 
@@ -621,14 +621,14 @@ enum ModelChangeAspect : ubyte {
   EndpointDefinition,
   SignalingProtocolDefinition,
   LookupDefinition,
-  BranchSchema,
-  BranchLifecycle,
+  ParametrizerSchema,
+  ParametrizerLifecycle,
   UdfDefinition,
   PlacementDefinition,
   EntityReplaced,
   EntityCreated,
   EntityDropped,
-  BranchPartitions,
+  ParametrizerPartitions,
   EmitterInstances,
   EntityLabels
 }
@@ -1084,9 +1084,9 @@ table RowField {
   sensitive: bool;
 }
 
-/// The declared branch of a branched relay and the fields of its key.
+/// The parametrizer of a branched relay and the fields of its branch key.
 table RowBranch {
-  branch: string (required);
+  parametrizer: string (required);
   /// The branch key fields in key order. Never empty.
   fields: [RowField] (required);
 }

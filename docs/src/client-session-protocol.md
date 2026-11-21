@@ -567,7 +567,7 @@ answers from the same rule, so the REPL, a visual form and the rule's validation
 member.
 
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
-dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
+dependency selects internal schemas, parametrizers, relays, codecs, VHOSTs, signaling protocols,
 JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference select relay
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
@@ -577,9 +577,9 @@ pairs that read an external system; a client producer ingestor selects its schem
 schema target instead. Each ingestor-reference target requires a domain and offers clients of its
 pair's connector, except the HTTP endpoint and WebSocket endpoint targets, which offer endpoints of
 that `TYPE`. Its decoding-codec target offers codecs that can decode. An unbranched-relay
-target needs a domain; a branched-relay target also needs the selected branch and offers relays
-with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
-takes a domain and branch reference. Ingestor decoded and output fields use the existing
+target needs a domain; a branched-relay target also needs the selected parametrizer and offers
+relays with exactly that parametrizer. Ingestor error relays use the unbranched target. A
+branch-field target takes a domain and parametrizer reference. Ingestor decoded and output fields use the existing
 codec-field and relay-field targets. A junction, deduplicator, reorderer, or reingestor asks for
 another input relay with a domain and the first relay reference; candidates have that relay's exact named schema and branch.
 The same dependencies with the output-relay target select the input branch, and with the

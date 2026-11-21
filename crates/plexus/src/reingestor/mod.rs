@@ -202,7 +202,7 @@ mod tests {
             parsed.output_routes.routes[0]
                 .branch
                 .as_ref()
-                .and_then(nervix_models::OutputBranch::branch)
+                .and_then(nervix_models::OutputBranch::parametrizer)
                 .map(|branch| branch.as_str()),
             Some("tenant_user")
         );
@@ -221,7 +221,7 @@ mod tests {
             parsed.output_routes.routes[0]
                 .branch
                 .as_ref()
-                .and_then(nervix_models::OutputBranch::branch)
+                .and_then(nervix_models::OutputBranch::parametrizer)
                 .map(|branch| branch.as_str()),
             Some("tenant_branch")
         );
@@ -253,7 +253,7 @@ mod tests {
             parsed.output_routes.routes[0]
                 .branch
                 .as_ref()
-                .and_then(nervix_models::OutputBranch::branch)
+                .and_then(nervix_models::OutputBranch::parametrizer)
                 .map(|branch| branch.as_str()),
             Some("tenant_branch")
         );

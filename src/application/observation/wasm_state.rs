@@ -543,7 +543,7 @@ impl SessionServiceImpl {
             .get(&request.unit)
             .ok_or(StateInspectionRejection::StaleContinuation)?;
         let epoch = node
-            .partition_branch()
+            .partition_parametrizer()
             .and_then(|branch| domain_schedule.partition_epochs.get(branch));
         let checkpoints = if node.has_inherited_partition_state(epoch) {
             self.inner

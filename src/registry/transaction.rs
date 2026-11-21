@@ -17,20 +17,21 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
-    AttributedGateBoundary, AttributedImpactNode, BranchName, BranchPartitions, CanonicalImpactSet,
-    CommandExecutionReference, ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction,
-    DomainLifecycleImpact, DomainName, DomainSchedule, DomainState as ControlDomainState,
-    DomainStatus, DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact,
-    ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage,
-    ImpactPlanningBasis, ImpactReportCompleteness, ImpactReportError, ImpactTopology,
-    ImpactTopologyEdge, ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason,
-    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
-    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResetWasmState, ResolvedBranchPartitions, ResourceBindingImpact, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
-    StateBranchSelectionError, StateResetImpact, Statement, TransactionCommitPlanStep,
-    TransactionCommitStepKind, TransactionImpactReport, TransactionOperation,
-    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
+    AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,
+    ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact,
+    DomainName, DomainSchedule, DomainState as ControlDomainState, DomainStatus,
+    DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
+    ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
+    ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason, OperationImpactReport,
+    OwnershipMoveImpact, ParametrizerName, ParametrizerPartitions, PauseRequirement,
+    PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason,
+    RequestedResourceVersion, ResetWasmState, ResolvedParametrizerPartitions,
+    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
+    ResourceUploads, ResourceVersionResolutionError, StateBranchSelectionError, StateResetImpact,
+    Statement, TransactionCommitPlanStep, TransactionCommitStepKind, TransactionImpactReport,
+    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPosition,
 };
 use thiserror::Error;
 
@@ -179,14 +180,14 @@ pub(crate) enum TransactionPlanningError {
     #[error("domain '{domain}' is already stopped")]
     DomainAlreadyStopped { domain: DomainName },
     #[error(
-        "branch '{branch}' in domain '{domain}' is still moving keys placed under its previous \
-         partition count {previous} to its current count {current}; change its partition count \
-         again once DESCRIBE BRANCH reports no previous partitions"
+        "parametrizer '{parametrizer}' in domain '{domain}' is still moving keys placed under its \
+         previous partition count {previous} to its current count {current}; change its partition \
+         count again once DESCRIBE PARAMETRIZER reports no previous partitions"
     )]
-    BranchPartitionsStillMoving {
+    ParametrizerPartitionsStillMoving {
         operation: TransactionOperationNumber,
         domain: DomainName,
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         previous: u16,
         current: u16,
     },
@@ -285,7 +286,7 @@ impl TransactionPlanningError {
             | Self::ModelPreflight { operation, .. }
             | Self::ExternalModelValidation { operation }
             | Self::UdfPreparation { operation }
-            | Self::BranchPartitionsStillMoving { operation, .. } => Some(*operation),
+            | Self::ParametrizerPartitionsStillMoving { operation, .. } => Some(*operation),
             Self::ResetIdentityMissing { operation } => Some(*operation),
             Self::Schedule { .. }
             | Self::ClusterParametersUnseeded
@@ -1134,7 +1135,7 @@ where
     ))
 }
 
-/// `ALTER BRANCH … SET PARTITIONS` begins the branch's next partition epoch on a running, paused
+/// `ALTER PARAMETRIZER … SET PARTITIONS` begins the branch's next partition epoch on a running, paused
 /// or stopped domain alike. While keys placed under the epoch's previous count may still lie
 /// outside their partition, a change to yet another count is refused, so every key keeps exactly
 /// one unit that may hold it outside its partition: the unit its previous count placed it in.
@@ -1144,7 +1145,7 @@ fn ensure_branch_partitions_change_is_settled(
     statement: &Statement,
     operation: TransactionOperationNumber,
 ) -> Result<(), Report<TransactionPlanningError>> {
-    let Statement::AlterBranch(alter) = statement else {
+    let Statement::AlterParametrizer(alter) = statement else {
         return Ok(());
     };
     let Some(requested) = alter.requested_partitions() else {
@@ -1153,27 +1154,27 @@ fn ensure_branch_partitions_change_is_settled(
     let Some(schedule) = schedule else {
         return Ok(());
     };
-    let Some(epoch) = schedule.partition_epochs.get(&alter.branch) else {
+    let Some(epoch) = schedule.partition_epochs.get(&alter.parametrizer) else {
         return Ok(());
     };
     let Some(transition) = &epoch.transition else {
         return Ok(());
     };
     let unchanged = match (requested, epoch.partitions) {
-        (BranchPartitions::Direct(requested), ResolvedBranchPartitions::Direct(current)) => {
+        (ParametrizerPartitions::Direct(requested), ResolvedParametrizerPartitions::Direct(current)) => {
             requested == current
         }
-        _ => schedule.nodes.get(&NodeRef::new(nervix_models::ModelKind::Branch, &alter.branch))
-            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Branch(branch) if branch.partitions == requested)),
+        _ => schedule.nodes.get(&NodeRef::new(nervix_models::ModelKind::Parametrizer, &alter.parametrizer))
+            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Parametrizer(branch) if branch.partitions == requested)),
     };
     if unchanged {
         return Ok(());
     }
     Err(Report::new(
-        TransactionPlanningError::BranchPartitionsStillMoving {
+        TransactionPlanningError::ParametrizerPartitionsStillMoving {
             operation,
             domain: domain.clone(),
-            branch: alter.branch.clone(),
+            parametrizer: alter.parametrizer.clone(),
             previous: transition.previous.count().get(),
             current: epoch.partitions.count().get(),
         },

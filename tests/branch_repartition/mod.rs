@@ -79,8 +79,8 @@ async fn wait_for_describe_parametrizer(
         nervix_primitives::task::consume_budget().await;
         assert!(
             !deadline.has_passed(),
-            "timed out waiting for DESCRIBE PARAMETRIZER {parametrizer} on node '{node_id}'. last output: \
-             {:?}, last error: {:?}",
+            "timed out waiting for DESCRIBE PARAMETRIZER {parametrizer} on node '{node_id}'. last \
+             output: {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
         );

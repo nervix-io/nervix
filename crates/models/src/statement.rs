@@ -27,26 +27,26 @@ use thiserror::Error;
 
 use crate::{
     ActivateLicense, AlterDeduplicator, AlterEmitter, AlterJunction, AlterPlacement,
-    AlterReingestor, AlterReorderer, AlterSchema, AlterWireSchema, AvroType, Backup, BranchName,
-    BranchPartitions, CborType, ClientConfigEntry, ClientName, ClusterNodeName, CodecName,
-    ConnectorKind, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
-    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
-    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    AlterReingestor, AlterReorderer, AlterSchema, AlterWireSchema, AvroType, Backup, CborType,
+    ClientConfigEntry, ClientName, ClusterNodeName, CodecName, ConnectorKind, CorrelatorName,
+    CreateAvroWireSchema, CreateCborWireSchema, CreateClientAzureBlob, CreateClientClickHouse,
+    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
+    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
+    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
+    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreatePlacement,
     CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
     CreateWindowProcessor, DeduplicatorName, DescribeInferencer, DescribeWasmProcessor,
     DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName,
     EndpointName, FieldName, GeneratorName, InferencerName, IngestQuiesceMode, IngestorName,
-    JsonType, JunctionName, LookupName, ModelName, NodeRef, PlacementName, ProcessorOutput,
-    ProcessorOutputs, RebindResource, RefreshLicense, ReingestorName, RelayName, ReleaseLicense,
-    ReordererName, RequestedResourceVersion, ResetWasmState, ResolvedBranchPartitions,
-    ResourceName, Restore, RotateLicenseClusterKey, SchemaName, ShowWasmProcessorState,
-    SignalingProtocolName, SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName,
-    Unit, UserName, VhostName, WindowProcessorName, WireSchemaName,
+    JsonType, JunctionName, LookupName, ModelName, NodeRef, ParametrizerName,
+    ParametrizerPartitions, PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource,
+    RefreshLicense, ReingestorName, RelayName, ReleaseLicense, ReordererName,
+    RequestedResourceVersion, ResetWasmState, ResolvedParametrizerPartitions, ResourceName,
+    Restore, RotateLicenseClusterKey, SchemaName, ShowWasmProcessorState, SignalingProtocolName,
+    SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName, Unit, UserName, VhostName,
+    WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -123,8 +123,8 @@ pub enum Statement {
     DescribeCluster(DescribeCluster),
     DescribeLicense(DescribeLicense),
     DescribeClient(DescribeClient),
-    AlterBranch(AlterBranch),
-    DescribeBranch(DescribeBranch),
+    AlterParametrizer(AlterParametrizer),
+    DescribeParametrizer(DescribeParametrizer),
     ShowNodes(ShowNodes),
 }
 
@@ -159,7 +159,7 @@ impl Statement {
             | Self::AlterReingestor(_)
             | Self::AlterGenerator(_)
             | Self::AlterPlacement(_)
-            | Self::AlterBranch(_)
+            | Self::AlterParametrizer(_)
             | Self::RebindResource(_)
             | Self::Drop(_) => true,
             Self::ShowLabels(_)
@@ -214,7 +214,7 @@ impl Statement {
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
             | Self::DescribeCluster(_)
-            | Self::DescribeBranch(_)
+            | Self::DescribeParametrizer(_)
             | Self::DescribeLicense(_)
             | Self::ResetWasmState(_) => false,
         }
@@ -315,8 +315,8 @@ pub enum ModelKind {
     Client,
     #[strum(props(completion_label = "ref:vhost", keyword = "VHOST"))]
     Vhost,
-    #[strum(props(completion_label = "ref:branch", keyword = "BRANCH"))]
-    Branch,
+    #[strum(props(completion_label = "ref:parametrizer", keyword = "PARAMETRIZER"))]
+    Parametrizer,
     #[strum(props(completion_label = "ref:endpoint", keyword = "ENDPOINT"))]
     Endpoint,
     #[strum(props(
@@ -1037,13 +1037,13 @@ pub struct DescribeLookup {
     pub name: LookupName,
 }
 
-/// `DESCRIBE BRANCH <branch>`: a branch's declaration, its partition epoch and, while keys placed
+/// `DESCRIBE PARAMETRIZER <branch>`: a branch's declaration, its partition epoch and, while keys placed
 /// under its previous partition count may lie outside their partition, how many still do.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct DescribeBranch {
-    pub branch: BranchName,
+pub struct DescribeParametrizer {
+    pub parametrizer: ParametrizerName,
 }
 
 #[derive(
@@ -1394,7 +1394,7 @@ declare_models! {
     ClientAzureBlob(CreateClientAzureBlob<Version>) => Client, Some(CreateClientAzureBlob::<Version>::CONNECTOR), shared;
     ClientIcebergRest(CreateClientIcebergRest<Version>) => Client, Some(CreateClientIcebergRest::<Version>::CONNECTOR), shared;
     Vhost(CreateVhost<Version>) => Vhost, None, paired;
-    Branch(CreateBranch) => Branch, None, paired;
+    Parametrizer(CreateParametrizer) => Parametrizer, None, paired;
     Endpoint(CreateEndpoint) => Endpoint, None, paired;
     SignalingProtocol(CreateSignalingProtocol<Version>) => SignalingProtocol, None, paired;
     Generator(CreateGenerator) => Generator, None, paired;
@@ -1938,26 +1938,28 @@ pub enum GeneralErrorPolicy {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CreateBranch {
+pub struct CreateParametrizer {
     pub labels: crate::EntityLabels,
-    pub name: BranchName,
+    pub name: ParametrizerName,
     pub schema: SchemaName,
     pub ttl: String,
-    pub partitions: BranchPartitions,
+    pub partitions: ParametrizerPartitions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub eviction: Option<BranchEviction>,
+    pub eviction: Option<ParametrizerEviction>,
 }
 
-impl CreateBranch {
+impl CreateParametrizer {
     pub fn apply_alter(
         &mut self,
-        alter: &AlterBranch,
-    ) -> error_stack::Result<(), AlterBranchError> {
-        if self.name != alter.branch {
-            return Err(Report::new(AlterBranchError::BranchNameMismatch {
-                stored: self.name.clone(),
-                requested: alter.branch.clone(),
-            }));
+        alter: &AlterParametrizer,
+    ) -> error_stack::Result<(), AlterParametrizerError> {
+        if self.name != alter.parametrizer {
+            return Err(Report::new(
+                AlterParametrizerError::ParametrizerNameMismatch {
+                    stored: self.name.clone(),
+                    requested: alter.parametrizer.clone(),
+                },
+            ));
         }
 
         let mut candidate = self.clone();
@@ -1968,9 +1970,9 @@ impl CreateBranch {
         Ok(())
     }
 
-    fn apply_alter_operation(&mut self, operation: &AlterBranchOperation) {
+    fn apply_alter_operation(&mut self, operation: &AlterParametrizerOperation) {
         match operation {
-            AlterBranchOperation::SetPartitions { partitions } => {
+            AlterParametrizerOperation::SetPartitions { partitions } => {
                 self.partitions = *partitions;
             }
         }
@@ -1996,40 +1998,40 @@ impl PartitionSeed {
     }
 }
 
-/// `ALTER BRANCH <name> <operation>, …`: changes the declaration of an existing branch.
+/// `ALTER PARAMETRIZER <name> <operation>, …`: changes the declaration of an existing branch.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct AlterBranch {
-    pub branch: BranchName,
-    pub operations: Vec<AlterBranchOperation>,
+pub struct AlterParametrizer {
+    pub parametrizer: ParametrizerName,
+    pub operations: Vec<AlterParametrizerOperation>,
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum AlterBranchOperation {
+pub enum AlterParametrizerOperation {
     /// `SET PARTITIONS n`: begins the branch's next partition epoch, on a running domain as on a
     /// stopped one. Keys the previous count placed elsewhere move to their new partition when
     /// their next record reaches it.
-    SetPartitions { partitions: BranchPartitions },
+    SetPartitions { partitions: ParametrizerPartitions },
 }
 
-impl AlterBranch {
+impl AlterParametrizer {
     /// Whether this alteration changes the branch's partition count, which begins a new partition
     /// epoch.
     pub fn sets_partitions(&self) -> bool {
         self.operations
             .iter()
-            .any(|operation| matches!(operation, AlterBranchOperation::SetPartitions { .. }))
+            .any(|operation| matches!(operation, AlterParametrizerOperation::SetPartitions { .. }))
     }
 
     /// The partition count this alteration leaves the branch with, when it sets one: the last
     /// count it sets, since its operations apply in written order.
-    pub fn requested_partitions(&self) -> Option<BranchPartitions> {
+    pub fn requested_partitions(&self) -> Option<ParametrizerPartitions> {
         let mut requested = None;
         for operation in &self.operations {
-            let AlterBranchOperation::SetPartitions { partitions } = operation;
+            let AlterParametrizerOperation::SetPartitions { partitions } = operation;
             requested = Some(*partitions);
         }
         requested
@@ -2037,22 +2039,22 @@ impl AlterBranch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum AlterBranchError {
-    #[error("ALTER targets branch `{requested}`, but the stored branch is `{stored}`")]
-    BranchNameMismatch {
-        stored: BranchName,
-        requested: BranchName,
+pub enum AlterParametrizerError {
+    #[error("ALTER targets parametrizer `{requested}`, but the stored parametrizer is `{stored}`")]
+    ParametrizerNameMismatch {
+        stored: ParametrizerName,
+        requested: ParametrizerName,
     },
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum BranchEviction {
+pub enum ParametrizerEviction {
     Lru { max_instances: NonZeroU64 },
 }
 
-impl BranchEviction {
+impl ParametrizerEviction {
     pub const fn max_instances(&self) -> NonZeroU64 {
         match self {
             Self::Lru { max_instances } => *max_instances,
@@ -2064,22 +2066,22 @@ impl BranchEviction {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum BranchSelection {
-    BranchedBy { branch: BranchName },
+    BranchedBy { parametrizer: ParametrizerName },
     Unbranched,
 }
 
 impl BranchSelection {
-    pub fn branched_by(branch: BranchName) -> Self {
-        Self::BranchedBy { branch }
+    pub fn branched_by(parametrizer: ParametrizerName) -> Self {
+        Self::BranchedBy { parametrizer }
     }
 
     pub fn unbranched() -> Self {
         Self::Unbranched
     }
 
-    pub fn branch(&self) -> Option<&BranchName> {
+    pub fn parametrizer(&self) -> Option<&ParametrizerName> {
         match self {
-            Self::BranchedBy { branch } => Some(branch),
+            Self::BranchedBy { parametrizer } => Some(parametrizer),
             Self::Unbranched => None,
         }
     }
@@ -2095,7 +2097,7 @@ impl BranchSelection {
 impl std::fmt::Display for BranchSelection {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BranchedBy { branch } => write!(formatter, "{branch}"),
+            Self::BranchedBy { parametrizer } => write!(formatter, "{parametrizer}"),
             Self::Unbranched => formatter.write_str("UNBRANCHED"),
         }
     }
@@ -2111,13 +2113,13 @@ impl std::fmt::Display for BranchSelection {
 pub enum ResolvedBranching {
     Unbranched,
     AwaitingTopology {
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         schema: crate::SchemaDefinition,
     },
     Branched {
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         schema: crate::SchemaDefinition,
-        partitions: ResolvedBranchPartitions,
+        partitions: ResolvedParametrizerPartitions,
     },
 }
 
@@ -2821,22 +2823,22 @@ pub const fn default_relay_buffer() -> NonZeroUsize {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum RelayBranching {
-    BranchedBy { branch: BranchName },
+    BranchedBy { parametrizer: ParametrizerName },
     Unbranched,
 }
 
 impl RelayBranching {
-    pub fn branched_by(branch: BranchName) -> Self {
-        Self::BranchedBy { branch }
+    pub fn branched_by(parametrizer: ParametrizerName) -> Self {
+        Self::BranchedBy { parametrizer }
     }
 
     pub fn unbranched() -> Self {
         Self::Unbranched
     }
 
-    pub fn branch(&self) -> Option<&BranchName> {
+    pub fn parametrizer(&self) -> Option<&ParametrizerName> {
         match self {
-            Self::BranchedBy { branch } => Some(branch),
+            Self::BranchedBy { parametrizer } => Some(parametrizer),
             Self::Unbranched => None,
         }
     }

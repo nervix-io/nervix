@@ -10,18 +10,18 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
-    BranchName, CanonicalImpactSet, ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact,
+    CanonicalImpactSet, ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact,
     ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
     ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
     ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
     ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, InspectionFormat,
     ModelChangeAspect, ModelKind, NodeRef, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph,
-    QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName, RequestedResourceVersion,
-    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName, StatePurge,
-    StateResetImpact, TransactionImpactReport, TransactionInspection, TransactionLifecycle,
-    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPosition, TransactionStatus,
+    OwnershipMoveImpact, ParametrizerName, PauseRequirement, PlannedExecutionStepImpact,
+    QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName,
+    RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
+    ResourceName, StatePurge, StateResetImpact, TransactionImpactReport, TransactionInspection,
+    TransactionLifecycle, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition, TransactionStatus,
 };
 
 use super::InspectionRendering;
@@ -414,8 +414,8 @@ fn resource(name: &str) -> ResourceName {
     ResourceName::parse(name).assured("the fixture resource name is an accepted literal")
 }
 
-fn branch(name: &str) -> BranchName {
-    BranchName::parse(name).assured("the fixture branch name is an accepted literal")
+fn parametrizer(name: &str) -> ParametrizerName {
+    ParametrizerName::parse(name).assured("the fixture branch name is an accepted literal")
 }
 
 fn cluster_node(name: &str) -> ClusterNodeName {
@@ -439,7 +439,7 @@ fn every_kind_report() -> TransactionImpactReport {
     let enrich = node(ModelKind::Junction, "enrich");
     let bundle = resource("bundle");
     let selected = ConcreteBranchCoverage::selected(
-        branch("tenant"),
+        parametrizer("tenant"),
         [
             BranchKeyFingerprint::new([1; 32]),
             BranchKeyFingerprint::new([2; 32]),
@@ -521,8 +521,8 @@ fn every_kind_report() -> TransactionImpactReport {
         ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
             node: ImpactNodeCoverage::execution(
                 enrich.clone(),
-                ConcreteBranchCoverage::AllOfBranch {
-                    branch: branch("tenant"),
+                ConcreteBranchCoverage::AllOfParametrizer {
+                    parametrizer: parametrizer("tenant"),
                 },
             ),
             unit: nervix_models::Unit::SINGLE,

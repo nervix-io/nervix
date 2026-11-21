@@ -13133,7 +13133,7 @@ mod tests {
             ChoiceControl::BranchSchema
             | ChoiceControl::RelaySchema
             | ChoiceControl::CodecSchema => nervix_client_wire::ChoiceTarget::Schema,
-            ChoiceControl::RelayBranch => nervix_client_wire::ChoiceTarget::Branch,
+            ChoiceControl::RelayParametrizer => nervix_client_wire::ChoiceTarget::Parametrizer,
             ChoiceControl::SubscriptionRelay => nervix_client_wire::ChoiceTarget::Relay,
             ChoiceControl::SubscriptionField => nervix_client_wire::ChoiceTarget::RelayField,
             ChoiceControl::CodecWireSchema => nervix_client_wire::ChoiceTarget::WireJsonSchema,
@@ -13162,7 +13162,9 @@ mod tests {
             ChoiceControl::IngestTimestampField | ChoiceControl::IngestInputField => {
                 nervix_client_wire::ChoiceTarget::CodecField
             }
-            ChoiceControl::IngestRouteBranch => nervix_client_wire::ChoiceTarget::Branch,
+            ChoiceControl::IngestRouteParametrizer => {
+                nervix_client_wire::ChoiceTarget::Parametrizer
+            }
             ChoiceControl::IngestRouteRelay | ChoiceControl::IngestErrorRelay => {
                 nervix_client_wire::ChoiceTarget::IngestUnbranchedRelay
             }
@@ -13177,8 +13179,8 @@ mod tests {
             | ChoiceControl::ProcessorRightInputRelay
             | ChoiceControl::ProcessorLeftTimeoutRelay
             | ChoiceControl::ProcessorRightTimeoutRelay => nervix_client_wire::ChoiceTarget::Relay,
-            ChoiceControl::ProcessorBranch | ChoiceControl::ProcessorRouteBranch => {
-                nervix_client_wire::ChoiceTarget::Branch
+            ChoiceControl::ProcessorParametrizer | ChoiceControl::ProcessorRouteParametrizer => {
+                nervix_client_wire::ChoiceTarget::Parametrizer
             }
             ChoiceControl::ProcessorStateField
             | ChoiceControl::ProcessorInputField

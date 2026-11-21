@@ -183,9 +183,9 @@ impl Runtime {
     pub(super) fn register_branch_lifecycle_metrics(
         &self,
         domain: &DomainName,
-        branch: Option<&BranchName>,
+        parametrizer: Option<&ParametrizerName>,
     ) {
-        if let Some(branch) = branch {
+        if let Some(branch) = parametrizer {
             let dispatcher = self.inner.remote_dispatcher.load();
             self.inner.metrics.register_branch(
                 domain,
@@ -205,10 +205,10 @@ impl Runtime {
     pub(super) fn observe_branch_instance_created(
         &self,
         domain: &DomainName,
-        branch: Option<&BranchName>,
+        parametrizer: Option<&ParametrizerName>,
         key: &Option<BranchKey>,
     ) {
-        if let Some(branch) = branch {
+        if let Some(branch) = parametrizer {
             let dispatcher = self.inner.remote_dispatcher.load();
             self.inner.metrics.observe_branch_instance_created(
                 domain,
@@ -229,11 +229,11 @@ impl Runtime {
     pub(super) fn observe_branch_instance_removed(
         &self,
         domain: &DomainName,
-        branch: Option<&BranchName>,
+        parametrizer: Option<&ParametrizerName>,
         key: &Option<BranchKey>,
         reason: Option<BranchEvictionReason>,
     ) {
-        let Some(branch) = branch else {
+        let Some(branch) = parametrizer else {
             return;
         };
         let dispatcher = self.inner.remote_dispatcher.load();

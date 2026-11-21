@@ -215,11 +215,11 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
-  branch's partition count when one relay owner per branch would funnel too much traffic (see
+- Isolation: unbranched or a concrete branch key, the parametrizer's branch TTL, optional instance
+  limit, and partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)). For external partition
   inheritance and producer eligibility, read [Inherited Partitions](../../../docs/src/partitioning.md).
-  Check `DESCRIBE BRANCH` before another recount. Decide an ingestor's `INSTANCES` too: a count of
+  Check `DESCRIBE PARAMETRIZER` before another recount. Decide an ingestor's `INSTANCES` too: a count of
   competing readers, or, on Kafka `OFFSET BY DOMAIN` and Pulsar only, `PER TRANSPORT PARTITION`,
   which deals the topic's partitions among one reader per branch partition. NATS, RabbitMQ, SQS,
   MQTT and Redis have no transport partitions, so they take a count; read
@@ -680,7 +680,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   untrusted custom processing in WASM.
 - Include Roto `test` blocks with every agent-generated UDF. Creation runs those tests and rejects
   the UDF without persisting it when any test rejects.
-- Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
+- Select `BRANCHED BY <parametrizer>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch. Use a reingestor to enter a parametrization distinct from every input relay's or to
   send records unbranched. See [Runtime Nodes](../../../docs/src/processors.md#reingestor).
 - Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
@@ -963,7 +963,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - To intentionally replace an existing WASM processor's guest state, use
   `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH KEY { <field> = <literal>, ... };`.
   It acts on the session's active domain, so `USE` that domain first.
-  Choose the explicit scope that matches its declared branch, and supply every branch-key field
+  Choose the explicit scope that matches its parametrizer, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the
   selected branch must already exist. This command loses the selected computation state; a fresh
   command reference is a new reset, while retrying the same reference returns its original outcome.
@@ -979,7 +979,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.
-- Declare the error relay with the input route's exact named branch, or unbranched for an
+- Declare the error relay with the input route's exact parametrizer, or unbranched for an
   unbranched input. See `Runtime Nodes` for the branch and error-record contract.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.

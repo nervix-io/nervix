@@ -72,7 +72,7 @@ const CONFIGURATION_KINDS: [ModelKind; 12] = [
     ModelKind::Codec,
     ModelKind::Client,
     ModelKind::Vhost,
-    ModelKind::Branch,
+    ModelKind::Parametrizer,
     ModelKind::Endpoint,
     ModelKind::SignalingProtocol,
     ModelKind::Placement,
@@ -170,14 +170,14 @@ const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 79] = [
     ModelChangeAspect::EndpointDefinition,
     ModelChangeAspect::SignalingProtocolDefinition,
     ModelChangeAspect::LookupDefinition,
-    ModelChangeAspect::BranchSchema,
-    ModelChangeAspect::BranchLifecycle,
+    ModelChangeAspect::ParametrizerSchema,
+    ModelChangeAspect::ParametrizerLifecycle,
     ModelChangeAspect::UdfDefinition,
     ModelChangeAspect::PlacementDefinition,
     ModelChangeAspect::EntityReplaced,
     ModelChangeAspect::EntityCreated,
     ModelChangeAspect::EntityDropped,
-    ModelChangeAspect::BranchPartitions,
+    ModelChangeAspect::ParametrizerPartitions,
 ];
 
 /// Every runtime state a Model change can make meaningless, in declaration order.
@@ -357,8 +357,8 @@ impl Arbitrary<'_> {
         match self.entropy.byte() % 4 {
             0 => ConcreteBranchCoverage::Unbranched,
             1 => ConcreteBranchCoverage::All,
-            2 => ConcreteBranchCoverage::AllOfBranch {
-                branch: self.name(),
+            2 => ConcreteBranchCoverage::AllOfParametrizer {
+                parametrizer: self.name(),
             },
             _ => {
                 let branch = self.name();
@@ -1470,7 +1470,7 @@ mod tests {
         "QuiesceSubgraph::gate_boundaries",
         "ConcreteBranchCoverage::All",
         "ConcreteBranchCoverage::Unbranched",
-        "ConcreteBranchCoverage::AllOfBranch",
+        "ConcreteBranchCoverage::AllOfParametrizer",
         "ConcreteBranchCoverage::Selected",
         "ImpactNodeCoverage::configuration",
         "ImpactNodeCoverage::execution",
@@ -1644,14 +1644,16 @@ mod tests {
                 ConcreteBranchCoverage::Unbranched => {
                     self.see("ConcreteBranchCoverage::Unbranched");
                 }
-                ConcreteBranchCoverage::AllOfBranch { .. } => {
-                    self.see("ConcreteBranchCoverage::AllOfBranch");
+                ConcreteBranchCoverage::AllOfParametrizer { .. } => {
+                    self.see("ConcreteBranchCoverage::AllOfParametrizer");
                 }
-                ConcreteBranchCoverage::Selected { branch, keys } => {
+                ConcreteBranchCoverage::Selected { parametrizer, keys } => {
                     self.see("ConcreteBranchCoverage::Selected");
-                    let rebuilt =
-                        ConcreteBranchCoverage::selected(branch.clone(), keys.as_slice().to_vec())
-                            .assured("a generated selection names a key");
+                    let rebuilt = ConcreteBranchCoverage::selected(
+                        parametrizer.clone(),
+                        keys.as_slice().to_vec(),
+                    )
+                    .assured("a generated selection names a key");
                     assert_eq!(&rebuilt, branches);
                 }
             }

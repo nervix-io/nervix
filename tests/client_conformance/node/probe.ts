@@ -541,7 +541,7 @@ async function main(): Promise<void> {
   const keyFields: Field[] = [];
   const branch = schema.branch();
   if (branch !== null) {
-    report(`BRANCH ${member(branch.branch())}`);
+    report(`PARAMETRIZER ${member(branch.parametrizer())}`);
     for (let index = 0; index < branch.fieldsLength(); index += 1) {
       const field = readField(member(branch.fields(index)));
       keyFields.push(field);
@@ -759,7 +759,7 @@ function rowSchema(schema: wire.RowSchema): RowSchemaLines {
   }
   const branch = schema.branch();
   if (branch !== null) {
-    lines.push(`BRANCH ${member(branch.branch())}`);
+    lines.push(`PARAMETRIZER ${member(branch.parametrizer())}`);
     for (let index = 0; index < branch.fieldsLength(); index += 1) {
       const field = readField(member(branch.fields(index)));
       keys.push(field);

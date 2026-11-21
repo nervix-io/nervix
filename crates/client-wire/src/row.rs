@@ -10,7 +10,7 @@ use std::{fmt, num::NonZeroU32};
 use error_stack::Report;
 use flatbuffers::{ForwardsUOffset, Vector, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{BranchName, FieldName, ParseAsType, SchemaField, Timestamp};
+use nervix_models::{FieldName, ParametrizerName, ParseAsType, SchemaField, Timestamp};
 use thiserror::Error;
 
 use crate::{
@@ -30,7 +30,7 @@ pub struct RowSchema {
 /// The declared branch of a branched relay and the fields of its key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowBranch {
-    branch: BranchName,
+    parametrizer: ParametrizerName,
     fields: Vec<SchemaField>,
 }
 
@@ -41,17 +41,20 @@ pub struct EmptyBranchKey;
 
 impl RowBranch {
     pub fn new(
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         fields: Vec<SchemaField>,
     ) -> Result<Self, Report<EmptyBranchKey>> {
         if fields.is_empty() {
             return Err(Report::new(EmptyBranchKey));
         }
-        Ok(Self { branch, fields })
+        Ok(Self {
+            parametrizer,
+            fields,
+        })
     }
 
-    pub fn branch(&self) -> &BranchName {
-        &self.branch
+    pub fn parametrizer(&self) -> &ParametrizerName {
+        &self.parametrizer
     }
 
     /// The branch key fields in key order.
@@ -78,7 +81,7 @@ impl RowSchema {
         })?;
         let branch = match &self.branch {
             Some(branch) => {
-                let name = encoder.text("RowBranch.branch", branch.branch.as_str())?;
+                let name = encoder.text("RowBranch.parametrizer", branch.parametrizer.as_str())?;
                 let fields = encoder.table_vector(
                     "RowBranch.fields",
                     &branch.fields,
@@ -87,7 +90,7 @@ impl RowSchema {
                 Some(wire::RowBranch::create(
                     encoder.fbb(),
                     &wire::RowBranchArgs {
-                        branch: Some(name),
+                        parametrizer: Some(name),
                         fields: Some(fields),
                     },
                 ))
@@ -112,7 +115,7 @@ impl RowSchema {
         })?;
         let branch = match schema.branch() {
             Some(branch) => {
-                let name = decoder.name("RowBranch.branch", branch.branch())?;
+                let name = decoder.name("RowBranch.parametrizer", branch.parametrizer())?;
                 let fields =
                     decoder.table_vector("RowBranch.fields", branch.fields(), |field| {
                         decode_field(decoder, field)

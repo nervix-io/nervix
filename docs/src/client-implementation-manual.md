@@ -277,7 +277,7 @@ archive; see [Restore Streams](#restore-streams).
 ## Structured Choice Lookups
 
 - **Q-1.** A client that sends `ChoiceLookupRequest` MUST use the target's typed dependencies:
-  domain for internal schema, branch, relay, codec, VHOST, signaling protocol, JSON/CBOR/AVRO wire
+  domain for internal schema, parametrizer, relay, codec, VHOST, signaling protocol, JSON/CBOR/AVRO wire
   schema, or resource choices;
   domain followed by a relay `Model` reference for relay fields; domain followed by a codec
   `Model` reference for the fields of its output schema; and domain followed by a
@@ -287,9 +287,9 @@ archive; see [Restore Streams](#restore-streams).
   `WEBSOCKETS ENDPOINT` targets return endpoints of that `TYPE`, and the others return clients of
   the pair's connector. The ingestor codec target carries a
   domain and returns only decoding codecs. Its unbranched relay target carries a domain, while its
-  branched relay target carries a domain followed by a branch `Model` reference. Ingestor error
-  relays use the unbranched target. A branch-field lookup carries a domain followed by a branch
-  `Model` reference. Decoded and relay output fields
+  branched relay target carries a domain followed by a parametrizer `Model` reference. Ingestor
+  error relays use the unbranched target. A branch-field lookup carries a domain followed by a
+  parametrizer `Model` reference. Decoded and relay output fields
   use the codec-field and relay-field targets above. Processor compatible-input, input-branch
   output, and materialized-relay targets each carry a domain followed by the first input relay's
   `Model` reference. The first requires the same named schema and branch, the second the same
@@ -297,7 +297,7 @@ archive; see [Restore Streams](#restore-streams).
   uses the ingestor relay target for its selected branch; a reingestor's first input uses the
   ordinary relay target. Reingestor routes that construct a different branch use the ingestor
   relay and branch-field targets. A generator's materialized-relay target carries a domain alone
-  for an unbranched generator, or a domain followed by its branch `Model` reference, and returns
+  for an unbranched generator, or a domain followed by its parametrizer `Model` reference, and returns
   only relays with materialized state on exactly that branch declaration; the generator's routes
   then use the input-branch target with that relay as the first input. A placement-member
   target carries a domain and returns exactly the runtime nodes a placement rule accepts as
@@ -565,8 +565,8 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
 ## Reading Rows
 
 The reply that opens a subscription carries a `RowSchema`: the relay's fields in declared order,
-each with its name, type, nullability, and sensitivity, and, exactly when the relay is branched, the
-declared branch with its key fields. Every later batch is positional against that schema.
+each with its name, type, nullability, and sensitivity, and, exactly when the relay is branched, its
+parametrizer with the branch key fields. Every later batch is positional against that schema.
 
 - **R-1.** A client MUST read a `RowBatch` only against the schema of the generation its frame
   names.

@@ -11,17 +11,17 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
-    BranchName, CanonicalImpactSet, ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact,
+    CanonicalImpactSet, ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact,
     ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
     ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
     ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
     ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
     ImpactTopologyEdge, ModelChangeAspect, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph,
-    QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName, RequestedResourceVersion,
-    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName, StatePurge,
-    StateResetImpact, TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition,
+    OwnershipMoveImpact, ParametrizerName, PauseRequirement, PlannedExecutionStepImpact,
+    QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName,
+    RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
+    ResourceName, StatePurge, StateResetImpact, TransactionImpactReport, TransactionOperation,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
 };
 
 use crate::{
@@ -153,14 +153,14 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
     EndpointDefinition,
     SignalingProtocolDefinition,
     LookupDefinition,
-    BranchSchema,
-    BranchLifecycle,
+    ParametrizerSchema,
+    ParametrizerLifecycle,
     UdfDefinition,
     PlacementDefinition,
     EntityReplaced,
     EntityCreated,
     EntityDropped,
-    BranchPartitions,
+    ParametrizerPartitions,
     EntityLabels,
 });
 
@@ -1697,8 +1697,8 @@ fn decode_attributed_gate(
     let branches = match boundary.branches_type() {
         wire::BranchCoverage::AllBranchCoverage => BranchCoverageMember::All,
         wire::BranchCoverage::UnbranchedCoverage => BranchCoverageMember::Unbranched,
-        wire::BranchCoverage::DeclaredBranchCoverage => BranchCoverageMember::Declared(
-            union_member(boundary.branches_as_declared_branch_coverage()),
+        wire::BranchCoverage::AllOfParametrizerCoverage => BranchCoverageMember::Declared(
+            union_member(boundary.branches_as_all_of_parametrizer_coverage()),
         ),
         wire::BranchCoverage::SelectedBranchCoverage => BranchCoverageMember::Selected(
             union_member(boundary.branches_as_selected_branch_coverage()),
@@ -1752,8 +1752,8 @@ fn decode_node_coverage(
         }
         wire::NodeBranchCoverage::AllBranchCoverage => BranchCoverageMember::All,
         wire::NodeBranchCoverage::UnbranchedCoverage => BranchCoverageMember::Unbranched,
-        wire::NodeBranchCoverage::DeclaredBranchCoverage => BranchCoverageMember::Declared(
-            union_member(coverage.branches_as_declared_branch_coverage()),
+        wire::NodeBranchCoverage::AllOfParametrizerCoverage => BranchCoverageMember::Declared(
+            union_member(coverage.branches_as_all_of_parametrizer_coverage()),
         ),
         wire::NodeBranchCoverage::SelectedBranchCoverage => BranchCoverageMember::Selected(
             union_member(coverage.branches_as_selected_branch_coverage()),
@@ -1770,7 +1770,7 @@ fn decode_node_coverage(
 enum BranchCoverageMember<'a> {
     All,
     Unbranched,
-    Declared(wire::DeclaredBranchCoverage<'a>),
+    Declared(wire::AllOfParametrizerCoverage<'a>),
     Selected(wire::SelectedBranchCoverage<'a>),
 }
 
@@ -1786,14 +1786,14 @@ trait BranchCoverageUnion {
 impl BranchCoverageUnion for wire::BranchCoverage {
     const ALL: Self = Self::AllBranchCoverage;
     const UNBRANCHED: Self = Self::UnbranchedCoverage;
-    const DECLARED: Self = Self::DeclaredBranchCoverage;
+    const DECLARED: Self = Self::AllOfParametrizerCoverage;
     const SELECTED: Self = Self::SelectedBranchCoverage;
 }
 
 impl BranchCoverageUnion for wire::NodeBranchCoverage {
     const ALL: Self = Self::AllBranchCoverage;
     const UNBRANCHED: Self = Self::UnbranchedCoverage;
-    const DECLARED: Self = Self::DeclaredBranchCoverage;
+    const DECLARED: Self = Self::AllOfParametrizerCoverage;
     const SELECTED: Self = Self::SelectedBranchCoverage;
 }
 
@@ -1815,18 +1815,22 @@ fn encode_branch_coverage<D: BranchCoverageUnion>(
             D::UNBRANCHED,
             wire::UnbranchedCoverage::create(encoder.fbb(), &wire::UnbranchedCoverageArgs {}),
         ),
-        ConcreteBranchCoverage::AllOfBranch { branch } => {
-            let branch = encoder.text("DeclaredBranchCoverage.branch", branch.as_str())?;
-            let declared = wire::DeclaredBranchCoverage::create(
+        ConcreteBranchCoverage::AllOfParametrizer { parametrizer } => {
+            let branch = encoder.text(
+                "AllOfParametrizerCoverage.parametrizer",
+                parametrizer.as_str(),
+            )?;
+            let declared = wire::AllOfParametrizerCoverage::create(
                 encoder.fbb(),
-                &wire::DeclaredBranchCoverageArgs {
-                    branch: Some(branch),
+                &wire::AllOfParametrizerCoverageArgs {
+                    parametrizer: Some(branch),
                 },
             );
             EncodedUnion::new(D::DECLARED, declared)
         }
-        ConcreteBranchCoverage::Selected { branch, keys } => {
-            let branch = encoder.text("SelectedBranchCoverage.branch", branch.as_str())?;
+        ConcreteBranchCoverage::Selected { parametrizer, keys } => {
+            let branch =
+                encoder.text("SelectedBranchCoverage.parametrizer", parametrizer.as_str())?;
             let keys = encoder.table_vector(
                 "SelectedBranchCoverage.keys",
                 keys.as_slice(),
@@ -1837,7 +1841,7 @@ fn encode_branch_coverage<D: BranchCoverageUnion>(
             let selected = wire::SelectedBranchCoverage::create(
                 encoder.fbb(),
                 &wire::SelectedBranchCoverageArgs {
-                    branch: Some(branch),
+                    parametrizer: Some(branch),
                     keys: Some(keys),
                 },
             );
@@ -1856,13 +1860,17 @@ impl BranchCoverageMember<'_> {
             Self::All => Ok(ConcreteBranchCoverage::All),
             Self::Unbranched => Ok(ConcreteBranchCoverage::Unbranched),
             Self::Declared(declared) => {
-                let branch: BranchName =
-                    decoder.name("DeclaredBranchCoverage.branch", declared.branch())?;
-                Ok(ConcreteBranchCoverage::AllOfBranch { branch })
+                let parametrizer: ParametrizerName = decoder.name(
+                    "AllOfParametrizerCoverage.parametrizer",
+                    declared.parametrizer(),
+                )?;
+                Ok(ConcreteBranchCoverage::AllOfParametrizer { parametrizer })
             }
             Self::Selected(selected) => {
-                let branch: BranchName =
-                    decoder.name("SelectedBranchCoverage.branch", selected.branch())?;
+                let parametrizer: ParametrizerName = decoder.name(
+                    "SelectedBranchCoverage.parametrizer",
+                    selected.parametrizer(),
+                )?;
                 let fingerprints = decoder.table_vector(
                     "SelectedBranchCoverage.keys",
                     selected.keys(),
@@ -1873,7 +1881,7 @@ impl BranchCoverageMember<'_> {
                     },
                 )?;
                 ensure_ascending("SelectedBranchCoverage.keys", fingerprints.iter())?;
-                match ConcreteBranchCoverage::selected(branch, fingerprints) {
+                match ConcreteBranchCoverage::selected(parametrizer, fingerprints) {
                     Ok(coverage) => Ok(coverage),
                     Err(error) => Err(error.change_context(WireDecodeError::EmptyCollection {
                         field: "SelectedBranchCoverage.keys",

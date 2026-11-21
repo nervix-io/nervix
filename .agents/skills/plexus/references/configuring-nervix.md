@@ -169,7 +169,7 @@ Use separate execution phases so transaction and active-domain rules stay clear.
 Within the graph transaction, declare dependencies before consumers:
 
 1. internal and branch-key schemas;
-2. named branches;
+2. parametrizers;
 3. wire schemas and codecs;
 4. clients, protocols, vhosts/endpoints, hash maps, and UDF declarations;
 5. relays, including materialized relays;
@@ -279,10 +279,10 @@ current connection, retry and deadline limits.
   Check its `Quiesce` section before promising retention and its `Emitter` section before sizing
   the complete codec payload or interpreting a local write as delivery.
 - Every relay declares a schema and explicit branch selection. Its `CAPACITY` is the cluster-wide
-  owner-buffer bound, once per partition when its branch declares `PARTITIONS <n>`, not a
+  owner-buffer bound, once per partition when its parametrizer declares `PARTITIONS <n>`, not a
   per-branch or per-consumer bound; nonowner producer and remote consumer nodes each have one
-  additional fixed dispatch slot. `ALTER BRANCH <branch> SET PARTITIONS <n>` changes the count on a
-  running domain and moves each key's state to its new partition; confirm with `DESCRIBE BRANCH`
+  additional fixed dispatch slot. `ALTER PARAMETRIZER <parametrizer> SET PARTITIONS <n>` changes the count on a
+  running domain and moves each key's state to its new partition; confirm with `DESCRIBE PARAMETRIZER`
   that no previous count is still moving before changing it again; read `Streams And State` →
   `Changing the partition count`.
   For automatic or grouped external partition inheritance, source agreement and Kafka/Pulsar
@@ -290,9 +290,9 @@ current connection, retry and deadline limits.
   count while discovery is pending or choose an external partition with a branch expression.
   On native 64-bit targets, its positive integer range ends at `18446744073709551615`, and stored,
   replicated, and restarted definitions retain the exact accepted capacity.
-- Every ordinary processor input/output uses the same named branch, or all are unbranched.
+- Every ordinary processor input/output uses the same parametrizer, or all are unbranched.
 - Every multi-input emitter relay declares the same payload schema. Its inputs may use different
-  branch names, but each input retains its own branch through collection and external publish;
+  parametrizers, but each input retains its own branch through collection and external publish;
   node-wide materialized dependencies and message-error relays match every input branch exactly.
 - Every emitter declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
@@ -757,7 +757,7 @@ Choose checks relevant to the configured graph:
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports
-  `nervix_branch_instances` per domain, branch declaration, and physical node, plus
+  `nervix_branch_instances` per domain, parametrizer, and physical node, plus
   `nervix_branch_evictions_total` split by `reason="lru"` or `reason="ttl"`.
 - A server error, negative acknowledgement or log names a concrete branch as `branch <fingerprint>`
   or `unbranched`, never by key values. Match the fingerprint to the one

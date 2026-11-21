@@ -642,9 +642,9 @@ nx_error *nx_schema_field_levels(const nx_schema *schema, int32_t part, size_t i
    NX_ERROR_INVALID_ARGUMENT. */
 nx_error *nx_schema_field_level(const nx_schema *schema, int32_t part, size_t index, size_t level,
                                 nx_type *type, uint32_t *length);
-/* Whether the relay is branched, and the branch's name when it is. An endpoint's schema is never
-   branched. */
-bool nx_schema_branch(const nx_schema *schema, const uint8_t **name, size_t *name_len);
+/* Whether the relay is branched, and its parametrizer's name when it is. An endpoint's schema is
+   never branched. */
+bool nx_schema_parametrizer(const nx_schema *schema, const uint8_t **name, size_t *name_len);
 void nx_schema_free(nx_schema *schema);
 
 /* ---- Events ------------------------------------------------------------------------------- */

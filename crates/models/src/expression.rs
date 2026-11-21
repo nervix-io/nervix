@@ -3,7 +3,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BranchName, BuiltinFunctionName, FieldName, JsonPath, ParseAsType, RelayName, UdfName,
+    BuiltinFunctionName, FieldName, JsonPath, ParametrizerName, ParseAsType, RelayName, UdfName,
 };
 
 /// An executable Plexus expression with parser-only spans removed.
@@ -750,7 +750,7 @@ pub struct MaterializedStateDependency {
 )]
 pub enum OutputBranch {
     BranchedBy {
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         assignments: Vec<Assignment>,
     },
     Unbranched,
@@ -758,19 +758,19 @@ pub enum OutputBranch {
 
 impl OutputBranch {
     /// The branch this route constructs from fields. Empty assignments preserve its input key.
-    pub fn constructed_branch(&self) -> Option<&BranchName> {
+    pub fn constructed_parametrizer(&self) -> Option<&ParametrizerName> {
         match self {
             Self::BranchedBy {
-                branch,
+                parametrizer,
                 assignments,
-            } if !assignments.is_empty() => Some(branch),
+            } if !assignments.is_empty() => Some(parametrizer),
             Self::BranchedBy { .. } | Self::Unbranched => None,
         }
     }
 
-    pub fn branch(&self) -> Option<&BranchName> {
+    pub fn parametrizer(&self) -> Option<&ParametrizerName> {
         match self {
-            Self::BranchedBy { branch, .. } => Some(branch),
+            Self::BranchedBy { parametrizer, .. } => Some(parametrizer),
             Self::Unbranched => None,
         }
     }

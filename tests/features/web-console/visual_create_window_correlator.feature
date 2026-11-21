@@ -29,9 +29,9 @@ Feature: Web console visual window processor and correlator creation
     And selector ".create-menu [data-create-kind='window-processor']" is clicked
     And selector ".create-name" is filled with "visual_window_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_window_tenant"
-    Then selector ".create-processor-branch [data-value='visual_window_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_window_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_window_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_window_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_window_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_window_input"
     Then selector ".create-processor-input [data-value='visual_window_input']" exists
     When selector ".create-processor-input [data-value='visual_window_input']" is clicked
@@ -152,9 +152,9 @@ Feature: Web console visual window processor and correlator creation
     # A correlator filters each side on its own and has no node-wide filter.
     Then selector ".create-processor-filter" does not exist
     When selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_correlate_tenant"
-    Then selector ".create-processor-branch [data-value='visual_correlate_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_correlate_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_correlate_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_correlate_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_correlate_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_orders"
     Then selector ".create-processor-input [data-value='visual_orders']" exists
     When selector ".create-processor-input [data-value='visual_orders']" is clicked

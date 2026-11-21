@@ -130,7 +130,7 @@ impl DomainState {
 
         for (key, model) in models {
             has_inherited_partitions |=
-                matches!(model, Model::Branch(branch) if branch.partitions.is_inherited());
+                matches!(model, Model::Parametrizer(branch) if branch.partitions.is_inherited());
             let resolved_branching = match model {
                 Model::Relay(relay) => Some(resolved_branch_selection(
                     domain,
@@ -190,7 +190,7 @@ impl DomainState {
                 .verified("the pass above added a graph node for every model in this map");
 
             if let Some(branched_by) = model_branch_selection(model)
-                && let Some(branch_ref) = branched_by.branch_ref()
+                && let Some(branch_ref) = branched_by.parametrizer_ref()
             {
                 let branch = expect_kind(
                     domain,
@@ -198,7 +198,7 @@ impl DomainState {
                     models,
                     &indices,
                     branch_ref,
-                    ModelKind::Branch,
+                    ModelKind::Parametrizer,
                 )?;
                 graph.add_edge(branch, source, EdgeKind::RequiredBy);
             }
@@ -257,7 +257,7 @@ impl DomainState {
                 Model::Schema(schema) => {
                     ensure_schema_has_fields(domain, identifier, &schema.fields, "schema")?;
                 }
-                Model::Branch(branch) => {
+                Model::Parametrizer(branch) => {
                     let branch_schema = expect_kind(
                         domain,
                         identifier,
@@ -823,14 +823,14 @@ impl DomainState {
                         ModelKind::Schema,
                     )?;
                     graph.add_edge(schema, source, EdgeKind::RequiredBy);
-                    if let Some(branch_ref) = stream.branching.branch() {
+                    if let Some(branch_ref) = stream.branching.parametrizer() {
                         let branch = expect_kind(
                             domain,
                             identifier,
                             models,
                             &indices,
                             branch_ref,
-                            ModelKind::Branch,
+                            ModelKind::Parametrizer,
                         )?;
                         graph.add_edge(branch, source, EdgeKind::RequiredBy);
                     }

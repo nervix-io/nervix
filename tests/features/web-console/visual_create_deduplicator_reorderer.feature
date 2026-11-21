@@ -28,9 +28,9 @@ Feature: Web console visual deduplicator and reorderer creation
     And selector ".create-menu [data-create-kind='deduplicator']" is clicked
     And selector ".create-name" is filled with "visual_dedup_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_dedup_tenant"
-    Then selector ".create-processor-branch [data-value='visual_dedup_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_dedup_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_dedup_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_dedup_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_dedup_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_dedup_input"
     Then selector ".create-processor-input [data-value='visual_dedup_input']" exists
     When selector ".create-processor-input [data-value='visual_dedup_input']" is clicked
@@ -119,9 +119,9 @@ Feature: Web console visual deduplicator and reorderer creation
     And selector ".create-menu [data-create-kind='reorderer']" is clicked
     And selector ".create-name" is filled with "visual_reorder_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_reorder_tenant"
-    Then selector ".create-processor-branch [data-value='visual_reorder_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_reorder_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_reorder_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_reorder_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_reorder_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_reorder_input"
     Then selector ".create-processor-input [data-value='visual_reorder_input']" exists
     When selector ".create-processor-input [data-value='visual_reorder_input']" is clicked
@@ -191,9 +191,9 @@ Feature: Web console visual deduplicator and reorderer creation
     And selector ".create-menu [data-create-kind='deduplicator']" is clicked
     And selector ".create-name" is filled with "visual_check_dedup"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_check_tenant"
-    Then selector ".create-processor-branch [data-value='visual_check_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_check_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_check_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_check_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_check_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_check"
     Then selector ".create-processor-input [data-value='visual_check_input']" exists
     And selector ".create-processor-input [data-value='visual_check_unbranched']" does not exist

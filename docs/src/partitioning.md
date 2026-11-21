@@ -9,7 +9,7 @@ business key; the external coordinate decides which execution unit owns it. See
 
 ```plexus
 CREATE SCHEMA tenant_key (tenant STRING);
-CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
 ```
 
 `PARTITIONS INHERITED` follows the observed partition count. A topic with twelve partitions gives
@@ -20,7 +20,7 @@ coordinate, zero.
 
 ```plexus
 CREATE SCHEMA account_key (account STRING);
-CREATE BRANCH by_account SCHEMA account_key TTL 5m PARTITIONS 4 INHERITED;
+CREATE PARAMETRIZER by_account SCHEMA account_key TTL 5m PARTITIONS 4 INHERITED;
 ```
 
 `PARTITIONS n INHERITED` declares a fixed number of groups, from 1 through 65535. External
@@ -29,7 +29,7 @@ zero reads partitions 0, 4 and 8; group one reads 1, 5 and 9. Every producer of 
 same committed grouping.
 
 More groups than external partitions are allowed. With twelve external partitions and sixteen
-groups, groups 12 through 15 are idle. `DESCRIBE BRANCH` reports the resolved count, external count
+groups, groups 12 through 15 are idle. `DESCRIBE PARAMETRIZER` reports the resolved count, external count
 and idle groups. An automatic count above 65535 cannot be installed; a declared grouping can fold
 a larger enumerable set into the supported number of branch partitions.
 The largest native partition coordinate must also fit the connectors' signed 32-bit metadata.
@@ -112,7 +112,7 @@ identify an unknown publisher's partition. Materialized reads likewise locate a 
 applying a default or treating it as absent. Checkpoints and backups retain the external origin so
 restoring under a different group count uses that origin.
 
-`ALTER BRANCH ... SET PARTITIONS INHERITED` and `ALTER BRANCH ... SET PARTITIONS n INHERITED`
+`ALTER PARAMETRIZER ... SET PARTITIONS INHERITED` and `ALTER PARAMETRIZER ... SET PARTITIONS n INHERITED`
 select automatic or grouped inheritance. As with a direct recount, an operator must let an ongoing
 key transition settle before changing the declaration again. External topology observations can
 advance while idle keys remain retained; their holding units remain scheduled until those keys are

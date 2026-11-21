@@ -37,9 +37,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-processor-mode" does not exist
     And selector ".create-processor-filter" does not exist
     When selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_generator_tenant"
-    Then selector ".create-processor-branch [data-value='visual_generator_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_generator_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_generator_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_generator_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_generator_tenant']" is clicked
     # Only a materialized relay on exactly the generator's branch can feed it.
     And selector ".create-generator-relay .create-choice-search" is filled with "visual_generator_"
     Then selector ".create-generator-relay [data-value='visual_generator_state']" exists
@@ -143,9 +143,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-menu [data-create-kind='inferencer']" is clicked
     And selector ".create-name" is filled with "visual_infer_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_infer_tenant"
-    Then selector ".create-processor-branch [data-value='visual_infer_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_infer_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_infer_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_infer_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_infer_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_infer_features"
     Then selector ".create-processor-input [data-value='visual_infer_features']" exists
     When selector ".create-processor-input [data-value='visual_infer_features']" is clicked
@@ -265,9 +265,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-menu [data-create-kind='wasm-processor']" is clicked
     And selector ".create-name" is filled with "visual_wasm_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_wasm_tenant"
-    Then selector ".create-processor-branch [data-value='visual_wasm_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_wasm_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_wasm_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_wasm_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_wasm_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_wasm_events"
     Then selector ".create-processor-input [data-value='visual_wasm_events']" exists
     When selector ".create-processor-input [data-value='visual_wasm_events']" is clicked
@@ -380,7 +380,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-menu [data-create-kind='generator']" is clicked
     And selector ".create-name" is filled with "visual_check_generator"
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "UNBRANCHED or a named branch"
+    Then selector ".create-validation" contains "UNBRANCHED or a parametrizer"
     When selector ".create-processor-branching [data-branch='unbranched']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "materialized relay"

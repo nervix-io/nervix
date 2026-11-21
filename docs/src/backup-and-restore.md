@@ -468,11 +468,11 @@ instead, leave the domain stopped and use `START AT '<frontier>' TIME RATE <rate
 
 A restore installs an archived branch key only when it is a key of the branching its restored
 entity declares in the schedule the restore publishes. A processor runs every branch under its one
-declaration, and a relay's materialized records carry its declared branch. An ingestor or a
+parametrizer, and a relay's materialized records carry its parametrizer. An ingestor or a
 reingestor keeps one branch lifecycle for all of its routes, and each route writes the branch of
 the relay it targets, so a key it archived may belong to the branching of any of those relays,
 unbranched included. A key belongs to a branching when it is absent exactly where the branching is
-unbranched, and otherwise holds exactly the fields of the branch's key schema, each with a value of
+unbranched, and otherwise holds exactly the fields of the parametrizer's key schema, each with a value of
 exactly the field's declared type: the same integer width, a float that is finite, a datetime that
 reads as RFC 3339 text, and an `ARRAY` of its declared length. A key lists its fields in field-name
 order, the order the archive reader requires. No value is converted to fit, and a key that does not
@@ -486,12 +486,12 @@ window skipped only for its window model or branch incarnation still is. The con
 record identity as it reads it. A dry run runs the same checks, and a restore `WITHOUT STATE`
 installs no archived key and checks none. A key that does not belong refuses the whole restore
 before it changes anything. The refusal names the archive section, the lifecycle entry, descriptor
-or record identity, numbered from 1, the entity, the branches it runs in and, for a key of another
+or record identity, numbered from 1, the entity, the parametrizers it runs under and, for a key of another
 shape, the field that is missing, undeclared or of another type. It never includes a key value,
 which a branch schema may declare `SENSITIVE`:
 
 ```text
-restore refused: the branch key of lifecycle entry 1 in archive section 'domains/payments/state/branch_lifecycle/deduplicator/unique_payment_filter/single/branches.rkyv' does not belong to the branching of deduplicator 'unique_payment_filter' in domain 'payments': it is not a key of branch 'by_tenant': field 'tenant' does not hold a value of its declared type: expected STRING, found I64
+restore refused: the branch key of lifecycle entry 1 in archive section 'domains/payments/state/branch_lifecycle/deduplicator/unique_payment_filter/single/branches.rkyv' does not belong to the branching of deduplicator 'unique_payment_filter' in domain 'payments': it is not a key of parametrizer 'by_tenant': field 'tenant' does not hold a value of its declared type: expected STRING, found I64
 ```
 
 Installation checks the same keys against the schedule it installs under before it stages any

@@ -365,7 +365,7 @@ pub(super) async fn run_processor_node_runtime(
             DomainNodeUnitRef::new(ownership_entity.clone(), template.owner.unit),
         )
     );
-    runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
+    runtime_handle.register_branch_lifecycle_metrics(&domain, template.parametrizer.as_ref());
     #[cfg_attr(
         nervix_lint,
         expect(
@@ -940,7 +940,7 @@ pub(super) async fn run_processor_node_runtime(
                         &runtime_handle,
                         &domain,
                         &processor,
-                        template.branch.as_ref(),
+                        template.parametrizer.as_ref(),
                         &mut instances,
                     )
                 )
@@ -958,7 +958,7 @@ pub(super) async fn run_processor_node_runtime(
                 &runtime_handle,
                 &domain,
                 &processor,
-                template.branch.as_ref(),
+                template.parametrizer.as_ref(),
                 &mut instances,
             )
         )
@@ -1065,7 +1065,11 @@ pub(super) async fn dispatch_processor_node_input(
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "the concrete branch creation transition registers its one metric identity",
-            runtime_handle.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
+            runtime_handle.observe_branch_instance_created(
+                domain,
+                template.parametrizer.as_ref(),
+                &key
+            )
         );
         debug!(
             domain = domain.as_str(),
@@ -1136,7 +1140,7 @@ pub(super) async fn dispatch_processor_node_input(
                  identity",
                 runtime_handle.observe_branch_instance_removed(
                     domain,
-                    template.branch.as_ref(),
+                    template.parametrizer.as_ref(),
                     &key,
                     None,
                 )
@@ -1840,13 +1844,13 @@ pub(super) async fn handoff_all_processor_branch_instances(
     runtime: &Runtime,
     domain: &DomainName,
     processor: impl Into<ModelName>,
-    branch: Option<&BranchName>,
+    parametrizer: Option<&ParametrizerName>,
     instances: &mut ProcessorBranches,
 ) -> Vec<ProcessorBranchHandoff> {
     let processor = processor.into();
     let mut handoffs = Vec::new();
     for (key, entry) in instances.drain() {
-        runtime.observe_branch_instance_removed(domain, branch, &key, None);
+        runtime.observe_branch_instance_removed(domain, parametrizer, &key, None);
         let task = match entry.as_ref() {
             ProcessorBranchSlot::Live(task) => task,
             ProcessorBranchSlot::Released(released) => {
@@ -1893,7 +1897,7 @@ pub(super) async fn expire_processor_branch_instances(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                template.branch.as_ref(),
+                template.parametrizer.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Ttl),
             )
@@ -1946,7 +1950,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                template.branch.as_ref(),
+                template.parametrizer.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Lru),
             )
@@ -1997,12 +2001,12 @@ pub(super) async fn shutdown_all_processor_branch_instances(
     runtime: &Runtime,
     domain: &DomainName,
     processor: impl Into<ModelName>,
-    branch: Option<&BranchName>,
+    parametrizer: Option<&ParametrizerName>,
     instances: &mut ProcessorBranches,
 ) {
     let processor = processor.into();
     for (key, entry) in instances.drain() {
-        runtime.observe_branch_instance_removed(domain, branch, &key, None);
+        runtime.observe_branch_instance_removed(domain, parametrizer, &key, None);
         let Some(task) = entry.live() else {
             continue;
         };

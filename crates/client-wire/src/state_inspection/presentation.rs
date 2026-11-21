@@ -233,7 +233,7 @@ impl Serialize for SchemaJson<'_> {
         let mut output = serializer.serialize_map(Some(2))?;
         output.serialize_entry("fields", &self.0.fields)?;
         let branch = self.0.branch.as_ref().map(|branch| BranchJson {
-            name: branch.branch(),
+            name: branch.parametrizer(),
             fields: branch.fields(),
         });
         output.serialize_entry("branch", &branch)?;
@@ -243,7 +243,7 @@ impl Serialize for SchemaJson<'_> {
 
 #[derive(Serialize)]
 struct BranchJson<'a> {
-    name: &'a nervix_models::BranchName,
+    name: &'a nervix_models::ParametrizerName,
     fields: &'a [nervix_models::SchemaField],
 }
 

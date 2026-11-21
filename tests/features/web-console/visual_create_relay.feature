@@ -24,10 +24,10 @@ Feature: Web console visual relay and subscription creation
     When selector ".create-schema-ref [data-value='order_record']" is clicked
     Then selector ".create-selected-schema" contains "order_record"
     When selector ".create-branching-options [data-value='BRANCHED BY']" is clicked
-    And selector ".create-branch-ref .create-choice-search" is filled with "by_tenant"
-    Then selector ".create-branch-ref [data-value='by_tenant']" exists
-    When selector ".create-branch-ref [data-value='by_tenant']" is clicked
-    Then selector ".create-selected-branch" contains "by_tenant"
+    And selector ".create-parametrizer-ref .create-choice-search" is filled with "by_tenant"
+    Then selector ".create-parametrizer-ref [data-value='by_tenant']" exists
+    When selector ".create-parametrizer-ref [data-value='by_tenant']" is clicked
+    Then selector ".create-selected-parametrizer" contains "by_tenant"
     When selector ".create-capacity" is filled with "4"
     And selector ".create-materialized-options [data-value='LAST BY TIMESTAMP']" is clicked
     Then selector ".create-preview" contains "CREATE RELAY visual_orders SCHEMA order_record BRANCHED BY by_tenant CAPACITY 4 WITH MATERIALIZED STATE LAST BY TIMESTAMP;"
@@ -386,13 +386,13 @@ Feature: Web console visual relay and subscription creation
     Then selector ".create-schema-ref [data-value='tenant_key']" exists
     When selector ".create-schema-ref [data-value='tenant_key']" is clicked
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "Choose UNBRANCHED or a branch"
+    Then selector ".create-validation" contains "Choose UNBRANCHED or a parametrizer"
     When selector ".create-branching-options [data-value='BRANCHED BY']" is clicked
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "Choose a branch"
-    When selector ".create-branch-ref .create-choice-search" is filled with "by_tenant"
-    Then selector ".create-branch-ref [data-value='by_tenant']" exists
-    When selector ".create-branch-ref [data-value='by_tenant']" is clicked
+    Then selector ".create-validation" contains "Choose a parametrizer"
+    When selector ".create-parametrizer-ref .create-choice-search" is filled with "by_tenant"
+    Then selector ".create-parametrizer-ref [data-value='by_tenant']" exists
+    When selector ".create-parametrizer-ref [data-value='by_tenant']" is clicked
     And selector ".create-capacity" is filled with "0"
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "Capacity"
@@ -407,7 +407,7 @@ Feature: Web console visual relay and subscription creation
     When selector ".create-scope-change" is clicked
     Then selector ".create-scope" contains "{{domain}}_other"
     And selector ".create-selected-schema" contains "tenant_key"
-    And selector ".create-selected-branch" contains "by_tenant"
+    And selector ".create-selected-parametrizer" contains "by_tenant"
     And selector ".create-reference-invalid" exists
     When selector ".create-submit" is clicked
     Then selector ".create-validation" contains "belongs to a changed context"

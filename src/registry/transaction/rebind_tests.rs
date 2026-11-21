@@ -416,8 +416,8 @@ fn a_wasm_rebinding_reports_a_guest_state_reset_over_every_concrete_branch() {
         &[StateResetImpact {
             node: ImpactNodeCoverage::execution(
                 node_ref(ModelKind::WasmProcessor, "filter_events"),
-                ConcreteBranchCoverage::AllOfBranch {
-                    branch: named("by_tenant"),
+                ConcreteBranchCoverage::AllOfParametrizer {
+                    parametrizer: named("by_tenant"),
                 },
             ),
             state: StatePurge::WasmGuestState,

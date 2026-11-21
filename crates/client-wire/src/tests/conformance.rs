@@ -1334,7 +1334,7 @@ fn schema_lines(schema: &RowSchema, lines: &mut Vec<String>) {
         lines.push(field_line("FIELD", field));
     }
     if let Some(branch) = &schema.branch {
-        lines.push(format!("BRANCH {}", branch.branch().as_str()));
+        lines.push(format!("PARAMETRIZER {}", branch.parametrizer().as_str()));
         for field in branch.fields() {
             lines.push(field_line("KEY", field));
         }

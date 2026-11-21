@@ -408,7 +408,7 @@ fn connect<K: Ord>(
 #[cfg(test)]
 mod tests {
     use nervix_arbitrary::{Arbitrary, Domain};
-    use nervix_models::{BranchKeyFingerprint, BranchPartitions, BranchSelection, Model};
+    use nervix_models::{BranchKeyFingerprint, BranchSelection, Model, ParametrizerPartitions};
     use nonzero_ext::nonzero;
     use petgraph::visit::EdgeRef as _;
 
@@ -419,14 +419,14 @@ mod tests {
     };
 
     fn partition_corridor(partitions: NonZeroU16, processors: u8) -> ActiveGraph {
-        let Model::Branch(mut parametrization) = branch("tenants", "tenant_key") else {
+        let Model::Parametrizer(mut parametrization) = branch("tenants", "tenant_key") else {
             unreachable!("the fixture builds a branch declaration");
         };
-        parametrization.partitions = BranchPartitions::Direct(partitions);
+        parametrization.partitions = ParametrizerPartitions::Direct(partitions);
         let mut models = vec![
             schema("record"),
             branch_schema("tenant_key", &["tenant"]),
-            Model::Branch(parametrization),
+            Model::Parametrizer(parametrization),
             relay_branched_by("incoming", "record", "tenants"),
         ];
         let mut upstream = String::from("incoming");
@@ -475,7 +475,7 @@ mod tests {
                         .resolved_branching
                         .as_ref()
                         .assured("a corridor output");
-                    assert_eq!(left_branch.branch(), Some(&named("tenants")));
+                    assert_eq!(left_branch.parametrizer(), Some(&named("tenants")));
                     assert_eq!(left_branch, right_branch);
                     let correspondence = UnitCorrespondence::decide(left, right);
                     assert_eq!(correspondence.class, HopClass::Identity);

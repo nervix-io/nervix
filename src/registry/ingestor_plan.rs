@@ -903,10 +903,17 @@ fn client_endpoint_contract(
             .map(|relay| &relay.branching);
         match branching {
             Some(
-                ResolvedBranching::Branched { branch, schema, .. }
-                | ResolvedBranching::AwaitingTopology { branch, schema },
+                ResolvedBranching::Branched {
+                    parametrizer,
+                    schema,
+                    ..
+                }
+                | ResolvedBranching::AwaitingTopology {
+                    parametrizer,
+                    schema,
+                },
             ) => {
-                add(branch.as_str());
+                add(parametrizer.as_str());
                 add(&schema
                     .to_canonical_plexus()
                     .change_context_lazy(unrenderable)?);

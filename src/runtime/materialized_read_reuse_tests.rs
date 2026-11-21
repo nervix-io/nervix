@@ -437,7 +437,8 @@ async fn a_partition_handoff_hides_only_its_materialized_dependency_until_the_fe
     let nervix_models::ResolvedBranching::Branched { partitions, .. } = &mut branching else {
         unreachable!("the fixture declares a named branch");
     };
-    *partitions = nervix_models::ResolvedBranchPartitions::Direct(nonzero_ext::nonzero!(2u16));
+    *partitions =
+        nervix_models::ResolvedParametrizerPartitions::Direct(nonzero_ext::nonzero!(2u16));
     let partitioning = RelayPartitioning::of(Some(&branching));
     let services = Arc::new(RelayBoundaryServices::new(
         RelayBoundaryFanout::branch_collapse_with_capacity(nonzero_ext::nonzero!(1usize)),

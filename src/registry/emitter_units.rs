@@ -16,8 +16,8 @@ use std::num::{NonZeroU16, NonZeroU64};
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    BranchName, CreateEmitter, DomainName, EmitterInstances, Model, ModelIndex, ModelKind,
-    ModelName, NodeRef, RelayName, ResolvedBranching, SingleInstanceRefusal, Unit,
+    CreateEmitter, DomainName, EmitterInstances, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    ParametrizerName, RelayName, ResolvedBranching, SingleInstanceRefusal, Unit,
 };
 use thiserror::Error;
 
@@ -51,7 +51,7 @@ pub(in crate::registry) enum EmitterUnits {
     PerPartition {
         count: Option<NonZeroU16>,
         relays: Vec<RelayName>,
-        branch: BranchName,
+        parametrizer: ParametrizerName,
     },
 }
 
@@ -92,7 +92,7 @@ impl EmitterUnits {
                 Ok(Self::Instances(count))
             }
             EmitterInstances::PerPartition => {
-                let Some(branch) = branching.branch() else {
+                let Some(branch) = branching.parametrizer() else {
                     return Err(refusal(EmitterInstancingError::MissingPartitions));
                 };
                 let count = branching.partitions().map(|partitions| partitions.count());
@@ -102,7 +102,7 @@ impl EmitterUnits {
                 Ok(Self::PerPartition {
                     count,
                     relays: emitter.from.relays().to_vec(),
-                    branch: branch.clone(),
+                    parametrizer: branch.clone(),
                 })
             }
         }
@@ -128,7 +128,7 @@ impl EmitterUnits {
             match &shared {
                 None => shared = Some(resolved),
                 Some(expected) => {
-                    if expected.branch() != resolved.branch() {
+                    if expected.parametrizer() != resolved.parametrizer() {
                         return Err(Report::new(EmitterInstancingError::DifferentBranch {
                             relay: relay.clone(),
                         })
@@ -149,8 +149,12 @@ impl EmitterUnits {
         &mut self,
         topology: &nervix_models::PartitionTopology,
     ) {
-        if let Self::PerPartition { count, branch, .. } = self
-            && let Some(layout) = topology.branches.get(branch)
+        if let Self::PerPartition {
+            count,
+            parametrizer,
+            ..
+        } = self
+            && let Some(layout) = topology.parametrizers.get(parametrizer)
         {
             *count = Some(layout.partitions().count());
         }

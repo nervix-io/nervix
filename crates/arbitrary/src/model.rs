@@ -170,7 +170,7 @@ impl ModelVariant {
             Model::ClientAzureBlob(_) => Self::ClientAzureBlob,
             Model::ClientIcebergRest(_) => Self::ClientIcebergRest,
             Model::Vhost(_) => Self::Vhost,
-            Model::Branch(_) => Self::Branch,
+            Model::Parametrizer(_) => Self::Branch,
             Model::Endpoint(_) => Self::Endpoint,
             Model::SignalingProtocol(_) => Self::SignalingProtocol,
             Model::Generator(_) => Self::Generator,
@@ -243,7 +243,7 @@ impl Arbitrary<'_> {
                 unpooled_client!(self, ClientIcebergRest, CreateClientIcebergRest)
             }
             ModelVariant::Vhost => Model::Vhost(self.create_vhost()),
-            ModelVariant::Branch => Model::Branch(self.create_branch()),
+            ModelVariant::Branch => Model::Parametrizer(self.create_branch()),
             ModelVariant::Endpoint => Model::Endpoint(self.create_endpoint()),
             ModelVariant::SignalingProtocol => {
                 Model::SignalingProtocol(self.create_signaling_protocol())

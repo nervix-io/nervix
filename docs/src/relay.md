@@ -16,32 +16,32 @@ CREATE IF NOT EXISTS RELAY notifications
 
 External feeds commonly contain records for many tenants, users, devices, accounts, or other business groups. Nervix branching lets one declared graph process those groups independently.
 
-Branching is defined by a schema name on a named branch:
+Branching is defined by a parametrizer, which names a schema:
 
-- `CREATE BRANCH by_user SCHEMA user_branch TTL 5m` isolates each user
-- `CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m` isolates each tenant
-- `CREATE BRANCH by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
-- `PARTITIONS <n>` divides the branch's concrete keys into partitions that each have their own
+- `CREATE PARAMETRIZER by_user SCHEMA user_branch TTL 5m` isolates each user
+- `CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m` isolates each tenant
+- `CREATE PARAMETRIZER by_tenant_user SCHEMA tenant_user_branch TTL 5m` isolates each tenant/user pair
+- `PARTITIONS <n>` divides the parametrizer's concrete keys into partitions that each have their own
   relay owners; see [Relay Partitions](#relay-partitions)
 - `PARTITIONS INHERITED` and `PARTITIONS <n> INHERITED` follow enumerable external partitions;
   see [Inherited Partitions](partitioning.md)
-- `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that branch
+- `MAX INSTANCES <n> EVICT LRU` can cap active concrete branch instances for that parametrizer
 
-The web console's **Create** menu also has a branch form. Its schema picker searches internal
+The web console's **Create** menu also has a parametrizer form. Its schema picker searches internal
 schemas in the captured domain, including schemas staged earlier in the attached transaction; the
 form requires a TTL, starts its partition count at 1, and accepts the optional positive LRU
 instance limit. Registry validation remains authoritative for whether the selected schema can
-serve as a branch key. `SHOW CREATE BRANCH <name>` returns the stored branch's canonical
-declaration.
+serve as a branch key. `SHOW CREATE PARAMETRIZER <name>` returns the stored parametrizer's
+canonical declaration.
 
-The same menu has a relay form. It selects the relay's schema and branch from server-backed lists
+The same menu has a relay form. It selects the relay's schema and parametrizer from server-backed lists
 of the captured domain, including models staged earlier in the attached transaction, and requires
 an explicit **UNBRANCHED** or **BRANCHED BY** choice. Capacity starts from the default relay buffer,
 and materialized state is none or `LAST BY TIMESTAMP`. `SHOW CREATE RELAY <name>` returns the
 stored relay's canonical declaration, which always states its capacity. See
 [Web Console](client-tools-web-console.md).
 
-Relays select an explicit branch or declare unbranched execution:
+Relays select an explicit parametrizer or declare unbranched execution:
 
 ```plexus
 CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
@@ -50,23 +50,23 @@ CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 
 ## Relay Partitions
 
-A branch declares how many partitions its concrete keys are divided into:
+A parametrizer declares how many partitions its concrete keys are divided into:
 
 ```plexus
-CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4;
+CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m PARTITIONS 4;
 ```
 
 The count is a whole number from 1 through 65535. A declaration that writes no count has one
-partition, and `SHOW CREATE BRANCH` omits `PARTITIONS 1`. `PARTITIONS` follows `TTL` and precedes
+partition, and `SHOW CREATE PARAMETRIZER` omits `PARTITIONS 1`. `PARTITIONS` follows `TTL` and precedes
 `MAX INSTANCES`.
 
-A concrete key in a direct branch lands in partition `seed mod n`. Its seed is the first eight bytes, read
+A concrete key of a parametrizer with direct partitions lands in partition `seed mod n`. Its seed is the first eight bytes, read
 little-endian, of the key's fingerprint, the same fingerprint that names the branch in metrics and
-diagnostics. The seed depends on the key's fields alone, never on the branch, relay or domain the key
-appears in, so every node places a key in the same partition of every relay its branch branches, and
+diagnostics. The seed depends on the key's fields alone, never on the parametrizer, relay or domain the key
+appears in, so every node places a key in the same partition of every relay of its parametrizer, and
 it stays there for as long as the count stays the same.
 
-An inherited branch takes its external coordinate from a Kafka or Pulsar record's native position.
+A parametrizer with inherited partitions takes its external coordinate from a Kafka or Pulsar record's native position.
 It follows the observed count or folds coordinates into a declared number of groups. Discovery,
 co-producing topics, idle groups and reader placement are described in
 [Inherited Partitions](partitioning.md).
@@ -101,19 +101,19 @@ each partition owner delivers that partition only to the instance that serves it
 partition after the relay, such as
 `- domain=payments kind=relay name=tenant_events unit=partition:2 owner=node-3 replicas=-`.
 
-An unbranched relay and a relay of a branch with one partition have one owner.
+An unbranched relay and a relay of a parametrizer with one partition have one owner.
 
 ### Changing the partition count
 
-`ALTER BRANCH <branch> SET PARTITIONS <n>` changes the count of a running, paused or stopped
+`ALTER PARAMETRIZER <parametrizer> SET PARTITIONS <n>` changes the count of a running, paused or stopped
 domain:
 
 ```plexus
-ALTER BRANCH by_tenant SET PARTITIONS 8;
+ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
 ```
 
-The change begins the branch's next partition epoch. On a running domain it activates entity by
-entity, without pausing the domain: Nervix gates, drains and force-flushes the relays of the branch,
+The change begins the parametrizer's next partition epoch. On a running domain it activates entity by
+entity, without pausing the domain: Nervix gates, drains and force-flushes the relays of the parametrizer,
 the processors and generators it divides into partitions, and every producer into and consumer of
 those relays, and from then on producers place each key by the new count. Every other entity of
 the domain keeps running, and session subscriptions of the relays keep receiving rows. On a stopped
@@ -143,11 +143,11 @@ If installation or forget changes the selected branch catalogs during a read, th
 as `not_ready`; retry it with a fresh inspection. Continuations keep their usual generation and
 control-revision fences.
 
-While keys may still lie in partitions of the previous count, `DESCRIBE BRANCH` names that count and
+While keys may still lie in partitions of the previous count, `DESCRIBE PARAMETRIZER` names that count and
 how far moving them has come:
 
 ```text
-branch: by_tenant
+parametrizer: by_tenant
 schema: tenant_key
 ttl: 5m
 partitions: 8
@@ -162,21 +162,21 @@ them in, together with the claims in flight; `keys claimed` counts the keys the 
 owners claimed in this epoch. A partition the new count drops stays scheduled as a holding unit
 until it holds no key, and takes no new records. Once no partition holds a key outside its
 partition, the leader retires the transition, which pauses nothing: `previous partitions`
-disappears from `DESCRIBE BRANCH`, every partition stops claiming keys and the holding units are
+disappears from `DESCRIBE PARAMETRIZER`, every partition stops claiming keys and the holding units are
 removed. Until then a change to yet another count is refused, so
 every key has one partition that may hold it outside its own:
 
 ```text
-branch 'by_tenant' in domain 'payments' is still moving keys placed under its previous partition count 4 to its current count 8; change its partition count again once DESCRIBE BRANCH reports no previous partitions
+parametrizer 'by_tenant' in domain 'payments' is still moving keys placed under its previous partition count 4 to its current count 8; change its partition count again once DESCRIBE PARAMETRIZER reports no previous partitions
 ```
 
 Each node also reports its own part: `nervix_branch_partition_epoch`,
 `nervix_branch_partition_keys_pending` and `nervix_branch_partition_keys_claimed_total`, described
 in [Metrics And Observability](metrics-and-observability.md). A backup cut while keys move restores
-every key into the partition the restored count places it in, and the restored branch begins its
-first partition epoch with no keys pending.
+every key into the partition the restored count places it in, and the restored parametrizer begins
+its first partition epoch with no keys pending.
 
-A branch none of whose entities keeps state per key, no deduplicator, window or WASM processor, no
+A parametrizer none of whose entities keeps state per key, no deduplicator, window or WASM processor, no
 inferencer that declares state and no materialized relay, has nothing to move: its new count applies at once and its epoch has no
 transition. [Data-Plane Concurrency](data-plane-concurrency.md#partition-transitions-and-key-claims)
 owns the claim protocol and its bounds.
@@ -208,7 +208,7 @@ replacing its owner buffer, advances the state epoch observed by readers, and re
 Adding state therefore has no interval in which post-commit records can bypass materialization.
 Dropping state purges the relay's in-memory and persisted materialized records before flow resumes.
 
-An ingestor or reingestor uses `BRANCHED BY <branch>` to compute the branch key for each record. When records for a key arrive, Nervix uses a branch instance for that key. A branch instance is the runtime execution path for one concrete key.
+An ingestor or reingestor uses `BRANCHED BY <parametrizer>` to compute the branch key for each record. When records for a key arrive, Nervix uses a branch instance for that key. A branch instance is the runtime execution path for one concrete key.
 
 Inside a branch, records retain their key while moving through the relay owner. Each concrete relay
 branch has:
@@ -224,11 +224,11 @@ once per declared relay and may contain interleaved batches from several concret
 
 Runtime branch rules:
 
-- an `INGESTOR` starts a branch for one concrete branch key through `BRANCHED BY <branch>`
-- normal downstream processors keep the same named branch and concrete branch key
+- an `INGESTOR` starts a branch for one concrete branch key through `BRANCHED BY <parametrizer>`
+- normal downstream processors keep the same parametrizer and concrete branch key
 - output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
-- a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`
+- a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <parametrizer>`
 - an `EMITTER` consumes records across the whole input relay and terminates the branch at an external emitter
 
 `branch` is a reserved namespace, so a relay cannot be named `branch`. Expressions inside a
@@ -329,7 +329,7 @@ across every branch. If omitted, Nervix uses the default relay buffer.
 
 ## TTL
 
-TTL is a branch contract, not a relay-local setting. `CREATE BRANCH` declares `TTL <duration>` after `SCHEMA <schema>`. `UNBRANCHED` branch roots do not declare TTL because there are no concrete branch instances to expire.
+TTL is a branch contract, not a relay-local setting. `CREATE PARAMETRIZER` declares `TTL <duration>` after `SCHEMA <schema>`. `UNBRANCHED` branch roots do not declare TTL because there are no concrete branch instances to expire.
 
 TTL controls:
 

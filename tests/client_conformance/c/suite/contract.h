@@ -1020,10 +1020,10 @@ static void test_b6_columns_use_size_queries_and_pointer_lengths(void) {
     uint32_t width = 1;
     suite_check(nx_schema_field_level(schema, NX_PART_ROWS, 8, 1, &type, &width));
     REQUIRE(type == NX_TYPE_STRING && width == 0);
-    const uint8_t *branch = NULL;
-    size_t branch_len = 0;
-    REQUIRE(nx_schema_branch(schema, &branch, &branch_len));
-    REQUIRE(suite_equal(branch, branch_len, "by_tenant"));
+    const uint8_t *parametrizer = NULL;
+    size_t parametrizer_len = 0;
+    REQUIRE(nx_schema_parametrizer(schema, &parametrizer, &parametrizer_len));
+    REQUIRE(suite_equal(parametrizer, parametrizer_len, "by_tenant"));
     bool nullable = false, sensitive = false;
     const uint8_t *name = NULL;
     size_t name_len = 0;

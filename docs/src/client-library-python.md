@@ -198,8 +198,8 @@ A page holds at most `page_size` candidates. Its `continuation` is the token of 
 ## Subscribe And Read Rows
 
 A subscription is a statement: `CREATE SUBSCRIPTION <name> TO <relay>;` opens it, and its outcome
-holds its `Subscription` handle and the `Schema` of its rows, with the relay's fields, its branch and
-the branch key's fields.
+holds its `Subscription` handle and the `Schema` of its rows, with the relay's fields, its parametrizer
+and the branch key's fields.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_subscriptions.py:subscribe}}

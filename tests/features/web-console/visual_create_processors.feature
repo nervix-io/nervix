@@ -264,9 +264,9 @@ Feature: Web console visual junction and reingestor creation
     Then selector ".create-processor-input [data-value='visual_partition_input']" exists
     When selector ".create-processor-input [data-value='visual_partition_input']" is clicked
     And selector ".create-processor-route-branching [data-branch='named']" is clicked
-    And selector ".create-processor-route-branch .create-choice-search" is filled with "visual_by_tenant"
-    Then selector ".create-processor-route-branch [data-value='visual_by_tenant']" exists
-    When selector ".create-processor-route-branch [data-value='visual_by_tenant']" is clicked
+    And selector ".create-processor-route-parametrizer .create-choice-search" is filled with "visual_by_tenant"
+    Then selector ".create-processor-route-parametrizer [data-value='visual_by_tenant']" exists
+    When selector ".create-processor-route-parametrizer [data-value='visual_by_tenant']" is clicked
     And selector ".create-processor-branch-fields .create-choice-search" is filled with "tenant"
     Then selector ".create-processor-branch-fields [data-value='tenant']" exists
     When selector ".create-processor-branch-fields [data-value='tenant']" is clicked

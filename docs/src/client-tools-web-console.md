@@ -217,9 +217,9 @@ A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definiti
 share a name. The preview and submitted command come from the completed semantic Model's
 canonical renderer, just as they do for the earlier forms.
 
-A branch form selects an internal key schema from a server-backed, searchable, paged list, then
-requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
-preview omits `PARTITIONS 1` as `SHOW CREATE BRANCH` does. It may set a positive maximum instance
+A parametrizer form selects an internal key schema from a server-backed, searchable, paged list,
+then requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
+preview omits `PARTITIONS 1` as `SHOW CREATE PARAMETRIZER` does. It may set a positive maximum instance
 count with LRU eviction. The schema list
 uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
 earlier in the same transaction is selectable. Changing the captured domain keeps a previous
@@ -487,7 +487,7 @@ as its form; where a contract is source text, the form embeds an editor for exac
 | `CREATE PLACEMENT` | Placement | `DOMAIN WIDE`, corridor `FROM` / `TO`, all four policies | — |
 | `CREATE SCHEMA` | Schema | every internal scalar type with vector and array layers | — |
 | `CREATE WIRE JSON`, `CBOR`, `AVRO SCHEMA` | Wire schema, one per format | each format's wire types, `STRICT` and `LOOSE` | — |
-| `CREATE BRANCH` | Branch | key schema, TTL, partitions, LRU eviction | — |
+| `CREATE PARAMETRIZER` | Parametrizer | key schema, TTL, partitions, LRU eviction | — |
 | `CREATE RELAY` | Relay | `UNBRANCHED`, `BRANCHED BY`, materialized state | — |
 | `CREATE ... CODEC` | Codec | declared wire schemas, `SYSLOG`, every JAQ-native format, Protobuf | jaq programs |
 | `CREATE SIGNALING PROTOCOL` | Signaling protocol | JSON, YAML, TOML, XML, CBOR, RAW, Protobuf | jaq programs |

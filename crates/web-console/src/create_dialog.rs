@@ -167,7 +167,7 @@ use processor_editor::ProcessorEditor;
 use relay_draft::{RelayDraft, RelayDraftError};
 use relay_editor::RelayEditor;
 use schema_draft::{SchemaDraftError, StructuredDrafts, WireFormat};
-use schema_editor::{BranchEditor, SchemaEditor, WireSchemaEditor};
+use schema_editor::{ParametrizerEditor, SchemaEditor, WireSchemaEditor};
 use signaling_draft::{SignalingDraft, SignalingDraftError, SignalingFormatDraft};
 use signaling_editor::SignalingEditor;
 use subscription_draft::{SubscriptionDraft, SubscriptionDraftError};
@@ -187,7 +187,7 @@ pub(crate) enum ChoiceControl {
     PlacementToMember,
     BranchSchema,
     RelaySchema,
-    RelayBranch,
+    RelayParametrizer,
     SubscriptionRelay,
     /// Inserts typed references to the selected relay's fields into the subscription filter.
     SubscriptionField,
@@ -212,7 +212,7 @@ pub(crate) enum ChoiceControl {
     IngestCodec,
     IngestTimestampField,
     IngestInputField,
-    IngestRouteBranch,
+    IngestRouteParametrizer,
     IngestRouteRelay,
     IngestOutputField,
     IngestBranchField,
@@ -229,10 +229,10 @@ pub(crate) enum ChoiceControl {
     EmitterErrorRelay,
     EmitterErrorField,
     ProcessorInputRelay,
-    ProcessorBranch,
+    ProcessorParametrizer,
     ProcessorStateRelay,
     ProcessorStateField,
-    ProcessorRouteBranch,
+    ProcessorRouteParametrizer,
     ProcessorRouteRelay,
     ProcessorInputField,
     ProcessorOutputField,
@@ -277,8 +277,8 @@ impl ChoiceControl {
             Self::PlacementPolicy | Self::PlacementFromMember | Self::PlacementToMember => {
                 CreateKind::Model(ModelKind::Placement)
             }
-            Self::BranchSchema => CreateKind::Model(ModelKind::Branch),
-            Self::RelaySchema | Self::RelayBranch => CreateKind::Model(ModelKind::Relay),
+            Self::BranchSchema => CreateKind::Model(ModelKind::Parametrizer),
+            Self::RelaySchema | Self::RelayParametrizer => CreateKind::Model(ModelKind::Relay),
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
             Self::CodecSchema
             | Self::CodecWireSchema
@@ -299,7 +299,7 @@ impl ChoiceControl {
             | Self::IngestCodec
             | Self::IngestTimestampField
             | Self::IngestInputField
-            | Self::IngestRouteBranch
+            | Self::IngestRouteParametrizer
             | Self::IngestRouteRelay
             | Self::IngestOutputField
             | Self::IngestBranchField
@@ -316,10 +316,10 @@ impl ChoiceControl {
             | Self::EmitterErrorRelay
             | Self::EmitterErrorField => CreateKind::Model(ModelKind::Emitter),
             Self::ProcessorInputRelay
-            | Self::ProcessorBranch
+            | Self::ProcessorParametrizer
             | Self::ProcessorStateRelay
             | Self::ProcessorStateField
-            | Self::ProcessorRouteBranch
+            | Self::ProcessorRouteParametrizer
             | Self::ProcessorRouteRelay
             | Self::ProcessorInputField
             | Self::ProcessorOutputField
@@ -553,7 +553,7 @@ impl ChoiceControls {
             ChoiceControl::PlacementToMember => self.placement_to_member,
             ChoiceControl::BranchSchema => self.branch_schema,
             ChoiceControl::RelaySchema => self.relay_schema,
-            ChoiceControl::RelayBranch => self.relay_branch,
+            ChoiceControl::RelayParametrizer => self.relay_branch,
             ChoiceControl::SubscriptionRelay => self.subscription_relay,
             ChoiceControl::SubscriptionField => self.subscription_field,
             ChoiceControl::CodecSchema => self.codec_schema,
@@ -577,7 +577,7 @@ impl ChoiceControls {
             ChoiceControl::IngestCodec => self.ingest_codec,
             ChoiceControl::IngestTimestampField => self.ingest_timestamp_field,
             ChoiceControl::IngestInputField => self.ingest_input_field,
-            ChoiceControl::IngestRouteBranch => self.ingest_route_branch,
+            ChoiceControl::IngestRouteParametrizer => self.ingest_route_branch,
             ChoiceControl::IngestRouteRelay => self.ingest_route_relay,
             ChoiceControl::IngestOutputField => self.ingest_output_field,
             ChoiceControl::IngestBranchField => self.ingest_branch_field,
@@ -594,10 +594,10 @@ impl ChoiceControls {
             ChoiceControl::EmitterErrorRelay => self.emitter_error_relay,
             ChoiceControl::EmitterErrorField => self.emitter_error_field,
             ChoiceControl::ProcessorInputRelay => self.processor_input_relay,
-            ChoiceControl::ProcessorBranch => self.processor_branch,
+            ChoiceControl::ProcessorParametrizer => self.processor_branch,
             ChoiceControl::ProcessorStateRelay => self.processor_state_relay,
             ChoiceControl::ProcessorStateField => self.processor_state_field,
-            ChoiceControl::ProcessorRouteBranch => self.processor_route_branch,
+            ChoiceControl::ProcessorRouteParametrizer => self.processor_route_branch,
             ChoiceControl::ProcessorRouteRelay => self.processor_route_relay,
             ChoiceControl::ProcessorInputField => self.processor_input_field,
             ChoiceControl::ProcessorOutputField => self.processor_output_field,
@@ -1312,9 +1312,9 @@ impl CreateSignals {
         }
         if self.captured_domain.get_untracked() != domain {
             match kind {
-                CreateKind::Model(ModelKind::Branch) => self
+                CreateKind::Model(ModelKind::Parametrizer) => self
                     .structured
-                    .update(|drafts| drafts.branch.invalidate_references()),
+                    .update(|drafts| drafts.parametrizer.invalidate_references()),
                 CreateKind::Model(ModelKind::Relay) => {
                     self.relay.update(RelayDraft::invalidate_references)
                 }
@@ -1631,9 +1631,9 @@ impl CreateSignals {
                     page_size: 100,
                 })
             }
-            ChoiceControl::RelayBranch => self.domain_question(
-                ChoiceTarget::Branch,
-                "Select a domain before choosing a branch",
+            ChoiceControl::RelayParametrizer => self.domain_question(
+                ChoiceTarget::Parametrizer,
+                "Select a domain before choosing a parametrizer",
             ),
             ChoiceControl::ClientSignaling | ChoiceControl::EndpointSignaling => self
                 .domain_question(
@@ -1741,8 +1741,8 @@ impl CreateSignals {
                     page_size: 100,
                 })
             }
-            ChoiceControl::IngestRouteBranch => self.domain_question(
-                ChoiceTarget::Branch,
+            ChoiceControl::IngestRouteParametrizer => self.domain_question(
+                ChoiceTarget::Parametrizer,
                 "Select a domain before choosing a route branch",
             ),
             ChoiceControl::IngestErrorRelay => self.domain_question(
@@ -1766,12 +1766,12 @@ impl CreateSignals {
                     }
                     RouteBranchDraft::Unbranched => ChoiceTarget::IngestUnbranchedRelay,
                     RouteBranchDraft::Branched { .. } => {
-                        let Some(branch) = route.branch.current_branch() else {
-                            return Err("Choose the named branch before its relay");
+                        let Some(branch) = route.branch.current_parametrizer() else {
+                            return Err("Choose the parametrizer before its relay");
                         };
                         dependencies.push(ChoiceSelection {
                             value: ChoiceValue::Model(nervix_models::NodeRef::new(
-                                ModelKind::Branch,
+                                ModelKind::Parametrizer,
                                 branch,
                             )),
                         });
@@ -1823,9 +1823,9 @@ impl CreateSignals {
                 let draft = self.ingestor.get_untracked();
                 let Some(branch) = draft
                     .active_route()
-                    .and_then(|route| route.branch.current_branch())
+                    .and_then(|route| route.branch.current_parametrizer())
                 else {
-                    return Err("Choose a named branch before its key fields");
+                    return Err("Choose a parametrizer before its key fields");
                 };
                 Ok(ChoiceQuery {
                     target: ChoiceTarget::BranchField,
@@ -1835,7 +1835,7 @@ impl CreateSignals {
                         },
                         ChoiceSelection {
                             value: ChoiceValue::Model(nervix_models::NodeRef::new(
-                                ModelKind::Branch,
+                                ModelKind::Parametrizer,
                                 branch,
                             )),
                         },
@@ -1854,10 +1854,10 @@ impl CreateSignals {
             | ChoiceControl::EmitterErrorRelay
             | ChoiceControl::EmitterErrorField => self.emitter_choice_query(control),
             ChoiceControl::ProcessorInputRelay
-            | ChoiceControl::ProcessorBranch
+            | ChoiceControl::ProcessorParametrizer
             | ChoiceControl::ProcessorStateRelay
             | ChoiceControl::ProcessorStateField
-            | ChoiceControl::ProcessorRouteBranch
+            | ChoiceControl::ProcessorRouteParametrizer
             | ChoiceControl::ProcessorRouteRelay
             | ChoiceControl::ProcessorInputField
             | ChoiceControl::ProcessorOutputField
@@ -1925,7 +1925,7 @@ impl CreateSignals {
             | CreateKind::Model(ModelKind::WireJsonSchema)
             | CreateKind::Model(ModelKind::WireCborSchema)
             | CreateKind::Model(ModelKind::WireAvroSchema)
-            | CreateKind::Model(ModelKind::Branch) => {
+            | CreateKind::Model(ModelKind::Parametrizer) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let drafts = self.structured.get_untracked();
@@ -1934,9 +1934,9 @@ impl CreateSignals {
                         Model::Schema(drafts.schema.build().map_err(draft_error)?),
                         drafts.schema.if_not_exists,
                     ),
-                    CreateKind::Model(ModelKind::Branch) => (
-                        Model::Branch(drafts.branch.build().map_err(draft_error)?),
-                        drafts.branch.if_not_exists,
+                    CreateKind::Model(ModelKind::Parametrizer) => (
+                        Model::Parametrizer(drafts.parametrizer.build().map_err(draft_error)?),
+                        drafts.parametrizer.if_not_exists,
                     ),
                     _ => {
                         let format = kind.wire_format().assured(
@@ -2248,11 +2248,11 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
                 ],
             }
         }
-        CreateKind::Model(ModelKind::Branch) => vec![ChoiceControl::BranchSchema],
+        CreateKind::Model(ModelKind::Parametrizer) => vec![ChoiceControl::BranchSchema],
         CreateKind::Model(ModelKind::Relay) => {
             let mut controls = vec![ChoiceControl::RelaySchema];
             if signals.relay.get_untracked().branching.is_branched() {
-                controls.push(ChoiceControl::RelayBranch);
+                controls.push(ChoiceControl::RelayParametrizer);
             }
             controls
         }
@@ -2338,7 +2338,7 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
                     controls.push(ChoiceControl::IngestInputField);
                 }
                 if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
-                    controls.push(ChoiceControl::IngestRouteBranch);
+                    controls.push(ChoiceControl::IngestRouteParametrizer);
                     controls.push(ChoiceControl::IngestBranchField);
                 }
                 controls.push(ChoiceControl::IngestOutputField);
@@ -2628,8 +2628,8 @@ fn CreateKindFields(
         <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::WireAvroSchema)) fallback=|| ()>
             <WireSchemaEditor signals=signals name_input=name_input format=WireFormat::Avro />
         </Show>
-        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Branch)) fallback=|| ()>
-            <BranchEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+        <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Parametrizer)) fallback=|| ()>
+            <ParametrizerEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
         <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Relay)) fallback=|| ()>
             <RelayEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
@@ -2713,7 +2713,7 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                         Some(CreateKind::Model(ModelKind::WireJsonSchema)) => signals.structured.get().wire_json.if_not_exists,
                         Some(CreateKind::Model(ModelKind::WireCborSchema)) => signals.structured.get().wire_cbor.if_not_exists,
                         Some(CreateKind::Model(ModelKind::WireAvroSchema)) => signals.structured.get().wire_avro.if_not_exists,
-                        Some(CreateKind::Model(ModelKind::Branch)) => signals.structured.get().branch.if_not_exists,
+                        Some(CreateKind::Model(ModelKind::Parametrizer)) => signals.structured.get().parametrizer.if_not_exists,
                         Some(CreateKind::Model(ModelKind::Relay)) => signals.relay.get().if_not_exists,
                         Some(CreateKind::Model(ModelKind::Codec)) => signals.codec.get().if_not_exists,
                         Some(CreateKind::Model(ModelKind::SignalingProtocol)) => signals.signaling.get().if_not_exists,
@@ -2747,7 +2747,7 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                             Some(CreateKind::Model(ModelKind::WireJsonSchema)) => signals.structured.update(|draft| draft.wire_json.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::WireCborSchema)) => signals.structured.update(|draft| draft.wire_cbor.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::WireAvroSchema)) => signals.structured.update(|draft| draft.wire_avro.if_not_exists = checked),
-                            Some(CreateKind::Model(ModelKind::Branch)) => signals.structured.update(|draft| draft.branch.if_not_exists = checked),
+                            Some(CreateKind::Model(ModelKind::Parametrizer)) => signals.structured.update(|draft| draft.parametrizer.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::Relay)) => signals.relay.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::Codec)) => signals.codec.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::SignalingProtocol)) => signals.signaling.update(|draft| draft.if_not_exists = checked),
