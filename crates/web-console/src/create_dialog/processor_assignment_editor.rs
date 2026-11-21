@@ -185,7 +185,7 @@ mod tests {
                     StatePolicyDraft::Default(Vec::new());
                 let route = draft.active_route_mut().assured("route exists");
                 route.branch = RouteBranchDraft::Branched {
-                    branch: None,
+                    parametrizer: None,
                     assignments: Vec::new(),
                 };
                 route.message_error = MessageErrorDraft::SendTo {

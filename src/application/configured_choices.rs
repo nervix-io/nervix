@@ -39,7 +39,7 @@ mod emitter;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application) enum ConfiguredQuestion {
     Schemas,
-    Branches,
+    Parametrizers,
     Relays,
     Codecs,
     Vhosts,
@@ -96,7 +96,7 @@ impl<'a> ConfiguredQuery<'a> {
         }
         let question = match request.target() {
             ChoiceTarget::Schema => ConfiguredQuestion::Schemas,
-            ChoiceTarget::Parametrizer => ConfiguredQuestion::Branches,
+            ChoiceTarget::Parametrizer => ConfiguredQuestion::Parametrizers,
             ChoiceTarget::Relay => ConfiguredQuestion::Relays,
             ChoiceTarget::Codec => ConfiguredQuestion::Codecs,
             ChoiceTarget::Vhost => ConfiguredQuestion::Vhosts,
@@ -412,7 +412,7 @@ impl ConfiguredChoices {
         let search = search.to_lowercase();
         match question {
             ConfiguredQuestion::Schemas
-            | ConfiguredQuestion::Branches
+            | ConfiguredQuestion::Parametrizers
             | ConfiguredQuestion::Relays
             | ConfiguredQuestion::Codecs
             | ConfiguredQuestion::Vhosts
@@ -460,8 +460,8 @@ impl ConfiguredChoices {
                 (ConfiguredQuestion::Schemas, Model::Schema(schema)) => {
                     ModelCandidate::schema(schema)?
                 }
-                (ConfiguredQuestion::Branches, Model::Parametrizer(branch)) => {
-                    ModelCandidate::branch(branch)?
+                (ConfiguredQuestion::Parametrizers, Model::Parametrizer(parametrizer)) => {
+                    ModelCandidate::parametrizer(parametrizer)?
                 }
                 (ConfiguredQuestion::Relays, Model::Relay(relay)) => ModelCandidate::relay(relay)?,
                 (ConfiguredQuestion::Codecs, Model::Codec(codec)) => ModelCandidate::new(
@@ -815,20 +815,20 @@ impl ConfiguredChoices {
     /// Non-security BLAKE3: checks branch/schema-page freshness, not access permission.
     fn branch_fields(
         &self,
-        branch: &NodeRef,
+        parametrizer: &NodeRef,
         search: &str,
     ) -> Result<ResolvedChoices, ChoiceStatus> {
-        let Some(Model::Parametrizer(branch)) = self.models.get(branch) else {
+        let Some(Model::Parametrizer(parametrizer)) = self.models.get(parametrizer) else {
             return Err(ChoiceStatus::MissingContext);
         };
-        let schema_ref = NodeRef::new(ModelKind::Schema, &branch.schema);
+        let schema_ref = NodeRef::new(ModelKind::Schema, &parametrizer.schema);
         let Some(Model::Schema(schema)) = self.models.get(&schema_ref) else {
             return Err(ChoiceStatus::LookupFailed);
         };
         let mut digest = blake3::Hasher::new();
         hash_choice_text(
             &mut digest,
-            &branch
+            &parametrizer
                 .to_canonical_plexus()
                 .inspect_err(|error| {
                     nervix_recovery::Reported::reported(
@@ -925,16 +925,24 @@ impl ModelCandidate {
         Self::new(node, detail, "Schema", schema.to_canonical_plexus())
     }
 
-    fn branch(branch: &CreateParametrizer) -> Result<Self, ChoiceStatus> {
-        let mut detail = format!("key schema {} · TTL {}", branch.schema, branch.ttl);
-        if let Some(eviction) = &branch.eviction {
+    fn parametrizer(parametrizer: &CreateParametrizer) -> Result<Self, ChoiceStatus> {
+        let mut detail = format!(
+            "key schema {} · TTL {}",
+            parametrizer.schema, parametrizer.ttl
+        );
+        if let Some(eviction) = &parametrizer.eviction {
             detail.push_str(&format!(
                 " · at most {} instances",
                 eviction.max_instances()
             ));
         }
-        let node = NodeRef::new(ModelKind::Parametrizer, &branch.name);
-        Self::new(node, detail, "Branch", branch.to_canonical_plexus())
+        let node = NodeRef::new(ModelKind::Parametrizer, &parametrizer.name);
+        Self::new(
+            node,
+            detail,
+            "Parametrizer",
+            parametrizer.to_canonical_plexus(),
+        )
     }
 
     /// A codec offered to a clause that uses it in `direction`, with the schema of the records it
@@ -1145,19 +1153,22 @@ mod tests {
             ),
             ["audit", "dangling"]
         );
-        let branch = ParametrizerName::parse("by_tenant").assured("valid branch");
+        let parametrizer = ParametrizerName::parse("by_tenant").assured("valid branch");
         assert_eq!(
             labels(
                 &ConfiguredQuestion::CompatibleRelays(RelayQuestion::OnBranch(Some(
-                    branch.clone()
+                    parametrizer.clone()
                 ))),
                 ""
             ),
             ["orders"]
         );
-        let branch_ref = NodeRef::new(ModelKind::Parametrizer, &branch);
+        let parametrizer_ref = NodeRef::new(ModelKind::Parametrizer, &parametrizer);
         assert_eq!(
-            labels(&ConfiguredQuestion::BranchFields(branch_ref.clone()), ""),
+            labels(
+                &ConfiguredQuestion::BranchFields(parametrizer_ref.clone()),
+                ""
+            ),
             ["tenant"]
         );
         let branched = ChoiceLookupRequest::new(
@@ -1167,7 +1178,7 @@ mod tests {
                     value: ChoiceValue::Domain(domain()),
                 },
                 ChoiceSelection {
-                    value: ChoiceValue::Model(branch_ref.clone()),
+                    value: ChoiceValue::Model(parametrizer_ref.clone()),
                 },
             ],
             String::new(),
@@ -1175,7 +1186,7 @@ mod tests {
         assert_eq!(
             ConfiguredQuery::of(&branched).map(|query| query.question),
             Some(ConfiguredQuestion::CompatibleRelays(
-                RelayQuestion::OnBranch(Some(branch))
+                RelayQuestion::OnBranch(Some(parametrizer))
             )),
         );
         let key_fields = ChoiceLookupRequest::new(
@@ -1185,7 +1196,7 @@ mod tests {
         );
         assert_eq!(
             ConfiguredQuery::of(&key_fields).map(|query| query.question),
-            Some(ConfiguredQuestion::BranchFields(branch_ref)),
+            Some(ConfiguredQuestion::BranchFields(parametrizer_ref)),
         );
     }
 
@@ -1535,7 +1546,10 @@ mod tests {
         }];
         for (target, question) in [
             (ChoiceTarget::Schema, ConfiguredQuestion::Schemas),
-            (ChoiceTarget::Parametrizer, ConfiguredQuestion::Branches),
+            (
+                ChoiceTarget::Parametrizer,
+                ConfiguredQuestion::Parametrizers,
+            ),
             (ChoiceTarget::Relay, ConfiguredQuestion::Relays),
             (
                 ChoiceTarget::PlacementMember,
@@ -1617,7 +1631,7 @@ mod tests {
             ["order_record", "tenant_key"]
         );
         assert_eq!(
-            labels(&ConfiguredQuestion::Branches, ""),
+            labels(&ConfiguredQuestion::Parametrizers, ""),
             ["bounded_tenants", "by_tenant"]
         );
         assert_eq!(
@@ -1625,7 +1639,7 @@ mod tests {
             ["audit", "dangling", "orders"]
         );
         assert_eq!(labels(&ConfiguredQuestion::Relays, "ORD"), ["orders"]);
-        assert!(labels(&ConfiguredQuestion::Branches, "nothing").is_empty());
+        assert!(labels(&ConfiguredQuestion::Parametrizers, "nothing").is_empty());
 
         let relays = configuration()
             .resolve(&ConfiguredQuestion::Relays, "")
@@ -1641,7 +1655,7 @@ mod tests {
             Some("schema order_record · unbranched")
         );
         let branches = configuration()
-            .resolve(&ConfiguredQuestion::Branches, "")
+            .resolve(&ConfiguredQuestion::Parametrizers, "")
             .assured("branches resolve");
         assert_eq!(
             branches.choices[0].presentation.detail.as_deref(),

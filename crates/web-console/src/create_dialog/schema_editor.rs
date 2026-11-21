@@ -428,16 +428,16 @@ pub(super) fn ParametrizerEditor(
             session_generation=session_generation />
         <Show when=move || signals.structured.get().parametrizer.schema.is_some() fallback=|| ()>
             <p class="create-selected-schema">{move || {
-                let branch = signals.structured.get().parametrizer;
-                match branch.schema {
+                let parametrizer = signals.structured.get().parametrizer;
+                match parametrizer.schema {
                     Some(schema) => format!("Selected schema: {}", schema.name()),
                     None => String::new(),
                 }
             }}</p>
         </Show>
         <Show when=move || {
-            let branch = signals.structured.get().parametrizer;
-            branch.schema.is_some_and(|schema| !schema.is_current())
+            let parametrizer = signals.structured.get().parametrizer;
+            parametrizer.schema.is_some_and(|schema| !schema.is_current())
         } fallback=|| ()>
             <p class="create-reference-invalid" role="alert">"The selected schema's domain changed. Select a schema again."</p>
         </Show>

@@ -421,14 +421,14 @@ fn processor_choices_update_each_selected_ordered_section() {
             ChoiceControl::ProcessorStateField,
             ChoiceValue::Field(FieldName::parse("message").assured("valid field")),
         );
-        let branch = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
-        select_choice(signals, ChoiceControl::ProcessorRouteParametrizer, branch.clone());
-        assert!(selected_choice(signals, ChoiceControl::ProcessorRouteParametrizer, &branch));
+        let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+        select_choice(signals, ChoiceControl::ProcessorRouteParametrizer, parametrizer.clone());
+        assert!(selected_choice(signals, ChoiceControl::ProcessorRouteParametrizer, &parametrizer));
         let branch_fields = signals
             .choice_query(ChoiceControl::ProcessorBranchField)
             .assured("route branch selected");
         assert_eq!(branch_fields.target, ChoiceTarget::BranchField);
-        assert_eq!(branch_fields.dependencies[1].value, branch);
+        assert_eq!(branch_fields.dependencies[1].value, parametrizer);
         assert_eq!(
             signals
                 .choice_query(ChoiceControl::ProcessorRouteRelay)
@@ -717,16 +717,16 @@ fn ingestor_choices_follow_the_selected_source_codec_branch_and_relays() {
             signals.choice_query(ChoiceControl::IngestRouteRelay).err(),
             Some("Choose the parametrizer before its relay")
         );
-        let branch = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
-        select_choice(signals, ChoiceControl::IngestRouteParametrizer, branch.clone());
-        assert!(selected_choice(signals, ChoiceControl::IngestRouteParametrizer, &branch));
+        let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+        select_choice(signals, ChoiceControl::IngestRouteParametrizer, parametrizer.clone());
+        assert!(selected_choice(signals, ChoiceControl::IngestRouteParametrizer, &parametrizer));
         assert_eq!(
             signals.choice_query(ChoiceControl::IngestBranchField).assured("branch selected").target,
             ChoiceTarget::BranchField
         );
         let route_query = signals.choice_query(ChoiceControl::IngestRouteRelay).assured("branch selected");
         assert_eq!(route_query.target, ChoiceTarget::IngestBranchedRelay);
-        assert_eq!(route_query.dependencies[1].value, branch);
+        assert_eq!(route_query.dependencies[1].value, parametrizer);
         select_choice(
             signals,
             ChoiceControl::IngestBranchField,
@@ -1767,17 +1767,17 @@ fn deduplicator_and_reorderer_forms_edit_ordered_keys_after_their_node_branch() 
                 open_form_controls(signals, form.kind)
                     .contains(&ChoiceControl::ProcessorParametrizer)
             );
-            let branch = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+            let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
             select_choice(
                 signals,
                 ChoiceControl::ProcessorParametrizer,
-                branch.clone(),
+                parametrizer.clone(),
             );
             let input = signals
                 .choice_query(ChoiceControl::ProcessorInputRelay)
                 .assured("the node branch is selected");
             assert_eq!(input.target, ChoiceTarget::IngestBranchedRelay);
-            assert_eq!(input.dependencies[1].value, branch);
+            assert_eq!(input.dependencies[1].value, parametrizer);
             select_choice(
                 signals,
                 ChoiceControl::ProcessorInputRelay,

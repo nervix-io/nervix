@@ -132,11 +132,11 @@ impl NodePartitionTransition {
         if !node.keeps_state_per_key() {
             return None;
         }
-        let branch = node.partition_parametrizer()?;
-        let epoch = schedule.partition_epochs.get(branch)?;
+        let parametrizer = node.partition_parametrizer()?;
+        let epoch = schedule.partition_epochs.get(parametrizer)?;
         let transition = epoch.transition.as_ref()?;
         Some(Self {
-            parametrizer: branch.clone(),
+            parametrizer: parametrizer.clone(),
             epoch: epoch.number,
             previous: transition.previous,
             holding: schedule.holding_units_of(node),
@@ -931,20 +931,20 @@ mod tests {
                     .configured::<CreateSchema>(named::<ModelName>("event"))
                     .assured("the schedule declares its key schema")
                     .clone();
-                let Model::Parametrizer(mut branch) =
+                let Model::Parametrizer(mut parametrizer) =
                     crate::registry::test_fixtures::branch("by_value", "event")
                 else {
                     unreachable!("the branch fixture constructs a branch");
                 };
-                branch.partitions =
+                parametrizer.partitions =
                     nervix_models::ParametrizerPartitions::Direct(partitions.count());
                 let branching =
-                    ResolvedBranching::branched(branch.name.clone(), key_schema, partitions);
-                let branch = ScheduledNode::new(
-                    Model::Parametrizer(branch),
+                    ResolvedBranching::branched(parametrizer.name.clone(), key_schema, partitions);
+                let parametrizer = ScheduledNode::new(
+                    Model::Parametrizer(parametrizer),
                     SchemaFingerprint::from_digest([7; 32]),
                 );
-                before.nodes.insert(branch.identity(), branch);
+                before.nodes.insert(parametrizer.identity(), parametrizer);
                 let node = before
                     .nodes
                     .get_mut(&relay)
