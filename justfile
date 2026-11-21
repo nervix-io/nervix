@@ -672,6 +672,13 @@ test-licensing-expiry *args: build-deps build-plexus-format build-test-cli build
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/ephemeral_expiry{,}.feature") }} {{ quote(args) }}
 
+# DESCRIBE LICENSE lists every catalog capability; a license can enable licensing.dummy.
+test-licensing-capabilities *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/capabilities{,}.feature") }} {{ quote(args) }}
+
 # Verify a maintained SSE parser source tree with its dependency-owner regressions.
 test-licensing-parser-source source *args:
     cargo test --manifest-path {{ quote(source / "Cargo.toml") }} --lib {{ quote(args) }}
