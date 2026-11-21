@@ -30,13 +30,13 @@ pub fn statement_parser<'src>()
         crate::create_resource::create_resource_parser().map(Statement::CreateResource),
         crate::domain::start_domain_parser().map(Statement::StartDomain),
         crate::domain::stop_domain_parser().map(Statement::StopDomain),
-        crate::branch::create_branch_parser()
+        crate::parametrizer::create_branch_parser()
             .map(|create| Statement::Create(create.map_body(Model::Branch).map_body(Box::new))),
         crate::placement::create_placement_parser()
             .map(|create| Statement::Create(create.map_body(Model::Placement).map_body(Box::new))),
         crate::describe_deduplicator::describe_deduplicator_parser()
             .map(Statement::DescribeDeduplicator),
-        crate::describe_branch::describe_branch_parser().map(Statement::DescribeBranch),
+        crate::describe_parametrizer::describe_branch_parser().map(Statement::DescribeBranch),
         crate::describe_domain::describe_domain_parser().map(Statement::DescribeDomain),
         crate::describe_endpoint::describe_endpoint_parser().map(Statement::DescribeEndpoint),
         crate::describe_client::describe_client_parser().map(Statement::DescribeClient),
@@ -125,7 +125,7 @@ pub fn statement_parser<'src>()
         crate::schema::alter_schema_parser().map(Statement::AlterSchema),
         crate::schema::alter_wire_schema_parser_any(),
         crate::relay::alter_relay_parser().map(Statement::AlterRelay),
-        crate::branch::alter_branch_parser().map(Statement::AlterBranch),
+        crate::parametrizer::alter_branch_parser().map(Statement::AlterBranch),
         crate::junction::alter_junction_parser().map(Statement::AlterJunction),
         crate::deduplicator::alter_deduplicator_parser().map(Statement::AlterDeduplicator),
         crate::reorderer::alter_reorderer_parser().map(Statement::AlterReorderer),

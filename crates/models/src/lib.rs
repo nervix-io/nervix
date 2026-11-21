@@ -58,11 +58,11 @@ mod name_spelling;
 mod names;
 mod node_capabilities;
 pub use database_settings::*;
-mod branch_partitions;
 mod node_endpoint;
 mod node_operations;
 mod node_record;
 mod node_selector;
+mod parametrizer_partitions;
 pub use node_selector::{NODE_SCOPE, NODE_TAG_FUNCTION, NodeSelectorField};
 mod node_ref;
 mod partition_epoch;
@@ -107,7 +107,6 @@ pub use backup::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupCutKind,
     BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
-pub use branch_partitions::{BranchPartitions, ResolvedBranchPartitions};
 pub use canonical::{
     CanonicalPlexusError, EmitterPayloadContainer, EmitterPayloadPresentation, EntityPresentation,
     PLEXUS_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_plexus,
@@ -347,6 +346,7 @@ pub use node_record::{
     OnnxRuntimeDetection, PropertyText, PropertyValueError, TagKey, TagValue, UndetectedReason,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
+pub use parametrizer_partitions::{BranchPartitions, ResolvedBranchPartitions};
 pub use partition_epoch::{BranchPartitionEpoch, PartitionEpochNumber, PartitionTransition};
 pub use partition_topology::{
     ExternalPartition, ExternalPartitionAssignment, ExternalPartitionRead, ExternalPartitionSet,
