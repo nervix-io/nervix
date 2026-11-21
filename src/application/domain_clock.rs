@@ -1091,7 +1091,7 @@ mod tests {
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]
     async fn leader_retries_an_authority_reassignment_its_leadership_refused() {
-        use nervix_models::{ClusterNodeIncarnation, DomainStartPoint, DomainTimeRate};
+        use nervix_models::ClusterNodeIncarnation;
         use nervix_recovery::Discarded as _;
 
         use crate::application::test_fixtures::{
@@ -1109,28 +1109,10 @@ mod tests {
             ClusterNodeName::parse("departed").assured("the fixture node name is valid"),
             ClusterNodeIncarnation::new(1),
         );
-        let origin = Timestamp::from_unix_nanos(0);
-        service
-            .inner
-            .consensus
-            .start_domain(
-                domain.clone(),
-                DomainStartPoint::At {
-                    timestamp: origin,
-                    time_rate: DomainTimeRate::ONE,
-                },
-                Some(DomainClockState::new(
-                    current_timestamp(),
-                    origin,
-                    DomainTimeRate::ONE,
-                )),
-                Some(departed.clone()),
-                None,
-            )
-            .await
-            .assured("the single-node leader commits the start it proposes");
-        // Gossip publishes the local node once after it starts. Waiting for that publication leaves
-        // no cluster change after the refusal, so only a retry can reassign the authority.
+        // Gossip publishes the local node once after it starts. A START chooses the clock
+        // authority of the paced domain among the published nodes, and waiting for that
+        // publication leaves no cluster change after the refusal, so only a retry can reassign
+        // the authority.
         let mut live_nodes = service.inner.cluster.subscribe_live_node_states().await;
         nervix_primitives::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -1146,6 +1128,34 @@ mod tests {
         })
         .await
         .assured("gossip publishes the local node within its first rounds");
+        service.test_start_domain("default").await;
+        // The started domain's clock then belongs to a node that left the cluster.
+        let state = service.inner.consensus.current_runtime_state().await;
+        let started_version = state
+            .domains
+            .get(&domain)
+            .assured("the started domain remains committed")
+            .start_version;
+        let started = state
+            .domain_clock_authorities
+            .get(&domain)
+            .cloned()
+            .assured("the START of a paced domain commits its clock authority");
+        service
+            .inner
+            .consensus
+            .reconcile_domain_clock_authority(
+                domain.clone(),
+                started_version,
+                started.clone(),
+                Some(departed.clone()),
+            )
+            .await
+            .assured("the single-node leader commits the reassignment it proposes");
+        let departed_at = started
+            .revision()
+            .checked_next()
+            .assured("the fixture authority revision is far below its bound");
         let local = service.inner.cluster.local_node_identity().await;
         let mut domain_changes = service.inner.consensus.subscribe_domains();
         let shutdown = CancellationToken::new();
@@ -1154,15 +1164,10 @@ mod tests {
         );
         // The running leader first replaces the departed authority with itself. Its first passes
         // also consume the changes it observed when it subscribed.
-        let settled = committed_owner_after(
-            &service,
-            &domain,
-            &local,
-            nervix_models::DomainClockAuthorityRevision::INITIAL,
-            &mut domain_changes,
-        )
-        .await
-        .assured("the running leader replaces the departed authority with itself");
+        let settled =
+            committed_owner_after(&service, &domain, &local, departed_at, &mut domain_changes)
+                .await
+                .assured("the running leader replaces the departed authority with itself");
 
         // A reassignment back to the departed node is the last change the loop observes. Raft
         // then refuses the leader's next proposal, so only a retry can restore its authority.
