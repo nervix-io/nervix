@@ -2864,6 +2864,25 @@ impl ConsensusTestProbe {
             .await
     }
 
+    /// Refuse this node's next proposal that ends `domain`'s stop the way a leader whose lease
+    /// lapsed refuses a write; the proposal after it goes ahead.
+    pub async fn refuse_next_domain_stop_ending_as_lapsed_lease(&self, domain: DomainName) {
+        self.inner
+            .lease_refusal
+            .arm(RefusalTarget::DomainStopEnding { domain })
+            .await;
+    }
+
+    /// Whether this node's proposal that ends `domain`'s stop reached the armed refusal.
+    pub async fn domain_stop_ending_refused_as_lapsed_lease(&self, domain: &DomainName) -> bool {
+        self.inner
+            .lease_refusal
+            .delivered(&RefusalTarget::DomainStopEnding {
+                domain: domain.clone(),
+            })
+            .await
+    }
+
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
         let mut counts = self.inner.append_stream_counts.lock();
         let count = counts.entry(target.clone()).or_default();

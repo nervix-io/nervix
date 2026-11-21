@@ -22535,8 +22535,45 @@ async fn when_bulk_execution_is_released(world: &mut ScenarioWorld, node_id: Str
     world.occupied_bulk_nodes.remove(&node_name);
 }
 
+/// Every node's `DESCRIBE DOMAIN` of the scenario's domain: what a stopping or stopped domain still
+/// waits for, such as the work in motion each node holds or a teardown whose cut is not reported
+/// yet, which names the wait behind a command that did not complete in time. Like the status
+/// diagnostics, it asks every node at once within one [`STATUS_DIAGNOSTIC_BUDGET`], so a node that
+/// holds the command up, and may hold its description too, delays the failure it explains by at
+/// most that budget.
+async fn stalled_command_domain_descriptions(world: &ScenarioWorld) -> Vec<String> {
+    let cluster = world.cluster();
+    let domain = world.domain.as_str();
+    let node_ids = cluster.node_ids();
+    let describing = node_ids
+        .iter()
+        .map(|node_id| stalled_command_domain_description(cluster, domain, node_id));
+    join_all(describing).await
+}
+
+/// One node's line of [`stalled_command_domain_descriptions`]: its `DESCRIBE DOMAIN` of `domain`,
+/// or why it gave none within [`STATUS_DIAGNOSTIC_BUDGET`].
+async fn stalled_command_domain_description(
+    cluster: &Cluster,
+    domain: &str,
+    node_id: &str,
+) -> String {
+    let described = nervix_primitives::time::timeout(
+        STATUS_DIAGNOSTIC_BUDGET,
+        cluster.run_command(node_id, domain, "DESCRIBE DOMAIN;"),
+    )
+    .await;
+    let description = match described {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => format!("DESCRIBE DOMAIN failed: {error}"),
+        Err(_) => format!("DESCRIBE DOMAIN did not answer within {STATUS_DIAGNOSTIC_BUDGET:?}"),
+    };
+    format!("{node_id}: {description}")
+}
+
 /// Run Plexus on a node and require it to finish inside a bound, which is how a scenario states that
-/// one class of work was not admitted behind another.
+/// one class of work was not admitted behind another. A command that outlasts the bound fails the
+/// step with every node's description of the domain, so a stalled `STOP` names what it waits for.
 #[then(expr = "within {string} these Plexus commands complete on node {string}")]
 async fn then_plexus_commands_complete_within(
     world: &mut ScenarioWorld,
@@ -22550,13 +22587,21 @@ async fn then_plexus_commands_complete_within(
     world.last_command_error = None;
     world.last_command_output = None;
     let started = Instant::now();
-    let session = nervix_primitives::time::timeout(
+    let completed = nervix_primitives::time::timeout(
         limit,
         execute_plexus_commands_on_node(world, &node_id, &commands),
     )
-    .await
-    .unwrap_or_else(|_| panic!("Plexus commands on '{node_id}' did not complete within {limit:?}"))
-    .unwrap_or_else(|error| panic!("failed to execute Plexus commands on '{node_id}': {error:?}"));
+    .await;
+    let Ok(completed) = completed else {
+        let descriptions = stalled_command_domain_descriptions(world).await;
+        panic!(
+            "Plexus commands on '{node_id}' did not complete within {limit:?}: {commands}; the \
+             domain as each node describes it: {descriptions:#?}"
+        );
+    };
+    let session = completed.unwrap_or_else(|error| {
+        panic!("failed to execute Plexus commands on '{node_id}': {error:?}")
+    });
     world.last_cluster_operation_elapsed = Some(started.elapsed());
     world.active_session = Some(session);
     world.active_session_node = Some(node_id);

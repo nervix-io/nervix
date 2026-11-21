@@ -1055,8 +1055,9 @@ Feature: A domain STOP lets the work already inside the domain finish
       """
     Then HTTP receiver "down" eventually receives at least 1 request
     # The destination refuses every attempt, so the emitter keeps the record waiting for a retry,
-    # which the stop does not wait for.
-    When these Plexus commands are executed on the leader node
+    # which the stop does not wait for. A STOP that outlasts its bound fails with every node's
+    # description of the domain, which names what the stop still waits for.
+    When within "60s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -1071,7 +1072,7 @@ Feature: A domain STOP lets the work already inside the domain finish
     And within "2s" Kafka consumer group "stop_down_group_{{test_id}}" next offset for topic "stop_down_{{test_id}}" partition 0 is "below 1"
     # The destination recovers, and the acknowledged source delivers the cut record again.
     Given HTTP receiver "down" answers unscripted requests with "respond 204"
-    When these Plexus commands are executed on the leader node
+    When within "60s" these Plexus commands complete on the leader node
       """
       START;
       """

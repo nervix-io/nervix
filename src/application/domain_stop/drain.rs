@@ -53,6 +53,8 @@ enum StopDrainError {
         node: ClusterNodeName,
         failure: RemoteOperationFailure,
     },
+    #[error("the stop of domain '{domain}' could not commit its ending")]
+    End { domain: DomainName },
 }
 
 /// What one pass of a stop's drain found.
@@ -368,14 +370,21 @@ pub(super) async fn drain_stopping_domain(
             continue;
         }
         if let Some(by) = due_enforcement(&stopping, now, service.committed_licensing_time()) {
-            end_stop(
+            let ended = end_stop(
                 &service,
                 &domain,
                 began_at_revision,
                 StopEnding::Enforced { by },
             )
             .await;
-            return;
+            match ended {
+                Ok(()) => return,
+                Err(error) => {
+                    report_unended_stop(&domain, &error);
+                    sleep(service.cluster_parameters().domain_drain_poll_interval()).await;
+                    continue;
+                }
+            }
         }
         // A clause acts at its time even while a pass waits on a node that answers late: the pass
         // is abandoned, and the loop reads the stop again and acts on the clause. An abandoned
@@ -395,8 +404,17 @@ pub(super) async fn drain_stopping_domain(
         };
         round = match pass {
             DrainPass::Rested => {
-                end_stop(&service, &domain, began_at_revision, StopEnding::Completed).await;
-                return;
+                let ended =
+                    end_stop(&service, &domain, began_at_revision, StopEnding::Completed).await;
+                match ended {
+                    Ok(()) => return,
+                    // The owner keeps the stop: it drains again from a releasing round and ends
+                    // the stop once a round rests again.
+                    Err(error) => {
+                        report_unended_stop(&domain, &error);
+                        DrainRound::Releasing
+                    }
+                }
             }
             DrainPass::Continue(next) => next,
         };
@@ -414,32 +432,38 @@ pub(super) async fn drain_stopping_domain(
 
 /// Commits the end of the stop that began at `began_at_revision`. A conflict means the stop
 /// changed under the owner, whose next look decides again.
+///
+/// The owner applies nothing it commits. Every node, this leader among them, tears the stopped
+/// domain down through its own application of the committed ending, as it applies every committed
+/// change. The owner loop ends this task as soon as the ending is applied, wherever the task then
+/// is, so a teardown this task ran could be cut short with it: the node would no longer hold the
+/// domain's execution, and no later application of the same state could end its tasks, write its
+/// final snapshot or complete its report.
 async fn end_stop(
     service: &SessionServiceImpl,
     domain: &DomainName,
     began_at_revision: u64,
     ending: StopEnding,
-) {
-    if let Err(error) = service
+) -> Result<(), Report<StopDrainError>> {
+    service
         .inner
         .consensus
         .end_domain_stop(domain.clone(), began_at_revision, ending)
         .await
-    {
-        tracing::warn!(
-            domain = domain.as_str(),
-            error = %format_args!("{error:#}"),
-            "the end of a domain's stop could not be committed; its owner decides again"
-        );
-        return;
-    }
-    if let Err(error) = service.apply_current_cluster_state().await {
-        tracing::warn!(
-            domain = domain.as_str(),
-            error = %format_args!("{error:#}"),
-            "the stopped domain's teardown did not complete everywhere yet"
-        );
-    }
+        .change_context_lazy(|| StopDrainError::End {
+            domain: domain.clone(),
+        })
+}
+
+/// Reports an ending the owner could not commit. The owner keeps the stop and ends it again, since
+/// the owner loop runs a stop's owner anew only when a revision is applied or the topology changes,
+/// which a cluster that has nothing else to do may never do.
+fn report_unended_stop(domain: &DomainName, error: &Report<StopDrainError>) {
+    tracing::warn!(
+        domain = domain.as_str(),
+        error = %format_args!("{error:#}"),
+        "the end of a domain's stop could not be committed; its owner tries again"
+    );
 }
 
 /// Collects every node's report of the teardown of the stop that ended `domain` at
@@ -635,6 +659,261 @@ mod tests {
             Some(StopRequestId::Operator(reference("operator"))),
             "an operator's ENFORCE that acts with the licensing stop's fixed time names the ending"
         );
+    }
+
+    /// The leader's owner loop retires a stop's drain task as soon as the ending that task committed
+    /// is applied, wherever the task then is. A teardown it had started on that node would be cut
+    /// short with it: the node no longer holds the domain's execution, so no later application of
+    /// the same committed state ends its tasks, writes its final snapshot or completes its report,
+    /// and the stop's `STOP` never answers. The test drives the drain task as that loop does and
+    /// retires it at the worst moment it can reach, once this node's teardown holds the domain's
+    /// execution, and then lets the node apply the committed ending as its reconciliation does.
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn retiring_the_owner_once_its_ending_commits_leaves_the_node_a_whole_teardown() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        use nervix_interconnect::domain_stop::StopReportAnswer;
+        use nervix_models::{DomainStatus, StopRequest};
+        use nervix_recovery::Discarded as _;
+
+        use crate::application::{
+            subscription::SessionSubscriptions,
+            test_fixtures::{
+                TestService, build_test_service, test_command_request, test_execution_reference,
+            },
+        };
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain =
+            DomainName::parse("default").assured("the fixture domain name is a valid literal");
+        let mut subscriptions = SessionSubscriptions::new();
+        // Two relays and a junction between them: an execution whose tasks the teardown waits for.
+        let configured = service
+            .test_command(
+                test_command_request(
+                    "BEGIN; CREATE SCHEMA event ( id I64 ); CREATE RELAY events SCHEMA event \
+                     UNBRANCHED; CREATE RELAY forwarded SCHEMA event UNBRANCHED; CREATE JUNCTION \
+                     forward FROM events UNBRANCHED TO forwarded INHERIT ALL FLUSH IMMEDIATE ON \
+                     MESSAGE ERROR LOG; COMMIT;",
+                    "default",
+                ),
+                &mut subscriptions,
+            )
+            .await;
+        assert!(
+            configured.succeeded(),
+            "the fixture graph is created: {configured:?}"
+        );
+        let started = service
+            .test_command(
+                test_command_request("START;", "default"),
+                &mut subscriptions,
+            )
+            .await;
+        assert!(
+            started.succeeded(),
+            "the fixture domain starts: {started:?}"
+        );
+        subscriptions.stop_all().await;
+
+        // The stop is requested and its intake stop applied, as a `STOP` does before it waits.
+        service
+            .inner
+            .consensus
+            .request_domain_stop(
+                domain.clone(),
+                StopRequest::Operator {
+                    reference: test_execution_reference(),
+                    request: OperatorStopRequest {
+                        requested_at: current_timestamp(),
+                        limit: None,
+                    },
+                },
+                None,
+            )
+            .await
+            .assured("the leader of the fixture's single-node consensus commits the request");
+        service
+            .apply_current_cluster_state()
+            .await
+            .assured("the fixture node applies the stopping domain");
+        let stopping = service
+            .inner
+            .consensus
+            .current_domain(&domain)
+            .await
+            .assured("the fixture domain exists");
+        let began_at_revision = stopping
+            .stopping()
+            .verified("the request above began the domain's stop")
+            .began_at_revision;
+        let start_version = stopping.start_version;
+
+        let mut owner = Box::pin(drain_stopping_domain(
+            service.clone(),
+            domain.clone(),
+            began_at_revision,
+        ));
+        let retired = nervix_primitives::time::timeout(Duration::from_secs(60), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                if futures_util::poll!(owner.as_mut()).is_ready() {
+                    return;
+                }
+                if service.inner.runtime.stop_teardown_holds_execution(&domain) {
+                    return;
+                }
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+        assert!(
+            retired.is_ok(),
+            "the drain of a domain with nothing in motion rests and commits its ending"
+        );
+        drop(owner);
+        let ended = service
+            .inner
+            .consensus
+            .current_domain(&domain)
+            .await
+            .assured("the fixture domain exists");
+        assert_eq!(
+            ended.status,
+            DomainStatus::Stopped,
+            "the owner committed the stop's ending before it was retired"
+        );
+
+        service
+            .apply_current_cluster_state()
+            .await
+            .assured("the fixture node applies the stopped domain");
+        assert_eq!(
+            service.inner.runtime.stop_report(&domain, start_version),
+            StopReportAnswer::Reported(Vec::new()),
+            "the node's teardown ran whole, so it reports the stop, which cut nothing"
+        );
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
+
+    /// The owner loop runs a stop's owner again only when it wakes for an applied revision or a
+    /// topology change, so an owner that gave up once its ending failed to commit would leave the
+    /// stop with no owner in a cluster where nothing else changes, and its `STOP` would never
+    /// answer. A leader whose lease lapsed under load refuses the ending once, as it refuses every
+    /// proposal until its lease recovers; the owner keeps the stop and ends it with the next
+    /// attempt, both a completed ending after its drain rested and an enforced one whose `ENFORCE
+    /// AFTER` has passed.
+    #[cfg(feature = "testing")]
+    #[rstest::rstest]
+    #[case::completed(None)]
+    #[case::enforced(Some(WaitLimit::Enforce { after: Duration::ZERO }))]
+    #[nervix_primitives::test]
+    async fn an_owner_whose_ending_fails_to_commit_ends_the_stop_again(
+        #[case] limit: Option<WaitLimit>,
+    ) {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        use nervix_consensus::ConsensusTestProbe;
+        use nervix_models::{DomainStatus, StopRequest};
+        use nervix_recovery::Discarded as _;
+
+        use crate::application::{
+            subscription::SessionSubscriptions,
+            test_fixtures::{
+                TestService, build_test_service_with_probe, test_command_request,
+                test_execution_reference,
+            },
+        };
+
+        let probe = ConsensusTestProbe::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_probe(true, probe.clone()).await;
+        let domain =
+            DomainName::parse("default").assured("the fixture domain name is a valid literal");
+        let mut subscriptions = SessionSubscriptions::new();
+        let started = service
+            .test_command(
+                test_command_request("START;", "default"),
+                &mut subscriptions,
+            )
+            .await;
+        assert!(
+            started.succeeded(),
+            "the fixture domain starts: {started:?}"
+        );
+        subscriptions.stop_all().await;
+        service
+            .inner
+            .consensus
+            .request_domain_stop(
+                domain.clone(),
+                StopRequest::Operator {
+                    reference: test_execution_reference(),
+                    request: OperatorStopRequest {
+                        requested_at: current_timestamp(),
+                        limit,
+                    },
+                },
+                None,
+            )
+            .await
+            .assured("the leader of the fixture's single-node consensus commits the request");
+        service
+            .apply_current_cluster_state()
+            .await
+            .assured("the fixture node applies the stopping domain");
+        let began_at_revision = service
+            .inner
+            .consensus
+            .current_domain(&domain)
+            .await
+            .assured("the fixture domain exists")
+            .stopping()
+            .verified("the request above began the domain's stop")
+            .began_at_revision;
+
+        probe
+            .refuse_next_domain_stop_ending_as_lapsed_lease(domain.clone())
+            .await;
+        let owned = nervix_primitives::time::timeout(
+            Duration::from_secs(60),
+            drain_stopping_domain(service.clone(), domain.clone(), began_at_revision),
+        )
+        .await;
+        assert!(
+            owned.is_ok(),
+            "the owner of a domain with nothing in motion ends its stop"
+        );
+        assert!(
+            probe
+                .domain_stop_ending_refused_as_lapsed_lease(&domain)
+                .await,
+            "the owner's first ending met the refusal"
+        );
+        let ended = service
+            .inner
+            .consensus
+            .current_domain(&domain)
+            .await
+            .assured("the fixture domain exists");
+        assert_eq!(
+            ended.status,
+            DomainStatus::Stopped,
+            "the owner kept the stop until its ending committed"
+        );
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 
     #[test]
