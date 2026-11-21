@@ -416,24 +416,79 @@ async fn an_empty_bulk_window_budget_fails_to_start() {
     );
 }
 
+/// Every consensus vote and metadata read or write reserves four management events, 256 KiB with
+/// the default limits. A management budget that holds one event but not that working set would let
+/// the node open its stores and then fail every one of those operations, so the executor refuses
+/// it first.
 #[nervix_primitives::test]
-async fn a_management_budget_below_one_event_fails_to_start() {
+async fn a_management_budget_below_one_consensus_vote_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
-            management: ByteUnit::Kibibyte(32),
+            management: ByteUnit::Kibibyte(128),
             ..MemoryBudgets::default()
         },
         ..ExecutionConfig::default()
     })
-    .expect_err("a management budget below one event is rejected");
+    .expect_err("a management budget below one consensus vote is rejected");
     assert_eq!(
         *error.current_context(),
         ExecutionConfigError::BudgetBelowOperation {
             class: "management",
-            operation: "management event",
-            budget: ByteUnit::Kibibyte(32).as_u64(),
-            required: ByteUnit::Kibibyte(64).as_u64(),
+            operation: "consensus vote or metadata write",
+            budget: ByteUnit::Kibibyte(128).as_u64(),
+            required: ByteUnit::Kibibyte(256).as_u64(),
         }
+    );
+}
+
+/// A management budget of exactly one consensus vote's working set is the smallest one accepted,
+/// and its whole class holds that working set.
+#[nervix_primitives::test]
+async fn a_management_budget_of_one_consensus_vote_starts_and_holds_it() {
+    let limits = OperationLimits::default();
+    let working_set = limits
+        .management_storage_working_bytes()
+        .expect("the default management event times the storage multiplier fits a u64");
+    assert_eq!(working_set, ByteUnit::Kibibyte(256).as_u64());
+    let executor = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            management: ByteUnit::Byte(working_set),
+            ..MemoryBudgets::default()
+        },
+        limits,
+        ..ExecutionConfig::default()
+    })
+    .expect("a management budget of one consensus vote is accepted");
+    let reservation = executor
+        .try_reserve(MemoryClass::Management, working_set)
+        .expect("the whole management class holds one consensus vote");
+    assert_eq!(
+        executor.snapshot().management_memory.reserved_bytes,
+        working_set
+    );
+    drop(reservation);
+    assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
+}
+
+/// A management event so large that its storage working set has no byte count is a contradiction
+/// the executor reports, not a reservation it wraps around.
+#[nervix_primitives::test]
+async fn a_management_storage_working_set_beyond_a_byte_count_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        limits: OperationLimits {
+            management_event_bytes: ByteUnit::Byte(u64::MAX),
+            ..OperationLimits::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("an unaddressable management working set is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::UnaddressableManagementStorage
+    );
+    assert_eq!(
+        error.current_context().to_string(),
+        "the configured management storage limits do not add up to an addressable size"
     );
 }
 
