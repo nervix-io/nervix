@@ -395,9 +395,9 @@ builds the ordinary server.
 A node runs its variable-size encoding, decoding, validation, hashing, compilation, program
 execution and synchronous filesystem or database work through the bounded executor, which admits
 each job into a CPU or storage class, charges its memory, and gives it the cancellation it checks
-between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call or a JAQ
-transformation, takes the extension class, so a program that never returns holds only that class's
-workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
+between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call, a JAQ
+transformation or the scratch WASM guest a state inspection renders a committed checkpoint on,
+takes the extension class, so a program that never returns holds only that class's workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
 listener spends only those, and saturated data, extension or bulk work never delays a login. A
 PBKDF2-HMAC-SHA-512 password operation charges its 64-byte verifier buffer; the Credentials memory
 class also carries mounted NATS credentials files and has a separate 19 MiB capacity. The

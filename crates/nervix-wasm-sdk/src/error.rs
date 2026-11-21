@@ -24,6 +24,16 @@ pub enum GuestError {
     ArrowIpc(#[from] ArrowError),
     #[error("envelope protocol violation")]
     Protocol,
+    #[error("state section '{section}' declares {fields} fields but carries {columns} columns")]
+    StateSectionShape {
+        section: String,
+        fields: usize,
+        columns: usize,
+    },
+    #[error("state section '{section}' carries a column of another type than field '{field}'")]
+    StateSectionColumnType { section: String, field: String },
+    #[error("state section '{section}' holds a null in field '{field}', which is not optional")]
+    StateSectionNulls { section: String, field: String },
     #[error("{reason}")]
     Failed { reason: String },
 }
@@ -43,7 +53,10 @@ impl GuestError {
             Self::InvalidSize => ERR_INVALID_SIZE,
             Self::OutOfBounds => ERR_OUT_OF_BOUNDS,
             Self::NotInitialized => ERR_NOT_INITIALIZED,
-            Self::ArrowIpc(_) => ERR_ARROW_IPC,
+            Self::ArrowIpc(_)
+            | Self::StateSectionShape { .. }
+            | Self::StateSectionColumnType { .. }
+            | Self::StateSectionNulls { .. } => ERR_ARROW_IPC,
             Self::Protocol => ERR_ENVELOPE,
             Self::Failed { .. } => ERR_ERROR_STATE,
         }

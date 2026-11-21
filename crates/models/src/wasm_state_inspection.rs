@@ -1,12 +1,14 @@
 //! Read-only, non-sensitive facts about one scheduled WASM processor's guest state.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** The typed checkpoint, reset and recovery facts an operator may inspect, their
-//!   complete counts over a branch selection and the ordered branch entries a bounded read pages.
-//! - **Depends on.** WASM state lifetimes, resource bindings, inspection selectors and opaque
-//!   branch fingerprints.
-//! - **Must not know.** Guest bytes, checkpoint storage, synchronization, owner routing or
-//!   presentation.
+//! - **Owns.** The typed checkpoint, reset and recovery facts an operator may inspect, the
+//!   structure of what a guest describes of a committed checkpoint (section names, fields and row
+//!   counts, never a value), their complete counts over a branch selection and the ordered branch
+//!   entries a bounded read pages.
+//! - **Depends on.** WASM state lifetimes, resource bindings, inspection selectors, schema field
+//!   names and types, and opaque branch fingerprints.
+//! - **Must not know.** Guest bytes, checkpoint storage, synchronization, owner routing, guest
+//!   execution or presentation.
 
 #![cfg_attr(
     nervix_lint,
@@ -20,9 +22,10 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BranchKeyFingerprint, CommandExecutionReference, ResourceName, ScheduledNode, ScheduledUnit,
-    StateInspectionBranchSelection, WasmSavedStateRejection, WasmStateGeneration,
-    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
+    BranchKeyFingerprint, CommandExecutionReference, FieldName, ParseAsType, ResourceName,
+    ScheduledNode, ScheduledUnit, StateInspectionBranchSelection, WasmSavedStateRejection,
+    WasmStateGeneration, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase,
+    WasmStateResetScope,
 };
 
 /// The latest checkpoint's progress through its durability boundary.
@@ -244,8 +247,92 @@ pub struct WasmStateResetInspection {
 #[serde(transparent)]
 pub struct WasmStateEntryKey(pub Option<BranchKeyFingerprint>);
 
-/// One selected branch's guest-state facts: its checkpoint in the current lifetime and the
-/// recovery recorded for a refused lifetime. A branch is listed when it has at least one of them.
+/// One field of a section a guest described of its state: its name, its type and whether a row
+/// may hold no value. Every guest section field is sensitive, so a read never carries one of its
+/// values.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct WasmGuestStateField {
+    pub name: FieldName,
+    pub ty: ParseAsType,
+    pub optional: bool,
+}
+
+/// One section a guest described of its state: its name, its fields in column order and how many
+/// rows it holds. Guest state is always sensitive, so a section reports its shape and size and
+/// carries none of its rows.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct WasmGuestStateSection {
+    pub name: FieldName,
+    pub fields: Vec<WasmGuestStateField>,
+    #[rkyv(with = crate::CountAsU64)]
+    pub rows: usize,
+}
+
+/// The lifecycle stage of the scratch instance at which a render of a committed checkpoint
+/// failed: everything before the guest's initialization is its instantiation, and a description
+/// the host refuses, or a render the read's deadline ended, is its state description.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::AsRefStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum WasmGuestStateRenderStage {
+    ModuleCompilation,
+    Instantiation,
+    Initialization,
+    SnapshotEnvelopeDecoding,
+    ApplicationStateRestoration,
+    StateRestore,
+    StateDescription,
+}
+
+/// What rendering one branch's committed checkpoint on a scratch instance produced.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum WasmGuestStateRender {
+    /// The sections the guest described, in its order; none when it describes no state.
+    Described {
+        sections: Vec<WasmGuestStateSection>,
+    },
+    /// The render failed at `stage`. `diagnostic` is the complete failure in the WASM diagnostic
+    /// shape, naming the branch by its fingerprint and carrying no guest payload or saved state.
+    Failed {
+        stage: WasmGuestStateRenderStage,
+        diagnostic: String,
+    },
+}
+
+/// The guest's own description of one branch's committed checkpoint, rendered on a scratch
+/// instance restored from it, with the lifetime and revision the render restored.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct WasmGuestStateDescription {
+    pub generation: WasmStateGeneration,
+    /// The committed revision the render restored; absent while the lifetime has committed
+    /// nothing, when the render starts from an initialized instance.
+    pub revision: Option<NonZeroU64>,
+    pub render: WasmGuestStateRender,
+}
+
+/// One selected branch's guest-state facts: its checkpoint in the current lifetime, the recovery
+/// recorded for a refused lifetime, and what its guest described of the committed checkpoint. A
+/// branch is listed when it has a checkpoint or a recovery, and only an entry with a checkpoint
+/// carries a description.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -253,6 +340,7 @@ pub struct WasmBranchStateInspection {
     pub branch: Option<BranchKeyFingerprint>,
     pub checkpoint: Option<WasmCheckpointState>,
     pub recovery: Option<WasmRecoveryInspection>,
+    pub description: Option<WasmGuestStateDescription>,
 }
 
 impl WasmBranchStateInspection {
@@ -264,6 +352,11 @@ impl WasmBranchStateInspection {
     /// Whether the entry reports anything; an entry of neither fact describes no state.
     pub const fn has_state(&self) -> bool {
         self.checkpoint.is_some() || self.recovery.is_some()
+    }
+
+    /// Whether a description, when the entry carries one, belongs to a checkpoint it reports.
+    pub const fn describes_its_checkpoint(&self) -> bool {
+        self.description.is_none() || self.checkpoint.is_some()
     }
 }
 
@@ -395,6 +488,7 @@ impl WasmUnitStateSelection {
                     branch: checkpoint.branch,
                     checkpoint: Some(checkpoint.state),
                     recovery: None,
+                    description: None,
                 },
             );
         }
@@ -424,6 +518,7 @@ impl WasmUnitStateSelection {
                         branch,
                         checkpoint: None,
                         recovery: None,
+                        description: None,
                     });
             entry.recovery = Some(recovery);
         }
@@ -490,6 +585,16 @@ impl WasmUnitStateSelection {
                 branches: tail,
             },
             more,
+        }
+    }
+}
+
+impl WasmGuestStateDescription {
+    /// The sections this description carries; a failed render carries none.
+    pub fn sections(&self) -> &[WasmGuestStateSection] {
+        match &self.render {
+            WasmGuestStateRender::Described { sections } => sections,
+            WasmGuestStateRender::Failed { .. } => &[],
         }
     }
 }

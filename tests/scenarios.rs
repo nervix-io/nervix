@@ -11578,6 +11578,7 @@ fn malformed_output_wasm_fixture(length: u32) -> Vec<u8> {
       (func (export "nervix_dump_state") (result i32) (i32.const 0))
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
+      (func (export "nervix_describe_state") (result i32) (i32.const 0))
     )"#
     )
     .into_bytes()
@@ -11680,6 +11681,7 @@ fn historical_time_tokenless_wasm_fixture(output_relay: &str) -> Vec<u8> {
             i32.const 0
             global.set $emitted
             i32.const 0)
+          (func (export "nervix_describe_state") (result i32) (i32.const 0))
         )"#
     )
     .into_bytes()
@@ -11869,6 +11871,7 @@ fn unreadable_generated_column_wasm_fixture(
             i32.const 0
             global.set $emitted
             i32.const 0)
+          (func (export "nervix_describe_state") (result i32) (i32.const 0))
         )"#
     )
     .into_bytes()
@@ -11926,6 +11929,7 @@ fn uninitialized_output_wasm_fixture(output_relay: &str) -> Vec<u8> {
             i32.const 0
             global.set $emitted
             i32.const 0)
+          (func (export "nervix_describe_state") (result i32) (i32.const 0))
         )"#
     )
     .into_bytes()
@@ -11950,6 +11954,7 @@ fn trapping_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_dump_state") (result i32) (i32.const 0))
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
+      (func (export "nervix_describe_state") (result i32) (i32.const 0))
     )"#
 }
 
@@ -11959,6 +11964,45 @@ fn trapping_wasm_fixture() -> &'static [u8] {
 /// enough for a forced ownership recovery to validate its restore within the recovery budget.
 fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
     state_counting_wasm_fixture_with_size(output_relay, 4)
+}
+
+/// The state description every state-counting guest returns: one `counters` section of one
+/// required `U32` field and one row. Inspection withholds every value of a guest's state, so the
+/// row's value never reaches a read and the description can be the same for every branch.
+fn state_counting_description() -> Vec<u8> {
+    let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        "count",
+        arrow_schema::DataType::UInt32,
+        false,
+    )]));
+    let count: arrow_array::ArrayRef = StdArc::new(arrow_array::UInt32Array::from(vec![0_u32]));
+    let batch = arrow_array::RecordBatch::try_new(schema.clone(), vec![count])
+        .assured("one required U32 column of one row is a valid batch");
+    let mut rows = Vec::new();
+    {
+        let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut rows, &schema)
+            .assured("a stream writer over a buffer opens");
+        writer
+            .write(&batch)
+            .assured("the batch matches the stream's schema");
+        writer
+            .finish()
+            .assured("a stream writer over a buffer finishes");
+    }
+    nervix_wasm_protocol::StateDescription {
+        sections: vec![nervix_wasm_protocol::StateSection {
+            schema: nervix_wasm_protocol::ProcessorSchema {
+                name: "counters".to_string(),
+                fields: vec![nervix_wasm_protocol::ProcessorField {
+                    name: "count".to_string(),
+                    ty: nervix_wasm_protocol::ProcessorType::U32,
+                    optional: false,
+                }],
+            },
+            arrow_ipc_batch: rows,
+        }],
+    }
+    .encode()
 }
 
 fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize) -> Vec<u8> {
@@ -12023,6 +12067,16 @@ fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize)
         .map(|byte| format!("\\{byte:02x}"))
         .collect::<String>();
     let encoded_len = encoded.len();
+    let description = state_counting_description();
+    let description_wat = description
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let description_len = description.len();
+    assert!(
+        49152 + description_len <= 65536,
+        "the state description fits between the acknowledgment and the save"
+    );
 
     format!(
         r#"(module
@@ -12032,6 +12086,7 @@ fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize)
           (global $read_ptr (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
           (data (i32.const 40000) "{ack_wat}")
+          (data (i32.const 49152) "{description_wat}")
           (func $field (param $table i32) (param $slot i32) (result i32)
             local.get $table
             local.get $table local.get $table i32.load i32.sub
@@ -12116,6 +12171,10 @@ fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize)
             i32.const 0
             global.set $emitted
             i32.const 0)
+          (func (export "nervix_describe_state") (result i32)
+            i32.const 49152
+            global.set $read_ptr
+            i32.const {description_len})
         )"#,
         token_address = 32768 + token_offset,
         ack_token_address = 40000 + ack_token_offset,
@@ -12250,6 +12309,7 @@ fn guest_requested_reset_wasm_fixture(output_relay: &str) -> Vec<u8> {
             i32.const 0
             global.set $emitted
             i32.const 0)
+          (func (export "nervix_describe_state") (result i32) (i32.const 0))
         )"#,
         rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
     )
@@ -12353,6 +12413,7 @@ fn timeout_buffering_wasm_fixture(output_relay: &str) -> Vec<u8> {
             i32.const 0
             global.set $emitted
             i32.const 0)
+          (func (export "nervix_describe_state") (result i32) (i32.const 0))
         )"#,
         rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
     )
@@ -12422,6 +12483,7 @@ fn state_rejecting_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (func (export "nervix_load_state") (param i32 i32) (result i32)
             (i32.const {rejected}))
           (func (export "nervix_reset_state") (result i32) (i32.const 0))
+          (func (export "nervix_describe_state") (result i32) (i32.const 0))
         )"#,
         rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
     )
@@ -12449,6 +12511,11 @@ enum WasmLifecycleFailureFixture {
     /// An input over the large threshold saves state the guest refuses to restore, and an input
     /// over the huge threshold exhausts `MAX FUEL` so the instance is recreated from that state.
     StateRestore,
+    /// Every branch processes and checkpoints normally, and the guest refuses to describe its
+    /// state when a state inspection renders it.
+    StateDescription,
+    /// The module lacks the required `nervix_describe_state` export, so no branch instantiates.
+    MissingStateDescriptionExport,
 }
 
 /// The tenant whose branch configuration the initialization fixture refuses.
@@ -12461,6 +12528,7 @@ impl WasmLifecycleFailureFixture {
     const TIMEOUT_REFUSAL: &str = "guest refuses its timeout";
     const SNAPSHOT_REFUSAL: &str = "guest cannot serialize its state";
     const RESTORE_REFUSAL: &str = "guest refuses its saved counters";
+    const DESCRIPTION_REFUSAL: &str = "guest cannot describe its state";
 
     fn parse(name: &str) -> Self {
         match name {
@@ -12470,6 +12538,8 @@ impl WasmLifecycleFailureFixture {
             "timeout" => Self::Timeout,
             "state snapshot" => Self::StateSnapshot,
             "state restore" => Self::StateRestore,
+            "state description" => Self::StateDescription,
+            "missing state description export" => Self::MissingStateDescriptionExport,
             other => panic!("unsupported failing WASM processor fixture '{other}'"),
         }
     }
@@ -12490,7 +12560,9 @@ impl WasmLifecycleFailureFixture {
             | Self::Memory
             | Self::Timeout
             | Self::StateSnapshot
-            | Self::StateRestore => "i32.const 0".to_string(),
+            | Self::StateRestore
+            | Self::StateDescription
+            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
         }
     }
 
@@ -12520,7 +12592,9 @@ impl WasmLifecycleFailureFixture {
                  local.get $size i32.const {large} i32.gt_u
                  if i32.const 1 global.set $poisoned end"
             ),
-            Self::Initialization => String::new(),
+            Self::Initialization | Self::StateDescription | Self::MissingStateDescriptionExport => {
+                String::new()
+            }
         }
     }
 
@@ -12534,7 +12608,9 @@ impl WasmLifecycleFailureFixture {
             | Self::Memory
             | Self::Initialization
             | Self::StateSnapshot
-            | Self::StateRestore => "i32.const 0".to_string(),
+            | Self::StateRestore
+            | Self::StateDescription
+            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
         }
     }
 
@@ -12558,9 +12634,12 @@ impl WasmLifecycleFailureFixture {
                    i32.const 0
                  end"
             .to_string(),
-            Self::Fuel | Self::Memory | Self::Initialization | Self::Timeout => {
-                "i32.const 0".to_string()
-            }
+            Self::Fuel
+            | Self::Memory
+            | Self::Initialization
+            | Self::Timeout
+            | Self::StateDescription
+            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
         }
     }
 
@@ -12575,7 +12654,29 @@ impl WasmLifecycleFailureFixture {
             | Self::Memory
             | Self::Initialization
             | Self::Timeout
-            | Self::StateSnapshot => "i32.const 0".to_string(),
+            | Self::StateSnapshot
+            | Self::StateDescription
+            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
+        }
+    }
+
+    /// The `nervix_describe_state` export, or nothing for the module that lacks it.
+    fn describe_state_export(self) -> String {
+        match self {
+            Self::StateDescription => format!(
+                r#"(func (export "nervix_describe_state") (result i32)
+            i32.const 40700 i32.const {} call $report i32.const -6)"#,
+                Self::DESCRIPTION_REFUSAL.len()
+            ),
+            Self::Fuel
+            | Self::Memory
+            | Self::Initialization
+            | Self::Timeout
+            | Self::StateSnapshot
+            | Self::StateRestore => {
+                r#"(func (export "nervix_describe_state") (result i32) i32.const 0)"#.to_string()
+            }
+            Self::MissingStateDescriptionExport => String::new(),
         }
     }
 
@@ -12607,10 +12708,12 @@ impl WasmLifecycleFailureFixture {
         let on_timeout_body = self.on_timeout_body();
         let dump_state_body = self.dump_state_body();
         let load_state_body = self.load_state_body();
+        let describe_state_export = self.describe_state_export();
         let init_refusal = Self::INIT_REFUSAL;
         let snapshot_refusal = Self::SNAPSHOT_REFUSAL;
         let timeout_refusal = Self::TIMEOUT_REFUSAL;
         let restore_refusal = Self::RESTORE_REFUSAL;
+        let description_refusal = Self::DESCRIPTION_REFUSAL;
 
         format!(
             r#"(module
@@ -12628,6 +12731,7 @@ impl WasmLifecycleFailureFixture {
           (data (i32.const 40300) "{timeout_refusal}")
           (data (i32.const 40400) "{restore_refusal}")
           (data (i32.const 40600) "\2a")
+          (data (i32.const 40700) "{description_refusal}")
           (func $report (param $ptr i32) (param $len i32)
             local.get $ptr
             global.set $reason_ptr
@@ -12737,6 +12841,7 @@ impl WasmLifecycleFailureFixture {
             i32.const 0
             global.set $emitted
             i32.const 0)
+          {describe_state_export}
         )"#
         )
         .into_bytes()

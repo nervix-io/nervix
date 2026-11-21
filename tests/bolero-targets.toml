@@ -1888,7 +1888,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__replies__bolero_replies_keep_complete_values/corpus"
-domain_version = 23
+domain_version = 24
 features = []
 id = "client-replies"
 invariant = "Every current reply family decodes to the complete original typed value, including dispositions, typed subscribe and clock attach refusals, diagnostics, metadata, the WASM state envelope tables with every checkpoint stage, reset scope, phase, reason and readiness, recovery outcome and rejection, entry counts and pinned binding, and client I/O."
@@ -1918,7 +1918,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_stream_frames_keep_values_and_chunk_ownership/corpus"
-domain_version = 16
+domain_version = 17
 features = []
 id = "client-streams"
 invariant = "Every upload, restore and backup stream root preserves complete typed values and retained chunk ownership."
@@ -2113,7 +2113,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_malformed_messages_fail_typed_within_bounds/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "wasm-protocol-malformed"
 invariant = "Short and arbitrary current guest messages return the owning typed error or a completely decoded value without panic."
@@ -2187,6 +2187,21 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_state_descriptions_preserve_sections_schemas_and_rows/corpus"
+domain_version = 1
+features = []
+id = "wasm-state-descriptions"
+invariant = "Current state descriptions, including one of no sections, preserve every section's schema, its nested field types, nullability and order, and its opaque row bytes across the owned decoder and the borrowed view, which lends the rows from the message."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/tests/representations.rs"
+test = "bolero_state_descriptions_preserve_sections_schemas_and_rows"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_reset_and_rejection_codes_preserve_typed_distinctions/corpus"
 domain_version = 1
 features = []
@@ -2206,13 +2221,28 @@ corpus = "crates/nervix-wasm/src/__fuzz__/properties__bolero_host_schema_preserv
 domain_version = 15
 features = []
 id = "wasm-host-schema"
-invariant = "The host ABI schema projection preserves names, exact nested types, nullability and order; sensitivity stays an explicit host execution rule."
+invariant = "The host ABI schema projection preserves names, exact nested types, nullability and order, and the schema and types a guest sends back convert to exactly the projected host schema and Nervix types; sensitivity stays an explicit host execution rule."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-wasm"
 random_iterations = 256
 source = "crates/nervix-wasm/src/properties.rs"
 test = "properties::bolero_host_schema_preserves_the_complete_abi_projection"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm/src/__fuzz__/properties__bolero_host_state_descriptions_preserve_sections_and_refuse_empty_arrays/corpus"
+domain_version = 1
+features = []
+id = "wasm-host-state-descriptions"
+invariant = "A decoded state description reaches the host with every section's schema, nested types, nullability, order and row bytes, and each declared type either names exactly the Nervix type it projects back to or, for an ARRAY of zero elements at any depth, is refused as such."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm"
+random_iterations = 256
+source = "crates/nervix-wasm/src/properties.rs"
+test = "properties::bolero_host_state_descriptions_preserve_sections_and_refuse_empty_arrays"
 test_target = "lib"
 
 [[target]]
@@ -2323,7 +2353,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_corrupt_messages_validate_sizes_offsets_and_counts/corpus"
-domain_version = 13
+domain_version = 14
 features = []
 id = "wasm-protocol-corruption"
 invariant = "Truncated frames, declared-size mismatches, invalid identifiers, offsets and vector counts fail before decoding or effects for every current message family."
@@ -2338,7 +2368,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_message_tags_and_column_descriptors_fail_typed/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "wasm-protocol-tags"
 invariant = "Unknown current union, processor-type and column-source tags, missing nested types and nonzero uninitialized indices yield the owning typed protocol error."
@@ -4875,12 +4905,12 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wasm_state_inspection__tests__bolero_wasm_state_page_messages_round_trip/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "interconnect-wasm-state-inspection"
-invariant = "Every field of the owner WASM state page request and its typed page or refusal survives the production admitted rkyv codec unchanged, including selectors, resume keys, entry limits, process origins, lifetimes, resets, complete counts and every branch entry's checkpoint and recovery, plus inherited diagnostics with their actual units and complete checkpoint facts."
+invariant = "Every field of the owner WASM state page request and its typed page or refusal survives the production admitted rkyv codec unchanged, including selectors, resume keys, entry limits, section and byte budgets, render budgets, process origins, lifetimes, resets, complete counts and every branch entry's checkpoint, recovery and guest-state description with its sections or failed render, plus inherited diagnostics with their actual units and complete checkpoint facts."
 manifest = "Cargo.toml"
-max_input_bytes = 512
+max_input_bytes = 2048
 package = "nervix-interconnect"
 random_iterations = 128
 source = "crates/interconnect/src/wasm_state_inspection.rs"

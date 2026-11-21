@@ -178,7 +178,9 @@ drains `nervix_read_emit` and saves the instance with `nervix_dump_state`. A gue
 lifetime with the `nervix_request_state_reset` import, which the host accepts only while one of
 those three callbacks is running. The ABI also requires a `nervix_reset_state` export. The host
 resolves it when it instantiates a branch and never calls it: every new lifetime starts in a new
-instance.
+instance. It requires a `nervix_describe_state` export too, which the host calls only on the scratch
+instance a state inspection creates the same way, restores from the committed checkpoint and
+discards; see [Observability](#observability).
 
 Every guest operation receives its own `MAX FUEL` budget and one explicit domain execution snapshot.
 Instantiation, initialization, restore, each callback, and each save are separate operations; the
@@ -771,19 +773,45 @@ and these typed facts:
 | Default generation | The lifetime of every branch that has not started one of its own |
 | Latest reset | Its request reference, scope, phase, reason, the generation it published for its scope, and its readiness |
 | Counts | Every selected branch entry, the selected checkpoints of the current lifetimes by stage, and the selected recorded recoveries by outcome, including entries beyond the page |
-| Branch entries | One per selected branch with a checkpoint in its current lifetime or a recorded rejected-state recovery, in branch order: the branch fingerprint (absent for the unbranched execution), the checkpoint's generation, committed and latest revision, stage and required and confirmed replica counts, and the recovery's refused generation, rejection, request reference and outcome |
+| Branch entries | One per selected branch with a checkpoint in its current lifetime or a recorded rejected-state recovery, in branch order: the branch fingerprint (absent for the unbranched execution), the checkpoint's generation, committed and latest revision, stage and required and confirmed replica counts, the recovery's refused generation, rejection, request reference and outcome, and the guest-state description of a branch with a checkpoint |
+| Guest-state description | What the guest's [`nervix_describe_state`](./wasm-processor-guests.md#state-description) rendered of the branch's committed checkpoint on a scratch instance: the generation and committed revision it restored (no revision when the lifetime has committed nothing yet), and either each section's name, its fields with their types and optionality, and its row count, or the failure of the render with its stage and [diagnostic](./wasm-processor-guests.md#failure-diagnostics). Every field is reported sensitive and no value is carried, because guest state is always sensitive |
 
 The envelope's counts report a WASM unit's selected branches under `branches`; a WASM processor has
 no row sections, so `rows` and `bytes` are zero. The text rendering prints, per unit, the summary
-lines `DESCRIBE WASM PROCESSOR` prints followed by one `checkpoint branch=<fingerprint>` line and one
-`rejected state recovery: branch=<fingerprint>` line per returned entry; the JSON rendering carries
-the same facts as `wasm` objects of the units, with snake-case stages, phases, reasons, readiness,
-rejections and outcomes.
+lines `DESCRIBE WASM PROCESSOR` prints followed, per returned entry, by one
+`checkpoint branch=<fingerprint>` line, one `rejected state recovery: branch=<fingerprint>` line, and
+the guest-state description: a `guest state branch=<fingerprint> generation=<g> revision=<r>` line that
+states `values withheld, guest state is always sensitive` or names the failed stage and its
+diagnostic, and one `guest section branch=<fingerprint> name=<name> rows=<n> fields=<field> <TYPE>`
+line per section, with `OPTIONAL` after an optional field's type. The JSON rendering carries the
+same facts as `wasm` objects of the units, with snake-case stages, phases, reasons, readiness,
+rejections, outcomes and render stages, and each entry's `description` with its `generation`,
+`revision`, `outcome` (`described` or `failed`), and its `sections` or its `failure`.
+
+Guest state is always sensitive. A WASM guest can hold anything, including private keys it derives
+itself, and Nervix cannot tell which part of its state derives from sensitive data, so no read ever
+carries a value a guest described, whatever the processor's inputs and branch key are: a section
+reports its name, its fields and their types, and its row count. There is no clause that reveals the
+values; a separate permission to read guest-state values will come later.
+
+The owner renders the description of every entry the page returns on a scratch instance: it
+instantiates the pinned module, initializes it with the branch's configuration, restores the
+committed checkpoint, calls `nervix_describe_state`, validates the sections like emitted output, and
+discards the instance. The render runs on the node's extension workers under the processor's
+`MAX FUEL` and `MAX MEMORY`, the host's guest buffer limit and the read's deadline, and charges the
+size of the checkpoint it restores to the node's state-read memory while it runs. It never touches the instance that
+processes input, takes its execution lane, or advances a checkpoint, and a render that fails, traps,
+exhausts a limit or runs past the deadline fails only that entry's description: nothing is latched,
+no checkpoint fails and `ON GLOBAL ERROR` does not run. A page carries at most the node's
+`inspection-max-sections` guest sections, and an entry whose description alone exceeds that bound
+reports it as a failed render; the page stops before an entry whose description no longer fits the
+reply, so a reply that stops early carries a continuation. Half of the read's remaining time bounds
+the renders of one unit's page.
 
 | Signal | What it shows |
 | --- | --- |
 | `DESCRIBE WASM PROCESSOR <name>` | The pinned `resource`, `resource version`, and `file`, the `rejected state policy`, and per unit `state default generation`, the latest reset as `state reset: <PUBLISHING or READY>, <scope>, generation <n>` with its reason, readiness and request, a `rejected state recoveries` summary when any is recorded, and the checkpoint counts |
-| `SHOW WASM PROCESSOR <name> STATE` | The unit facts above and a bounded, resumable page of branch entries, in text or JSON |
+| `SHOW WASM PROCESSOR <name> STATE` | The unit facts above and a bounded, resumable page of branch entries with their guest-state descriptions, in text or JSON |
 | Client outcome | `CommandOutcome::state` carries the typed envelope of a state read beside either rendering |
 | `DESCRIBE TRANSACTION` | The planned and actual effect of a transaction's `RESET WASM PROCESSOR` step |
 | `SHOW CLUSTER STATUS` | A forced recovery's `state_recovery` outcome and the `wasm_processor` component it reset with the cause |
@@ -791,9 +819,10 @@ rejections and outcomes.
 | Server log | At `info`: `WASM guest-state reset generation published` and `WASM guest-state reset became usable` on the leader, `wasm guest requested a new branch state lifetime` and `raised a refused WASM guest-state lifetime for recovery` on the owner, and `WASM rejected-state recovery admitted` and `WASM rejected-state recovery settled` on the leader |
 
 Both reads are read-only. The owner of each unit answers a state read from the committed schedule at
-the read's control revision and its published checkpoint observations, without taking a branch's
-execution lane, requesting synchronization, or advancing a checkpoint, and it applies the selection
-and the entry limit before anything crosses the interconnect. Only checkpoints of the generation the
+the read's control revision, its published checkpoint observations and, for the descriptions of
+`SHOW ... STATE`, its committed checkpoints, without taking a branch's execution lane, requesting
+synchronization, or advancing a checkpoint, and it applies the selection, the entry limit and the
+description bounds before anything crosses the interconnect. Only checkpoints of the generation the
 committed schedule names for their branch count, so a lagging owner or an in-flight rebind is fenced
 out of the read. A continuation names the processor, the selection and the committed control
 revision it was issued for; a resume after any later schedule change, such as a reset or a recovery
@@ -836,6 +865,11 @@ Nervix guarantees:
    binding change never becomes current again.
 6. **Strict restoration.** Only a guest's own verdict can make `ON REJECTED STATE RESET` discard a
    lifetime.
+7. **Inspection leaves the branch alone.** A guest-state description is rendered on a scratch
+   instance restored from the committed checkpoint and discarded afterwards; it never runs on,
+   delays, latches or checkpoints the instance that processes input.
+8. **Guest-state values are withheld.** No read carries a value a guest described: guest state is
+   always sensitive.
 
 Nervix does not provide, and these limits apply:
 
@@ -863,6 +897,10 @@ Nervix does not provide, and these limits apply:
 - **A `DETACHED` processor gates no ingestor acknowledgement** on its checkpoints.
 - **Guest requests and recovery raises are volatile**, and are raised again by the next callback or
   refusal.
+- **A description reflects the committed checkpoint**, which lags the live instance by at most the
+  callback in progress, and renders the guest's state only as the guest chooses to describe it.
+- **No permission reveals guest-state values yet.** A separate permission to read them will come
+  later.
 
 ## Qualification Evidence
 

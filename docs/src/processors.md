@@ -822,8 +822,23 @@ rejection, request and outcome. Required and confirmed replica counts are shown 
 captured on the current owner; a restored checkpoint whose earlier boundary is unknown reports those
 counts as unknown. `LIMIT` bounds the entries of one reply, and a reply that stops early carries a
 continuation that `AFTER` resumes under the same committed schedule. `FORMAT JSON` renders the same
-typed envelope the command returns to clients in either format. See
-[Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
+typed envelope the command returns to clients in either format.
+
+Each entry with a checkpoint also carries the guest's own description of that checkpoint: the
+owner restores the committed checkpoint on a scratch instance, asks the guest's
+[`nervix_describe_state`](wasm-processor-guests.md#state-description) export for its sections, and
+discards the instance. The entry reports the generation and revision the render restored and each
+section's name, its fields and their types, and its row count, or the failed render's stage and
+diagnostic. Guest state is always sensitive, so no value a guest describes is ever shown, whatever
+the processor reads; there is no clause that reveals them, and a separate permission to read
+guest-state values will come later:
+
+```text
+guest state branch=40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1 generation=1 revision=2: values withheld, guest state is always sensitive
+guest section branch=40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1 name=counters rows=1 fields=count U32
+```
+
+See [Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
 [WASM State And Recovery](wasm-state.md#observability).
 
 ### Reset guest state from Plexus

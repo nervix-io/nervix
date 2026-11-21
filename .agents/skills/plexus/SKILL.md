@@ -964,7 +964,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - To inspect WASM guest-state progress, use
   `SHOW WASM PROCESSOR <processor> STATE [FOR ...] [LIMIT <n> [AFTER '<continuation>']] [FORMAT TEXT|JSON];`.
   Read each unit's reset phase, generation and readiness beside every selected branch's checkpoint
-  revision, stage and replica counts; follow a returned continuation with `AFTER` to page the rest.
+  revision, stage and replica counts and the guest's description of that checkpoint, whose values
+  are always withheld; follow a returned continuation with `AFTER` to page the rest.
   `DESCRIBE WASM PROCESSOR <processor>;` prints only the binding and per-unit summary counts. See
   `Runtime Nodes` and `WASM Processor Guests` for the meaning of each stage.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output

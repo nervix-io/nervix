@@ -1609,8 +1609,46 @@ function wasmUnitLines(state: wire.WasmUnitStateFacts): string[] {
     if (recovery !== null) {
       lines.push(`STATE_WASM_RECOVERY branch=${branch} generation=${recovery.generation()} rejection=${wire.WasmSavedStateRejection[member(recovery.rejection())]} request=${recovery.request()} outcome=${wire.WasmRecoveryOutcome[member(recovery.outcome())]}`);
     }
+    const description = entry.description();
+    if (description !== null) {
+      if (checkpoint === null) throw new Error('a WASM guest-state description has no checkpoint beside it');
+      lines.push(...wasmDescriptionLines(branch, description));
+    }
   }
   return lines;
+}
+
+/**
+ * A guest-state description: its restored generation and revision, then its sections with their
+ * fields, which are always sensitive, or its failed render's stage and diagnostic.
+ */
+function wasmDescriptionLines(branch: string, description: wire.WasmGuestStateDescription): string[] {
+  const restored = `STATE_WASM_DESCRIPTION branch=${branch} generation=${description.generation()} revision=${optionalNumber(description.revision())}`;
+  switch (description.renderType()) {
+    case wire.WasmGuestStateRender.WasmGuestStateSections: {
+      const described = member(description.render(new wire.WasmGuestStateSections()) as wire.WasmGuestStateSections | null);
+      const lines = [`${restored} outcome=described sections=${described.sectionsLength()}`];
+      for (let i = 0; i < described.sectionsLength(); i += 1) {
+        const section = member(described.sections(i));
+        lines.push(`STATE_WASM_SECTION branch=${branch} name=${section.name()} rows=${section.rows()} fields=${section.fieldsLength()}`);
+        for (let j = 0; j < section.fieldsLength(); j += 1) {
+          const field = readField(member(section.fields(j)));
+          if (!field.sensitive) throw new Error(`guest section ${section.name()} field ${field.name} is not sensitive`);
+          lines.push(fieldLine('STATE_WASM_FIELD', field));
+        }
+      }
+      return lines;
+    }
+    case wire.WasmGuestStateRender.WasmGuestStateRenderFailure: {
+      const failure = member(description.render(new wire.WasmGuestStateRenderFailure()) as wire.WasmGuestStateRenderFailure | null);
+      const stage = member(failure.stage());
+      const name = wire.WasmGuestStateRenderStage[stage];
+      if (name === undefined) throw new Error(`undeclared WASM render stage ${stage}`);
+      return [`${restored} outcome=failed stage=${name} diagnostic=${text(failure.diagnostic())}`];
+    }
+    default:
+      throw new Error(`unknown WASM guest-state render ${description.renderType()}`);
+  }
 }
 
 function stateInspectionLines(state: wire.StateInspection): string[] {
