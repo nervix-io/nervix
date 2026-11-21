@@ -287,6 +287,11 @@ checklists.
 - Errors keep typed causes (`thiserror`, `error-stack`) until the reporting boundary, never driver
   `Display` text or free-text reasons, and no `nervix::error_boundary` claims a record rejection the
   path does not perform.
+- The host records every external interaction it owns through the connector-interaction metric
+  families, once at its typed outcome boundary. Connector crates report transport-specific facts
+  through a declared event or a typed host-handle `record_*` method and name no metrics types. A new
+  family joins the node's metric store with vocabulary-derived labels, declared buckets, windows
+  and bounds, and its `source:` or `destination:` projection in `DESCRIBE`.
 - Every publish, window or batch, header and metadata mapping and acknowledgement path has unit
   coverage through its production owner, and every connector-owned encoding or encoded-size measure
   a registered, bounded Bolero property (shared implementations keep theirs with their owner).
@@ -313,9 +318,10 @@ checklists.
   confirmed record. A delivery defect is fixed red first: a public scenario through the real
   transport and, for an interleaving, a Shuttle check over the production owner.
 - Before closing a connector epic, review landed parallel work against both standards and record
-  evidence and compliance tasks on ClickUp. A connector change keeps the contract chapter, the
-  relevant manuals and the ratchet current in the same change; `just ratchet` and the clock-boundary
-  check treat connector crates as data plane.
+  evidence and compliance tasks on ClickUp. Check coverage of host interactions, typed outcomes and
+  event reporting, metric ownership, labels, declared constants and inspection placement. A connector
+  change keeps the contract chapter, the relevant manuals and the ratchet current in the same
+  change. `just ratchet` and the clock-boundary check treat connector crates as data plane.
 
 ### Execution-sensitive primitives
 
@@ -812,6 +818,8 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   transitions. Per-message, per-record, per-batch, payload-bearing, duplicate-drop and branch-churn
   details belong at `debug` or `trace`.
 - Hot-path logs and structured errors never expose sensitive payload values.
+- [Metrics And Observability](docs/src/metrics-and-observability.md#connector-interaction-metrics)
+  owns the connector-interaction families, their labels, lifetimes and inspection format.
 
 ## Node Settings
 

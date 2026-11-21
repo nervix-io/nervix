@@ -146,6 +146,9 @@ For backend validation claims, follow that chapter's P-256 signing and backend-s
 selecting an approved algorithm does not establish a validated deployment.
 For cluster continuity and public identity inspection, read
 [Node Settings → Permanent Cluster Identity](../../../docs/src/node-settings.md#permanent-cluster-identity).
+For node tags and detected properties, read [Selecting Nodes](../../../docs/src/placement.md#selecting-nodes)
+and [Node Selectors](../../../docs/src/filter-map-functions.md#node-selectors). Use `SHOW NODES WHERE ...`
+to preview the selector against the committed node records and `FORMAT JSON` for scripts.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
 effective policy, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and

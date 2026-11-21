@@ -534,8 +534,9 @@ as its high watermark.
 ## Inferencer
 
 Commands that bind an ONNX model inspect its tensor metadata on the node's bulk workers. Each
-inspection reserves a 16 KiB bulk buffer and uses its admitted worker to read an explicitly configured
-absolute native-library image sequentially before ONNX initialization and optimization. Its
+inspection reserves a bulk buffer of one bulk chunk (`--execution-bulk-chunk-bytes`) and uses its
+admitted worker to read an explicitly configured absolute native-library image sequentially before
+ONNX initialization and optimization. Its
 thirty-second bound covers memory admission, the worker queue, image preparation, model loading,
 metadata extraction and session release. Image preparation is advisory; native library discovery
 and loading errors remain owned by ONNX Runtime. A full bulk

@@ -978,6 +978,9 @@ module Probe
   end
 
   def self.run_inspection(session)
+    nodes = session.native.execute(session.native.prepare("SHOW NODES WHERE node.name = 'node-1';")).node_inspection
+    raise 'typed cluster node preview' unless nodes.is_a?(NX::NodeInspection) && nodes.names == ['node-1'] && nodes.json.include?('"architecture":')
+    report('INSPECTION nodes names=node-1')
     license = session.native.execute(session.native.prepare('DESCRIBE LICENSE;')).state_inspection
     unless license.domain.nil? && license.entity_name.nil? && license.entity_kind == 'LICENSE' && license.counts.rows == 3 && license.counts.branches.zero?
       raise 'typed cluster licensing observation'

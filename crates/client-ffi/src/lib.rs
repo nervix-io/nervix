@@ -37,6 +37,7 @@ mod event;
 mod failure;
 mod fields;
 mod inspection;
+mod node_inspection;
 mod outcome;
 mod producer;
 mod schema;
@@ -141,3 +142,4 @@ pub use inspection::{
     nx_inspection_schema, nx_outcome_inspection,
 };
 pub use nervix_client_host::{EntityLabelViewKind, EntityLabelsInspection, Inspection};
+pub use node_inspection::*;

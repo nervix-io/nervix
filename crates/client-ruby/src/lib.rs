@@ -28,6 +28,7 @@ mod enums;
 mod errors;
 mod gvl;
 mod inspection;
+mod node_inspection;
 mod schema;
 mod sessions;
 mod subscriptions;
@@ -47,6 +48,7 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     sessions::register(ruby, client)?;
     inspection::register(ruby, client)?;
     entity_labels::register(ruby, client)?;
+    node_inspection::register(ruby, client)?;
     subscriptions::register(ruby, client)?;
     clocks::register(ruby, client)?;
     endpoints::register(ruby, client)?;
