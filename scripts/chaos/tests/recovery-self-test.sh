@@ -402,10 +402,12 @@ jq -e '.contract == "failover permitted" and .leaders_observed == []' "${tmp_dir
     label_dir="${tmp_dir}/labels"
     mkdir -p "${label_dir}"
     # Stands in for the packaged CLI: every owner answers its committed inspection, except the
-    # owner LABEL_UNANSWERED names, whose read fails.
+    # owner LABEL_UNANSWERED names, whose read fails. With LABEL_BATCH_FAILS set, the batch
+    # fails before it writes anything, as when its container cannot start.
     admin_cli_batch() {
         local output_dir="$3"
         shift 4
+        [[ -z "${LABEL_BATCH_FAILS:-}" ]] || return 1
         mkdir -p "${output_dir}"
         while [[ "$#" -ge 2 ]]; do
             local name="$1"
@@ -429,6 +431,12 @@ jq -e '.contract == "failover permitted" and .leaders_observed == []' "${tmp_dir
     fi
     jq -e '.user == null' "${label_dir}/read/nervix-2.json" >/dev/null \
         || fail 'an unanswered owner did not read as null'
+    if LABEL_BATCH_FAILS=1 label_probe_read nervix-3 "${label_dir}/read/nervix-3"; then
+        fail 'a node whose read batch failed was accepted'
+    fi
+    jq -e --argjson owners "$(printf '%s\n' "${label_probe_owners[@]}" | jq -R . | jq -sc 'sort')" \
+        'keys == $owners and all(.[]; . == null)' "${label_dir}/read/nervix-3.json" >/dev/null \
+        || fail "a failed read batch did not read as every owner unanswered: $(cat "${label_dir}/read/nervix-3.json" 2>/dev/null)"
 
     maps='{"domain":{"probe":"installed"},"user":{"probe":"installed","stale_r1":"1"}}'
     mkdir -p "${label_dir}/agree" "${label_dir}/differ"

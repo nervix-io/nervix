@@ -89,8 +89,9 @@ label_probe_edit() {
 # Reads every probed owner's labels through HOST's own public route, in DOMAIN when one is given
 # and in the baseline domain otherwise, into OUTPUT_DIR and writes OUTPUT_DIR.json mapping each
 # owner to its complete label map, or to null where the read did not answer with one typed
-# committed inspection. Returns 1 unless every owner answered, so a wait repeats the read until the
-# node serves every inspection.
+# committed inspection. The map file is written even when the batch itself fails, so a judge reads
+# an unanswered owner rather than a missing file. Returns 1 unless every owner answered, so a wait
+# repeats the read until the node serves every inspection.
 label_probe_read() {
     local host="$1"
     local output_dir="$2"
@@ -100,7 +101,9 @@ label_probe_read() {
     for owner in "${label_probe_owners[@]}"; do
         pairs+=("labels-${owner}" "SHOW LABELS ON $(label_probe_target "${owner}" "${domain}") FORMAT JSON;")
     done
-    admin_cli_batch "${host}" "${domain}" "${output_dir}" 120 "${pairs[@]}" || return 1
+    local batch_status=0
+    admin_cli_batch "${host}" "${domain}" "${output_dir}" 120 "${pairs[@]}" || batch_status=$?
+    mkdir -p "${output_dir}"
     local maps
     maps="$(mktemp "${output_dir}/.labels.XXXXXX")"
     for owner in "${label_probe_owners[@]}"; do
@@ -114,6 +117,7 @@ label_probe_read() {
     done
     jq -s 'from_entries' "${maps}" >"${output_dir}.json"
     rm -f "${maps}"
+    ((batch_status == 0)) || return 1
     jq -e 'all(.[]; . != null)' "${output_dir}.json" >/dev/null
 }
 
