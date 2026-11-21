@@ -15,8 +15,22 @@ use std::num::{NonZeroU32, NonZeroU64};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol allows 32 consumer handles per session"
+    )
+)]
 pub const MAX_CLIENT_CONSUMERS_PER_SESSION: usize = 32;
 pub const DEFAULT_CLIENT_CONSUMER_SESSION_BYTES: u64 = crate::ClientConsumerSessionBytes::DEFAULT;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol (rule E-1) caps a consumer's batch limit at 1,024"
+    )
+)]
 pub const MAX_CLIENT_CONSUMER_BATCHES: u32 = 1024;
 
 #[derive(

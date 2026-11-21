@@ -102,6 +102,17 @@ captured policy revision and acceptance limits. Revision values retain all 64 bi
 {{#include ../../tests/client_conformance/java/suite/cluster/EntityLabelsTests.java:entity_labels}}
 ```
 
+### Inspect Cluster Nodes
+
+`outcome.nodeInspection()` returns an independently retained `NodeInspection` for either
+presentation of `SHOW NODES`. It returns `null` when the outcome has no node inspection.
+Read `names()` for the ordered matches and `json()` for the full membership and committed
+record data. Close the handle when finished.
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/InspectionTests.java:node_inspection}}
+```
+
 ### Inspect Materialized State
 
 `Outcome.stateInspection()` returns an independently retained inspection, or `null` when the

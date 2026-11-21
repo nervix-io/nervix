@@ -2527,9 +2527,10 @@ written its `PUBREC`; after that it releases the publish once with `PUBREL`. Ner
 delivery attempts and acknowledgements of a connection in memory only, so a publish whose
 acknowledgement a lost connection never wrote is delivered again once a persistent session
 resumes, at QoS 2 as at QoS 1.
-The per-node Prometheus counter `nervix_ingestor_read_ahead_dropped_payloads_total`, labeled by
-`domain`, `ingestor` and `physical_node_id`, counts each overflow immediately, including during an
-acknowledgement wait. It is separate from the transport-redelivery count in `DESCRIBE INGESTOR`.
+The per-unit Prometheus counter `nervix_ingestor_read_ahead_dropped_payloads_total` counts each
+overflow immediately, including during an acknowledgement wait. [Ingestor intake and payload
+handling](metrics-and-observability.md#ingestor-intake-and-payload-handling) lists its labels and
+the transport-redelivery counter that `DESCRIBE INGESTOR` reports.
 An oversized QoS 0 publish dropped at this boundary counts as overflow only. Under `NO ACK` the
 64-outcome read-ahead applies backpressure when full, which also stops its keep-alive until the
 ingestor reads again. See
@@ -4034,9 +4035,9 @@ the schedule assigns it to.
 
 ### Inspecting Transport Reads
 
-Read `DESCRIBE INGESTOR`'s `source:` section and the matching Prometheus families to distinguish raw
-transport reads from graph traffic. Kafka reads count returned payloads before the filter runs;
-HTTP REQUEST and PROMETHEUS QUERY polls also report empty answers and elapsed poll duration.
-[Ingestor Source Interactions](metrics-and-observability.md#ingestor-source-interactions) defines
-outcomes, labels, timing and replay accounting. The existing graph edge metrics retain their own
-row and batch meanings.
+Read `DESCRIBE INGESTOR`'s `source:` section and the matching Prometheus families for transport
+reads, polls, endpoint requests, acknowledgement and lifecycle outcomes. A Kafka read counts its
+raw payloads before the filter runs. `HTTP REQUEST` and `PROMETHEUS QUERY` polls report empty
+answers and elapsed poll duration. Graph `outgoing_edges` measure the rows and batches sent to
+each `relay`. [Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)
+defines the families, labels, timing and replay accounting.

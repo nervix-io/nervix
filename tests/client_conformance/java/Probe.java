@@ -1201,6 +1201,12 @@ public final class Probe {
     }
 
     static void runInspection(Session session) throws Exception {
+        try (var outcome = session.handle.command("SHOW NODES WHERE node.name = 'node-1';", null);
+                var nodes = outcome.nodeInspection()) {
+            require(nodes != null && nodes.names().equals(List.of("node-1")), "typed cluster node preview");
+            require(nodes.json().contains("\"architecture\":"), "committed node facts");
+            report("INSPECTION nodes names=node-1");
+        }
         try (var outcome = session.handle.command("DESCRIBE LICENSE;", null); var license = outcome.stateInspection()) {
             require(license.domain() == null && license.entityName() == null, "cluster licensing scope");
             require(license.entityKind().equals("LICENSE") && license.counts().rows() == 3 && license.counts().branches() == 0, "typed licensing observation");

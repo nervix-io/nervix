@@ -266,6 +266,13 @@ func commandLines(head string, outcome *session.CommandOutcome) ([]string, error
 		}
 		lines = append(lines, inspected...)
 	}
+	if nodes := outcome.NodeInspection(nil); nodes != nil {
+		inspected, err := nodeInspectionLines(nodes)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, inspected...)
+	}
 
 	return lines, nil
 }
@@ -1607,6 +1614,41 @@ func entityLabelLines(value *session.EntityLabelsInspection) ([]string, error) {
 			return nil, errors.New("labels lack an entry")
 		}
 		lines = append(lines, fmt.Sprintf("LABEL key=%s value=%s", text(entry.Key()), text(entry.Value())))
+	}
+	return lines, nil
+}
+
+func nodeInspectionLines(value *session.NodeInspection) ([]string, error) {
+	var lines []string
+	for index := 0; index < value.NodesLength(); index++ {
+		row := new(session.NodeInspectionRow)
+		if !value.Nodes(row, index) {
+			return nil, errors.New("node inspection lacks a row")
+		}
+		live, voter, cordoned, terminating := row.Live(), row.Voter(), row.Cordoned(), row.Terminating()
+		if live == nil || voter == nil || cordoned == nil || terminating == nil {
+			return nil, errors.New("node inspection lacks membership flags")
+		}
+		lines = append(lines, fmt.Sprintf("NODE name=%s live=%t voter=%t cordoned=%t terminating=%t",
+			row.Name(), *live, *voter, *cordoned, *terminating))
+		record := row.Record(nil)
+		if record == nil {
+			lines = append(lines, "NODE_RECORD none")
+			continue
+		}
+		properties := record.Properties(nil)
+		if properties == nil || record.Revision() == nil {
+			return nil, errors.New("node inspection lacks committed facts")
+		}
+		lines = append(lines, fmt.Sprintf("NODE_RECORD revision=%d cpu_count=%s memory_limit=%s architecture=%s",
+			*record.Revision(), optionalNumber(record.CpuCount()), optionalNumber(record.MemoryLimit()), text(properties.Architecture())))
+		for index := 0; index < record.TagsLength(); index++ {
+			entry := new(session.NodeTagEntry)
+			if !record.Tags(entry, index) {
+				return nil, errors.New("node inspection lacks a tag entry")
+			}
+			lines = append(lines, fmt.Sprintf("NODE_TAG key=%s value=%s", text(entry.Key()), text(entry.Value())))
+		}
 	}
 	return lines, nil
 }

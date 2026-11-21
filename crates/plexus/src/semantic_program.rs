@@ -108,6 +108,7 @@ fn parse_scope<'src>(name: &str, span: Span) -> Result<FieldScope, ParseError<'s
         "right" => Ok(FieldScope::Right),
         "metadata" => Ok(FieldScope::Metadata),
         "payload" => Ok(FieldScope::Payload),
+        nervix_models::NODE_SCOPE => Ok(FieldScope::Node),
         "partial_output" => Ok(FieldScope::PartialOutput),
         "error" => Ok(FieldScope::Error),
         _ => Err(Rich::custom(
@@ -124,7 +125,7 @@ fn field_reference<'src>()
         .then(qualified_name_word().labelled("ref:expression_field"))
         .then(
             tok(Token::Dot)
-                .ignore_then(qualified_name(FieldName::parse))
+                .ignore_then(qualified_name(FieldName::parse).labelled("ref:expression_field"))
                 .or_not(),
         )
         .try_map(|((scope, second), third), span| match third {
@@ -136,9 +137,14 @@ fn field_reference<'src>()
                     field,
                 ))
             }
+            Some(field) if scope.eq_ignore_ascii_case(nervix_models::NODE_SCOPE) => {
+                let field = FieldName::parse(&format!("{second}.{field}"))
+                    .map_err(|error| Rich::custom(span, error.to_string()))?;
+                Ok(FieldReference::scoped(FieldScope::Node, field))
+            }
             Some(_) => Err(Rich::custom(
                 span,
-                "only relay_state.<relay>.<field> may contain three field path segments",
+                "three field path segments require relay_state or node",
             )),
             None if scope.eq_ignore_ascii_case("relay_state") => Err(Rich::custom(
                 span,

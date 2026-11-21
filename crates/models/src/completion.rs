@@ -21,6 +21,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinFunctionScope {
     Ordinary,
+    NodeSelector,
     IngestorEntity(IngestorEntityKind),
     EmitterInvocation(EmitterEntityKind),
     /// The value a window processor route's `SET` assigns, where the window's aggregates stand

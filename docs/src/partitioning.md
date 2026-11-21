@@ -93,6 +93,12 @@ requests. The whole transfer must finish within the entity gate deadline (`ENTIT
 If it does not, the publication fails, the readers continue on the previous layout, and the leader
 publishes the topology again at its next observation.
 
+Every source unit must supply the checkpoints its current schedule requires. An offset table
+without any committed positions is a valid checkpoint. If a required checkpoint cannot be read
+from its source, the attempt fails and the previous layout stays in effect. Units in the new
+layout install their prepared state before their readers start, including units that stay on the
+same owner.
+
 Growing a topic from twelve to sixteen partitions advances the branch epoch. An automatic branch
 then has sixteen partitions. A four-group branch keeps four groups, and the new external partitions
 join their modulo groups. A source replacement also advances the epoch when its count stays the

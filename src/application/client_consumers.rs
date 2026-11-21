@@ -44,6 +44,15 @@ use crate::runtime::{
     ClientEmitterResponder, Runtime,
 };
 
+/// The largest delivery chunk of a consumer stream: the executing node splits a delivery at it,
+/// and the serving node refuses a larger chunk as a break of the stream contract.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "both nodes of a consumer stream split and check delivery chunks at one MiB"
+    )
+)]
 const CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]

@@ -333,6 +333,12 @@ struct Outcome {
 }
 
 impl Outcome {
+    fn node_inspection(&self) -> Option<crate::node_inspection::NodeInspection> {
+        self.outcome
+            .node_inspection()
+            .map(crate::node_inspection::NodeInspection::new)
+    }
+
     fn entity_labels(&self) -> Option<crate::entity_labels::EntityLabelsInspection> {
         self.outcome
             .entity_labels()
@@ -561,6 +567,7 @@ impl Outcome {
         outcome.define_method("disposition", method!(Outcome::disposition, 0))?;
         outcome.define_method("entity_labels", method!(Outcome::entity_labels, 0))?;
         outcome.define_method("state_inspection", method!(Outcome::state_inspection, 0))?;
+        outcome.define_method("node_inspection", method!(Outcome::node_inspection, 0))?;
         outcome.define_method("message", method!(Outcome::message, 0))?;
         outcome.define_method(
             "execution_reference",

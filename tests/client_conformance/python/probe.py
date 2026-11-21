@@ -1144,6 +1144,11 @@ def run_upload(session, report):
 def run_inspection(session, report):
     import gc
 
+    nodes = execute(session, "SHOW NODES WHERE node.name = 'node-1';").node_inspection
+    assert isinstance(nodes, nx.NodeInspection) and nodes.names == ["node-1"]
+    row, = json.loads(nodes.json)["nodes"]
+    assert row["name"] == "node-1" and row["record"]["properties"]["architecture"]
+    report("INSPECTION nodes names=node-1")
     license_outcome = execute(session, "DESCRIBE LICENSE;")
     license = license_outcome.state_inspection
     assert license is not None and license.domain is None and license.entity_name is None

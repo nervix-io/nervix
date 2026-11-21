@@ -11,24 +11,25 @@ use nervix_models::{
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
-    ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
-    DescribeBranch, DescribeClient, DescribeCluster, DescribeCorrelator, DescribeDeduplicator,
-    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLicense, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate, DrainNode, DropModel,
-    DropNode, EmitterBatchLegality, EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration,
-    EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity, IngestorAlteration,
+    BinaryOperator, BuiltinFunctionName, ClientIngestorEntity, CordonNode, CreateDomain,
+    CreateResource, CreateStatement, CreateUser, DescribeBranch, DescribeClient, DescribeCluster,
+    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
+    DescribeIngestor, DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement,
+    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
+    DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality, EmitterBodyForm,
+    EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind, ExistingUserPolicy,
+    Expression, FieldName, FieldReference, FieldScope, HttpIngestorEntity, IngestorAlteration,
     IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind, InspectionFormat,
-    KafkaIngestorEntity, LookupQuery, ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity,
-    NodeRef, PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity,
-    RabbitMqIngestorEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
-    RedisIngestorEntity, RelayBranching, RelayName, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
-    ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements, ShowProcessorState,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, ShowWasmProcessorState,
-    SqsIngestorEntity, StartDomain, StateBranchField, StateBranchSelection,
+    KafkaIngestorEntity, Literal, LookupQuery, ModelKind, ModelName, MqttIngestorEntity,
+    NODE_TAG_FUNCTION, NatsIngestorEntity, NodeRef, NodeSelectorField, PlacementPolicy,
+    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
+    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
+    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
+    RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes,
+    ShowPlacements, ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    ShowWasmProcessorState, SqsIngestorEntity, StartDomain, StateBranchField, StateBranchSelection,
     StateInspectedProcessor, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral,
     SyslogIngestorEntity, TransactionInspectionRequest, TransactionInspectionTarget,
     TransactionOperationNumber, UncordonNode, UploadResource, WebsocketsIngestorEntity,
@@ -180,6 +181,7 @@ pub enum StatementVariant {
     AlterCluster,
     MutateEntityLabels,
     ShowLabels,
+    ShowNodes,
 }
 
 impl StatementVariant {
@@ -251,6 +253,7 @@ impl StatementVariant {
             Statement::ShowProcessorState(_) => Self::ShowProcessorState,
             Statement::ShowWasmProcessorState(_) => Self::ShowWasmProcessorState,
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
+            Statement::ShowNodes(_) => Self::ShowNodes,
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
             Statement::DescribeCluster(_) => Self::DescribeCluster,
@@ -859,6 +862,7 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::ShowClusterStatus => Statement::ShowClusterStatus(ShowClusterStatus),
+            StatementVariant::ShowNodes => Statement::ShowNodes(self.show_nodes()),
             StatementVariant::ShowTransactions => Statement::ShowTransactions(ShowTransactions),
             StatementVariant::DescribeTransaction => {
                 let target = if self.entropy.flag() {
@@ -917,6 +921,42 @@ impl Arbitrary<'_> {
             operations.push(operation(self));
         }
         operations
+    }
+
+    /// A node preview with no selector, a declared property read or a literal tag comparison.
+    fn show_nodes(&mut self) -> ShowNodes {
+        let field = |field: NodeSelectorField| {
+            let name = FieldName::parse(field.name()).assured("a selector field has a valid name");
+            Expression::Field(FieldReference::scoped(FieldScope::Node, name))
+        };
+        let selector = match self.entropy.byte() % 4 {
+            0 => None,
+            1 => Some(field(NodeSelectorField::CudaAvailable)),
+            2 => Some(Expression::Binary {
+                operator: BinaryOperator::Equal,
+                left: Box::new(field(NodeSelectorField::Name)),
+                right: Box::new(Expression::Literal(Literal::String(
+                    self.non_empty_string(),
+                ))),
+            }),
+            _ => Some(Expression::Binary {
+                operator: BinaryOperator::Equal,
+                left: Box::new(Expression::Call {
+                    function: BuiltinFunctionName::parse(NODE_TAG_FUNCTION)
+                        .assured("tag is a builtin function name"),
+                    arguments: vec![Expression::Literal(Literal::String(
+                        self.non_empty_string(),
+                    ))],
+                }),
+                right: Box::new(Expression::Literal(Literal::String(
+                    self.non_empty_string(),
+                ))),
+            }),
+        };
+        ShowNodes {
+            selector,
+            format: self.inspection_format(),
+        }
     }
 
     /// The clauses every state inspection statement takes after its head, drawn in their order.

@@ -111,6 +111,16 @@ describe the acceptance policy used by the read.
 {{#include ../../tests/client_conformance/ruby/suite/cluster/entity_labels_test.rb:entity_labels}}
 ```
 
+### Inspect Cluster Nodes
+
+`outcome.node_inspection` holds a `NodeInspection` for either presentation of `SHOW NODES`.
+It returns `nil` when the outcome has no node inspection. The report outlives the outcome
+and gives the ordered `names` and full `json` projection of membership and committed records.
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/inspection_test.rb:node_inspection}}
+```
+
 ### Inspect Materialized State
 
 `outcome.state_inspection` returns an independently retained inspection, or `nil` when the

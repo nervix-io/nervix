@@ -567,6 +567,9 @@ impl CompletionSnapshot<'_> {
                 let mut names = FunctionName::ordinary_completion_names();
                 match scope {
                     BuiltinFunctionScope::Ordinary => {}
+                    BuiltinFunctionScope::NodeSelector => {
+                        names = FunctionName::node_selector_completion_names();
+                    }
                     BuiltinFunctionScope::IngestorEntity(kind) if kind.reads_headers() => {
                         names.push(FunctionName::ReadHeader.as_str().to_string());
                         names.push(FunctionName::ReadHeaders.as_str().to_string());
@@ -1609,6 +1612,7 @@ impl SessionServiceImpl {
                 parsed.statement,
                 ClientStatement::Server(
                     Statement::ShowClusterStatus(_)
+                        | Statement::ShowNodes(_)
                         | Statement::DescribeCluster(_)
                         | Statement::DescribeLicense(_)
                 )
