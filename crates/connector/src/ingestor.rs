@@ -933,6 +933,11 @@ mod tests {
             3,
             "every clone records into the host's one count, once per drop"
         );
+        assert_eq!(
+            format!("{overflow:?}"),
+            "IngestorReadAheadOverflow { .. }",
+            "the debug form names the report without exposing the host's recorder"
+        );
     }
 
     #[nervix_primitives::test]
