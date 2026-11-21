@@ -2473,6 +2473,54 @@ fn render_wasm_unit_state(state: &nervix_models::WasmUnitStateInspection, lines:
                 recovery.outcome
             ));
         }
+        if let Some(description) = &entry.description {
+            render_wasm_description(&branch, description, lines);
+        }
+    }
+}
+
+/// A guest-state description: its restored generation and revision, then either its sections,
+/// each with its fields, or the stage and diagnostic of its failed render.
+fn render_wasm_description(
+    branch: &str,
+    description: &nervix_models::WasmGuestStateDescription,
+    lines: &mut Vec<String>,
+) {
+    let restored = format!(
+        "STATE_WASM_DESCRIPTION branch={branch} generation={} revision={}",
+        description.generation,
+        optional_text(description.revision)
+    );
+    match &description.render {
+        nervix_models::WasmGuestStateRender::Described { sections } => {
+            lines.push(format!(
+                "{restored} outcome=described sections={}",
+                sections.len()
+            ));
+            for section in sections {
+                lines.push(format!(
+                    "STATE_WASM_SECTION branch={branch} name={} rows={} fields={}",
+                    section.name.as_str(),
+                    section.rows,
+                    section.fields.len()
+                ));
+                for field in &section.fields {
+                    let row_field = SchemaField {
+                        name: field.name.clone(),
+                        ty: field.ty.clone(),
+                        optional: field.optional,
+                        sensitive: true,
+                    };
+                    lines.push(field_line("STATE_WASM_FIELD", &row_field));
+                }
+            }
+        }
+        nervix_models::WasmGuestStateRender::Failed { stage, diagnostic } => {
+            lines.push(format!(
+                "{restored} outcome=failed stage={stage:?} diagnostic={}",
+                text(diagnostic)
+            ));
+        }
     }
 }
 

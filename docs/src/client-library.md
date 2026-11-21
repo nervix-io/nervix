@@ -747,7 +747,8 @@ order. Each branch entry names its opaque fingerprint, absent for the unbranched
 carries its current-lifetime checkpoint, its recorded recovery, or both.
 
 `DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
-and its `summary`, `quotas` and `transitions` sections, including when no domain is selected.
+and its `summary`, `quotas`, `capabilities` and `transitions` sections, including when no domain
+is selected.
 Match `StateInspectionEntity::DomainNode` to access the domain and graph-node reference of a
 materialized-state observation.
 

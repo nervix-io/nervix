@@ -1766,8 +1766,24 @@ table WasmRecoveryCounts { attempted: ulong; recovered: ulong; failed: ulong; }
 table WasmCheckpointFacts { generation: ulong; committed_revision: ulong = null; latest_revision: ulong = null; stage: WasmCheckpointStage = null; required_replicas: uint = null; confirmed_replicas: uint = null; }
 /// The recovery recorded for a branch's refused lifetime.
 table WasmRecoveryFacts { generation: ulong; rejection: WasmSavedStateRejection = null; request: string (required); outcome: WasmRecoveryOutcome = null; }
-/// One selected branch, absent for the unbranched execution, with at least one of its facts.
-table WasmBranchStateFacts { branch: Fingerprint; checkpoint: WasmCheckpointFacts; recovery: WasmRecoveryFacts; }
+/// One section a guest described of its state: its name, its fields with their types and
+/// optionality, and how many rows it holds. Guest state is always sensitive: every field is
+/// `sensitive`, and no row of a guest section is ever carried.
+table WasmGuestStateSection { name: string (required); fields: [RowField] (required); rows: ulong; }
+/// The sections a guest described, in its order; none when it describes no state.
+table WasmGuestStateSections { sections: [WasmGuestStateSection] (required); }
+/// The lifecycle stage of the scratch instance at which a render of a committed checkpoint failed.
+enum WasmGuestStateRenderStage : ubyte { ModuleCompilation, Instantiation, Initialization, SnapshotEnvelopeDecoding, ApplicationStateRestoration, StateRestore, StateDescription }
+/// A render that failed at `stage`, with its complete diagnostic.
+table WasmGuestStateRenderFailure { stage: WasmGuestStateRenderStage = null; diagnostic: string (required); }
+/// What rendering a committed checkpoint on a scratch instance produced.
+union WasmGuestStateRender { WasmGuestStateSections, WasmGuestStateRenderFailure }
+/// What a guest described of a branch's committed checkpoint, with the lifetime and the committed
+/// revision its render restored; the revision is absent while the lifetime has committed nothing.
+table WasmGuestStateDescription { generation: ulong; revision: ulong = null; render: WasmGuestStateRender (required); }
+/// One selected branch, absent for the unbranched execution, with at least one of its facts. Only
+/// an entry with a checkpoint carries a guest-state description.
+table WasmBranchStateFacts { branch: Fingerprint; checkpoint: WasmCheckpointFacts; recovery: WasmRecoveryFacts; description: WasmGuestStateDescription; }
 /// One unit's guest-state lifetimes, complete counts over the selection and one page of branch
 /// entries in branch order.
 table WasmUnitStateFacts { default_generation: ulong; reset: WasmResetFacts; entries: ulong; checkpoints: WasmCheckpointCounts (required); recoveries: WasmRecoveryCounts (required); branches: [WasmBranchStateFacts] (required); }

@@ -213,8 +213,9 @@ No host adds an inferencer-specific inspection object or parses a tensor from di
 
 An inspection entity is a domain node or the cluster license. Domain and entity-name accessors
 are optional: they retain their values for a domain node and are absent for the cluster license.
-The cluster license's entity kind is `LICENSE`. Its summary and quota sections use the same
-retained schemas and Row frames, and its JSON preserves that typed entity scope.
+The cluster license's entity kind is `LICENSE`. Its summary, quota, capability and transition
+sections use the same retained schemas and Row frames, and its JSON preserves that typed entity
+scope.
 
 Python and Ruby metadata objects share one inspection owner. JVM unit and section handles lease
 the same inspection with immutable checked indices, so closing a parent does not invalidate a

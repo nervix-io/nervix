@@ -486,9 +486,10 @@ pub use wasm_state_generation::{
 };
 pub use wasm_state_inspection::{
     WasmBranchStateInspection, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
-    WasmCheckpointState, WasmRecoveryCounts, WasmRecoveryInspection, WasmStateBinding,
-    WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection, WasmStateResetReadiness,
-    WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
+    WasmCheckpointState, WasmGuestStateDescription, WasmGuestStateField, WasmGuestStateRender,
+    WasmGuestStateRenderStage, WasmGuestStateSection, WasmRecoveryCounts, WasmRecoveryInspection,
+    WasmStateBinding, WasmStateEntryKey, WasmStateInspectionError, WasmStateResetInspection,
+    WasmStateResetReadiness, WasmUnitStateInspection, WasmUnitStatePage, WasmUnitStateSelection,
 };
 pub use window_model_digest::WindowModelDigest;
 pub use wire_schema_definition::{WireSchemaDefinition, WireSchemaRef};

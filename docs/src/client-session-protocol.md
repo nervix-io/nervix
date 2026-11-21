@@ -2751,10 +2751,12 @@ carries its domain and node reference. A cluster-license entity has neither a do
 name. `DESCRIBE LICENSE` uses the same page, unit, origin and Row-section contract, capturing one
 published policy revision and its committed usage. Its single unit belongs to the answering node.
 The `summary` includes typed decision issue/receipt timestamps and the active transition count.
-The `quotas` section reports current usage against each target; `transitions` reports the original
-and target quota, affected usage, identity, start, deadline, effective deadline, acknowledgement and
-current quota state. Its datetime cells retain full timestamp precision. Counts include transition
-rows, and a client preserves every section through the generic inspection contract.
+The `quotas` section reports current usage against each target; `capabilities` reports each
+catalog capability's `state` (`enabled`, `disabled` or `permitted`) with a `permitted_until`
+deadline only for `permitted`; `transitions` reports the original and target quota, affected usage,
+identity, start, deadline, effective deadline, acknowledgement and current quota state. Its
+datetime cells retain full timestamp precision. Counts include capability and transition rows, and
+a client preserves every section through the generic inspection contract.
 
 Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
 retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes
@@ -2778,11 +2780,16 @@ count, `WasmCheckpointCounts` and `WasmRecoveryCounts`, and the returned `WasmBr
 strictly increasing branch order. An entry's absent `branch` is the unbranched execution; it carries
 a `WasmCheckpointFacts` (generation, optional committed and latest revisions, stage and optional
 required and confirmed replica counts), a `WasmRecoveryFacts` (refused generation, rejection,
-request reference and outcome) or both, never neither. Generations and revisions are positive; a
-decoder refuses a zero, an unordered or stateless entry, more returned entries than the complete
-count, and every undeclared enum value or union member. Other kinds carry neither table. A WASM
-page has no row sections, so its `rows` and `bytes` counts are zero and `branches` counts the
-selected branches.
+request reference and outcome) or both, never neither. An entry with a checkpoint also carries a
+`WasmGuestStateDescription`: the generation and optional committed revision the scratch render
+restored, and the `WasmGuestStateRender` union of `WasmGuestStateSections`, each
+`WasmGuestStateSection` with its name, its `RowField`s and its row count, or
+`WasmGuestStateRenderFailure` with its `WasmGuestStateRenderStage` and diagnostic. Guest state is
+always sensitive, so every guest section field is `sensitive` and no row of a guest section is
+carried. Generations and revisions are positive; a decoder refuses a zero, an unordered or stateless
+entry, more returned entries than the complete count, a description beside no checkpoint, a guest
+section field that is not sensitive, and every undeclared enum value or union member. Other kinds carry neither table. A WASM page has no
+row sections, so its `rows` and `bytes` counts are zero and `branches` counts the selected branches.
 
 The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
 read its typed metadata and lossless JSON through their native binding, using the host guides'
@@ -2800,8 +2807,9 @@ single-terminal reply gate still govern that outcome. Other typed reasons are `U
 
 The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
 bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
-metadata; WASM stages, phases, reasons, readiness, rejections and outcomes render as snake-case
-strings and reset scopes as `{"kind": ..., "branch": ...}`. See
+metadata; WASM stages, phases, reasons, readiness, rejections, outcomes and render stages render as
+snake-case strings and reset scopes as `{"kind": ..., "branch": ...}`, and a guest-state
+description's fields carry their Plexus type text. See
 [Inspect Materialized State](./relay.md#inspect-materialized-state) and
 [WASM State And Recovery](./wasm-state.md#observability) for token fencing and query semantics. This operator page protocol does not change subscription batches or the
 internal dependency/generator full-snapshot protocol.
