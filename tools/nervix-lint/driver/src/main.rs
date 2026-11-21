@@ -19,6 +19,7 @@ extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
 extern crate rustc_trait_selection;
+extern crate thin_vec;
 
 use std::{
     collections::BTreeMap,
@@ -57,9 +58,55 @@ fn definition_path(tcx: rustc_middle::ty::TyCtxt<'_>, id: rustc_span::def_id::De
         tcx.def_path(id).to_string_no_crate_verbose()
     )
 }
+
 use contracts::{Flow, INVALID_CONTRACT, LIFECYCLE_CALL, SYNC_ACQUISITION, UNKNOWN_EFFECT};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::Span;
+
+/// Where a nested import is written: its path, and its rename when it has one.
+fn import_span(tree: &rustc_hir::UseTree<'_>) -> Span {
+    let path = tree.prefix.span;
+    match tree.kind {
+        rustc_hir::UseKind::Single(name) if name.span.lo() > path.hi() => path.to(name.span),
+        rustc_hir::UseKind::Single(_)
+        | rustc_hir::UseKind::Glob
+        | rustc_hir::UseKind::Nested { .. } => path,
+    }
+}
+
+/// Whether `node` is a `use` tree that lists imports, whose prefix imports nothing itself.
+fn use_list_prefix(cx: &LateContext<'_>, node: rustc_hir::HirId) -> bool {
+    let tree = match cx.tcx.hir_node(node) {
+        rustc_hir::Node::Item(rustc_hir::Item {
+            kind: rustc_hir::ItemKind::Use(tree),
+            ..
+        }) => tree,
+        rustc_hir::Node::NestedUseTree(tree) => tree,
+        _ => return false,
+    };
+    match tree.kind {
+        rustc_hir::UseKind::Nested { items } => !items.is_empty(),
+        rustc_hir::UseKind::Single(_) | rustc_hir::UseKind::Glob => false,
+    }
+}
+
+/// The instance a call to `definition` with `arguments` selects once analysis has revealed
+/// opaque types. The arguments are renormalized in that environment with it, since an alias that
+/// was rigid while the body was checked can be normalizable after analysis.
+fn resolve_after_analysis<'tcx>(
+    cx: &LateContext<'tcx>,
+    definition: rustc_span::def_id::DefId,
+    arguments: ty::GenericArgs<'tcx>,
+) -> Option<ty::Instance<'tcx>> {
+    let ty::PseudoCanonicalInput {
+        typing_env,
+        value: arguments,
+    } = cx
+        .typing_env()
+        .with_post_analysis_normalized_invalidating_rigid_aliases(cx.tcx, arguments);
+    // A failure was already reported by the compiler; the call then selects no instance.
+    ty::Instance::try_resolve(cx.tcx, typing_env, definition, arguments).unwrap_or_default()
+}
 
 struct AcquisitionPass {
     flow: Flow,
@@ -87,7 +134,7 @@ struct PassInputs {
 
 struct ResolvedCall<'tcx> {
     definition: rustc_span::def_id::DefId,
-    arguments: ty::GenericArgsRef<'tcx>,
+    arguments: ty::GenericArgs<'tcx>,
     receiver: Ty<'tcx>,
     receiver_expression: String,
     span: Span,
@@ -343,6 +390,52 @@ impl AcquisitionPass {
         result
     }
 
+    /// References what a `use` tree imports, each import at its own node and span. A single or
+    /// glob import references its resolutions. A list references only through its imports,
+    /// except an empty list, which imports its prefix.
+    fn imports(
+        &mut self,
+        cx: &LateContext<'_>,
+        tree: &rustc_hir::UseTree<'_>,
+        node: rustc_hir::HirId,
+        span: Span,
+    ) {
+        let resolved = match tree.kind {
+            rustc_hir::UseKind::Single(_) | rustc_hir::UseKind::Glob => true,
+            rustc_hir::UseKind::Nested { items } => {
+                for (nested, nested_node, _) in items {
+                    self.imports(cx, nested, *nested_node, import_span(nested));
+                }
+                items.is_empty()
+            }
+        };
+        if !resolved {
+            return;
+        }
+        let resolutions = tree.prefix.res;
+        for resolution in [
+            resolutions.type_ns,
+            resolutions.value_ns,
+            resolutions.macro_ns,
+        ] {
+            if let Some(rustc_hir::def::Res::Def(_, definition)) = resolution {
+                self.architecture
+                    .reference(cx, node, span, definition, &mut self.flow);
+            }
+        }
+    }
+
+    /// Validates the contracts written on a `use` item at each of its nested imports, which
+    /// carry the item's attributes.
+    fn validate_imports(&mut self, cx: &LateContext<'_>, tree: &rustc_hir::UseTree<'_>) {
+        if let rustc_hir::UseKind::Nested { items } = tree.kind {
+            for (nested, nested_node, _) in items {
+                self.flow.validate(cx, *nested_node, false);
+                self.validate_imports(cx, nested);
+            }
+        }
+    }
+
     fn receiver<'tcx>(&self, cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> Option<(String, String)> {
         let mut normalized = cx
             .tcx
@@ -414,19 +507,12 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             if let Some((name, span)) = self.branches.item(cx, item, &mut self.flow) {
                 self.record_branch_inversion(cx, item.hir_id(), name, span);
             }
-            if let rustc_hir::ItemKind::Use(path, _) = item.kind {
-                for resolution in [path.res.type_ns, path.res.value_ns, path.res.macro_ns] {
-                    if let Some(rustc_hir::def::Res::Def(_, definition)) = resolution {
-                        self.architecture.reference(
-                            cx,
-                            item.hir_id(),
-                            item.span,
-                            definition,
-                            &mut self.flow,
-                        );
-                    }
-                }
+            if let rustc_hir::ItemKind::Use(tree) = item.kind {
+                self.imports(cx, &tree, item.hir_id(), item.span);
             }
+        }
+        if let rustc_hir::ItemKind::Use(tree) = item.kind {
+            self.validate_imports(cx, &tree);
         }
         self.flow.validate(
             cx,
@@ -497,6 +583,10 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
         path: &rustc_hir::Path<'tcx>,
         node: rustc_hir::HirId,
     ) {
+        // The prefix of a non-empty `use` list imports nothing itself; its imports do.
+        if use_list_prefix(cx, node) {
+            return;
+        }
         if self.authored(cx, path.span)
             && let rustc_hir::def::Res::Def(_, definition) = path.res
         {
@@ -592,14 +682,8 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
                     self.flow.call(cx, expression, None, true, authored);
                     return;
                 };
-                let selected = ty::Instance::try_resolve(
-                    cx.tcx,
-                    cx.typing_env().with_post_analysis_normalized(cx.tcx),
-                    definition,
-                    typeck.node_args(expression.hir_id),
-                )
-                .ok()
-                .flatten();
+                let selected =
+                    resolve_after_analysis(cx, definition, typeck.node_args(expression.hir_id));
                 let indirect = cx.tcx.trait_of_assoc(definition).is_some()
                     && selected.is_none_or(|instance| {
                         matches!(instance.def, ty::InstanceKind::Virtual(..))
@@ -637,14 +721,7 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
                     }
                     return;
                 };
-                let selected = ty::Instance::try_resolve(
-                    cx.tcx,
-                    cx.typing_env().with_post_analysis_normalized(cx.tcx),
-                    definition,
-                    substitutions.skip_binder(),
-                )
-                .ok()
-                .flatten();
+                let selected = resolve_after_analysis(cx, definition, substitutions.skip_binder());
                 let target = match selected {
                     Some(instance) => instance.def_id(),
                     None => definition,
@@ -837,7 +914,7 @@ fn main() -> anyhow::Result<()> {
         arguments.remove(0);
     } else {
         let path = Command::new("rustup")
-            .args(["which", "--toolchain", "nightly-2026-09-17", "rustc"])
+            .args(["which", "--toolchain", "nightly-2026-11-21", "rustc"])
             .output()?;
         if !path.status.success() {
             bail!("cannot locate the pinned compiler");
@@ -875,8 +952,8 @@ fn main() -> anyhow::Result<()> {
         bail!("cannot obtain the compiler identity");
     }
     let compiler_identity = String::from_utf8(version.stdout)?;
-    if !compiler_identity.contains("commit-hash: 923c95cdf") {
-        bail!("the analysis compiler does not match nightly-2026-09-17");
+    if !compiler_identity.contains("commit-hash: c7d5ba59d") {
+        bail!("the analysis compiler does not match nightly-2026-11-21");
     }
     let extra_filename = arguments
         .windows(2)
@@ -944,7 +1021,7 @@ fn main() -> anyhow::Result<()> {
         report: Arc::new(Mutex::new(report)),
         failure: None,
     };
-    rustc_driver::run_compiler(&arguments, &mut analysis);
+    rustc_driver::compiler_entrypoint(&arguments, &mut analysis);
     if let Some(failure) = analysis.failure {
         return Err(failure).context("cannot publish the required compiler report");
     }
