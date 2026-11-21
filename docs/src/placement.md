@@ -650,6 +650,26 @@ of server listeners on every live node. Inspect the claims and negotiated receiv
 `DESCRIBE CLUSTER`; [Node Settings](node-settings.md#committed-node-capabilities) owns their detection
 and restart procedure.
 
+## Selecting Nodes
+
+Use `SHOW NODES` to list the cluster nodes that the answering node knows about. Each row shows
+whether the node is live, a voter, cordoned or terminating. A node's committed record adds its
+revision, CPU count, memory limit, detected properties and operator tags. A departed node's record
+remains visible until `DROP NODE` removes it. A node that is still announcing its record appears
+without a record in the unfiltered list.
+
+Add `WHERE` to preview a selector against the committed records. For example, this lists the
+nodes tagged `zone=eu` whose GPU and ONNX Runtime can use CUDA.
+
+```plexus
+SHOW NODES WHERE tag('zone') = 'eu' AND node.cuda.available;
+```
+
+Any node can answer this command without a selected domain. Its answer reflects the committed
+records it has applied and the liveness it observes. The command is read-only. `FORMAT JSON`
+selects the JSON projection of the same inspection. See
+[Node Selectors](filter-map-functions.md#node-selectors) for the fields, types and `tag()` syntax.
+
 ## Ingestor Instance Units
 
 An instance-capable ingestor with `INSTANCES n` has one `Instance(i)` placement per global index.

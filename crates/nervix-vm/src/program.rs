@@ -105,6 +105,7 @@ pub struct FieldRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum InternalFieldNamespace {
     LookupHashMap,
+    NodeTags,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -613,6 +614,7 @@ pub enum FunctionName {
     LookupHashMap,
     ReadHeader,
     ReadHeaders,
+    Tag,
     WriteHeader,
     #[strum(disabled)]
     WindowAggregate(WindowAggregateInvocation),
@@ -1052,7 +1054,9 @@ impl FunctionName {
     /// and header writes have separate owners and are offered only by those contexts.
     pub fn ordinary_completion_names() -> Vec<String> {
         let mut names = Self::iter()
-            .filter(|function| !function.is_injected() && *function != Self::WriteHeader)
+            .filter(|function| {
+                !function.is_injected() && !matches!(function, Self::WriteHeader | Self::Tag)
+            })
             .map(|function| function.as_str().to_string())
             .collect::<Vec<_>>();
         names.extend(DatetimeFunctionName::iter().map(|function| function.to_string()));
@@ -1061,6 +1065,19 @@ impl FunctionName {
         names.extend(["ceiling", "power", "substring"].map(str::to_string));
         names.sort();
         names.dedup();
+        names
+    }
+
+    /// Builtins a node selector can use with only the committed node record as input.
+    pub fn node_selector_completion_names() -> Vec<String> {
+        let mut names = Self::ordinary_completion_names();
+        names.retain(|name| {
+            let Some(semantics) = crate::builtin_function_semantics(&Self::parse(name)) else {
+                return true;
+            };
+            semantics.volatility == crate::Volatility::Immutable && !semantics.has_side_effects
+        });
+        names.push(Self::Tag.as_str().to_string());
         names
     }
 
@@ -1207,6 +1224,7 @@ impl FunctionName {
             "lookup_hash_map" => Self::LookupHashMap,
             "read_header" => Self::ReadHeader,
             "read_headers" => Self::ReadHeaders,
+            nervix_models::NODE_TAG_FUNCTION => Self::Tag,
             "write_header" => Self::WriteHeader,
             _ => Self::Unknown(name.to_string()),
         }
@@ -1349,6 +1367,7 @@ impl FunctionName {
             Self::LookupHashMap => "lookup_hash_map",
             Self::ReadHeader => "read_header",
             Self::ReadHeaders => "read_headers",
+            Self::Tag => nervix_models::NODE_TAG_FUNCTION,
             Self::WriteHeader => "write_header",
             Self::WindowAggregate(invocation) => invocation.function.as_ref(),
             Self::Udf(name) => name.as_str(),

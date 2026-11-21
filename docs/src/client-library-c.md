@@ -100,6 +100,18 @@ captured with the same read. C++ uses the same handle with its usual RAII owner.
 {{#include ../../tests/client_conformance/c/suite/contract.h:entity_labels}}
 ```
 
+### Inspect Cluster Nodes
+
+`nx_outcome_node_inspection` retains the typed result of `SHOW NODES` for either presentation
+format. The count and indexed name accessors read the ordered matches. The JSON accessor exposes
+the membership flags and the committed records. The accessors borrow UTF-8 bytes for the lifetime
+of the node inspection handle. Release it with `nx_node_inspection_free`. C++ can own the same
+handle with a typed deleter.
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:node_inspection}}
+```
+
 ### Read Materialized State
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.

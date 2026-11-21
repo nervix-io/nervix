@@ -1194,6 +1194,15 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
 }
 
 pub fn builtin_function_semantics(function: &FunctionName) -> Option<OperationSemantics> {
+    if let FunctionName::Tag = function {
+        return Some(OperationSemantics {
+            volatility: Volatility::Immutable,
+            dependency_scope: DependencyScope::RowLocal,
+            has_side_effects: false,
+            can_error: false,
+            null_propagation: NullPropagation::Custom,
+        });
+    }
     builtin_descriptor(function).map(|descriptor| descriptor.semantics)
 }
 

@@ -14,9 +14,9 @@
     )
 )]
 
-use cucumber::{given, then};
+use cucumber::{gherkin::Step, given, then, when};
 
-use crate::{ScenarioWorld, cluster_description_block, expand_placeholders};
+use crate::{ScenarioWorld, cluster_description_block, docstring, expand_placeholders};
 
 /// Names a property a node's detection double reports from its next start: `gpu.count`,
 /// `onnx.cuda` or `cpu.model`, as `DESCRIBE CLUSTER` names them.
@@ -89,6 +89,58 @@ async fn node_describes_no_record(world: &mut ScenarioWorld, reader: String, nod
                 .any(|line| line.starts_with("  record: revision "))
         })
         .await;
+}
+
+#[when("this Plexus command is sent without a domain to a follower or the only node")]
+async fn inspect_cluster_on_non_leader(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let nodes = cluster_nodes(world);
+    let node = if let [only] = nodes.as_slice() {
+        only.clone()
+    } else {
+        world
+            .cluster()
+            .any_follower_node("node-1")
+            .await
+            .expect("the cluster has a follower")
+    };
+    let command = expand_placeholders(world, docstring(step));
+    // A direct session uses the chosen node's answer without retrying on the leader.
+    let mut session = world
+        .cluster()
+        .open_session(&node, "")
+        .await
+        .expect("a session with no domain connects to the chosen node");
+    let result = session
+        .run_command_result(&command)
+        .await
+        .expect("the request receives a command outcome");
+    let result = nervix_client_core::CommandOutcome::from(result);
+    assert!(
+        result.succeeded(),
+        "{node} refused {command}: {}",
+        result.message
+    );
+    world.last_command_output = Some(result.message.clone());
+    world.last_client_outcome = Some(result);
+}
+
+#[then(expr = "the typed node inspection lists {string}")]
+fn typed_node_inspection_lists(world: &mut ScenarioWorld, names: String) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .expect("the scenario read the command outcome");
+    let inspection = outcome
+        .node_inspection
+        .as_ref()
+        .expect("a node preview carries its typed envelope");
+    let actual: Vec<_> = inspection
+        .nodes
+        .iter()
+        .map(|node| node.name.as_str())
+        .collect();
+    let expected: Vec<_> = names.split(',').filter(|name| !name.is_empty()).collect();
+    assert_eq!(actual, expected);
 }
 
 /// Every node of the running cluster, by name.

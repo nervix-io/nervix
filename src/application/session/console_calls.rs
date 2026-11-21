@@ -59,12 +59,6 @@ use super::{
 };
 use crate::application::session_service::SessionServiceImpl;
 
-/// The close code for a call the client broke by sending a frame the call does not take.
-const CLOSE_POLICY_VIOLATION: u16 = 1008;
-
-/// The close code for an answer the server could not put into a frame.
-const CLOSE_INTERNAL_ERROR: u16 = 1011;
-
 /// Why a console call ended before its answer was complete.
 #[derive(Debug)]
 pub(in crate::application) enum ConsoleCallEnd {
@@ -73,7 +67,7 @@ pub(in crate::application) enum ConsoleCallEnd {
     /// The connection failed.
     Failed,
     /// The client broke the call's framing.
-    Violation { code: u16, reason: String },
+    Violation { code: CloseCode, reason: String },
     /// The node began to stop.
     ShuttingDown,
 }
@@ -180,7 +174,7 @@ impl SessionServiceImpl {
             Err(error) => {
                 debug!(error = %format_args!("{error:#}"), "a console download's answer does not fit a frame");
                 let violation = Violation {
-                    code: CLOSE_INTERNAL_ERROR,
+                    code: CloseCode::Error,
                     reason: "the download's answer does not fit a frame".to_string(),
                 };
                 close(&mut connector, close_frame(Some(violation))).await;
@@ -245,7 +239,7 @@ impl SessionServiceImpl {
                         None => {}
                         Some(Ok(_)) => {
                             return Some(ConsoleCallEnd::Violation {
-                                code: CLOSE_POLICY_VIOLATION,
+                                code: CloseCode::Policy,
                                 reason: "a download carries exactly one request".to_string(),
                             });
                         }
@@ -306,7 +300,7 @@ impl SessionServiceImpl {
             Err(error) => {
                 debug!(error = %format_args!("{error:#}"), "a console restore's reply does not fit a frame");
                 let violation = Violation {
-                    code: CLOSE_INTERNAL_ERROR,
+                    code: CloseCode::Error,
                     reason: "the restore's reply does not fit a frame".to_string(),
                 };
                 close(&mut connector, close_frame(Some(violation))).await;

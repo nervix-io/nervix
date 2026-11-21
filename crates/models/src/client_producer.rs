@@ -32,10 +32,24 @@ use uuid::Uuid;
 use crate::{AckWindow, SchemaField};
 
 /// The most producers one session may hold open at once.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol budgets 32 producers per session"
+    )
+)]
 pub const MAX_CLIENT_PRODUCERS_PER_SESSION: usize = 32;
 /// The default requested session-byte window; admission uses committed cluster parameters.
 pub const DEFAULT_CLIENT_PRODUCER_SESSION_BYTES: u64 = crate::ClientProducerSessionBytes::DEFAULT;
 /// The most batches one producer may have outstanding at once.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol (rule P-1) caps a producer's credit at 1,024 batches"
+    )
+)]
 pub const MAX_CLIENT_PRODUCER_BATCHES: u32 = 1024;
 /// The default client row window; the server grants its committed row limit.
 pub const DEFAULT_CLIENT_BATCH_ROWS: u32 = crate::ClientBatchRows::DEFAULT;

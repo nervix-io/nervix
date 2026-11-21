@@ -36,6 +36,14 @@ const CONSENSUS_KEYSPACE_PREFIX: &str = "raft_";
 /// closing the node's stores, whose databases allocate their own caches, the startup preflight's
 /// reads of small kernel files and its probe files, and its hardware probes, whose libraries
 /// allocate their own memory. The charge only admits the job.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an admission token of one page: the stores and libraries such a job runs own \
+                  their memory, so the charge sizes nothing"
+    )
+)]
 pub(in crate::application) const STORAGE_JOB_RESERVATION_BYTES: u64 = 4096;
 
 #[derive(Debug, Error)]
