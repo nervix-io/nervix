@@ -545,3 +545,72 @@ Feature: Bounded execution and transient memory
       | cluster_size |
       | 1            |
       | 3            |
+
+  # A consumer forwarded from another node is topology-specific: its serving node and the node that
+  # owns its emitter must differ, so the scenario runs on three nodes only.
+  @client_emitter
+  Scenario: A forwarded consumer keeps its stream while its serving node's data workers are full and receives the batch once they free
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA incoming (id STRING, amount I64);
+      CREATE SCHEMA outgoing (id STRING, cents I64);
+      CREATE RELAY orders SCHEMA incoming UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA incoming
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        INHERIT id SET cents = input.amount * 100
+        BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "owner"
+    And a node other than placeholder "owner" is saved as placeholder "serving"
+    When these Plexus commands are executed on the leader node
+      """
+      RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
+      RELOCATE EMITTER app_output ONTO NODE {{owner}} IGNORE PREFERENCES;
+      """
+    Then within "30s" node "{{serving}}" eventually reports scheduled "ingestor" "orders_in" owner equals placeholder "owner"
+    And within "30s" node "{{serving}}" eventually reports scheduled "emitter" "app_output" owner equals placeholder "owner"
+    Given client "app" is connected to node "{{serving}}"
+    And client "source" is connected to node "{{owner}}"
+    When client "app" opens consumer "remote" on emitter "app_output" expecting fields "id STRING, cents I64"
+    Then within "30s" the leader node describes emitter "app_output" with
+      """
+      consumers: 1
+      forwarded consumers: 1
+      """
+    When client "source" opens producer "input" on ingestor "orders_in" expecting fields "id STRING, amount I64"
+    # The serving node's data workers carry the forwarded consumer's heartbeats and deliveries.
+    # While they are full, those frames wait for a place instead of being refused, so the stream
+    # stays open as long as the serving node is released within its heartbeat silence limit.
+    And data execution is saturated on node "{{serving}}"
+    And producer "input" submits batch "held" with rows
+      | id  | amount |
+      | o-5 | 7      |
+    Then within "30s" the leader node describes emitter "app_output" with
+      """
+      forwarded retained batches: 1
+      """
+    When execution is released on node "{{serving}}"
+    And consumer "remote" reads output batch "held output"
+    Then output batch "held output" contains id "o-5" and cents 700
+    When output batch "held output" is acknowledged
+    Then batch "held" completes
+    And within "30s" the leader node describes emitter "app_output" with
+      """
+      consumers: 1
+      forwarded consumers: 1
+      retained batches: 0
+      """

@@ -22390,6 +22390,35 @@ async fn when_extension_execution_is_saturated_on_every_node(world: &mut Scenari
     }
 }
 
+/// Fill every data worker and every place in the data wait queue on one node, so a job that
+/// refuses on a full class is refused there and one that waits for a place waits, until the
+/// scenario releases the node's execution.
+#[when(expr = "data execution is saturated on node {string}")]
+async fn when_data_execution_is_saturated_on_node(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let fault_injection = world.fault_injection.clone();
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        fault_injection.saturate_execution(
+            &crate::common::cluster::node_name(&node_id),
+            nervix_execution::CpuClass::Data,
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("data execution on '{node_id}' never filled its workers and wait queue: {error}")
+    });
+}
+
+/// Release every worker the scenario occupied on one node, of every class.
+#[when(expr = "execution is released on node {string}")]
+async fn when_execution_is_released_on_node(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_execution(&crate::common::cluster::node_name(&node_id));
+}
+
 #[when("extension execution is released on every node")]
 async fn when_extension_execution_is_released_on_every_node(world: &mut ScenarioWorld) {
     for node_id in world.cluster().node_ids() {
