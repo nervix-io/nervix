@@ -113,7 +113,7 @@ fn decode_topology(
     }
     for branch in branches {
         let name = ParametrizerName::parse(&branch.name)
-            .map_err(|cause| cause.change_context(invalid_value(path, "branch name")))?;
+            .map_err(|cause| cause.change_context(invalid_value(path, "parametrizer name")))?;
         let grouping = match branch.layout {
             InheritedGroupingWire::Identity(count) => InheritedPartitionLayout::Identity(
                 NonZeroU16::new(count).ok_or_else(|| invalid(path, "partition count"))?,
@@ -240,7 +240,7 @@ impl ArchiveRecord for PartitionTopologyRecord {
         let mut epochs = BTreeMap::new();
         for epoch in wire.epochs {
             let name = ParametrizerName::parse(&epoch.name)
-                .map_err(|cause| cause.change_context(invalid_value(path, "branch name")))?;
+                .map_err(|cause| cause.change_context(invalid_value(path, "parametrizer name")))?;
             let number = PartitionEpochNumber::new(
                 NonZeroU64::new(epoch.number).ok_or_else(|| invalid(path, "partition epoch"))?,
             );
@@ -265,18 +265,18 @@ impl ArchiveRecord for PartitionTopologyRecord {
                 return Err(invalid(path, "branch epoch"));
             }
         }
-        for (branch, grouping) in &topology.parametrizers {
+        for (parametrizer, grouping) in &topology.parametrizers {
             if epochs
-                .get(branch)
+                .get(parametrizer)
                 .is_none_or(|epoch| epoch.partitions != grouping.partitions())
             {
                 return Err(invalid(path, "grouping epoch"));
             }
         }
         let mut holding_units = BTreeMap::new();
-        for (branch, units) in wire.holding {
-            let name = ParametrizerName::parse(&branch)
-                .map_err(|cause| cause.change_context(invalid_value(path, "branch name")))?;
+        for (parametrizer, units) in wire.holding {
+            let name = ParametrizerName::parse(&parametrizer)
+                .map_err(|cause| cause.change_context(invalid_value(path, "parametrizer name")))?;
             let Some(epoch) = epochs.get(&name) else {
                 return Err(invalid(path, "holding branch"));
             };
@@ -331,7 +331,8 @@ pub(super) mod tests {
         domain: DomainName,
     ) -> PartitionTopologyRecord {
         let ingestor = IngestorName::parse("input").assured("the fixture name is valid");
-        let branch = ParametrizerName::parse("by_tenant").assured("the fixture name is valid");
+        let parametrizer =
+            ParametrizerName::parse("by_tenant").assured("the fixture name is valid");
         let count = arbitrary.entropy().pick([
             1,
             12,
@@ -392,7 +393,7 @@ pub(super) mod tests {
                         },
                     )]),
                     parametrizers: if activated {
-                        BTreeMap::from([(branch.clone(), layout)])
+                        BTreeMap::from([(parametrizer.clone(), layout)])
                     } else {
                         BTreeMap::new()
                     },
@@ -403,12 +404,12 @@ pub(super) mod tests {
                     },
                 },
                 epochs: if activated {
-                    BTreeMap::from([(branch.clone(), epoch)])
+                    BTreeMap::from([(parametrizer.clone(), epoch)])
                 } else {
                     BTreeMap::new()
                 },
                 holding_units: if activated && !holding.is_empty() {
-                    BTreeMap::from([(branch, holding.into_iter().collect())])
+                    BTreeMap::from([(parametrizer, holding.into_iter().collect())])
                 } else {
                     BTreeMap::new()
                 },
