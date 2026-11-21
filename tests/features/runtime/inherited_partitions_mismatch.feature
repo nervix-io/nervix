@@ -26,14 +26,14 @@ Feature: Co-producing inherited readers agree on their external partition count
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR first_reader
         FROM broker TOPIC 'inherited_first_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR second_reader
         FROM broker TOPIC 'inherited_second_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

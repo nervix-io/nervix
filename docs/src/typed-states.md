@@ -1424,13 +1424,13 @@ read-only buffers retain the native allocation through their root rather than a 
 
 ## Intake Unit And Gate Identity
 
-An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the
-forms before placement. Its native and archived representations occupy eight bytes. The archive
-encodes `PerPartition` as zero and each positive count as its exact unsigned 64-bit value; semantic
-JSON retains the tagged forms. A resolved ingestor unit uses the shared `NodeUnitRef` and
-`DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
-There is no node-local index conversion. An ingestor's readiness is one scalar whose retirement ends
-that exact lifetime.
+An instancing declaration is `Count(NonZeroU64)` or `PerTransportPartition`; entity capabilities
+admit the forms before placement. Its native and archived representations occupy eight bytes. The
+archive encodes `PerTransportPartition` as zero and each positive count as its exact unsigned 64-bit
+value; semantic JSON retains the tagged forms. A resolved ingestor unit uses the shared
+`NodeUnitRef` and `DomainNodeUnitRef` identities throughout plans, runtime registrations and durable
+state placement. There is no node-local index conversion. An ingestor's readiness is one scalar
+whose retirement ends that exact lifetime.
 The shared `Unit` identity occupies eight bytes with four-byte archive alignment. Its private rank
 orders `Single`, all 32-bit partitions, and then instance indices. `UnitKind` is its semantic view;
 JSON uses that tagged view and validates an instance index through `Unit::try_instance`.

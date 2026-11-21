@@ -219,8 +219,12 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   branch's partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)). For external partition
   inheritance and producer eligibility, read [Inherited Partitions](../../../docs/src/partitioning.md).
-  Check `DESCRIBE BRANCH` before another recount. When one emitter would funnel a partitioned branch back into one
-  node, decide its `INSTANCES` (a count or `PER PARTITION`); read
+  Check `DESCRIBE BRANCH` before another recount. Decide an ingestor's `INSTANCES` too: a count of
+  competing readers, or, on Kafka `OFFSET BY DOMAIN` and Pulsar only, `PER TRANSPORT PARTITION`,
+  which deals the topic's partitions among one reader per branch partition. NATS, RabbitMQ, SQS,
+  MQTT and Redis have no transport partitions, so they take a count; read
+  [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing). When one emitter would funnel
+  a partitioned branch back into one node, decide its `INSTANCES` (a count or `PER PARTITION`); read
   [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
   ordering it keeps, the entities that run one instance, and placement.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,

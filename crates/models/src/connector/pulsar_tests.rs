@@ -175,7 +175,7 @@ fn the_subscription_is_required_with_its_owner_and_instances_are_optional() {
         assert_eq!(choice.value, None);
         assert_eq!(choice.example, format!("TYPE {kind}"));
     }
-    assert_eq!(*instances, OptionDeclaration::INSTANCES);
+    assert_eq!(*instances, OptionDeclaration::TRANSPORT_PARTITION_INSTANCES);
 }
 
 #[rstest]
@@ -207,9 +207,9 @@ fn only_the_types_that_read_through_one_consumer_refuse_more_instances(
     ingestor.instances =
         crate::IngestorInstances::Count(NonZeroU64::new(2).assured("two is greater than zero"));
     assert_eq!(ingestor.instances_fit_subscription(), !one_consumer);
-    // Per-partition reading opens one consumer per partition topic, so it fits every type; the
-    // registry requires an inherited branch for the types that read through one consumer.
-    ingestor.instances = crate::IngestorInstances::PerPartition;
+    // Transport-partition reading deals the partition topics among the instances, so each partition
+    // topic keeps one consumer, which fits every type on every branch.
+    ingestor.instances = crate::IngestorInstances::PerTransportPartition;
     assert!(ingestor.instances_fit_subscription());
 }
 
