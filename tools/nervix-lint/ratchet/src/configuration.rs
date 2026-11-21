@@ -18,7 +18,7 @@ use crate::{
     error::{Error, Result},
 };
 
-pub const TOOLCHAIN: &str = "nightly-2026-09-17";
+pub const TOOLCHAIN: &str = "nightly-2026-11-21";
 pub const TOOLING: &str = "tools/nervix-lint";
 
 #[derive(Debug, thiserror::Error)]
