@@ -132,16 +132,16 @@ fn connector_expression_positions_keep_their_declared_function_scope() {
         (
             "CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
              1MiB DECODE USING codec FILTER WHERE read_",
-            endpoint,
+            endpoint.clone(),
         ),
         (
             "CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
              1MiB DECODE USING codec FILTER WHERE coalesce(read_",
-            endpoint,
+            endpoint.clone(),
         ),
         (
             "ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_",
-            endpoint,
+            endpoint.clone(),
         ),
         (
             "CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co",

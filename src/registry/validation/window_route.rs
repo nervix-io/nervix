@@ -15,14 +15,13 @@
 use ahash::HashSet;
 use arrow_schema::DataType;
 use error_stack::{Report, ResultExt as _};
-use nervix_models::{
-    CreateSchema, CreateWindowProcessor, ProcessorOutput, WindowBound, WindowStateLimit,
-};
+use nervix_models::{CreateSchema, CreateWindowProcessor, ProcessorOutput};
 use nervix_vm::{
     CompileOptions,
-    program::{FieldRef, Program, SpannedNode, WindowAggregateFunction},
+    program::{FieldRef, Program, SpannedNode},
     window::{
-        CompiledWindowRoute, WindowAggregateExpr, WindowAggregateProgram, WindowRouteSchemas,
+        CompiledWindowRoute, WindowAggregateExpr, WindowAggregateProgram, WindowCollectionBound,
+        WindowRouteSchemas,
     },
 };
 
@@ -55,7 +54,7 @@ pub(in crate::registry) fn validate_window_route_types(
         context,
         output,
         aggregate,
-        &processor.width,
+        processor,
         output_schema,
         input_schema,
         branch_schema,
@@ -64,17 +63,17 @@ pub(in crate::registry) fn validate_window_route_types(
         domain, identifier, ..
     } = context;
     for (demand_index, demand) in compiled.demands.iter().enumerate() {
-        if demand
-            .functions
-            .contains(&WindowAggregateFunction::CollectVec)
-            && processor.width.messages.is_none()
-            && let WindowStateLimit::Unbounded = processor.state_limit
-        {
+        let unbounded = WindowCollectionBound::RetainedRows.first_unmet(
+            demand.functions.iter(),
+            &processor.width,
+            processor.state_limit,
+        );
+        if let Some(function) = unbounded {
             return Err(Report::new(RegistryError::WindowCollectionMissingBound {
                 domain: domain.clone(),
                 processor: identifier.clone(),
                 route: output.relay.clone(),
-                function: WindowAggregateFunction::CollectVec,
+                function,
             }));
         }
         for (argument_index, argument) in demand.arguments.iter().enumerate() {
@@ -92,13 +91,13 @@ pub(in crate::registry) fn validate_window_route_types(
     Ok(())
 }
 
-/// The route's aggregate program compiled against the declared input, output, branch and
-/// materialized-state schemas, exactly as the runtime compiles it.
+/// The route's aggregate program of `window` compiled against the declared input, output, branch
+/// and materialized-state schemas, exactly as the runtime compiles it.
 pub(in crate::registry) fn compile_window_route(
     context: ModelValidationContext<'_, '_>,
     output: &ProcessorOutput,
     aggregate: &WindowAggregateProgram,
-    width: &WindowBound,
+    window: &CreateWindowProcessor,
     output_schema: &CreateSchema,
     input_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
@@ -108,19 +107,20 @@ pub(in crate::registry) fn compile_window_route(
         identifier,
         models,
     } = context;
-    if width.fixed_message_width().is_none() {
-        for demand in aggregate.demands() {
-            if demand
-                .functions
-                .contains(&WindowAggregateFunction::CollectArray)
-            {
-                return Err(Report::new(RegistryError::WindowFixedCollectionWidth {
-                    domain: domain.clone(),
-                    processor: identifier.clone(),
-                    route: output.relay.clone(),
-                    width: width.clone(),
-                }));
-            }
+    let width = &window.width;
+    for demand in aggregate.demands() {
+        let unfixed = WindowCollectionBound::ExactMessageCount.first_unmet(
+            demand.functions.iter(),
+            width,
+            window.state_limit,
+        );
+        if unfixed.is_some() {
+            return Err(Report::new(RegistryError::WindowFixedCollectionWidth {
+                domain: domain.clone(),
+                processor: identifier.clone(),
+                route: output.relay.clone(),
+                width: width.clone(),
+            }));
         }
     }
     let mut readable = Vec::new();

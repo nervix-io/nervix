@@ -1908,9 +1908,8 @@ deduplicator, window, inferencer or materialized relay state. Their durability v
 rest on this drained and held boundary rather than on an observed publication, and the result says
 so.
 
-`DESCRIBE` does not read an inferencer, so the runner places `chaos_running` from the schedule
-section of `SHOW CLUSTER STATUS`, one line per unit, and every other stateful entity from its
-`DESCRIBE` answer.
+The runner places `chaos_running` from the schedule section of `SHOW CLUSTER STATUS`, one line per
+unit, and every other stateful entity from its `DESCRIBE` answer.
 
 **The fault.** The load resumes for four more records and holds again, and version 3 is published.
 The runner reads the fault's boundaries while the load holds, which takes several broker round trips.

@@ -33,23 +33,20 @@ use super::{
 pub(crate) enum IngestorInstancingError {
     #[error("INSTANCES {count} cannot be represented as execution units on this target")]
     UnaddressableCount { count: NonZeroU64 },
-    #[error("installed per-partition intake has {count} units, above the partition bound")]
+    #[error("installed transport-partition intake has {count} units, above the partition bound")]
     InstalledPartitionUnitCount { count: usize },
     #[error("{entity} does not support the declared instancing form")]
     Unsupported { entity: IngestorEntityKind },
-    #[error("{entity} INSTANCES PER PARTITION requires OFFSET BY DOMAIN")]
+    #[error("{entity} INSTANCES PER TRANSPORT PARTITION requires OFFSET BY DOMAIN")]
     KafkaOffsets { entity: IngestorEntityKind },
     #[error(
-        "INSTANCES PER PARTITION requires constructing routes to one branch partition structure"
+        "INSTANCES PER TRANSPORT PARTITION requires constructing routes to one branch partition \
+         structure"
     )]
     MissingConstruction,
-    #[error("Pulsar {kind} INSTANCES PER PARTITION requires an inherited branch")]
-    PulsarPartitionTopics {
-        kind: nervix_models::PulsarSubscriptionType,
-    },
     #[error(
-        "INSTANCES PER PARTITION requires constructing routes to one branch partition structure; \
-         route to '{relay}' differs"
+        "INSTANCES PER TRANSPORT PARTITION requires constructing routes to one branch partition \
+         structure; route to '{relay}' differs"
     )]
     DifferentStructure { relay: RelayName },
 }
@@ -59,7 +56,7 @@ pub(crate) enum IngestorInstancingError {
 pub(in crate::registry) enum IngestorUnits {
     Single,
     Instances(NonZeroU64),
-    PerPartition {
+    PerTransportPartition {
         count: Option<NonZeroU16>,
         relays: Vec<RelayName>,
         branches: Vec<BranchName>,
@@ -99,7 +96,7 @@ impl IngestorUnits {
                     .change_context_lazy(context)?;
                 return Ok(Self::Instances(count));
             }
-            IngestorInstances::PerPartition => {}
+            IngestorInstances::PerTransportPartition => {}
         }
         if let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(source))) =
             ingestor.input.transport_entity()
@@ -141,19 +138,10 @@ impl IngestorUnits {
             branches.insert(branch.clone());
             relays.insert(route.relay.clone());
         }
-        let Some((_, declaration, count)) = structure else {
+        let Some((_, _, count)) = structure else {
             return Err(refusal(IngestorInstancingError::MissingConstruction));
         };
-        if let Some(IngestorEntity::Pulsar(nervix_models::PulsarIngestor::Topic(source))) =
-            ingestor.input.transport_entity()
-            && source.subscription.kind.reads_through_one_consumer()
-            && !declaration.is_inherited()
-        {
-            return Err(refusal(IngestorInstancingError::PulsarPartitionTopics {
-                kind: source.subscription.kind,
-            }));
-        }
-        Ok(Self::PerPartition {
+        Ok(Self::PerTransportPartition {
             count,
             relays: relays.into_iter().collect(),
             branches: branches.into_iter().collect(),
@@ -170,7 +158,7 @@ impl IngestorUnits {
         existing: Option<&nervix_models::ScheduledNode>,
         restored: Option<NonZeroU16>,
     ) -> Result<(), Report<RegistryError>> {
-        let Self::PerPartition {
+        let Self::PerTransportPartition {
             count, branches, ..
         } = self
         else {
@@ -203,7 +191,7 @@ impl IngestorUnits {
         }
         if let Some(existing) = existing
             && matches!(existing.config.as_ref(), nervix_models::Model::Ingestor(model)
-                if model.input.instances() == Some(IngestorInstances::PerPartition))
+                if model.input.instances() == Some(IngestorInstances::PerTransportPartition))
         {
             let installed = u16::try_from(existing.units.len())
                 .change_context(IngestorInstancingError::InstalledPartitionUnitCount {
@@ -223,10 +211,10 @@ impl IngestorUnits {
         match self {
             Self::Single => UnitLayout::Single,
             Self::Instances(count) => UnitLayout::Instances(*count),
-            Self::PerPartition {
+            Self::PerTransportPartition {
                 count: Some(count), ..
             } => UnitLayout::Instances(NonZeroU64::from(*count)),
-            Self::PerPartition { count: None, .. } => UnitLayout::AwaitingTopology,
+            Self::PerTransportPartition { count: None, .. } => UnitLayout::AwaitingTopology,
         }
     }
 }

@@ -161,7 +161,7 @@ impl UnitCorrespondence {
         let rhs = UnitLayout::of(right);
         let singleton_pair = lhs.count() == 1 && rhs.count() == 1;
         let partition_intake = !singleton_pair
-            && matches!(&left.ingestor_units, Some(IngestorUnits::PerPartition { relays, .. }) if right.kind == ModelKind::Relay && relays.iter().any(|relay| relay.as_str() == right.identifier.as_str()));
+            && matches!(&left.ingestor_units, Some(IngestorUnits::PerTransportPartition { relays, .. }) if right.kind == ModelKind::Relay && relays.iter().any(|relay| relay.as_str() == right.identifier.as_str()));
         let partition_emission = !singleton_pair
             && matches!(&right.emitter_units, Some(EmitterUnits::PerPartition { relays, .. }) if left.kind == ModelKind::Relay && relays.iter().any(|relay| relay.as_str() == left.identifier.as_str()));
         // A relay maps each partition to one emitter unit by declaration: every partition to a
@@ -283,7 +283,7 @@ impl UnitPlacementGroups {
         }
         for node in graph.graph.node_weights() {
             let relays = match (&node.ingestor_units, &node.emitter_units) {
-                (Some(IngestorUnits::PerPartition { relays, .. }), _)
+                (Some(IngestorUnits::PerTransportPartition { relays, .. }), _)
                 | (_, Some(EmitterUnits::PerPartition { relays, .. })) => relays,
                 _ => continue,
             };

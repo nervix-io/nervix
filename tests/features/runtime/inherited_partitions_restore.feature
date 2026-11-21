@@ -25,7 +25,7 @@ Feature: Inherited topology and provenance survive a native backup and restore
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'growing_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant

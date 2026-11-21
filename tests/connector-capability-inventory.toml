@@ -1822,45 +1822,17 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "INSTANCES PER PARTITION"
+capability = "INSTANCES PER TRANSPORT PARTITION"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "Kafka domain-offset instances follow their constructed partitions on <nodes> nodes" },
 ]
 
 [[capability]]
-capability = "INSTANCES PER PARTITION"
-entity = "MQTT TOPIC INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes" },
-]
-
-[[capability]]
-capability = "INSTANCES PER PARTITION"
-entity = "NATS SUBJECT INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "NATS partition-following instances share their partition owners on <nodes> nodes" },
-]
-
-[[capability]]
-capability = "INSTANCES PER PARTITION"
+capability = "INSTANCES PER TRANSPORT PARTITION"
 entity = "PULSAR TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes" },
-]
-
-[[capability]]
-capability = "INSTANCES PER PARTITION"
-entity = "RABBITMQ QUEUE INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes" },
-]
-
-[[capability]]
-capability = "INSTANCES PER PARTITION"
-entity = "SQS QUEUE INGESTOR"
-scenarios = [
-  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "SQS partition-following instances share their partition owners on <nodes> nodes" },
+  { feature = "tests/features/runtime/ingestor_instances.feature", scenario = "Pulsar <subscription_type> readers deal the partition topics of a hashed branch on <nodes> nodes" },
 ]
 
 [[capability]]

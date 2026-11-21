@@ -4828,14 +4828,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4874,14 +4866,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4939,14 +4923,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4989,14 +4965,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -5070,14 +5038,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
   "scenario.websocket-declaration-buffer",
@@ -5360,14 +5320,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -6354,102 +6306,22 @@ selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-10"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-10"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-11"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-11"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-12"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-12"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-13"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-13"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
+examples = 4
 feature = "tests/features/runtime/ingestor_instances.feature"
 id = "scenario.ingestor-instance-14"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invariant = "Each global instance runs on its selected owner beside its relay partition, holds a consumer on exactly the partition topics dealt to it, and every record reaches its relay once."
 invocation = "scenarios"
-scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+scenario = "Pulsar <subscription_type> readers deal the partition topics of a hashed branch on <nodes> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
 coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
+examples = 4
 feature = "tests/features/runtime/ingestor_instances.feature"
 id = "stress.ingestor-instance-14"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invariant = "Each global instance runs on its selected owner beside its relay partition, holds a consumer on exactly the partition topics dealt to it, and every record reaches its relay once."
 invocation = "stress-scenarios"
-scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+scenario = "Pulsar <subscription_type> readers deal the partition topics of a hashed branch on <nodes> nodes"
 selections = ["deloxide-stress"]
 
 [[workload]]

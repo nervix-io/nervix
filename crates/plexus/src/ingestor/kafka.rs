@@ -326,7 +326,7 @@ mod tests {
     #[rstest]
     #[case::fixed_count("3")]
     #[case::maximum_count("18446744073709551615")]
-    #[case::partition_following("PER PARTITION")]
+    #[case::transport_partition_following("PER TRANSPORT PARTITION")]
     fn source_replacement_and_topic_change_preserve_the_complete_instancing_body(
         #[case] instances: &str,
     ) {
@@ -416,19 +416,19 @@ mod tests {
     }
 
     #[test]
-    fn instancing_accepts_full_width_counts_or_the_complete_partition_phrase() {
+    fn instancing_accepts_full_width_counts_or_the_complete_transport_partition_phrase() {
         let text = statement("orders", DOMAIN_OFFSETS, SEQUENTIAL);
-        let partitioned = text.replace("INSTANCES 2", "INSTANCES PER PARTITION");
+        let partitioned = text.replace("INSTANCES 2", "INSTANCES PER TRANSPORT PARTITION");
         assert_eq!(
             created_source(&partitioned).instances,
-            nervix_models::IngestorInstances::PerPartition
+            nervix_models::IngestorInstances::PerTransportPartition
         );
         let bounded = text.replace("INSTANCES 2", "INSTANCES 18446744073709551615");
         assert_eq!(
             created_source(&bounded).instances,
             nervix_models::IngestorInstances::Count(std::num::NonZeroU64::MAX)
         );
-        for invalid in ["0", "18446744073709551616", "PER"] {
+        for invalid in ["0", "18446744073709551616", "PER", "PER TRANSPORT"] {
             assert!(
                 created_model(&text.replace("INSTANCES 2", &format!("INSTANCES {invalid}")))
                     .is_none()
@@ -436,12 +436,12 @@ mod tests {
         }
         assert_offers_exactly(
             &format!("{HEAD} 'orders' {DOMAIN_OFFSETS} INSTANCES "),
-            &["PER PARTITION", "instance_count"],
+            &["PER TRANSPORT PARTITION", "instance_count"],
         );
         assert_offers_exactly(
             "ALTER KAFKA TOPIC INGESTOR intake SET FROM kafka_main TOPIC 'orders' OFFSET BY \
              DOMAIN INSTANCES ",
-            &["PER PARTITION", "instance_count"],
+            &["PER TRANSPORT PARTITION", "instance_count"],
         );
     }
 
