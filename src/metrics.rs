@@ -7416,7 +7416,7 @@ mod tests {
             &rendered,
             "nervix_branch_instances",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
             ],
@@ -7436,7 +7436,7 @@ mod tests {
             &rendered,
             "nervix_branch_instances",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
             ],
@@ -7446,7 +7446,7 @@ mod tests {
             &rendered,
             "nervix_branch_evictions_total",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
                 "reason=\"lru\"",
@@ -7467,7 +7467,7 @@ mod tests {
             &rendered,
             "nervix_branch_instances",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
             ],
@@ -7477,7 +7477,7 @@ mod tests {
             &rendered,
             "nervix_branch_evictions_total",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
                 "reason=\"lru\"",
@@ -7488,7 +7488,7 @@ mod tests {
             &rendered,
             "nervix_branch_evictions_total",
             &[
-                "branch=\"by_tenant\"",
+                "parametrizer=\"by_tenant\"",
                 "domain=\"main\"",
                 "physical_node_id=\"node-1\"",
                 "reason=\"ttl\"",

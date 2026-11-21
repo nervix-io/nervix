@@ -1640,7 +1640,7 @@ mod tests {
             RegistryError::IncompatibleSchema { .. }
         ));
         assert!(
-            format!("{err}").contains("must use its exact declared branch 'branch_a'"),
+            format!("{err}").contains("must use its exact parametrizer 'branch_a'"),
             "unexpected error: {err}"
         );
 

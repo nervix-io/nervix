@@ -598,7 +598,7 @@ mod tests {
             .expect_err("a branched processor holds no unbranched key");
         assert_eq!(
             unbranched.to_string(),
-            "it is unbranched, where the entity runs in branch 'by_tenant_shard'"
+            "it is unbranched, where the entity runs under parametrizer 'by_tenant_shard'"
         );
 
         let missing = router
@@ -625,7 +625,7 @@ mod tests {
             .expect_err("a key whose field holds another type is refused");
         assert_eq!(
             format!("{retyped:#}"),
-            "it is not a key of branch 'by_tenant_shard': field 'shard' does not hold a value of \
+            "it is not a key of parametrizer 'by_tenant_shard': field 'shard' does not hold a value of \
              its declared type: expected I32, found STRING"
         );
 
@@ -709,7 +709,7 @@ mod tests {
             .expect_err("a key of no route's branch is refused");
         assert_eq!(
             foreign.to_string(),
-            "it is a key of none of branches 'by_region', 'by_tenant_shard'"
+            "it is a key of none of parametrizers 'by_region', 'by_tenant_shard'"
         );
     }
 

@@ -8,7 +8,7 @@ Feature: Ingestor branch consistency
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "must use its exact declared branch"
+    When these Plexus commands fail with "must use its exact parametrizer"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -86,7 +86,7 @@ Feature: Ingestor branch consistency
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "must use its exact declared branch"
+    When these Plexus commands fail with "must use its exact parametrizer"
       """
       CREATE SCHEMA notification (
         tenant STRING,
