@@ -45,8 +45,26 @@ struct EndpointPauseClaim {
 }
 
 impl EndpointPauseClaim {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(fixed, reason = "zero encodes an unresolved atomic admission claim")
+    )]
     const WAITING: u8 = 0;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the resolved admission value tells a racing cancellation that replay won"
+        )
+    )]
     const ADMITTED: u8 = 1;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the resolved cancellation value tells a racing replay to discard the body"
+        )
+    )]
     const ABANDONED: u8 = 2;
 
     fn new(metrics: Option<IngestorEndpointMetrics>, bytes: usize) -> Self {
