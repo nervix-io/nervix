@@ -29,7 +29,7 @@ Feature: Explicit element-wise list arithmetic
       CREATE HTTP ENDPOINT source_ingress ON edge PATH '/arithmetic';
       CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_codec
         TO sources INHERIT ALL UNBRANCHED
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -92,7 +92,7 @@ Feature: Explicit element-wise list arithmetic
       CREATE HTTP ENDPOINT source_ingress ON edge PATH '/arithmetic';
       CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_codec
         TO sources INHERIT ALL UNBRANCHED
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -148,7 +148,7 @@ Feature: Explicit element-wise list arithmetic
       CREATE HTTP ENDPOINT source_ingress ON edge PATH '/arithmetic';
       CREATE HTTP ENDPOINT INGESTOR ingestor_node
         FROM source_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_codec
         TO sources INHERIT ALL UNBRANCHED
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

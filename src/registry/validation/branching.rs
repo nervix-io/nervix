@@ -18,10 +18,10 @@ use ahash::{HashMap, HashSet};
 use error_stack::Report;
 use meticulous::OptionExt;
 use nervix_models::{
-    BranchName, BranchSelection, CorrelationTimeoutAction, CreateBranch, CreateSchema, DomainName,
-    FieldName, Model, ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ProcessorOutput,
-    ProcessorOutputs, ReingestorName, RelayBranching, RelayName, ResolvedBranching, SchemaName,
-    parse_duration_text,
+    BranchSelection, CorrelationTimeoutAction, CreateParametrizer, CreateSchema, DomainName,
+    FieldName, Model, ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ParametrizerName,
+    ProcessorOutput, ProcessorOutputs, ReingestorName, RelayBranching, RelayName,
+    ResolvedBranching, SchemaName, parse_duration_text,
 };
 use nervix_vm::{
     CompileOptions, OutputMode, compile_program_with_options_for_bindings_with_sensitivity,
@@ -50,10 +50,10 @@ pub(in crate::registry) fn validate_branch_model(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
-    branch: &CreateBranch,
+    parametrizer: &CreateParametrizer,
 ) -> Result<(), Report<RegistryError>> {
-    parse_branch_ttl(domain, identifier, &branch.ttl)?;
-    ensure_branch_schema_exists(domain, identifier, models, branch)
+    parse_branch_ttl(domain, identifier, &parametrizer.ttl)?;
+    ensure_branch_schema_exists(domain, identifier, models, parametrizer)
 }
 
 fn parse_branch_ttl(
@@ -74,16 +74,17 @@ fn ensure_branch_schema_exists(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
-    branch: &CreateBranch,
+    parametrizer: &CreateParametrizer,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(Model::Schema(schema)) =
-        models.get(&NodeRef::new(ModelKind::Schema, branch.schema.clone()))
-    else {
+    let Some(Model::Schema(schema)) = models.get(&NodeRef::new(
+        ModelKind::Schema,
+        parametrizer.schema.clone(),
+    )) else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             expected_kind: ModelKind::Schema.as_str(),
-            reference: branch.schema.as_str().to_string(),
+            reference: parametrizer.schema.as_str().to_string(),
         }));
     };
 
@@ -91,7 +92,7 @@ fn ensure_branch_schema_exists(
         if field.ty.contains_bytes() {
             return Err(Report::new(RegistryError::BranchFieldContainsBytes {
                 domain: domain.clone(),
-                branch: identifier.clone(),
+                parametrizer: identifier.clone(),
                 field: field.name.clone(),
             }));
         }
@@ -105,7 +106,7 @@ pub(in crate::registry) fn relay_declared_branch<'a>(
     identifier: &ModelName,
     models: &'a ModelIndex,
     relay: &RelayName,
-) -> Result<Option<&'a BranchName>, Report<RegistryError>> {
+) -> Result<Option<&'a ParametrizerName>, Report<RegistryError>> {
     let Some(Model::Relay(relay_model)) =
         models.get(&NodeRef::new(ModelKind::Relay, relay.clone()))
     else {
@@ -116,7 +117,7 @@ pub(in crate::registry) fn relay_declared_branch<'a>(
             reference: relay.as_str().to_string(),
         }));
     };
-    Ok(relay_model.branching.branch())
+    Ok(relay_model.branching.parametrizer())
 }
 
 pub(in crate::registry) fn relay_declared_branch_schema<'a>(
@@ -135,7 +136,7 @@ pub(in crate::registry) fn relay_declared_branch_schema<'a>(
             reference: relay.as_str().to_string(),
         }));
     };
-    let Some(branch_ref) = relay_model.branching.branch() else {
+    let Some(branch_ref) = relay_model.branching.parametrizer() else {
         return Ok(None);
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
@@ -159,7 +160,7 @@ pub(in crate::registry) fn ensure_output_branch(
     output: &ProcessorOutput,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-    input_parametrizations: Option<&HashMap<&BranchName, &RelayName>>,
+    input_parametrizations: Option<&HashMap<&ParametrizerName, &RelayName>>,
 ) -> Result<(), Report<RegistryError>> {
     let target_branch = relay_declared_branch(domain, identifier, models, &output.relay)?;
     let Some(branch_action) = output.branch.as_ref() else {
@@ -189,9 +190,9 @@ pub(in crate::registry) fn ensure_output_branch(
             return Ok(());
         }
         OutputBranch::BranchedBy {
-            branch,
+            parametrizer,
             assignments,
-        } => (branch, assignments),
+        } => (parametrizer, assignments),
     };
 
     if target_branch != Some(branch_ref) {
@@ -199,7 +200,7 @@ pub(in crate::registry) fn ensure_output_branch(
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
-                "TO output '{}' must use its exact declared branch '{}'",
+                "TO output '{}' must use its exact parametrizer '{}'",
                 output.relay.as_str(),
                 format_branch_name(target_branch)
             ),
@@ -780,17 +781,17 @@ impl ProcessorBranchingCheck<'_> {
             }));
         }
 
-        if relay_branching.branch() != declared.branch() {
+        if relay_branching.parametrizer() != declared.parametrizer() {
             return Err(Report::new(RegistryError::IncompatibleSchema {
                 domain: self.domain.as_str().to_string(),
                 identifier: self.identifier.as_str().to_string(),
                 reason: format!(
-                    "{} '{}' branch name '{}' does not match relay '{}' branch name '{}'",
+                    "{} '{}' parametrizer '{}' does not match relay '{}' parametrizer '{}'",
                     self.model_kind,
                     self.identifier.as_str(),
-                    format_branch_name(declared.branch()),
+                    format_branch_name(declared.parametrizer()),
                     relay.as_str(),
-                    format_branch_name(relay_branching.branch()),
+                    format_branch_name(relay_branching.parametrizer()),
                 ),
             }));
         }
@@ -892,24 +893,24 @@ fn relay_branching(
 }
 
 pub(in crate::registry) trait BranchReference {
-    fn branch_ref(&self) -> Option<&BranchName>;
+    fn parametrizer_ref(&self) -> Option<&ParametrizerName>;
 }
 
 impl BranchReference for BranchSelection {
-    fn branch_ref(&self) -> Option<&BranchName> {
-        self.branch()
+    fn parametrizer_ref(&self) -> Option<&ParametrizerName> {
+        self.parametrizer()
     }
 }
 
 impl BranchReference for RelayBranching {
-    fn branch_ref(&self) -> Option<&BranchName> {
-        self.branch()
+    fn parametrizer_ref(&self) -> Option<&ParametrizerName> {
+        self.parametrizer()
     }
 }
 
 impl BranchReference for OutputBranch {
-    fn branch_ref(&self) -> Option<&BranchName> {
-        self.branch()
+    fn parametrizer_ref(&self) -> Option<&ParametrizerName> {
+        self.parametrizer()
     }
 }
 
@@ -946,7 +947,7 @@ pub(in crate::registry) fn resolved_branch_selection(
     models: &ModelIndex,
     branched_by: &dyn BranchReference,
 ) -> Result<ResolvedBranching, Report<RegistryError>> {
-    let Some(branch_ref) = branched_by.branch_ref() else {
+    let Some(branch_ref) = branched_by.parametrizer_ref() else {
         return Ok(ResolvedBranching::unbranched());
     };
     let branch = branch_model(domain, identifier, models, branch_ref)?;
@@ -963,19 +964,20 @@ pub(in crate::registry) fn branch_model<'a>(
     domain: &DomainName,
     identifier: &ModelName,
     models: &'a ModelIndex,
-    branch_ref: &BranchName,
-) -> Result<&'a CreateBranch, Report<RegistryError>> {
-    let Some(Model::Branch(branch)) =
-        models.get(&NodeRef::new(ModelKind::Branch, branch_ref.clone()))
-    else {
+    parametrizer_ref: &ParametrizerName,
+) -> Result<&'a CreateParametrizer, Report<RegistryError>> {
+    let Some(Model::Parametrizer(parametrizer)) = models.get(&NodeRef::new(
+        ModelKind::Parametrizer,
+        parametrizer_ref.clone(),
+    )) else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            expected_kind: ModelKind::Branch.as_str(),
-            reference: branch_ref.as_str().to_string(),
+            expected_kind: ModelKind::Parametrizer.as_str(),
+            reference: parametrizer_ref.as_str().to_string(),
         }));
     };
-    Ok(branch)
+    Ok(parametrizer)
 }
 
 fn schema_model<'a>(
@@ -1035,7 +1037,7 @@ fn assign_stream_branching(
         }
         Some(existing) if existing == &branching => Ok(false),
         Some(existing) if existing.field_names().eq(branching.field_names()) => {
-            if existing.branch() != branching.branch() {
+            if existing.parametrizer() != branching.parametrizer() {
                 return Err(Report::new(RegistryError::IncompatibleSchema {
                     domain: domain.as_str().to_string(),
                     identifier: producer.as_str().to_string(),
@@ -1043,9 +1045,9 @@ fn assign_stream_branching(
                         "stream '{}' receives conflicting branch names: existing '{}' vs producer \
                          '{}' with '{}'",
                         relay.as_str(),
-                        format_branch_name(existing.branch()),
+                        format_branch_name(existing.parametrizer()),
                         producer.as_str(),
-                        format_branch_name(branching.branch()),
+                        format_branch_name(branching.parametrizer()),
                     ),
                 }));
             }
@@ -1074,8 +1076,8 @@ fn assign_stream_branching(
     }
 }
 
-pub(in crate::registry) fn format_branch_name(branch: Option<&BranchName>) -> &str {
-    match branch {
+pub(in crate::registry) fn format_branch_name(parametrizer: Option<&ParametrizerName>) -> &str {
+    match parametrizer {
         Some(name) => name.as_str(),
         None => "UNBRANCHED",
     }
@@ -1103,7 +1105,7 @@ pub(in crate::registry) fn add_output_branch_dependency_edges(
     outputs: &ProcessorOutputs,
 ) -> Result<(), Report<RegistryError>> {
     for output in outputs.outputs() {
-        let Some(branch_ref) = output.branch.as_ref().and_then(OutputBranch::branch) else {
+        let Some(branch_ref) = output.branch.as_ref().and_then(OutputBranch::parametrizer) else {
             continue;
         };
         let branch = expect_kind(
@@ -1112,7 +1114,7 @@ pub(in crate::registry) fn add_output_branch_dependency_edges(
             models,
             indices,
             branch_ref,
-            ModelKind::Branch,
+            ModelKind::Parametrizer,
         )?;
         graph.add_edge(branch, source, EdgeKind::RequiredBy);
     }
@@ -1143,12 +1145,12 @@ mod tests {
     use crate::registry::{
         storage::Registry,
         test_fixtures::{
-            TOO_LONG_DURATION_TEXT, branch, branch_for_relay, branch_name_for_relay, branch_schema,
+            TOO_LONG_DURATION_TEXT, branch, branch_for_relay, branch_schema,
             branch_schema_with_types, branched_by, client_model, codec, deduplicator,
-            ingestor_with_params, junction, named, processor, reingestor, relay, relay_branched_by,
-            relay_branched_by_relay_branch, relay_branched_like, scheduled_node, schema,
-            temp_db_path, unbranched_ingestor, wire_schema, with_inherit_all, with_output_branch,
-            with_processor_branching,
+            ingestor_with_params, junction, named, parametrizer_name_for_relay, processor,
+            reingestor, relay, relay_branched_by, relay_branched_by_relay_branch,
+            relay_branched_like, scheduled_node, schema, temp_db_path, unbranched_ingestor,
+            wire_schema, with_inherit_all, with_output_branch, with_processor_branching,
         },
     };
 
@@ -1179,12 +1181,12 @@ mod tests {
     #[test]
     fn branch_schema_rejects_nested_bytes_with_field_identity() {
         let domain = named::<DomainName>("binary_domain");
-        let branch = CreateBranch {
+        let parametrizer = CreateParametrizer {
             labels: Default::default(),
             name: named("by_blob"),
             schema: named("binary_branch_schema"),
             ttl: "5m".to_string(),
-            partitions: nervix_models::BranchPartitions::ONE,
+            partitions: nervix_models::ParametrizerPartitions::ONE,
             eviction: None,
         };
         let models = ModelIndex::from_iter([branch_schema_with_types(
@@ -1196,8 +1198,12 @@ mod tests {
                 },
             )],
         )]);
-        let result =
-            validate_branch_model(&domain, &ModelName::from(&branch.name), &models, &branch);
+        let result = validate_branch_model(
+            &domain,
+            &ModelName::from(&parametrizer.name),
+            &models,
+            &parametrizer,
+        );
         let Err(error) = result else {
             panic!("a BYTES element cannot become part of a branch key");
         };
@@ -1212,7 +1218,7 @@ mod tests {
         let domain: DomainName = named("default");
         let producer: ModelName = named("producer");
         let relay_name: RelayName = named("events");
-        let branch_name: BranchName = named("by_tenant");
+        let parametrizer_name: ParametrizerName = named("by_tenant");
         let branch_schema = CreateSchema {
             labels: Default::default(),
             name: named("tenant_branch_schema"),
@@ -1224,9 +1230,9 @@ mod tests {
             }],
         };
         let branching = ResolvedBranching::branched(
-            branch_name.clone(),
+            parametrizer_name.clone(),
             branch_schema.clone(),
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         );
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let relay_index = graph.add_node(ActiveNode {
@@ -1287,9 +1293,9 @@ mod tests {
             &producer,
             &relay_name,
             ResolvedBranching::branched(
-                branch_name,
+                parametrizer_name,
                 sensitive_schema,
-                nervix_models::ResolvedBranchPartitions::ONE,
+                nervix_models::ResolvedParametrizerPartitions::ONE,
             ),
             &indices,
             &mut graph,
@@ -1304,7 +1310,7 @@ mod tests {
             ResolvedBranching::branched(
                 named("by_account"),
                 branch_schema,
-                nervix_models::ResolvedBranchPartitions::ONE,
+                nervix_models::ResolvedParametrizerPartitions::ONE,
             ),
             &indices,
             &mut graph,
@@ -1534,7 +1540,7 @@ mod tests {
                                     max_batch_size: "1MiB".to_string(),
                                 }),
                             OutputBranch::BranchedBy {
-                                branch: branch_name_for_relay("notifications"),
+                                parametrizer: parametrizer_name_for_relay("notifications"),
                                 assignments: vec![Assignment {
                                     target: AssignmentTarget {
                                         scope: AssignmentTargetScope::Bare,
@@ -1609,7 +1615,7 @@ mod tests {
             unreachable!("ingestor helper must build an ingestor model")
         };
         let Some(OutputBranch::BranchedBy {
-            branch: ingestor_branch,
+            parametrizer: ingestor_branch,
             ..
         }) = &mut ingestor.output_routes.routes[0].branch
         else {
@@ -1639,7 +1645,7 @@ mod tests {
             RegistryError::IncompatibleSchema { .. }
         ));
         assert!(
-            format!("{err}").contains("must use its exact declared branch 'branch_a'"),
+            format!("{err}").contains("must use its exact parametrizer 'branch_a'"),
             "unexpected error: {err}"
         );
 
@@ -1677,7 +1683,7 @@ mod tests {
         ));
         assert!(
             format!("{err}").contains(
-                "branch name 'branch_b' does not match relay 'input' branch name 'branch_a'"
+                "parametrizer 'branch_b' does not match relay 'input' parametrizer 'branch_a'"
             ),
             "unexpected error: {err}"
         );
@@ -1734,8 +1740,8 @@ mod tests {
         ));
         assert!(
             format!("{err}").contains(
-                "generator 'generate' branch name 'branch_b' does not match relay 'input' branch \
-                 name 'branch_a'"
+                "generator 'generate' parametrizer 'branch_b' does not match relay 'input' \
+                 parametrizer 'branch_a'"
             ),
             "unexpected error: {err}"
         );
@@ -1908,7 +1914,7 @@ mod tests {
                     relay_branched_by(
                         "notifications",
                         "event_schema",
-                        branch_name_for_relay("notifications").as_str(),
+                        parametrizer_name_for_relay("notifications").as_str(),
                     ),
                     relay_branched_by("errors", "event_schema", "by_route_logs"),
                     relay_branched_by("warnings", "event_schema", "by_route_logs"),

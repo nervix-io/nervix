@@ -27,8 +27,9 @@ pub(super) async fn options(
         .try_reserve(MemoryClass::Credentials, 0)
         .change_context(NatsClientOptionsError::CredentialsPreparation)?;
     executor
-        .run_storage(
+        .run_storage_with(
             StorageClass::Filesystem,
+            nervix_execution::QueueAdmission::WaitForPlace,
             charge,
             move |charge, cancellation| read_options(&path, charge, cancellation),
         )

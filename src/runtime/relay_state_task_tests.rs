@@ -36,13 +36,13 @@ async fn a_retired_transition_applies_the_batch_its_materialized_unit_parked() {
     let relay = named::<RelayName>("profiles");
     let unit = Unit::partition(5);
     let partitions = |count: u16| {
-        nervix_models::ResolvedBranchPartitions::Direct(
+        nervix_models::ResolvedParametrizerPartitions::Direct(
             std::num::NonZeroU16::new(count).expect("the test counts are positive"),
         )
     };
     // Unit 5 of a branch growing from four partitions to eight: four placed `beta` in unit 1.
     let transition = UnitPartitionTransition {
-        branch: named("by_tenant"),
+        parametrizer: named("by_tenant"),
         epoch: nervix_models::PartitionEpochNumber::FIRST.next(),
         current: RelayPartitioning::of_partitions(partitions(8)),
         previous: RelayPartitioning::of_partitions(partitions(4)),
@@ -84,8 +84,9 @@ async fn a_retired_transition_applies_the_batch_its_materialized_unit_parked() {
             parked_capacity: 2,
         },
     );
-    let held =
-        || runtime.partition_transition_holdings(&domain, &transition.branch, transition.epoch);
+    let held = || {
+        runtime.partition_transition_holdings(&domain, &transition.parametrizer, transition.epoch)
+    };
     timeout(Duration::from_secs(30), async {
         while held().is_empty() {
             sleep(Duration::from_millis(10)).await;

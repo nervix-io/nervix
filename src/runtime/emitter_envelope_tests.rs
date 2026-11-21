@@ -777,7 +777,7 @@ async fn partition_only_envelopes_select_each_source_count_without_a_value_progr
             ResolvedBranching::branched(
                 named("first_branch"),
                 schema.clone(),
-                nervix_models::ResolvedBranchPartitions::Direct(
+                nervix_models::ResolvedParametrizerPartitions::Direct(
                     std::num::NonZeroU16::new(4).expect("four"),
                 ),
             ),
@@ -787,7 +787,7 @@ async fn partition_only_envelopes_select_each_source_count_without_a_value_progr
             ResolvedBranching::branched(
                 named("second_branch"),
                 schema,
-                nervix_models::ResolvedBranchPartitions::ONE,
+                nervix_models::ResolvedParametrizerPartitions::ONE,
             ),
         ),
     ]);
@@ -839,7 +839,7 @@ async fn partition_only_envelopes_select_each_source_count_without_a_value_progr
     if let ResolvedBranching::Branched { partitions, .. } =
         changed.sources.get_mut("first").expect("source exists")
     {
-        *partitions = nervix_models::ResolvedBranchPartitions::ONE;
+        *partitions = nervix_models::ResolvedParametrizerPartitions::ONE;
     }
     assert_ne!(
         plan, changed,

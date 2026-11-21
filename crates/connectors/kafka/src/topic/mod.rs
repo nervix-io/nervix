@@ -294,9 +294,12 @@ impl KafkaPartitionMetadata {
             .try_reserve(MemoryClass::Commands, charge_bytes.arch_into())
             .change_context(KafkaPartitionMetadataError::Admission)
             .change_context_lazy(failure)?;
-        let running = self
-            .executor
-            .run_storage(StorageClass::Connector, charge, operation);
+        let running = self.executor.run_storage_with(
+            StorageClass::Connector,
+            nervix_execution::QueueAdmission::WaitForPlace,
+            charge,
+            operation,
+        );
         timeout_at(deadline, running)
             .await
             .map_err(|_| Report::new(KafkaPartitionMetadataError::Timeout))

@@ -1085,6 +1085,7 @@ impl Describer {
         if assembled.record.is_some() {
             return Err(misplaced(entry));
         }
+        record.validate_labels(entry.path.as_str(), assembled.capture.entity_label_policy)?;
         assembled.record = Some(record);
         Ok(())
     }

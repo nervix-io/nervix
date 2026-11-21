@@ -136,11 +136,11 @@ fn ProcessorRouteBranchEditor(
                             route.branch.choose_branched();
                             if let Some(relay) = &mut route.relay { relay.invalidate(); }
                         }
-                    }); signals.edit(); }>"Named branch"</button>
+                    }); signals.edit(); }>"Parametrizer"</button>
             </fieldset>
             <Show when=move || draft.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. })) fallback=|| ()>
-                <ChoiceGroup class_name="create-processor-route-branch" label="Named route branch"
-                    control=ChoiceControl::ProcessorRouteBranch signals=signals request_tx=request_tx
+                <ChoiceGroup class_name="create-processor-route-parametrizer" label="Route parametrizer"
+                    control=ChoiceControl::ProcessorRouteParametrizer signals=signals request_tx=request_tx
                     session_generation=session_generation show_detail=true />
                 <div class="create-processor-branch-assignments">
                     <ChoiceGroup class_name="create-processor-branch-fields" label="Add branch key assignment"

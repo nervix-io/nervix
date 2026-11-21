@@ -139,13 +139,13 @@ pub(crate) fn scheduled_impact_coverage(node: &ScheduledNode) -> ImpactNodeCover
     if !is_schedulable_model(node.config.as_ref()) {
         return ImpactNodeCoverage::configuration(identity);
     }
-    let declared_branch = match node.config.as_ref() {
-        Model::Relay(relay) => relay.branching.branch(),
-        model => model_branch_selection(model).and_then(|selection| selection.branch_ref()),
+    let declared_parametrizer = match node.config.as_ref() {
+        Model::Relay(relay) => relay.branching.parametrizer(),
+        model => model_branch_selection(model).and_then(|selection| selection.parametrizer_ref()),
     };
-    let branches = match declared_branch {
-        Some(branch) => ConcreteBranchCoverage::AllOfBranch {
-            branch: branch.clone(),
+    let branches = match declared_parametrizer {
+        Some(parametrizer) => ConcreteBranchCoverage::AllOfParametrizer {
+            parametrizer: parametrizer.clone(),
         },
         None if node.resolved_branching.is_some()
             && matches!(node.kind(), ModelKind::Emitter | ModelKind::Reingestor) =>
@@ -354,6 +354,7 @@ mod tests {
             mode: EndpointIngestMode::NoAck,
             quiesce: IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         }));
         Model::Ingestor(statement)

@@ -90,7 +90,7 @@ def test_a_subscription_reads_typed_rows_with_null_and_withheld_values(
     assert handle is not None and schema is not None
     assert handle.name == name
     assert [field.name for field in schema.fields][:3] == ["id", "tenant", "amount"]
-    assert schema.branch == "by_tenant"
+    assert schema.parametrizer == "by_tenant"
     assert [field.name for field in schema.key_fields] == ["tenant"]
     # ANCHOR_END: subscribe
     publish(session, cluster.domain, [Row(1, "acme", amount=-7, note="first"), Row(2, "acme")])

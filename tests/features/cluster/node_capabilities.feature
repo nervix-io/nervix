@@ -51,7 +51,7 @@ Feature: Committed node capabilities
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA partition_key (key I64);
       CREATE SCHEMA event (value I64);
-      CREATE BRANCH by_capacity SCHEMA partition_key TTL 5m PARTITIONS 32;
+      CREATE PARAMETRIZER by_capacity SCHEMA partition_key TTL 5m PARTITIONS 32;
       CREATE RELAY events SCHEMA event BRANCHED BY by_capacity;
       START;
       SHOW CLUSTER STATUS;

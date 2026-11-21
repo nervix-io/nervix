@@ -74,8 +74,8 @@ Feature: Web console visual creation with a delayed initial domain publication
 
     Examples:
       | cluster_size | kind         | choice                 | value          |
-      | 1            | branch       | .create-schema-ref     | initial_key    |
-      | 3            | branch       | .create-schema-ref     | initial_key    |
+      | 1            | parametrizer | .create-schema-ref     | initial_key    |
+      | 3            | parametrizer | .create-schema-ref     | initial_key    |
       | 1            | subscription | .create-relay-ref      | initial_events |
       | 3            | subscription | .create-relay-ref      | initial_events |
       | 1            | codec        | .create-codec-schema   | initial_key    |

@@ -150,7 +150,7 @@ For node tags and detected properties, read [Selecting Nodes](../../../docs/src/
 and [Node Selectors](../../../docs/src/filter-map-functions.md#node-selectors). Use `SHOW NODES WHERE ...`
 to preview the selector against the committed node records and `FORMAT JSON` for scripts.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
-effective policy, credential handling and quota usage, read
+effective policy, capabilities, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 For grace, replacement allowances and over-limit outcomes, also read
@@ -198,9 +198,9 @@ For the rows a reorderer holds or a correlator's pending records, read
 same clauses and envelope. Read the CLI chapter for one-shot JSON output; programs consume
 `CommandOutcome.state` directly.
 
-For domain entity metadata, read [Entity Labels](../../../docs/src/entity-labels.md) before
-choosing label targets, limits, transaction handling or inspection. Keep descriptive labels
-separate from physical node tags and authorization.
+For Model, domain, logical resource and user metadata, read [Entity Labels](../../../docs/src/entity-labels.md)
+for supported targets, limits, staged resource and Model reads, and administrative admission.
+Physical node tags and authorization have their own contracts.
 
 ## Gather the configuration contract
 
@@ -215,11 +215,11 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
-  branch's partition count when one relay owner per branch would funnel too much traffic (see
+- Isolation: unbranched or a concrete branch key, the parametrizer's branch TTL, optional instance
+  limit, and partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)). For external partition
   inheritance and producer eligibility, read [Inherited Partitions](../../../docs/src/partitioning.md).
-  Check `DESCRIBE BRANCH` before another recount. Decide an ingestor's `INSTANCES` too: a count of
+  Check `DESCRIBE PARAMETRIZER` before another recount. Decide an ingestor's `INSTANCES` too: a count of
   competing readers, or, on Kafka `OFFSET BY DOMAIN` and Pulsar only, `PER TRANSPORT PARTITION`,
   which deals the topic's partitions among one reader per branch partition. NATS, RabbitMQ, SQS,
   MQTT and Redis have no transport partitions, so they take a count; read
@@ -680,7 +680,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   untrusted custom processing in WASM.
 - Include Roto `test` blocks with every agent-generated UDF. Creation runs those tests and rejects
   the UDF without persisting it when any test rejects.
-- Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
+- Select `BRANCHED BY <parametrizer>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch. Use a reingestor to enter a parametrization distinct from every input relay's or to
   send records unbranched. See [Runtime Nodes](../../../docs/src/processors.md#reingestor).
 - Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
@@ -937,9 +937,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   or relocation only while the domain `START` generation and endpoint contract still match; it
   never resends a batch merely because its outcome is missing.
 - End every transport ingestor body with an explicit declared `ON QUIESCE` body
-  immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
-  `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
-  `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
+  immediately before `DECODE USING`. Write a positive `MAX SIZE` with `BUFFER`. An `HTTP ENDPOINT`
+  in `MODE NO ACK` can use `RESPOND IMMEDIATE` or `RESPOND AFTER RESUME`. A
+  `WEBSOCKETS ENDPOINT` in `MODE NO ACK` uses `RESPOND IMMEDIATE`. A buffered endpoint in `MODE ACK`
+  uses `RESPOND AFTER RESUME`. Either endpoint can use `REJECT RETRY AFTER <duration>` in
+  either mode. Connected sources write `ON OVERFLOW DROP OLDEST|DROP NEWEST` after the buffer size.
+  Use the same bodies in `SET QUIESCE`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
   `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
   and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Write every `MQTT TOPIC`
   emitter's `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, with `NO ACK` only at `QOS 0` and `ACK` only
@@ -963,7 +966,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - To intentionally replace an existing WASM processor's guest state, use
   `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH KEY { <field> = <literal>, ... };`.
   It acts on the session's active domain, so `USE` that domain first.
-  Choose the explicit scope that matches its declared branch, and supply every branch-key field
+  Choose the explicit scope that matches its parametrizer, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the
   selected branch must already exist. This command loses the selected computation state; a fresh
   command reference is a new reset, while retrying the same reference returns its original outcome.
@@ -973,13 +976,14 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - To inspect WASM guest-state progress, use
   `SHOW WASM PROCESSOR <processor> STATE [FOR ...] [LIMIT <n> [AFTER '<continuation>']] [FORMAT TEXT|JSON];`.
   Read each unit's reset phase, generation and readiness beside every selected branch's checkpoint
-  revision, stage and replica counts; follow a returned continuation with `AFTER` to page the rest.
+  revision, stage and replica counts and the guest's description of that checkpoint, whose values
+  are always withheld; follow a returned continuation with `AFTER` to page the rest.
   `DESCRIBE WASM PROCESSOR <processor>;` prints only the binding and per-unit summary counts. See
   `Runtime Nodes` and `WASM Processor Guests` for the meaning of each stage.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.
-- Declare the error relay with the input route's exact named branch, or unbranched for an
+- Declare the error relay with the input route's exact parametrizer, or unbranched for an
   unbranched input. See `Runtime Nodes` for the branch and error-record contract.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.

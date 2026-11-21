@@ -134,8 +134,9 @@ impl<'a> LicensingClient<'a> {
             )
             .change_context(LicensingRequestError::Admission)?;
         let client = executor
-            .run_storage(
+            .run_storage_with(
                 nervix_execution::StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation,
                       cancellation|

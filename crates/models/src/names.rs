@@ -308,8 +308,8 @@ declare_names! {
     ClientName => Allowed,
     /// A virtual host declared with `CREATE VHOST`.
     VhostName => Allowed,
-    /// A branch declared with `CREATE BRANCH`.
-    BranchName => Allowed,
+    /// A parametrizer declared with `CREATE PARAMETRIZER`.
+    ParametrizerName => Allowed,
     /// A listening endpoint declared with `CREATE HTTP ENDPOINT` or `CREATE WEBSOCKETS ENDPOINT`.
     EndpointName => Allowed,
     /// A signaling protocol declared with `CREATE SIGNALING PROTOCOL`.
@@ -410,7 +410,7 @@ declare_model_names! {
     CodecName,
     ClientName,
     VhostName,
-    BranchName,
+    ParametrizerName,
     EndpointName,
     SignalingProtocolName,
     GeneratorName,

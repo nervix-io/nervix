@@ -64,20 +64,20 @@ use nervix_interconnect::{
     Transport, WasmStateResetTarget,
 };
 use nervix_models::{
-    AckMode, BranchKeyFingerprint, BranchName, ClientConfigEntry, ClientName,
-    ClientProducerEndReason, ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation,
-    ClusterNodeName, CodecName, CommandExecutionReference, CoordinationIdentity,
-    CorrelationTimeoutAction, CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig,
-    DomainName, DomainNodeRef, DomainNodeUnitRef, DomainState, EmitterName, EndpointName,
-    EndpointType, EntityGateTargets, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
-    GeneralErrorPolicy, GeneratorName, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestTimestampSource, IngestorName, Literal as ModelLiteral,
-    LookupName, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
-    MessageErrorPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    PartitionSeed, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResolvedBranchPartitions, ResolvedBranching, ResourceId, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
+    AckMode, BranchKeyFingerprint, ClientConfigEntry, ClientName, ClientProducerEndReason,
+    ClientResourceMount, ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName,
+    CommandExecutionReference, CoordinationIdentity, CorrelationTimeoutAction,
+    CorrelatorMatchPolicy, DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef,
+    DomainNodeUnitRef, DomainState, EmitterName, EndpointName, EndpointType, EntityGateTargets,
+    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
+    IngestorName, Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef,
+    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    OwnershipStateResetCause, ParametrizerName, ParseAsType, PartitionSeed, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
+    ResolvedBranching, ResolvedParametrizerPartitions, ResourceId, ResourceName, RetryPolicy,
+    RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
     StructuredMessageError, SubscriptionName, Timestamp, Unit, WasmCheckpointInspection,
     WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
@@ -253,6 +253,7 @@ mod emitter_task_programs;
 mod emitter_values;
 mod endpoint;
 mod endpoint_acknowledgement;
+mod endpoint_pause;
 mod endpoint_route_table;
 mod entity_gate;
 mod entrypoint_routes;
@@ -491,12 +492,13 @@ use emitter_values::{
     MappedRequestEmitter, MappedRowEmitter, MappedValuesProjection, MappedValuesProjectionInit,
 };
 pub(crate) use endpoint::{
-    EndpointDispatchOutcome, HttpEndpointRequestMetadata, ResolvedEndpointRoute,
+    EndpointDispatchOutcome, EndpointPayload, HttpEndpointRequestMetadata, ResolvedEndpointRoute,
     WebsocketsEndpointFrameMetadata,
 };
 use endpoint::{EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint};
 use endpoint_acknowledgement::EndpointRequestPolicy;
 pub(crate) use endpoint_acknowledgement::{EndpointRequestOutcome, EndpointRequestReply};
+pub(crate) use endpoint_pause::EndpointFramePause;
 pub(crate) use endpoint_route_table::EndpointResolution;
 use endpoint_route_table::{EndpointBinding, EndpointIntakeRoute, EndpointIntakeRoutes};
 use entity_gate::{
@@ -530,7 +532,7 @@ use ingest_group::{
     BatchPayload, BoundIngestor, BoundIngestorInput, BranchedEntrypointInput, ClientBatchDispatch,
     ClientBatchMetadata, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
     IngestorRouteRuntimes, PayloadDecodeFailure, RawIngestAcceptance, RefusedEntry, SplitPayloads,
-    UnfoldingNotAdmitted, decode_ingested_payload, prepare_branched_entrypoint_input,
+    decode_ingested_payload, prepare_branched_entrypoint_input,
 };
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, INGEST_PAYLOAD_NAMESPACE,
@@ -754,6 +756,7 @@ use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
     ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary, WasmGuestState,
 };
+pub(crate) use wasm_state_description::{WasmDescriptionSize, WasmDescriptionSource};
 use wasm_state_recovery::RaisedWasmStateRecoveries;
 pub(crate) use wasm_state_recovery::WasmStateRecoveryRequest;
 pub(crate) use wasm_state_reset::WasmStateResetPreparation;
@@ -799,6 +802,7 @@ mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;
+mod wasm_state_description;
 mod wasm_state_recovery;
 mod wasm_state_reset;
 mod window_accumulator;

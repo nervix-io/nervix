@@ -300,7 +300,7 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
                     count: 1024,
                     unit: "pending jobs",
                 },
-                overflow: BufferOverflow::RefuseRequest,
+                overflow: BufferOverflow::Backpressure,
             },
         },
     ],
@@ -349,7 +349,8 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
          unanswered after its caller's 30 s deadline retains its worker and the ingestor's one \
          in-flight commit until the native call ends. Native subscribe, assign, pause, resume and \
          unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.",
-        "During a long read allowance hold, a consumer-group ingestor pauses fetching and \
+        "While the host holds the loop, during a long read allowance hold or while a payload \
+         waits for the node's extension workers, a consumer-group ingestor pauses fetching and \
          services its group through the same control turn. Each job polls once. The driver can \
          discard its own prefetched copies; the next admitted read resumes from its unread \
          position. No record buffer is added.",

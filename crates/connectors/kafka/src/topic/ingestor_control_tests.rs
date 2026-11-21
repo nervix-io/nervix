@@ -14,10 +14,7 @@ use std::{
 use async_trait::async_trait;
 use meticulous::ResultExt as _;
 use nervix_connector::{BrokerIngestorConnector as _, IngestorConnector};
-use nervix_execution::{
-    AdmissionError, ExecutionConfig, ExecutionError, Executor, MemoryClass, StorageClass,
-    WorkerCounts,
-};
+use nervix_execution::{AdmissionError, Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, KafkaTopicName};
 use nervix_primitives::sync::oneshot;
 use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext, types::RDKafkaRespErr};
@@ -31,6 +28,7 @@ use super::{
         READ_DEADLINE, cluster, plan as group_plan, publish, read_positions, subscribed_ingestor,
     },
 };
+use crate::topic::retirement_tests::{FullConnectorQueue, single_connector_worker};
 
 struct UnreachedOffsets;
 
@@ -218,7 +216,6 @@ async fn domain_ingestor(
     executor: Executor,
 ) -> KafkaTopicIngestor {
     let plan = KafkaTopicIngestorPlan {
-        maintain_rate_limit_holds: false,
         settings: crate::KafkaTopicIngestorSettings::default(),
         executor,
         config: vec![
@@ -273,30 +270,43 @@ async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
     assert_eq!(executor.snapshot().connector_storage.admitted, 0);
 }
 
+/// A control job the full connector queue cannot take now waits for a place rather than being
+/// refused, and runs once one frees. The client deadline still bounds the whole wait: a job whose
+/// worker stays held past it ends without starting its native operation.
 #[nervix_primitives::test]
-async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while_queued() {
+async fn control_admission_waits_for_a_place_and_spends_the_client_deadline_on_it() {
     let broker = cluster();
-    let executor = Executor::new(ExecutionConfig {
-        workers: WorkerCounts {
-            connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(
-                std::num::NonZeroUsize::MIN,
-            ))
-            .assured("one worker fits the primitive permit bound"),
-            pending_jobs: nervix_execution::PendingJobCounts::uniform(std::num::NonZeroUsize::MIN),
-            ..WorkerCounts::default()
-        },
-        ..ExecutionConfig::default()
-    })
-    .assured("the test changes only worker counts");
+    let executor = single_connector_worker();
     let ingestor = domain_ingestor(&broker, executor.clone()).await;
     // The charge of its consumer's retirement, which the open ingestor holds throughout.
     let opened = executor.snapshot().commands_memory.reserved_bytes;
+
+    let full = FullConnectorQueue::fill(&executor).await;
+    let before = executor.snapshot().connector_storage;
+    let mut waiting = Box::pin(ingestor.control.run(&ingestor.consumer, |_, _| Ok(())));
+    let first_poll = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
+    assert!(
+        first_poll.is_pending(),
+        "a full connector queue holds the control job back"
+    );
+    full.release().await;
+    waiting
+        .await
+        .assured("the control job runs once a place frees, within the client deadline");
+    assert_eq!(
+        executor.snapshot().connector_storage.refused,
+        before.refused,
+        "a full connector queue refuses no control job"
+    );
+
+    // The queue has room, but the only worker stays held. This wait must spend the effective
+    // client deadline on admission without starting the native operation afterwards.
     let (started, has_started) = oneshot::channel();
     let (release, released) = oneshot::channel();
     let occupied = executor.clone();
     let charge = executor
         .try_reserve(MemoryClass::Commands, 1)
-        .assured("the first envelope fits");
+        .assured("the occupying envelope fits");
     let running = nervix_primitives::task::spawn(async move {
         occupied
             .run_storage(StorageClass::Connector, charge, move |_, _| {
@@ -309,20 +319,7 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
     });
     has_started
         .await
-        .assured("the first job holds the only connector worker");
-    let charge = executor
-        .try_reserve(MemoryClass::Commands, 1)
-        .assured("the queued envelope fits");
-    let mut queued = Box::pin(executor.run_storage(StorageClass::Connector, charge, |_, _| ()));
-    let first_poll = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
-    assert!(first_poll.is_pending());
-    let result = ingestor
-        .control
-        .run(&ingestor.consumer, |_, _| Ok(()))
-        .await;
-    drop(queued);
-    // The queue has room again, but the only worker remains held. This wait must spend the
-    // effective client deadline on admission without starting the native operation afterwards.
+        .assured("the occupying job holds the only connector worker");
     let expired: Result<(), _> = ingestor
         .control
         .run(&ingestor.consumer, |_, _| {
@@ -331,24 +328,12 @@ async fn control_admission_preserves_refusals_and_uses_the_client_deadline_while
         .await;
     release
         .send(())
-        .assured("the test releases its worker before checking the refusal");
+        .assured("the test releases its worker before checking the timeout");
     running
         .await
         .assured("the supervisor is joined")
         .assured("the occupying job exits");
 
-    let report = result.expect_err("a full connector queue refuses the next operation");
-    assert!(matches!(
-        report.current_context(),
-        KafkaTopicIngestorError::ControlExecution
-    ));
-    assert!(matches!(
-        report.downcast_ref::<ExecutionError>(),
-        Some(ExecutionError::QueueFull {
-            class: "connector_storage",
-            pending: 1
-        })
-    ));
     let report = expired.expect_err("the configured deadline includes waiting for a worker");
     assert!(matches!(report.current_context(),
         KafkaTopicIngestorError::ControlTimeout { timeout } if *timeout == Duration::from_secs(1)));

@@ -21,7 +21,9 @@
 
 use async_trait::async_trait;
 use nervix_connector::{EmitterLifecycle, EmitterRecordPosition, RecordEmitter};
-use nervix_execution::{Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass};
+use nervix_execution::{
+    Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass, QueueAdmission,
+};
 use nervix_models::EmitterBatchPolicy;
 
 use super::{
@@ -243,9 +245,12 @@ impl EmitterConnectorContext {
                     )));
             }
         };
+        // The emitter already accepted the rows it encodes, so a full queue holds the encoding
+        // back rather than refusing it for a retry.
         let encoded = executor
-            .run_cpu(
+            .run_cpu_with(
                 CpuClass::Extension,
+                QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| encode(cancellation),
             )
@@ -253,7 +258,16 @@ impl EmitterConnectorContext {
         match encoded {
             Ok(result) => result,
             Err(error) => match error.current_context() {
-                ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => Err(error
+                // A wait for a place ends in a refusal only once the node's executor admits no
+                // more work, as the node stops.
+                ExecutionError::PoolClosed { .. } => Err(error
+                    .change_context(EmitterRuntimeError::EncodingRefused)
+                    .attach_printable(format!(
+                        "emitter '{}' could not start its encoding: the node's extension workers \
+                         admit no more work as the node stops",
+                        self.emitter.as_str()
+                    ))),
+                ExecutionError::QueueFull { .. } => Err(error
                     .change_context(EmitterRuntimeError::EncodingRefused)
                     .attach_printable(format!(
                         "emitter '{}' could not start its encoding: the node's extension workers \
@@ -1194,23 +1208,49 @@ mod tests {
         assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
     }
 
+    /// The emitter already accepted the rows it encodes, so a transformed encoding the extension
+    /// workers cannot take now waits for a place rather than being refused for a retry, and encodes
+    /// the row once one frees.
     #[nervix_primitives::test]
-    async fn a_node_without_room_for_a_transformed_encoding_refuses_it_for_a_retry() {
+    async fn a_transformed_encoding_the_extension_workers_cannot_take_now_waits_for_a_place() {
         let executor = single_worker_executor();
         let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
         let context = context_with(executor.clone());
+        let batch = one_row(3);
 
-        let refused = encode_pending_broker_payloads(jaq_codec(), &context, &one_row(3), vec![0])
-            .await
-            .expect_err("a full extension class refuses the encoding");
-
-        assert_eq!(
-            *refused.current_context(),
-            EmitterRuntimeError::EncodingRefused
+        let mut encoding = Box::pin(encode_pending_broker_payloads(
+            jaq_codec(),
+            &context,
+            &batch,
+            vec![0],
+        ));
+        let first_poll = std::future::poll_fn(|waker_context| {
+            std::task::Poll::Ready(encoding.as_mut().poll(waker_context))
+        })
+        .await;
+        assert!(
+            first_poll.is_pending(),
+            "a full extension class holds the encoding back"
         );
-        assert!(refused.current_context().is_retryable_publish_failure());
-        assert_eq!(executor.snapshot().extension_cpu.refused, 1);
         filled.release().await;
+        let payloads = encoding
+            .await
+            .expect("the encoding runs once a place frees");
+
+        let [
+            PendingRowPayload {
+                row_index: 0,
+                payload,
+            },
+        ] = payloads.as_slice()
+        else {
+            panic!("the one pending row is encoded once");
+        };
+        let payload = payload
+            .as_ref()
+            .expect("the identity program encodes the row");
+        assert_eq!(payload.as_slice(), br#"{"value": 3}"#);
+        assert_eq!(executor.snapshot().extension_cpu.refused, 0);
     }
 
     #[nervix_primitives::test]

@@ -77,6 +77,7 @@ mod live_view_gap;
 mod live_view_gap_tests;
 mod materialized_fetch_hold;
 mod materialized_reads;
+mod materialized_row_boundaries;
 mod model_publication;
 mod orphaned_domain_pause;
 mod ownership_handoff_reads;

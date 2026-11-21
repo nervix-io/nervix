@@ -294,6 +294,12 @@ pub enum CommandExecutionEffect {
         if_not_exists: bool,
         name: UserName,
         password_credential: nervix_models::PasswordCredential,
+        labels: nervix_models::EntityLabels,
+    },
+    EditAdministrativeLabels {
+        target: nervix_models::AdministrativeLabelTarget,
+        mutation: nervix_models::EntityLabelMutation,
+        outcome: Option<Result<(), crate::EntityLabelWriteError>>,
     },
     DropNode {
         identity: ClusterNodeIdentity,
@@ -603,6 +609,7 @@ impl CommandExecution {
             Some(
                 CommandExecutionEffect::CreateDomain { .. }
                 | CommandExecutionEffect::AlterCluster { .. }
+                | CommandExecutionEffect::EditAdministrativeLabels { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::StopDomain { .. }
@@ -624,6 +631,7 @@ impl CommandExecution {
             Some(
                 CommandExecutionEffect::CreateDomain { .. }
                 | CommandExecutionEffect::AlterCluster { .. }
+                | CommandExecutionEffect::EditAdministrativeLabels { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
@@ -660,6 +668,7 @@ impl CommandExecution {
                 CommandExecutionEffect::TransactionRequest(request) => Some(&request.target),
                 CommandExecutionEffect::CreateDomain { .. }
                 | CommandExecutionEffect::AlterCluster { .. }
+                | CommandExecutionEffect::EditAdministrativeLabels { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::StopDomain { .. }
@@ -688,6 +697,7 @@ impl CommandExecution {
                 } => Some(password_credential),
                 CommandExecutionEffect::CreateDomain { .. }
                 | CommandExecutionEffect::AlterCluster { .. }
+                | CommandExecutionEffect::EditAdministrativeLabels { .. }
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
@@ -790,6 +800,7 @@ impl CommandExecution {
             }
             CommandExecutionEffect::CreateDomain { .. }
             | CommandExecutionEffect::AlterCluster { .. }
+            | CommandExecutionEffect::EditAdministrativeLabels { .. }
             | CommandExecutionEffect::Transaction { .. }
             | CommandExecutionEffect::Statement { .. }
             | CommandExecutionEffect::StopDomain { .. }
@@ -1318,6 +1329,7 @@ mod tests {
             [u8::try_from(index).assured("the test index fits in one byte"); 32],
             Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
             CommandExecutionEffect::CreateUser {
+                labels: nervix_models::EntityLabels::default(),
                 if_not_exists: false,
                 name: UserName::parse("created_user")
                     .assured("the test target is a valid user name"),

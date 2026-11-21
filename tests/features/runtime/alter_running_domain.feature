@@ -35,7 +35,7 @@ Feature: Altering schemas on a running domain
 
       CREATE HTTP ENDPOINT INGESTOR running_event_ingestor
         FROM running_event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING running_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING running_event_codec
         TO running_events
         INHERIT ALL
         UNBRANCHED
@@ -121,7 +121,7 @@ Feature: Altering schemas on a running domain
         ON timeout_edge PATH '/alter-timeout';
       CREATE HTTP ENDPOINT INGESTOR timeout_ingestor
         FROM timeout_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timeout_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING timeout_event_codec
         TO timeout_events
         INHERIT ALL
         UNBRANCHED
@@ -208,7 +208,7 @@ Feature: Altering schemas on a running domain
         TO SCHEMA stable_event;
 
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
-      CREATE BRANCH tenant_branch SCHEMA tenant_branch_schema TTL 5m;
+      CREATE PARAMETRIZER tenant_branch SCHEMA tenant_branch_schema TTL 5m;
 
       CREATE RELAY mutable_state
         SCHEMA mutable_event
@@ -227,7 +227,7 @@ Feature: Altering schemas on a running domain
 
       CREATE HTTP ENDPOINT INGESTOR mutable_ingestor
         FROM mutable_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING mutable_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING mutable_event_codec
         TO mutable_state
         INHERIT ALL
         BRANCHED BY tenant_branch
@@ -237,7 +237,7 @@ Feature: Altering schemas on a running domain
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR stable_ingestor
         FROM stable_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stable_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING stable_event_codec
         TO stable_state
         INHERIT ALL
         BRANCHED BY tenant_branch
@@ -339,7 +339,7 @@ Feature: Altering schemas on a running domain
 
       CREATE HTTP ENDPOINT INGESTOR rollback_ingestor
         FROM rollback_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING rollback_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING rollback_event_codec
         TO rollback_events
         INHERIT ALL
         UNBRANCHED

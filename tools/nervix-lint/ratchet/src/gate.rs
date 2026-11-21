@@ -691,6 +691,103 @@ mod tests {
     }
 
     #[test]
+    fn a_declaration_an_earlier_impl_block_renumbers_keeps_its_pin() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join(BASELINE);
+        let mut pinned = baseline(1);
+        pinned.branch_inversion_sites = BTreeSet::from(["owner::{impl#14}::routed".to_string()]);
+        fs::write(&path, serde_json::to_string(&pinned).unwrap()).unwrap();
+        let renumbered = Site {
+            path: "src/owner.rs".into(),
+            line: 7,
+            detail: "owner::{impl#13}::routed".into(),
+        };
+        let result = execute(
+            root,
+            true,
+            None,
+            || Ok(()),
+            || {
+                Ok(BTreeMap::from([(
+                    "owner::{impl#13}::routed".into(),
+                    renumbered,
+                )]))
+            },
+            || Ok(counts(1)),
+        );
+        assert_eq!(result.unwrap(), 0);
+        let written: Baseline = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(
+            written.branch_inversion_sites,
+            BTreeSet::from(["owner::{impl#13}::routed".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_second_declaration_under_a_pinned_stable_identity_is_still_new() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join(BASELINE);
+        let mut pinned = baseline(1);
+        pinned.branch_inversion_sites = BTreeSet::from(["owner::{impl#3}::routed".to_string()]);
+        let original = serde_json::to_string(&pinned).unwrap();
+        fs::write(&path, &original).unwrap();
+        let site = |line, detail: &str| Site {
+            path: "src/owner.rs".into(),
+            line,
+            detail: detail.into(),
+        };
+        let result = execute(
+            root,
+            true,
+            None,
+            || Ok(()),
+            || {
+                Ok(BTreeMap::from([
+                    (
+                        "owner::{impl#3}::routed".into(),
+                        site(7, "owner::{impl#3}::routed"),
+                    ),
+                    (
+                        "owner::{impl#4}::routed".into(),
+                        site(19, "owner::{impl#4}::routed"),
+                    ),
+                ]))
+            },
+            || Ok(counts(1)),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("new branch ownership expectations are forbidden"));
+        assert!(error.contains("src/owner.rs:19: owner::{impl#4}::routed"));
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn a_stable_identity_drops_only_impl_disambiguators() {
+        assert_eq!(
+            branches::stable_identity("crate::module::{impl#12}::method::{impl#3}::field"),
+            "crate::module::{impl}::method::{impl}::field"
+        );
+        assert_eq!(
+            branches::stable_identity("crate::{impl#}::field::{impl#x}"),
+            "crate::{impl#}::field::{impl#x}"
+        );
+        let accepted = BTreeSet::from(["crate::{impl#2}::field".to_string()]);
+        let renumbered = ["crate::{impl#1}::field".to_string()];
+        assert!(
+            branches::added(renumbered.iter(), &accepted)
+                .unwrap()
+                .is_empty()
+        );
+        let grown = [
+            "crate::{impl#1}::field".to_string(),
+            "crate::{impl#5}::field".to_string(),
+        ];
+        assert_eq!(branches::added(grown.iter(), &accepted).unwrap().len(), 2);
+    }
+
+    #[test]
     fn retiring_a_branch_expectation_requires_removing_its_pin() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(BASELINE);

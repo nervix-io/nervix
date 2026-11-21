@@ -36,7 +36,7 @@ pub enum ChoiceTarget {
     DomainPace,
     PlacementPolicy,
     Schema,
-    Branch,
+    Parametrizer,
     Relay,
     /// The fields of one relay's records, asked with the domain and then the relay as
     /// dependencies.
@@ -113,7 +113,7 @@ wire_enum!(ALL_CHOICE_TARGETS: ChoiceTarget => wire::ChoiceTarget {
     DomainPace,
     PlacementPolicy,
     Schema,
-    Branch,
+    Parametrizer,
     Relay,
     RelayField,
     WireJsonSchema,
@@ -414,7 +414,7 @@ impl ChoiceTarget {
             Self::DomainPace
             | Self::PlacementPolicy
             | Self::Schema
-            | Self::Branch
+            | Self::Parametrizer
             | Self::Relay
             | Self::RelayField
             | Self::WireJsonSchema

@@ -144,6 +144,7 @@ callbacks onto the trait:
 | `flush` | The runtime is quiescing this branch: for an entity or domain pause, an ownership move, a coordinated reset, or a shutdown. Emit everything the processor still buffers; whatever it keeps stays unacknowledged until the branch resumes. |
 | `save_state` | After every `process_batch` and `on_timeout` call, whether it succeeded or failed, unless it exhausted a limit or requested a new state lifetime; after a `flush` that emitted output; and when the host checkpoints the branch for an ownership handoff. Return the processor's durable computation state, or an error when it cannot be serialized. |
 | `restore` | The host recreates the branch instance, for example after a restart or on the node a branch moved to, and hands it the application state of the checkpoint the branch continues from. |
+| `describe_state` | A state inspection reads the branch, on a scratch instance restored from the committed checkpoint that the host discards afterwards. Return the [description of the processor's state](#describing-state). |
 
 Keep all state branch-local. Never aggregate across branch keys inside one
 guest, and reject init payloads whose schemas the guest does not implement
@@ -262,6 +263,45 @@ keeps the saved state after a rejection and reports it under the
 `snapshot envelope decoding` or `application state restoration`
 [failure stage](./wasm-processor-guests.md#failure-diagnostics), so return an
 error from `restore` only when the saved state itself is unusable.
+
+## Describing State
+
+`describe_state` tells an operator's `SHOW WASM PROCESSOR <processor> STATE` what the processor's
+state holds, because the bytes `save_state` returns mean nothing to anyone but the processor.
+Build a `StateDescription` from named sections, each one table of typed rows:
+
+```rust
+fn describe_state(&self) -> Result<StateDescription, GuestError> {
+    let mut description = StateDescription::new();
+    description.add_section(
+        "progress",
+        vec![ProcessorField {
+            name: "processed_rows".to_string(),
+            ty: ProcessorType::U64,
+            optional: false,
+        }],
+        vec![Arc::new(UInt64Array::from(vec![self.processed_rows]))],
+    )?;
+    Ok(description)
+}
+```
+
+`add_section` refuses columns that do not match their fields: a column count that differs from the
+field count, a column whose Arrow type is not exactly the one `ProcessorTypeArrow::arrow_data_type`
+states for its field, columns of different lengths, and a null in a field that is not optional.
+Section and field names follow the
+[name rules](./wasm-processor-guests.md#state-description), and the sections are reported in the
+order they are added. The default describes no state.
+
+The host calls `describe_state` only on a scratch instance it restored from the branch's committed
+checkpoint and discards afterwards, never on the instance that processes input, so describing state
+cannot change, delay or fail the branch, and `GuestContext` is not available. An error is reported
+with its reason in the branch's entry of the inspection, under the `state description`
+[failure stage](./wasm-processor-guests.md#failure-diagnostics), without latching error state.
+
+Guest state is always sensitive: an inspection reports each section's name, its fields and their
+types, and its row count, and never a value, whatever the processor reads. A separate permission to
+read guest-state values will come later.
 
 ## Requesting A New State Lifetime
 

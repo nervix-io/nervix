@@ -48,6 +48,27 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
+    pub(in crate::runtime) async fn pause_materialized_row_release_if_armed(
+        &self,
+        _domain: &DomainName,
+        _relay: &NodeRef,
+    ) {
+    }
+
+    pub(in crate::runtime) async fn pause_materialized_row_take_if_armed(
+        &self,
+        _domain: &DomainName,
+        _relay: &NodeRef,
+    ) {
+    }
+
+    pub(in crate::runtime) async fn pause_materialized_checkpoint_if_armed(
+        &self,
+        _domain: &DomainName,
+        _relay: &ModelName,
+    ) {
+    }
+
     pub(in crate::runtime) fn wasm_reset_publication_failure_is_enabled(
         &self,
         _domain: &DomainName,

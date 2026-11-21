@@ -638,16 +638,16 @@ impl Arbitrary<'_> {
 
     /// The partition count of a generated relay's branch, from one through
     /// [`SCHEDULED_PARTITIONS`], for a scheduled relay or a relay whose batches a case routes.
-    pub fn scheduled_branch_partitions(&mut self) -> nervix_models::ResolvedBranchPartitions {
+    pub fn scheduled_branch_partitions(&mut self) -> nervix_models::ResolvedParametrizerPartitions {
         let count = self
             .entropy
             .boundary_biased(1..=u64::from(SCHEDULED_PARTITIONS));
         let count = u16::try_from(count).verified("the range above ends below u16::MAX");
         let count = std::num::NonZeroU16::new(count).verified("the range above starts at one");
         if self.entropy.flag() {
-            nervix_models::ResolvedBranchPartitions::Inherited(count)
+            nervix_models::ResolvedParametrizerPartitions::Inherited(count)
         } else {
-            nervix_models::ResolvedBranchPartitions::Direct(count)
+            nervix_models::ResolvedParametrizerPartitions::Direct(count)
         }
     }
 
@@ -835,6 +835,7 @@ impl Arbitrary<'_> {
             DomainStatus::Running | DomainStatus::Paused => None,
         };
         DomainState {
+            labels: nervix_models::EntityLabels::default(),
             id,
             config: DomainConfig { pace },
             status,
@@ -1208,7 +1209,7 @@ impl Arbitrary<'_> {
         let placement_groups = self.records(Self::placement_group);
         let mut partition_epochs = std::collections::BTreeMap::new();
         for epoch in self.records(Self::branch_partition_epoch) {
-            partition_epochs.insert(self.name::<nervix_models::BranchName>(), epoch);
+            partition_epochs.insert(self.name::<nervix_models::ParametrizerName>(), epoch);
         }
         DomainSchedule::new(domain, nodes, placement_groups)
             .with_partition_epochs(partition_epochs)
@@ -1251,7 +1252,7 @@ impl Arbitrary<'_> {
                     groups,
                 }
             };
-            topology.branches.insert(self.rule_name(), layout);
+            topology.parametrizers.insert(self.rule_name(), layout);
         }
         for name in topology.sources.keys() {
             if self.entropy.flag() {
@@ -1276,7 +1277,7 @@ impl Arbitrary<'_> {
 
     /// The partition epoch of one branch whose count changed since it was created: a later epoch,
     /// settled or in a transition from the count before it.
-    pub fn branch_partition_epoch(&mut self) -> nervix_models::BranchPartitionEpoch {
+    pub fn branch_partition_epoch(&mut self) -> nervix_models::ParametrizerPartitionEpoch {
         let number = self.entropy.boundary_biased(1..=u64::MAX);
         let number = nervix_models::PartitionEpochNumber::new(
             std::num::NonZeroU64::new(number).verified("the range above starts at one"),
@@ -1289,7 +1290,7 @@ impl Arbitrary<'_> {
         } else {
             None
         };
-        nervix_models::BranchPartitionEpoch {
+        nervix_models::ParametrizerPartitionEpoch {
             number,
             partitions,
             transition,

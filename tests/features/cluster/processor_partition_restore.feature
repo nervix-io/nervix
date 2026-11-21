@@ -24,7 +24,7 @@ Feature: Partitioned processor state in backup archives
         pairs ARRAY<I64, 2, 2>
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 2;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m PARTITIONS 2;
       CREATE RELAY payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY unique_payments SCHEMA payment BRANCHED BY by_tenant;
       CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -33,12 +33,12 @@ Feature: Partitioned processor state in backup archives
       CREATE HTTP ENDPOINT payment_ingress ON edge PATH '/payments';
       CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR payment_ingestor FROM payment_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING payment_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING payment_codec
         TO payments INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

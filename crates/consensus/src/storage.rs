@@ -24,7 +24,7 @@ use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot as FjallSnapshot};
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
+use nervix_execution::{Executor, MemoryClass, QueueAdmission, Reservation, StorageClass};
 use nervix_primitives::sync::{
     Arc, OwnedSemaphorePermit, Semaphore, StdArc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -96,13 +96,13 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_logs";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_logs";
 const KEYSPACE_META: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_meta";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_state";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_snapshots";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// The working memory one Management storage operation reserves, in largest management events. A
@@ -248,7 +248,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 42,
+    ClusterState = 44,
 }
 
 #[derive(Debug)]
@@ -417,7 +417,7 @@ impl StateMachineData {
             domain_clock_authorities: Records::load(b'a', sm)?,
             users: Records::load(b'u', sm)?,
             resources: ResourceRecords {
-                counters: Records::load(b'c', sm)?,
+                catalog: Records::load(b'c', sm)?,
                 versions: Records::load(b'v', sm)?,
                 replicas: Records::load(b'r', sm)?,
                 uploads: Records::load(b'o', sm)?,
@@ -472,20 +472,19 @@ impl StateMachineData {
 
     /// Checks every recovered label map under the recovered record's committed policy.
     fn check_recovered_entity_labels(&self) -> io::Result<()> {
-        if self.schedule.domains.len() != 0 {
-            let parameters = self
-                .parameters
-                .as_ref()
-                .ok_or_else(|| io::Error::other(StorageFailure::InvalidState))?;
-            let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
-            for schedule in self.schedule.domains.values() {
-                for node in schedule.nodes.values() {
-                    node.config
-                        .labels()
-                        .validate(&limits)
-                        .map_err(crate::durable_batch::storage_report_io)?;
-                }
+        let Some(parameters) = self.parameters.as_ref() else {
+            if self.schedule.domains.len() != 0
+                || self.entity_label_sets().any(|labels| !labels.is_empty())
+            {
+                return Err(io::Error::other(StorageFailure::InvalidState));
             }
+            return Ok(());
+        };
+        let limits = nervix_models::EntityLabelLimits::from(&parameters.values);
+        for labels in self.entity_label_sets() {
+            labels
+                .validate(&limits)
+                .map_err(crate::durable_batch::storage_report_io)?;
         }
         Ok(())
     }
@@ -600,8 +599,8 @@ impl StateMachineData {
         self.users
             .write_changes(&preceding.users, b'u', batch, sm)?;
         self.resources
-            .counters
-            .write_changes(&preceding.resources.counters, b'c', batch, sm)?;
+            .catalog
+            .write_changes(&preceding.resources.catalog, b'c', batch, sm)?;
         self.resources
             .versions
             .write_changes(&preceding.resources.versions, b'v', batch, sm)?;
@@ -930,9 +929,12 @@ impl StoreInner {
     ) -> io::Result<T> {
         let WorkingSet { reservation, turn } = self.admit(charge).await?;
         let inner = self.clone();
+        // Consensus storage answers no waiting caller with a refusal: a full queue holds the
+        // operation back until the ordered worker has room.
         self.executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Consensus,
+                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, cancellation| {
                     let working_set = WorkingSet { reservation, turn };
@@ -1437,8 +1439,9 @@ impl StoreInner {
         let executor = self.executor.clone();
         let inner = self.clone();
         executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Consensus,
+                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, cancellation| {
                     let working_set = WorkingSet { reservation, turn };
@@ -1528,8 +1531,9 @@ impl FjallStore {
             admission.admit(&executor, StorageCharge::Commands).await?;
         let store_executor = executor.clone();
         let opened = executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Consensus,
+                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, _| {
                     let working_set = WorkingSet { reservation, turn };

@@ -6,21 +6,21 @@ use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::{CodecDirection, RelayQuestion, RelayRule};
 use crate::{
-    BranchName, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateRelay,
-    MaterializedRelayState, RelayBranching, RelayName, SchemaName, WireSchemaName,
+    CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateRelay, MaterializedRelayState,
+    ParametrizerName, RelayBranching, RelayName, SchemaName, WireSchemaName,
 };
 
 fn relay_name(name: &str) -> RelayName {
     RelayName::parse(name).assured("the test names a valid relay")
 }
 
-fn branch_name(name: &str) -> BranchName {
-    BranchName::parse(name).assured("the test names a valid branch")
+fn parametrizer_name(name: &str) -> ParametrizerName {
+    ParametrizerName::parse(name).assured("the test names a valid branch")
 }
 
 fn relay(name: &str, schema: &str, branch: Option<&str>, materialized: bool) -> CreateRelay {
     let branching = match branch {
-        Some(branch) => RelayBranching::branched_by(branch_name(branch)),
+        Some(branch) => RelayBranching::branched_by(parametrizer_name(branch)),
         None => RelayBranching::unbranched(),
     };
     let materialized_state = if materialized {
@@ -202,7 +202,7 @@ fn branch_questions_compare_a_candidate_with_the_branch_alone() {
         ["first", "labels", "same", "state"]
     );
     assert_eq!(
-        relays.admitted(&RelayQuestion::OnBranch(Some(branch_name("by_id")))),
+        relays.admitted(&RelayQuestion::OnBranch(Some(parametrizer_name("by_id")))),
         ["branched", "branched_state"]
     );
     assert_eq!(
@@ -210,9 +210,9 @@ fn branch_questions_compare_a_candidate_with_the_branch_alone() {
         ["state"]
     );
     assert_eq!(
-        relays.admitted(&RelayQuestion::MaterializedOnBranch(Some(branch_name(
-            "by_id"
-        )))),
+        relays.admitted(&RelayQuestion::MaterializedOnBranch(Some(
+            parametrizer_name("by_id")
+        ))),
         ["branched_state"]
     );
 }
@@ -221,9 +221,9 @@ fn branch_questions_compare_a_candidate_with_the_branch_alone() {
 fn a_generator_state_admits_what_its_form_offers_on_some_branch() {
     let relays = Relays::new();
     let mut on_some_branch = relays.admitted(&RelayQuestion::MaterializedOnBranch(None));
-    let on_by_id = relays.admitted(&RelayQuestion::MaterializedOnBranch(Some(branch_name(
-        "by_id",
-    ))));
+    let on_by_id = relays.admitted(&RelayQuestion::MaterializedOnBranch(Some(
+        parametrizer_name("by_id"),
+    )));
     on_some_branch.extend(on_by_id);
     on_some_branch.sort_unstable();
     assert_eq!(

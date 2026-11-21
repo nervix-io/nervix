@@ -65,10 +65,31 @@ fn rate(value: f64) -> DomainTimeRate {
     DomainTimeRate::try_from(value).assured("the test rate is positive and finite")
 }
 
+fn labels() -> nervix_models::EntityLabels {
+    nervix_models::EntityLabels::try_from(vec![
+        nervix_models::LabelAssignment {
+            key: nervix_models::LabelKey::try_from("owner".to_owned()).assured("valid key"),
+            value: " Δ ".to_owned(),
+        },
+        nervix_models::LabelAssignment {
+            key: nervix_models::LabelKey::try_from("empty".to_owned()).assured("valid key"),
+            value: String::new(),
+        },
+    ])
+    .assured("the label fixture has unique keys")
+}
+
 fn users() -> UsersRecord {
     UsersRecord {
+        label_policy: nervix_models::EntityLabelPolicy {
+            revision: std::num::NonZeroU64::MIN,
+            limits: nervix_models::EntityLabelLimits::from(
+                &nervix_models::ClusterParameterValues::default(),
+            ),
+        },
         users: vec![
             UserRecord {
+                labels: labels(),
                 name: UserName::parse("alice").assured("the test user is valid"),
                 password_credential: nervix_models::PasswordCredential::from_parts(
                     210000, [249; 16], [249; 64],
@@ -76,6 +97,7 @@ fn users() -> UsersRecord {
                 .assured("the fixed credential has a bounded iteration count"),
             },
             UserRecord {
+                labels: labels(),
                 name: UserName::parse("default").assured("the test user is valid"),
                 password_credential: nervix_models::PasswordCredential::from_parts(
                     210000, [39; 16], [39; 64],
@@ -89,6 +111,7 @@ fn users() -> UsersRecord {
 fn paced_domain(name: &str) -> DomainRecord {
     DomainRecord {
         domain: domain(name),
+        labels: labels(),
         pace: DomainPace::Paced {
             period: DomainClockPeriod::from_nanos(version(100_000_000)),
             skew: DomainClockSkew::from_nanos(10_000_000),
@@ -107,10 +130,12 @@ fn paced_domain(name: &str) -> DomainRecord {
         logical_frontier: Some(Timestamp::from_unix_nanos(1_893_456_100_000_000_000)),
         resources: vec![
             DeclaredResource {
+                labels: labels(),
                 resource: resource("model.v2"),
                 next_version: version(3),
             },
             DeclaredResource {
+                labels: labels(),
                 resource: resource(".."),
                 next_version: version(1),
             },
@@ -121,6 +146,7 @@ fn paced_domain(name: &str) -> DomainRecord {
 fn unpaced_domain(name: &str) -> DomainRecord {
     DomainRecord {
         domain: domain(name),
+        labels: labels(),
         pace: DomainPace::Unpaced,
         status: DomainStatus::Stopped,
         start_version: 0,
@@ -199,6 +225,95 @@ fn every_record_round_trips_through_its_section() {
 }
 
 #[test]
+fn archive_read_refuses_owner_labels_over_the_captured_policy() {
+    let mut accounts = users();
+    accounts.label_policy.limits.count = 1;
+    let encoded = accounts
+        .encode()
+        .assured("the record can encode structurally valid fields");
+    let error = UsersRecord::decode("users.rkyv", &encoded)
+        .expect_err("the account labels exceed the captured limit");
+    assert_eq!(
+        error.current_context(),
+        &ArchiveReadError::InvalidValue {
+            path: "users.rkyv".into(),
+            field: "user labels",
+        }
+    );
+
+    let domain_path = SectionPath::domain_record(&domain("prod"));
+    for (domain_labels, field) in [
+        (labels(), "domain labels"),
+        (nervix_models::EntityLabels::default(), "resource labels"),
+    ] {
+        let sections = [
+            record_section(
+                domain_path.clone(),
+                &DomainRecord {
+                    labels: domain_labels,
+                    ..paced_domain("prod")
+                },
+            ),
+            bytes_section(
+                SectionPath::domain_models(&domain("prod")),
+                SectionContent::Plexus,
+                Vec::new(),
+            ),
+        ];
+        let mut manifest = manifest_of(
+            ArchiveScope::Domain(domain("prod")),
+            sections
+                .iter()
+                .map(|section| section.entry.clone())
+                .collect(),
+        );
+        manifest.domains[0].entity_label_policy.limits.count = 1;
+        let (_, bytes) = write_archive(manifest, &sections);
+        let error = describe_archive(bytes.as_slice())
+            .expect_err("the owner labels exceed the captured limit");
+        assert_eq!(
+            error.current_context(),
+            &ArchiveReadError::InvalidValue {
+                path: domain_path.as_str().into(),
+                field,
+            }
+        );
+    }
+}
+
+#[test]
+fn archive_owner_names_are_unique_within_their_scope() {
+    let mut accounts = users();
+    accounts.users.push(accounts.users[0].clone());
+    let encoded = accounts
+        .encode()
+        .assured("the invalid record is structurally encodable");
+    let error = UsersRecord::decode("users.rkyv", &encoded).expect_err("the user has two maps");
+    assert_eq!(
+        error.current_context(),
+        &ArchiveReadError::InvalidValue {
+            path: "users.rkyv".into(),
+            field: "duplicate user name",
+        }
+    );
+
+    let mut domain = paced_domain("prod");
+    domain.resources.push(domain.resources[0].clone());
+    let encoded = domain
+        .encode()
+        .assured("the invalid record is structurally encodable");
+    let error =
+        DomainRecord::decode("domain.rkyv", &encoded).expect_err("the resource has two maps");
+    assert_eq!(
+        error.current_context(),
+        &ArchiveReadError::InvalidValue {
+            path: "domain.rkyv".into(),
+            field: "duplicate resource name",
+        }
+    );
+}
+
+#[test]
 fn a_section_of_another_kind_is_refused_at_its_header() {
     let domain_section = paced_domain("prod")
         .encode()
@@ -268,6 +383,7 @@ fn a_payload_that_fails_bytecheck_is_refused() {
 #[test]
 fn values_that_fail_their_vocabulary_are_refused() {
     let invalid_name = DomainWire {
+        labels: labels(),
         domain: "Not A Domain".to_string(),
         pace: PaceWire::Unpaced,
         status: StatusWire::Stopped,
@@ -293,6 +409,7 @@ fn values_that_fail_their_vocabulary_are_refused() {
     let zero_next_version = DomainWire {
         domain: "prod".to_string(),
         resources: vec![DeclaredResourceWire {
+            labels: labels(),
             resource: "model".to_string(),
             next_version: 0,
         }],

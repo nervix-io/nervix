@@ -1,8 +1,9 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
-use nervix_models::{CreateResource, CreateStatement};
+use nervix_models::{CreateResource, CreateStatement, EntityLabels};
 
 use crate::{
+    labels::finish_creation,
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, if_not_exists_clause, into_parse_error, kw,
@@ -13,14 +14,19 @@ use crate::{
 pub fn create_resource_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateResource>, extra::Err<ParseError<'src>>>
 + Clone {
-    kw(Identifier::Create)
-        .ignore_then(if_not_exists_clause())
-        .then_ignore(kw(Identifier::Resource))
-        .then(resource_ref())
-        .map(|(if_not_exists, identifier)| {
-            CreateStatement::new(CreateResource { identifier }, if_not_exists)
-        })
-        .then_ignore(crate::parser_support::tok(Token::Semicolon).or_not())
+    finish_creation(
+        kw(Identifier::Create)
+            .ignore_then(if_not_exists_clause())
+            .then_ignore(kw(Identifier::Resource))
+            .then(resource_ref())
+            .map(|(if_not_exists, identifier)| {
+                let resource = CreateResource {
+                    identifier,
+                    labels: EntityLabels::default(),
+                };
+                CreateStatement::new(resource, if_not_exists)
+            }),
+    )
 }
 
 pub fn parse_create_resource_tokens(

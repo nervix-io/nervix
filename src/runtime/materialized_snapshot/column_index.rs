@@ -254,6 +254,7 @@ impl ColumnarCheckpointIndex {
                 .change_context(MaterializedSnapshotError::Execution)?;
             let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
+                nervix_execution::QueueAdmission::RefuseWhenFull,
                 StdArc::clone(schema),
                 bytes,
             )

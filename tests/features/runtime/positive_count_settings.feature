@@ -37,7 +37,7 @@ Feature: Positive count settings
     When these Plexus commands fail with "MAX INSTANCES must be greater than 0"
       """
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m MAX INSTANCES 0 EVICT LRU;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m MAX INSTANCES 0 EVICT LRU;
       """
 
   Scenario: Ingest INSTANCES and confirmation windows must be positive counts

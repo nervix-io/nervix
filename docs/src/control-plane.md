@@ -130,7 +130,7 @@ Only the bound domain's replicated configuration effects may be queued:
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `START` and `STOP`;
-- `CREATE RESOURCE` and `RESET WASM PROCESSOR ... STATE`.
+- `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, `DROP LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
 
 Completion on the bound session resolves identifiers against the configuration the queued
 statements produce, applied in written order, so a client is offered the models and resources its
@@ -141,8 +141,9 @@ same user, are offered committed configuration alone.
 For a `REBIND RESOURCE ... FOR` list, completion further limits each kind to queued-result models
 that bind the named resource.
 
-Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
-and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
+Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. A single
+`SHOW LABELS` request reads beside the queue. `CREATE DOMAIN`, `CREATE USER` and domain or
+user label edits are administrative commands that run outside the transaction.
 Session subscriptions, `UPLOAD RESOURCE`, `BACKUP`, `RESTORE`, and node scheduling or membership
 operations (`CORDON`, `UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate,
 non-transaction content. Run those statements outside `BEGIN`/`COMMIT`.
@@ -612,13 +613,17 @@ earliest `ENFORCE AFTER` has passed, counted from each request's admission, or o
 licensing time reaches the licensing stop's fixed minute after the expiry; and it withdraws each
 request whose `CANCEL AFTER` passed, the last withdrawal calling the stop off. An ending names the
 stop it ends by the revision that began it, so a stop called off and begun again is never ended by
-the owner of the first. Once the domain is stopped, a task of its own collects every node's report
-of what its teardown cut and commits it beside the ending, and each request's `STOP` answers from
-that record. A `STOP` that a leader change interrupts is resumed under its execution reference: its
-request is already held, its stop already ended, or, when the domain has started again since the
-command was admitted, the stop it requested is long over. [Stopping A
-Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its answers, and [A
-Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
+the owner of the first. An owner whose ending fails to commit keeps the stop and ends it again
+rather than leaving it without an owner until something else changes. The owner applies nothing it
+commits: every node, the leader among them, tears the stopped domain down by applying the
+committed ending as it applies every committed change, so the owner's task, which ends as soon as
+that ending is applied, never takes a teardown with it. Once the domain is stopped, a task of its
+own collects every node's report of what its teardown cut and commits it beside the ending, and
+each request's `STOP` answers from that record. A `STOP` that a leader change interrupts is resumed
+under its execution reference: its request is already held, its stop already ended, or, when the
+domain has started again since the command was admitted, the stop it requested is long over.
+[Stopping A Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its
+answers, and [A Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
 
 ## Backing Up A Domain
 
@@ -1047,7 +1052,9 @@ waiting operator's signal. Failed refreshes retain their pending work and respec
 The coalesced hint retains its activation and the revisions reported by a sync. After acquiring
 the request turn, an automatic refresh compares that requirement with the fresh committed
 observation. A foreground response that already covers those decision, conditions and trust
-revisions satisfies the sync without another service request. An explicit refresh still runs.
+revisions satisfies the sync without another service request. A refused response commits nothing
+and covers nothing, so a sync that reports the decision the service issued for it still
+refreshes. An explicit refresh still runs.
 A notification-revision gap, decision or trust event remains an invalidation, including a change
 that arrived after an in-flight response was issued; a due deadline or revoked signing key also
 continues to require refresh.

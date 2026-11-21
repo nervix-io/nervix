@@ -21,7 +21,7 @@ Feature: Remote record acknowledgements lost between nodes
       CREATE WIRE JSON CODEC lost_ack_codec
         FROM WIRE SCHEMA lost_ack_wire TO SCHEMA lost_ack_event;
       CREATE SCHEMA lost_ack_key ( branch_name STRING );
-      CREATE BRANCH lost_ack_branch SCHEMA lost_ack_key TTL 5m;
+      CREATE PARAMETRIZER lost_ack_branch SCHEMA lost_ack_key TTL 5m;
       CREATE RELAY lost_ack_records SCHEMA lost_ack_event BRANCHED BY lost_ack_branch;
       CREATE KAFKA CLIENT lost_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

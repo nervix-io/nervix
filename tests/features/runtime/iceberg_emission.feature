@@ -137,7 +137,7 @@ Feature: Iceberg emission
       CREATE HTTP ENDPOINT notification_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_input
         FROM notification_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE GCS CLIENT gcs_main CONFIG {
@@ -367,7 +367,7 @@ Feature: Iceberg emission
         TO SCHEMA notification
         ENCODE created_at AS RFC3339;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -459,7 +459,7 @@ Feature: Iceberg emission
       PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
       FROM notification_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       UNBRANCHED
@@ -844,7 +844,7 @@ Feature: Iceberg emission
       PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
       FROM notification_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       UNBRANCHED
@@ -1111,7 +1111,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1210,7 +1210,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1296,7 +1296,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1378,7 +1378,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1462,7 +1462,7 @@ Feature: Iceberg emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -1548,7 +1548,7 @@ Feature: Iceberg emission
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -1620,7 +1620,7 @@ Feature: Iceberg emission
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -1691,7 +1691,7 @@ Feature: Iceberg emission
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE SCHEMA user_key (user_id I64);
-      CREATE BRANCH by_user SCHEMA user_key TTL 5m;
+      CREATE PARAMETRIZER by_user SCHEMA user_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_user;
       CREATE CLIENT PRODUCER INGESTOR notifications_in
         FROM SCHEMA notification
@@ -1857,7 +1857,7 @@ Feature: Iceberg emission
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE SCHEMA user_key (user_id I64);
-      CREATE BRANCH by_user SCHEMA user_key TTL 5m;
+      CREATE PARAMETRIZER by_user SCHEMA user_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_user;
       CREATE CLIENT PRODUCER INGESTOR notifications_in
         FROM SCHEMA notification

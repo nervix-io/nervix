@@ -73,7 +73,14 @@ impl ModelArchive {
     ) -> Self {
         let users = if cluster {
             Some(UsersRecord {
+                label_policy: nervix_models::EntityLabelPolicy {
+                    revision: std::num::NonZeroU64::MIN,
+                    limits: nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                },
                 users: vec![UserRecord {
+                    labels: arbitrary.entity_labels(),
                     name: UserName::parse("synthetic").assured("the synthetic user is valid"),
                     password_credential: nervix_models::PasswordCredential::from_parts(
                         210000, [54; 16], [54; 64],
@@ -119,6 +126,7 @@ impl ModelArchive {
             let domain = DomainName::parse(&format!("archive_{index}"))
                 .assured("indexed domain names are valid");
             let record = DomainRecord {
+                labels: arbitrary.entity_labels(),
                 domain: domain.clone(),
                 pace: DomainPace::Unpaced,
                 status: DomainStatus::Stopped,

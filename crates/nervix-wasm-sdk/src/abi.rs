@@ -159,6 +159,18 @@ impl RuntimeCore {
         rejected.current_context().verdict().code()
     }
 
+    /// Reports why the processor could not describe its state and returns the code that classifies
+    /// the failure.
+    ///
+    /// Like a rejected saved state, the reason goes on the global-error channel and nothing is
+    /// latched: the host describes state only on a scratch instance it discards afterwards.
+    fn refuse_description(&mut self, refused: &Report<GuestError>) -> i32 {
+        self.global_error.clear();
+        self.global_error
+            .extend_from_slice(format!("{refused:#}").as_bytes());
+        refused.current_context().abi_code()
+    }
+
     /// Clears guest-owned state while keeping the reusable buffer allocation.
     fn reset(&mut self) {
         self.pending_emit.clear();
@@ -428,6 +440,36 @@ pub fn load_state<P: Processor>(slot: &InstanceSlot<P>, ptr: i32, size: i32) -> 
     })
 }
 
+/// Encodes what the processor describes of its state into the reusable buffer and returns its size,
+/// or zero when it describes no state.
+///
+/// A processor that cannot describe its state fails the call with its reason on the global-error
+/// channel, without latching error state, because the host only ever describes the state of a
+/// scratch instance it discards afterwards.
+pub fn describe_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
+    guarded(false, |core| {
+        if core.branch.is_none() {
+            return Err(Report::new(GuestError::NotInitialized));
+        }
+        let described = slot.with(|instance| {
+            let Some(instance) = instance.as_ref() else {
+                return Err(Report::new(GuestError::NotInitialized));
+            };
+            instance.describe_state()
+        });
+        let description = match described {
+            Ok(description) => description,
+            Err(refused) => return Ok(core.refuse_description(&refused)),
+        };
+        let Some(encoded) = description.encode() else {
+            // A zero size writes nothing: the processor describes no state.
+            return Ok(0);
+        };
+        core.buffer = encoded;
+        i32::try_from(core.buffer.len()).map_err(|_| Report::new(GuestError::InvalidSize))
+    })
+}
+
 pub fn reset_state<P: Processor>(slot: &InstanceSlot<P>) -> i32 {
     CORE.with(RuntimeCore::reset);
     slot.with(|slot| *slot = None);
@@ -471,6 +513,24 @@ mod tests {
         assert_eq!(
             String::from_utf8(core.global_error).expect("the rejection reason is text"),
             "saved count must be exactly 8 bytes"
+        );
+        assert!(core.error_state.is_none());
+    }
+
+    #[test]
+    fn a_refused_description_reports_its_reason_without_latching() {
+        let refused = Report::new(GuestError::StateSectionNulls {
+            section: "tenants".to_string(),
+            field: "tenant".to_string(),
+        });
+        let mut core = RuntimeCore::new();
+
+        let code = core.refuse_description(&refused);
+
+        assert_eq!(code, refused.current_context().abi_code());
+        assert_eq!(
+            String::from_utf8(core.global_error).expect("the refusal reason is text"),
+            "state section 'tenants' holds a null in field 'tenant', which is not optional"
         );
         assert!(core.error_state.is_none());
     }

@@ -473,12 +473,7 @@ async fn a_batch_keeps_decoding_after_its_codec_refuses_a_payload() {
     ];
 
     let payloads = runtime
-        .decode_raw_ingest_payload(
-            &mut collector,
-            QueueAdmission::RefuseWhenFull,
-            &codec,
-            batch,
-        )
+        .decode_raw_ingest_payload(&mut collector, &codec, batch)
         .await
         .expect("a codec refusal leaves the batch's other payloads to decode");
 
@@ -501,11 +496,11 @@ async fn a_batch_keeps_decoding_after_its_codec_refuses_a_payload() {
     );
 }
 
-/// A payload the node cannot unfold now was judged by nothing, so the whole batch is refused
-/// rather than consumed, even a payload its codec would have refused, and the group keeps nothing
-/// of it.
+/// A payload's unfolding waits for a place on the extension workers instead of being refused, so
+/// a batch the node cannot unfold now is decoded once the workers have room, and its codec's
+/// refusal of one payload stays that payload's own.
 #[nervix_primitives::test]
-async fn a_batch_the_node_cannot_unfold_is_refused_whole() {
+async fn a_batch_the_node_cannot_unfold_now_waits_for_the_extension_workers() {
     let executor = single_worker_executor();
     let runtime = Runtime::with_executor(executor.clone());
     let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
@@ -527,21 +522,40 @@ async fn a_batch_the_node_cannot_unfold_is_refused_whole() {
         },
     ];
 
-    let refused = runtime
-        .decode_raw_ingest_payload(
-            &mut collector,
-            QueueAdmission::RefuseWhenFull,
-            &codec,
-            batch,
-        )
-        .await;
-
-    assert!(
-        refused.is_err(),
-        "a full extension class refuses the batch instead of judging its payloads"
+    let decoding = nervix_primitives::task::spawn(async move {
+        let payloads = runtime
+            .decode_raw_ingest_payload(&mut collector, &codec, batch)
+            .await;
+        (collector, payloads)
+    });
+    // The first payload's memory is charged before its unfolding asks the full class for a place.
+    timeout(Duration::from_secs(10), async {
+        while executor.snapshot().relay_memory.reserved_bytes == 0 {
+            nervix_primitives::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the batch's first unfolding reaches the full extension class");
+    assert_eq!(
+        executor.snapshot().extension_cpu.refused,
+        0,
+        "the unfolding waits for a place instead of being refused"
     );
-    assert_eq!(collector.pending.undispatched_payloads(), 0);
+    assert!(
+        !decoding.is_finished(),
+        "the batch waits while the class is full"
+    );
+
     filled.release().await;
+    let (collector, payloads) = timeout(Duration::from_secs(10), decoding)
+        .await
+        .expect("the batch decodes once the extension workers have room")
+        .expect("the decoding task does not panic");
+    let payloads = payloads.expect("an unfolding that waits for a place is never refused");
+    assert_eq!(payloads.decoded, [1]);
+    assert_eq!(payloads.refused.len(), 1);
+    assert_eq!(payloads.refused[0].entry, 0);
+    assert_eq!(collector.pending.undispatched_payloads(), 1);
 }
 
 /// Every message a payload unfolds into takes the payload's metadata and a share of its ACK
@@ -1426,7 +1440,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
                 Unit::SINGLE,
             ),
             root_relay: root_relay.clone(),
-            branch: None,
+            parametrizer: None,
             branch_ttl: None,
             branch_max_instances: None,
             error_policies: ErrorPolicies::handled_by_log(),
@@ -1550,7 +1564,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
                         Unit::SINGLE,
                     ),
                     root_relay: root_relay.clone(),
-                    branch: None,
+                    parametrizer: None,
                     branch_ttl: None,
                     branch_max_instances: None,
                     error_policies: ErrorPolicies::handled_by_log(),

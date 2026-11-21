@@ -546,7 +546,7 @@ mod tests {
                             })
                             .collect(),
                     },
-                    nervix_models::ResolvedBranchPartitions::ONE,
+                    nervix_models::ResolvedParametrizerPartitions::ONE,
                 ),
             );
         }

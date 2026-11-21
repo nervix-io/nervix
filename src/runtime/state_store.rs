@@ -2208,8 +2208,9 @@ impl RuntimeStateStore {
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         self.executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, _cancellation| {
                     writer.write_latest_snapshot(&placement, saved.revision(), saved.bytes())
@@ -2243,8 +2244,9 @@ impl RuntimeStateStore {
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         self.executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, _cancellation| writer.replace_latest_snapshot(&placement, &snapshot),
             )
@@ -2354,8 +2356,9 @@ impl RuntimeStateStore {
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         let installed = self
             .executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, _cancellation| writer.install_replica_if_newer(&placement, snapshot),
             )

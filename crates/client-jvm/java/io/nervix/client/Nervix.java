@@ -560,7 +560,7 @@ public final class Nervix {
     public static final class Schema extends Handle {
         private Schema(long pointer) { super(pointer); }
         public List<Field> fields(Part part) { return read(p -> values(Native.schemaFields(p, part.code()), Field.class)); }
-        public String branch() { return read(Native::schemaBranch); }
+        public String parametrizer() { return read(Native::schemaParametrizer); }
     }
     public static final class BatchBuilder extends Handle {
         public BatchBuilder(Schema schema, int rows) { super(schema.read(p -> Native.builderNew(p, rows))); }
@@ -670,6 +670,7 @@ public final class Nervix {
     /** Exact metadata and its captured policy, retained independently of the originating outcome. */
     public static final class EntityLabelsInspection extends Handle {
         private EntityLabelsInspection(long pointer) { super(pointer); }
+        /** The associated domain, or null for cluster-wide user labels. */
         public String domain() { return read(Native::entityLabelsDomain); }
         public String entityKind() { return read(Native::entityLabelsEntityKind); }
         public String entityName() { return read(Native::entityLabelsEntityName); }

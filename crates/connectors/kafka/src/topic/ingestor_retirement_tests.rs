@@ -18,7 +18,7 @@ use meticulous::ResultExt as _;
 use nervix_connector::IngestorConnector as _;
 use nervix_execution::{AdmissionError, Executor, MemoryClass};
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::sync::oneshot;
+use nervix_primitives::{sync::oneshot, time::timeout};
 use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
 
 use super::{
@@ -29,6 +29,10 @@ use super::{
 use crate::topic::retirement_tests::{
     FullConnectorQueue, connector_workers_reach, single_connector_worker,
 };
+
+/// How long a commit job held back by a full connector queue is watched for a refusal, which the
+/// executor would record at once.
+const REFUSAL_WINDOW: Duration = Duration::from_millis(500);
 
 /// The plan of an ingestor in the test group that runs its driver jobs on `executor`.
 fn plan_on(
@@ -144,10 +148,11 @@ async fn a_destruction_waits_for_a_place_in_a_full_connector_queue() {
     .await;
 }
 
-/// A commit's job carries a handle of its own. When the node refuses that job after the commit's
-/// caller and its ingestor are gone, the refused job let the last handle go.
+/// A commit's job carries a handle of its own. When the full connector queue holds that job back
+/// after the commit's caller and its ingestor are gone, the job waits for a place rather than being
+/// refused, runs once one frees, and then lets the last handle go, which a connector job destroys.
 #[nervix_primitives::test]
-async fn a_commit_refused_after_its_ingestor_was_dropped_destroys_the_consumer_on_a_connector_worker()
+async fn a_commit_waiting_for_a_place_after_its_ingestor_was_dropped_runs_and_then_destroys_the_consumer()
  {
     let broker = cluster();
     let executor = single_connector_worker();
@@ -171,24 +176,37 @@ async fn a_commit_refused_after_its_ingestor_was_dropped_destroys_the_consumer_o
     let first_poll = poll_fn(|context| Poll::Ready(commit.as_mut().poll(context))).await;
     assert!(
         first_poll.is_pending(),
-        "the commit waits for its job, which has not asked for a place yet"
+        "the commit waits for its job, which waits for a place in the full queue"
     );
     drop(commit);
 
     drop(ingestor);
 
-    connector_workers_reach(
-        &executor,
-        "the full connector queue refuses the commit's job",
-        |workers| workers.refused == before.refused + 1,
-    )
+    // A refusal would show at once; the job holds back instead for as long as the queue is full.
+    let refused = timeout(REFUSAL_WINDOW, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if executor.snapshot().connector_storage.refused > before.refused {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
     .await;
+    assert!(
+        refused.is_err(),
+        "a full connector queue refuses no commit job; connector workers: {:?}",
+        executor.snapshot().connector_storage
+    );
     full.release().await;
     connector_workers_reach(
         &executor,
-        "the consumer the refused commit held last is destroyed by a connector job",
+        "the commit's job runs once a place frees, and the consumer it held last is destroyed by \
+         a connector job",
         |workers| {
-            workers.admitted == before.admitted + 1 && workers.completed == before.completed + 3
+            workers.refused == before.refused
+                && workers.admitted == before.admitted + 2
+                && workers.completed == before.completed + 4
         },
     )
     .await;

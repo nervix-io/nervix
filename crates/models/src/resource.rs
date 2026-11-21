@@ -16,6 +16,23 @@ use crate::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, NodeRef, ResourceName, Timestamp, UserName,
 };
 
+/// The logical resource declared in one domain, independent of any uploaded version.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceCatalogKey {
+    pub domain: DomainName,
+    pub identifier: ResourceName,
+}
+
+impl ResourceCatalogKey {
+    pub fn new(domain: &DomainName, identifier: &ResourceName) -> Self {
+        Self {
+            domain: domain.clone(),
+            identifier: identifier.clone(),
+        }
+    }
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::constant(

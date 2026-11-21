@@ -5,7 +5,7 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The interconnect handler for partition-transition requests, the gathering of a
-//!   branch's holdings from every node owning a unit of its keyed entities, `DESCRIBE BRANCH`, and
+//!   branch's holdings from every node owning a unit of its keyed entities, `DESCRIBE PARAMETRIZER`, and
 //!   the leader's retirement of a transition whose holdings are all empty.
 //! - **Depends on.** The committed schedule and its partition epochs, the interconnect, the
 //!   runtime's published holdings and claim answers, and consensus's automatic schedule commit.
@@ -28,8 +28,8 @@ use nervix_interconnect::{
     PartitionTransitionAnswer, PartitionTransitionRequest, PartitionTransitionResponse,
 };
 use nervix_models::{
-    BranchName, ClusterNodeName, CreateBranch, DescribeBranch, DomainName, DomainSchedule, NodeRef,
-    NodeUnitRef, PartitionEpochNumber, Unit,
+    ClusterNodeName, CreateParametrizer, DescribeParametrizer, DomainName, DomainSchedule, NodeRef,
+    NodeUnitRef, ParametrizerName, PartitionEpochNumber, Unit,
 };
 use tracing::{debug, info, warn};
 
@@ -43,10 +43,10 @@ use super::{
 /// Why a branch's holdings could not be read completely.
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum TransitionHoldingsError {
-    #[error("node '{node}' did not answer for the units of branch '{branch}' it owns")]
+    #[error("node '{node}' did not answer for the units of parametrizer '{parametrizer}' it owns")]
     Unanswered {
         node: ClusterNodeName,
-        branch: BranchName,
+        parametrizer: ParametrizerName,
     },
     #[error("unit {unit:?} of {entity:?} has no owner in the committed schedule")]
     Unowned { entity: NodeRef, unit: Unit },
@@ -71,13 +71,13 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn branch_transition_holdings(
         &self,
         schedule: &DomainSchedule,
-        branch: &BranchName,
+        parametrizer: &ParametrizerName,
         epoch: PartitionEpochNumber,
     ) -> error_stack::Result<BranchTransitionHoldings, TransitionHoldingsError> {
         let mut expected = BTreeSet::new();
         let mut owners = BTreeSet::new();
         for node in schedule.nodes.values() {
-            if node.partition_branch() != Some(branch) || !node.keeps_state_per_key() {
+            if node.partition_parametrizer() != Some(parametrizer) || !node.keeps_state_per_key() {
                 continue;
             }
             for (unit, placement) in &node.units {
@@ -98,7 +98,7 @@ impl SessionServiceImpl {
             if owner == local {
                 answered.extend(self.inner.runtime.partition_transition_holdings(
                     &schedule.domain,
-                    branch,
+                    parametrizer,
                     epoch,
                 ));
                 continue;
@@ -110,21 +110,21 @@ impl SessionServiceImpl {
                     &owner,
                     PartitionTransitionRequest::Holdings {
                         domain: schedule.domain.clone(),
-                        branch: branch.clone(),
+                        parametrizer: parametrizer.clone(),
                         epoch,
                     },
                 )
                 .await
                 .change_context_lazy(|| TransitionHoldingsError::Unanswered {
                     node: owner.clone(),
-                    branch: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                 })?;
             match response.result {
                 Ok(PartitionTransitionAnswer::Holdings(holdings)) => answered.extend(holdings),
                 Ok(_) | Err(_) => {
                     return Err(Report::new(TransitionHoldingsError::Unanswered {
                         node: owner,
-                        branch: branch.clone(),
+                        parametrizer: parametrizer.clone(),
                     }));
                 }
             }
@@ -156,31 +156,31 @@ impl SessionServiceImpl {
 }
 
 impl SessionServiceImpl {
-    /// `DESCRIBE BRANCH`: the branch's declaration, the partition epoch it executes in and, while
+    /// `DESCRIBE PARAMETRIZER`: the branch's declaration, the partition epoch it executes in and, while
     /// keys placed under its previous count may lie outside their partition, that count and how
     /// far moving them has come.
     pub(in crate::application) async fn describe_branch(
         &self,
         domain: &DomainName,
-        describe: DescribeBranch,
+        describe: DescribeParametrizer,
     ) -> CommandResult {
         let declaration = match self
             .inner
             .registry
-            .get::<CreateBranch>(domain, &describe.branch)
+            .get::<CreateParametrizer>(domain, &describe.parametrizer)
         {
             Ok(Some(declaration)) => declaration,
             Ok(None) => {
                 return command_error(format!(
-                    "branch '{}' does not exist in domain '{}'",
-                    describe.branch.as_str(),
+                    "parametrizer '{}' does not exist in domain '{}'",
+                    describe.parametrizer.as_str(),
                     domain.as_str()
                 ));
             }
             Err(error) => {
                 return command_error(format!(
-                    "failed to read branch '{}' in domain '{}': {error:#}",
-                    describe.branch.as_str(),
+                    "failed to read parametrizer '{}' in domain '{}': {error:#}",
+                    describe.parametrizer.as_str(),
                     domain.as_str()
                 ));
             }
@@ -188,18 +188,23 @@ impl SessionServiceImpl {
         let schedule = self.inner.consensus.current_schedule().await;
         let domain_schedule = schedule.domain(domain);
         let mut lines = vec![
-            format!("branch: {}", declaration.name.as_str()),
+            format!("parametrizer: {}", declaration.name.as_str()),
             format!("schema: {}", declaration.schema.as_str()),
             format!("ttl: {}", declaration.ttl),
         ];
-        if let Some(nervix_models::BranchEviction::Lru { max_instances }) = &declaration.eviction {
+        if let Some(nervix_models::ParametrizerEviction::Lru { max_instances }) =
+            &declaration.eviction
+        {
             lines.push(format!("max instances: {max_instances}"));
         }
         if declaration.partitions.is_inherited() {
             lines.push(format!("partition declaration: {}", declaration.partitions));
-            if let Some(layout) = domain_schedule
-                .and_then(|schedule| schedule.partition_topology.branches.get(&describe.branch))
-            {
+            if let Some(layout) = domain_schedule.and_then(|schedule| {
+                schedule
+                    .partition_topology
+                    .parametrizers
+                    .get(&describe.parametrizer)
+            }) {
                 lines.push(format!("partitions: {}", layout.partitions().count()));
                 lines.push(format!("external partitions: {}", layout.source_count()));
                 let idle = layout
@@ -222,15 +227,15 @@ impl SessionServiceImpl {
             lines.push(format!("partition epoch: {}", PartitionEpochNumber::FIRST));
             return command_ok(lines.join("\n"));
         };
-        let epoch = domain_schedule.partition_epoch_of(&describe.branch);
+        let epoch = domain_schedule.partition_epoch_of(&describe.parametrizer);
         lines.push(format!("partition epoch: {epoch}"));
-        if let Some(transition) = domain_schedule.partition_transition_of(&describe.branch) {
+        if let Some(transition) = domain_schedule.partition_transition_of(&describe.parametrizer) {
             lines.push(format!(
                 "previous partitions: {}",
                 transition.previous.count()
             ));
             match self
-                .branch_transition_holdings(domain_schedule, &describe.branch, epoch)
+                .branch_transition_holdings(domain_schedule, &describe.parametrizer, epoch)
                 .await
             {
                 Ok(holdings) => {

@@ -570,7 +570,7 @@ fn a_producer_reports_its_description_and_takes_every_outcome_class() {
     unsafe {
         succeeded(nx_producer_schema(producer.0, &mut schema));
         assert_eq!((*schema).fields(Part::Rows), endpoint_fields().as_slice());
-        assert_eq!((*schema).branch(), None);
+        assert_eq!((*schema).parametrizer(), None);
         nx_schema_free(schema);
         assert_eq!(nx_producer_generation(producer.0), 3);
         nx_producer_contract(producer.0, &mut digest, &mut digest_len);
@@ -1003,7 +1003,7 @@ fn a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain(
     unsafe {
         succeeded(nx_consumer_schema(consumer.0, &mut schema));
         assert_eq!((*schema).fields(Part::Rows), endpoint_fields().as_slice());
-        assert_eq!((*schema).branch(), None);
+        assert_eq!((*schema).parametrizer(), None);
         nx_schema_free(schema);
         assert_eq!(nx_consumer_generation(consumer.0), 3);
         nx_consumer_contract(consumer.0, &mut digest, &mut digest_len);

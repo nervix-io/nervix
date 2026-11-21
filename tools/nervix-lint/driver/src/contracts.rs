@@ -6,7 +6,13 @@
 use std::collections::BTreeMap;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use meticulous::OptionExt as _;
 use nervix_lint_report::{Context, ContractProblem, ReportError};
+use rustc_ast::{MetaItemInner, MetaItemKind};
+use rustc_attr_ir::{
+    AttrArgs, AttrItem, Attribute, AttributeKind,
+    lint::{LintCheck, LintCheckKind},
+};
 use rustc_errors::{Diag, Diagnostic};
 use rustc_hir::{Expr, HirId, def::DefKind};
 use rustc_lint::LateContext;
@@ -16,22 +22,23 @@ use rustc_span::{
     Span, Symbol,
     def_id::{DefId, LocalDefId},
 };
+use thin_vec::ThinVec;
 
-declare_tool_lint! { pub nervix::SYNC_ACQUISITION, Deny, "recurring synchronization requires a bounded source contract", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::LIFECYCLE_CALL, Deny, "recurring execution cannot enter a lifecycle-only contract", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::UNKNOWN_EFFECT, Deny, "unknown synchronization or callback effects require a source contract", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::INVALID_CONTRACT, Deny, "source contracts and narrow expectations must be valid", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::SYNC_ACQUISITION, Deny, "recurring synchronization requires a bounded source contract", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::LIFECYCLE_CALL, Deny, "recurring execution cannot enter a lifecycle-only contract", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::UNKNOWN_EFFECT, Deny, "unknown synchronization or callback effects require a source contract", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::INVALID_CONTRACT, Deny, "source contracts and narrow expectations must be valid", @report_in_external_macro = true }
 
 pub struct Message {
     pub message: String,
 }
 
-impl<'a> Diagnostic<'a, ()> for Message {
+impl<'a> Diagnostic<'a> for Message {
     fn into_diag(
         self,
         dcx: rustc_errors::DiagCtxtHandle<'a>,
         level: rustc_errors::Level,
-    ) -> Diag<'a, ()> {
+    ) -> Diag<'a> {
         Diag::new(dcx, level, self.message)
     }
 }
@@ -90,12 +97,77 @@ pub fn contract_attribute<'tcx>(
     tcx: TyCtxt<'tcx>,
     definition: DefId,
     name: &str,
-) -> Option<&'tcx rustc_hir::Attribute> {
+) -> Option<&'tcx AttrItem> {
     if tcx.def_kind(definition) == DefKind::ForeignMod {
         return None;
     }
     let path = [Symbol::intern("nervix"), Symbol::intern(name)];
-    tcx.get_attrs_by_path(definition, &path).next()
+    tcx.tool_attrs(definition, &path).next()
+}
+
+/// The tool attributes at `path` written on `node`, in written order. Built-in attributes are
+/// parsed by the compiler and never match a tool path.
+pub fn tool_attributes<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    node: HirId,
+    path: &[Symbol],
+) -> Vec<&'tcx AttrItem> {
+    let mut found = Vec::new();
+    for attribute in tcx.hir_attrs(node) {
+        if let Attribute::Tool { item, .. } = attribute
+            && item.path.segments.iter().eq(path)
+        {
+            found.push(&**item);
+        }
+    }
+    found
+}
+
+/// The meta items of a delimited tool attribute, such as `#[nervix::context(kind, reason = "")]`,
+/// parsed from its tokens as the compiler parses an attribute's arguments.
+pub fn meta_items(attribute: &AttrItem) -> Option<ThinVec<MetaItemInner>> {
+    match &attribute.args {
+        AttrArgs::Delimited(arguments) => MetaItemKind::list_from_tokens(arguments.tokens.clone()),
+        AttrArgs::Empty | AttrArgs::Eq { .. } => None,
+    }
+}
+
+/// The lint checks of every lint-level attribute written on `node`, flattened in written order.
+/// The compiler lowers all of a node's `allow`, `expect`, `warn`, `deny` and `forbid` attributes
+/// into this one list.
+fn lint_checks<'tcx>(tcx: TyCtxt<'tcx>, node: HirId) -> &'tcx [LintCheck] {
+    for attribute in tcx.hir_attrs(node) {
+        if let Attribute::Parsed(AttributeKind::LintCheck(checks)) = attribute {
+            return checks;
+        }
+    }
+    &[]
+}
+
+/// One written lint-level attribute: the run of a node's lint checks that came from it.
+struct LevelAttribute<'a> {
+    kind: LintCheckKind,
+    span: Span,
+    reason: Option<Symbol>,
+    checks: &'a [LintCheck],
+}
+
+/// The written lint-level attributes behind a node's flattened checks, in written order. The
+/// checks of one attribute are contiguous and share its identity, level, reason and span.
+fn level_attributes(checks: &[LintCheck]) -> Vec<LevelAttribute<'_>> {
+    let mut attributes = Vec::new();
+    for written in checks.chunk_by(|left, right| left.attr_id.attr_id == right.attr_id.attr_id) {
+        let first = written
+            .first()
+            .assured("chunk_by yields only non-empty runs");
+        attributes.push(LevelAttribute {
+            kind: first.kind,
+            span: first.attr_span,
+            reason: first.reason,
+            checks: written,
+        });
+    }
+    attributes
 }
 
 /// Narrowest metadata contract wins. Parent contracts supply defaults for their definitions;
@@ -213,11 +285,169 @@ pub fn has_callee_contract(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
     }
 }
 
-fn parse_context(
-    attribute: &rustc_hir::Attribute,
-) -> Result<Context, error_stack::Report<ReportError>> {
+/// Whether `attribute` is the `nervix::<name>` source contract.
+fn is_contract(attribute: &AttrItem, name: &str) -> bool {
+    matches!(&*attribute.path.segments, [tool, contract]
+        if tool.as_str() == "nervix" && contract.as_str() == name)
+}
+
+fn validate_context(cx: &LateContext<'_>, node: HirId, placement: bool, attribute: &AttrItem) {
+    let anonymous_body =
+        binding(cx.tcx.hir_node(node)).is_some_and(|local| local.init.is_some_and(owns_one_body));
+    let problem = if !placement && !anonymous_body {
+        Some(
+            "context belongs on a function, closure, trait, type, impl, module, crate or binding \
+             owning one anonymous body"
+                .into(),
+        )
+    } else {
+        parse_context(attribute)
+            .err()
+            .map(|error| error.current_context().to_string())
+    };
+    if let Some(message) = problem {
+        cx.tcx
+            .emit_node_span_lint(INVALID_CONTRACT, node, attribute.span, Message { message });
+    }
+    if let rustc_hir::Node::ImplItem(implementation) = cx.tcx.hir_node(node)
+        && let Some(item) = cx
+            .tcx
+            .opt_associated_item(implementation.owner_id.to_def_id())
+        && let Some(trait_item) = item.trait_item_def_id()
+        && parse_context(attribute).is_ok_and(|value| !value.is_recurring())
+        && context(cx.tcx, trait_item).is_some_and(|value| value.is_recurring())
+    {
+        cx.tcx.emit_node_span_lint(
+            INVALID_CONTRACT,
+            node,
+            attribute.span,
+            Message {
+                message: "an implementation cannot weaken its recurring trait method to a \
+                          non-recurring context"
+                    .into(),
+            },
+        );
+    }
+}
+
+fn validate_dispatch(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
+    let arguments = meta_items(attribute);
+    let valid = arguments.as_ref().is_some_and(|items| {
+        items.len() == 1
+            && items[0].meta_item().is_some_and(|item| {
+                item.has_name(Symbol::intern("reason"))
+                    && item
+                        .value_str()
+                        .is_some_and(|reason| !reason.as_str().trim().is_empty())
+            })
+    });
+    let callable = matches!(
+        cx.tcx.hir_node(node),
+        rustc_hir::Node::Expr(rustc_hir::Expr {
+            kind: rustc_hir::ExprKind::Closure(..),
+            ..
+        }) | rustc_hir::Node::Item(rustc_hir::Item {
+            kind: rustc_hir::ItemKind::Fn { .. },
+            ..
+        }) | rustc_hir::Node::ImplItem(rustc_hir::ImplItem {
+            kind: rustc_hir::ImplItemKind::Fn(..),
+            ..
+        }) | rustc_hir::Node::TraitItem(rustc_hir::TraitItem {
+            kind: rustc_hir::TraitItemKind::Fn(..),
+            ..
+        })
+    );
+    if !callable || !valid {
+        cx.tcx.emit_node_span_lint(
+            INVALID_CONTRACT,
+            node,
+            attribute.span,
+            Message {
+                message: "dispatch requires a reason on its owning function or closure".into(),
+            },
+        );
+    }
+}
+
+/// A Nervix exception is a reason-bearing `expect` on one operation or declaration. Lint levels
+/// for other tools and for the compiler's own lints are not governed, except `warnings`, which
+/// would cap every Nervix diagnostic.
+fn validate_level(cx: &LateContext<'_>, node: HirId, written: &LevelAttribute<'_>) {
+    let allow = match written.kind {
+        LintCheckKind::Allow => true,
+        LintCheckKind::Expect => false,
+        LintCheckKind::Warn | LintCheckKind::Deny | LintCheckKind::Forbid => return,
+    };
+    let mut warnings = false;
+    let mut governed = false;
+    let mut only_branch_inversion = true;
+    let mut only_hidden_tunable = true;
+    for check in written.checks {
+        let name = check.lint_name.name.as_str();
+        match check.lint_name.tool {
+            Some(tool) => {
+                let nervix = tool.as_str() == "nervix";
+                governed |= nervix;
+                only_branch_inversion &= nervix && name == "branch_inversion";
+                only_hidden_tunable &= nervix && name == "hidden_tunable";
+            }
+            None => {
+                warnings |= name == "warnings";
+                governed |= name == "nervix";
+                only_branch_inversion = false;
+                only_hidden_tunable = false;
+            }
+        }
+    }
+    if !warnings && !governed {
+        return;
+    }
+    let reason = match written.reason {
+        Some(reason) => !reason.as_str().trim().is_empty(),
+        None => false,
+    };
+    // A normal expect records at least one occurrence, not its exact cardinality. Restrict it
+    // to an operation expression or its binding so unrelated new operations cannot inherit a
+    // function/module-wide suppression.
+    let branch_declaration =
+        matches!(cx.tcx.hir_node(node), rustc_hir::Node::Field(_)) && only_branch_inversion;
+    // A retained hidden tunable is one constant declaration, named with its debt.
+    let tunable_declaration = matches!(
+        cx.tcx.hir_node(node),
+        rustc_hir::Node::Item(rustc_hir::Item {
+            kind: rustc_hir::ItemKind::Const(..),
+            ..
+        }) | rustc_hir::Node::ImplItem(rustc_hir::ImplItem {
+            kind: rustc_hir::ImplItemKind::Const(..),
+            ..
+        }) | rustc_hir::Node::TraitItem(rustc_hir::TraitItem {
+            kind: rustc_hir::TraitItemKind::Const(..),
+            ..
+        })
+    ) && only_hidden_tunable;
+    let narrow = branch_declaration
+        || tunable_declaration
+        || matches!(
+            cx.tcx.hir_node(node),
+            rustc_hir::Node::Expr(_) | rustc_hir::Node::LetStmt(_) | rustc_hir::Node::Stmt(_)
+        );
+    if allow || warnings || !reason || !narrow {
+        cx.tcx.emit_node_span_lint(
+            INVALID_CONTRACT,
+            node,
+            written.span,
+            Message {
+                message: "Nervix exceptions require a reason-bearing expect on one operation or \
+                          declaration; blanket suppression is forbidden"
+                    .into(),
+            },
+        );
+    }
+}
+
+fn parse_context(attribute: &AttrItem) -> Result<Context, error_stack::Report<ReportError>> {
     let invalid = |problem| error_stack::Report::new(ReportError::InvalidContract { problem });
-    let Some(arguments) = attribute.meta_item_list() else {
+    let Some(arguments) = meta_items(attribute) else {
         return Err(invalid(ContractProblem::MissingArguments));
     };
     let mut kind = None;
@@ -286,215 +516,63 @@ impl Flow {
         let mut contexts = 0;
         let mut dispatches = 0;
         for attribute in cx.tcx.hir_attrs(node) {
-            let path = attribute.path();
-            if path.first().is_some_and(|name| name.as_str() == "nervix")
-                && (path.len() != 2
-                    || !matches!(
-                        path[1].as_str(),
-                        "context"
-                            | "dispatch"
-                            | "error_boundary"
-                            | "layer"
-                            | "value"
-                            | "identity"
-                            | "state"
-                            | "input"
-                            | "constant"
-                    ))
-            {
-                cx.tcx.emit_node_span_lint(
-                    INVALID_CONTRACT,
-                    node,
-                    attribute.span(),
-                    Message {
-                        message: "unknown Nervix source annotation; use an execution, error or \
-                                  architectural contract"
-                            .into(),
-                    },
-                );
-            }
-            if path.first().is_some_and(|name| name.as_str() == "nervix")
-                && path.get(1).is_some_and(|name| {
-                    matches!(
-                        name.as_str(),
-                        "layer" | "value" | "identity" | "state" | "input" | "constant"
-                    )
-                })
-            {
-                crate::architecture::validate(cx, node, attribute);
-            }
-            if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("error_boundary")])
-            {
-                crate::errors::validate_boundary(cx, node, attribute);
-            }
-            if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("context")]) {
-                contexts += 1;
-                let anonymous_body = binding(cx.tcx.hir_node(node))
-                    .is_some_and(|local| local.init.is_some_and(owns_one_body));
-                let problem = if !placement && !anonymous_body {
-                    Some(
-                        "context belongs on a function, closure, trait, type, impl, module, crate \
-                         or binding owning one anonymous body"
-                            .into(),
-                    )
-                } else {
-                    parse_context(attribute)
-                        .err()
-                        .map(|error| error.current_context().to_string())
-                };
-                if let Some(message) = problem {
-                    cx.tcx.emit_node_span_lint(
-                        INVALID_CONTRACT,
-                        node,
-                        attribute.span(),
-                        Message { message },
-                    );
-                }
-                if let rustc_hir::Node::ImplItem(implementation) = cx.tcx.hir_node(node)
-                    && let Some(item) = cx
-                        .tcx
-                        .opt_associated_item(implementation.owner_id.to_def_id())
-                    && let Some(trait_item) = item.trait_item_def_id()
-                    && parse_context(attribute).is_ok_and(|value| !value.is_recurring())
-                    && context(cx.tcx, trait_item).is_some_and(|value| value.is_recurring())
-                {
-                    cx.tcx.emit_node_span_lint(
-                        INVALID_CONTRACT,
-                        node,
-                        attribute.span(),
-                        Message {
-                            message: "an implementation cannot weaken its recurring trait method \
-                                      to a non-recurring context"
-                                .into(),
-                        },
-                    );
-                }
-            }
-            if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("dispatch")]) {
-                dispatches += 1;
-                let arguments = attribute.meta_item_list();
-                let valid = arguments.as_ref().is_some_and(|items| {
-                    items.len() == 1
-                        && items[0].meta_item().is_some_and(|item| {
-                            item.has_name(Symbol::intern("reason"))
-                                && item
-                                    .value_str()
-                                    .is_some_and(|reason| !reason.as_str().trim().is_empty())
+            match attribute {
+                Attribute::Tool { item, .. } => {
+                    let path = &item.path.segments;
+                    if path.first().is_some_and(|name| name.as_str() == "nervix")
+                        && (path.len() != 2
+                            || !matches!(
+                                path[1].as_str(),
+                                "context"
+                                    | "dispatch"
+                                    | "error_boundary"
+                                    | "layer"
+                                    | "value"
+                                    | "identity"
+                                    | "state"
+                                    | "input"
+                                    | "constant"
+                            ))
+                    {
+                        cx.tcx.emit_node_span_lint(
+                            INVALID_CONTRACT,
+                            node,
+                            item.span,
+                            Message {
+                                message: "unknown Nervix source annotation; use an execution, \
+                                          error or architectural contract"
+                                    .into(),
+                            },
+                        );
+                    }
+                    if path.first().is_some_and(|name| name.as_str() == "nervix")
+                        && path.get(1).is_some_and(|name| {
+                            matches!(
+                                name.as_str(),
+                                "layer" | "value" | "identity" | "state" | "input" | "constant"
+                            )
                         })
-                });
-                let callable = matches!(
-                    cx.tcx.hir_node(node),
-                    rustc_hir::Node::Expr(rustc_hir::Expr {
-                        kind: rustc_hir::ExprKind::Closure(..),
-                        ..
-                    }) | rustc_hir::Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Fn { .. },
-                        ..
-                    }) | rustc_hir::Node::ImplItem(rustc_hir::ImplItem {
-                        kind: rustc_hir::ImplItemKind::Fn(..),
-                        ..
-                    }) | rustc_hir::Node::TraitItem(rustc_hir::TraitItem {
-                        kind: rustc_hir::TraitItemKind::Fn(..),
-                        ..
-                    })
-                );
-                if !callable || !valid {
-                    cx.tcx.emit_node_span_lint(
-                        INVALID_CONTRACT,
-                        node,
-                        attribute.span(),
-                        Message {
-                            message: "dispatch requires a reason on its owning function or closure"
-                                .into(),
-                        },
-                    );
+                    {
+                        crate::architecture::validate(cx, node, item);
+                    }
+                    if is_contract(item, "error_boundary") {
+                        crate::errors::validate_boundary(cx, node, item);
+                    }
+                    if is_contract(item, "context") {
+                        contexts += 1;
+                        validate_context(cx, node, placement, item);
+                    }
+                    if is_contract(item, "dispatch") {
+                        dispatches += 1;
+                        validate_dispatch(cx, node, item);
+                    }
                 }
-            }
-            let level = attribute.name();
-            if let Some(level) = level
-                && matches!(level.as_str(), "allow" | "expect")
-                && let Some(arguments) = attribute.meta_item_list()
-            {
-                let warnings = arguments.iter().any(|item| {
-                    item.meta_item()
-                        .is_some_and(|item| item.has_name(Symbol::intern("warnings")))
-                });
-                let governed = warnings
-                    || arguments.iter().any(|item| {
-                        item.meta_item().is_some_and(|item| {
-                            item.path
-                                .segments
-                                .first()
-                                .is_some_and(|segment| segment.ident.name.as_str() == "nervix")
-                        })
-                    });
-                if !governed {
-                    continue;
+                Attribute::Parsed(AttributeKind::LintCheck(checks)) => {
+                    for written in level_attributes(checks) {
+                        validate_level(cx, node, &written);
+                    }
                 }
-                let reason = arguments.iter().any(|item| {
-                    item.meta_item().is_some_and(|item| {
-                        item.has_name(Symbol::intern("reason"))
-                            && item
-                                .value_str()
-                                .is_some_and(|value| !value.as_str().trim().is_empty())
-                    })
-                });
-                // A normal expect records at least one occurrence, not its exact cardinality.
-                // Restrict it to an operation expression or its binding so unrelated new
-                // operations cannot inherit a function/module-wide suppression.
-                let branch_declaration = matches!(cx.tcx.hir_node(node), rustc_hir::Node::Field(_))
-                    && arguments
-                        .iter()
-                        .filter_map(|item| item.meta_item())
-                        .all(|item| {
-                            item.has_name(Symbol::intern("reason"))
-                                || item.path.segments.len() == 2
-                                    && item.path.segments[0].ident.name.as_str() == "nervix"
-                                    && item.path.segments[1].ident.name.as_str()
-                                        == "branch_inversion"
-                        });
-                // A retained hidden tunable is one constant declaration, named with its debt.
-                let tunable_declaration = matches!(
-                    cx.tcx.hir_node(node),
-                    rustc_hir::Node::Item(rustc_hir::Item {
-                        kind: rustc_hir::ItemKind::Const(..),
-                        ..
-                    }) | rustc_hir::Node::ImplItem(rustc_hir::ImplItem {
-                        kind: rustc_hir::ImplItemKind::Const(..),
-                        ..
-                    }) | rustc_hir::Node::TraitItem(rustc_hir::TraitItem {
-                        kind: rustc_hir::TraitItemKind::Const(..),
-                        ..
-                    })
-                ) && arguments
-                    .iter()
-                    .filter_map(|item| item.meta_item())
-                    .all(|item| {
-                        item.has_name(Symbol::intern("reason"))
-                            || item.path.segments.len() == 2
-                                && item.path.segments[0].ident.name.as_str() == "nervix"
-                                && item.path.segments[1].ident.name.as_str() == "hidden_tunable"
-                    });
-                let narrow = branch_declaration
-                    || tunable_declaration
-                    || matches!(
-                        cx.tcx.hir_node(node),
-                        rustc_hir::Node::Expr(_)
-                            | rustc_hir::Node::LetStmt(_)
-                            | rustc_hir::Node::Stmt(_)
-                    );
-                if level.as_str() == "allow" || warnings || !reason || !narrow {
-                    cx.tcx.emit_node_span_lint(
-                        INVALID_CONTRACT,
-                        node,
-                        attribute.span(),
-                        Message {
-                            message: "Nervix exceptions require a reason-bearing expect on one \
-                                      operation or declaration; blanket suppression is forbidden"
-                                .into(),
-                        },
-                    );
-                }
+                Attribute::Parsed(_) | Attribute::DeriveHelper(_) => {}
             }
         }
         if contexts > 1 {
@@ -806,9 +884,14 @@ impl Flow {
 }
 
 fn expectation_key(tcx: TyCtxt<'_>, expectation: StableLintExpectationId) -> ExpectationKey {
-    // Like rustc's expectation check, canonicalize copied HIR attributes from one expansion.
+    // Like rustc's expectation check, canonicalize copied HIR attributes from one expansion: the
+    // expectation indexes its node's flattened lint checks, and each check keeps the identity of
+    // the attribute it was written in.
+    let check = lint_checks(tcx, expectation.hir_id)
+        .get(usize::from(expectation.lint_index))
+        .assured("a stable expectation indexes the lint checks of the node it names");
     ExpectationKey {
-        attribute: tcx.hir_attrs(expectation.hir_id)[usize::from(expectation.attr_index)].id(),
+        attribute: check.attr_id.attr_id,
         lint_index: expectation.lint_index,
     }
 }
@@ -824,11 +907,8 @@ fn binding_context(tcx: TyCtxt<'_>, definition: DefId) -> Option<Context> {
     let path = [Symbol::intern("nervix"), Symbol::intern("context")];
     for (parent, node) in tcx.hir_parent_iter(tcx.local_def_id_to_hir_id(local)) {
         if binding(node).is_some() {
-            return tcx
-                .hir_attrs(parent)
-                .iter()
-                .find(|attribute| attribute.path_matches(&path))
-                .and_then(|attribute| parse_context(attribute).ok());
+            let attribute = tool_attributes(tcx, parent, &path).first().copied()?;
+            return parse_context(attribute).ok();
         }
         if matches!(
             node,

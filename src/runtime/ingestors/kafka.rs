@@ -307,7 +307,6 @@ impl KafkaTopicIngestorStartPlan {
                 config: resolved_client.entries,
                 topic,
                 offset_mode: connector_offset_mode,
-                maintain_rate_limit_holds: !ingestor.rate_limit.is_empty(),
             },
             capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
             acknowledgement,
@@ -327,10 +326,6 @@ impl KafkaTopicIngestorStartPlan {
             instance,
             buffered_intake: false,
             flush_each_intake: false,
-            // A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group,
-            // which rebalances, and an instance reading domain offsets would keep its partitions
-            // assigned through an ownership handoff.
-            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved_client.mounts.into_iter().collect(),
             connector_label: KafkaTopicIngestor::KIND
                 .connector()

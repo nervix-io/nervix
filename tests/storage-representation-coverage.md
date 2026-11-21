@@ -68,9 +68,11 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX NODE VIEW` registry signature and `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_` consensus namespace
-identify the current Model layout before decoding, including the ordered `RATE LIMIT` clauses an
-ingestor body writes and the `SET RATE LIMIT` and `DROP RATE LIMIT` alterations.
+The `NERVIX PARAM ACK` registry signature and `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_`
+consensus namespace identify the current Model layout before decoding, including the `parametrizer` kind text of the
+declared entity that defines a parametrization, the ordered `RATE LIMIT` clauses an
+ingestor body writes, the `SET RATE LIMIT` and `DROP RATE LIMIT` alterations and the required
+response timing of each endpoint pause buffer.
 
 `ALTER INGESTOR` and `ALTER EMITTER` statement generators draw, for every entity, each change its
 own grammar writes: a locator, a declared option and the `DROP` of an optional one, `SET MODE`,
@@ -78,15 +80,16 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_` consensus namespace identifies the statement layout the
-transactions it keeps are stored in before decoding.
+and the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_` consensus namespace identifies the
+stored transaction statement layout before decoding.
 
 The complete cluster-parameter record uses each declaration's validated inline storage. Its
 `u32::MAX`-bounded counts retain their public unsigned 64-bit values in four stored bytes; all four
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_gossip_readahead_` namespace and `ClusterState` encoding 42 identify this current archive layout.
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_` namespace and `ClusterState` encoding 44
+identify the current layout, which includes labels on domains, logical resources and users.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
 all-branches or concrete-branch scope; the statement takes its domain from the transaction that

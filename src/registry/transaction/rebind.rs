@@ -11,12 +11,12 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::Report;
 use nervix_models::{
-    CanonicalImpactSet, DomainName, DropModel, ImpactAttribution, ModelIndex, NodeRef,
-    OperationImpactReason, RebindResource, RebindResourceSelection, ResourceBindingImpact,
+    CanonicalImpactSet, DomainName, DropModel, EntityLabels, ImpactAttribution, ModelIndex,
+    NodeRef, OperationImpactReason, RebindResource, RebindResourceSelection, ResourceBindingImpact,
     ResourceName, ResourceUploads, TransactionOperation, TransactionOperationNumber,
 };
 
@@ -25,13 +25,13 @@ use crate::registry::RegistryMutation;
 
 pub(super) fn plan_resource_rebind(
     domain: &DomainName,
-    resources: &BTreeSet<ResourceName>,
+    resources: &BTreeMap<ResourceName, EntityLabels>,
     resource_uploads: &ResourceUploads,
     prefix_models: &mut ModelIndex,
     rebind: &RebindResource,
     operation: TransactionOperationNumber,
 ) -> Result<PlannedResourceRebind, Report<TransactionPlanningError>> {
-    if !resources.contains(&rebind.resource) {
+    if !resources.contains_key(&rebind.resource) {
         return Err(Report::new(TransactionPlanningError::ResourceNotFound {
             resource: rebind.resource.clone(),
         }));

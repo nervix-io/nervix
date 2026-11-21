@@ -122,7 +122,12 @@ impl HostDetection {
             .await
             .change_context(ProbeError::Execution { probe })?;
         executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_, _| detect())
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |_, _| detect(),
+            )
             .await
             .change_context(ProbeError::Execution { probe })
     }
@@ -130,7 +135,11 @@ impl HostDetection {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::{
+        future::{Future as _, poll_fn},
+        num::NonZeroUsize,
+        task::Poll,
+    };
 
     use meticulous::OptionExt as _;
     use nervix_execution::{ExecutionConfig, PendingJobCounts, WorkerCounts};
@@ -223,26 +232,49 @@ mod tests {
         drop(release);
     }
 
+    /// A probe is a planned step of the node's start, so a full bulk class holds it back rather
+    /// than refusing it, and it runs once a place frees, within the detection timeout.
     #[nervix_primitives::test]
-    async fn probes_the_bulk_workers_refuse_are_undetected_and_the_start_goes_on() {
+    async fn probes_the_bulk_workers_cannot_take_now_wait_for_a_place_and_run() {
         let executor = single_worker_executor();
         let filled = FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
-        let properties = NodeDetection::Host
-            .detect(&executor, Duration::from_secs(60))
-            .await;
-        assert_eq!(
-            properties.cpu_model,
-            Detected::Undetected(UndetectedReason::DetectionFailed)
+        let before = executor.snapshot().cpu_class(CpuClass::Bulk);
+        let mut detection =
+            Box::pin(NodeDetection::Host.detect(&executor, Duration::from_secs(60)));
+        let first_poll = poll_fn(|context| Poll::Ready(detection.as_mut().poll(context))).await;
+        assert!(
+            first_poll.is_pending(),
+            "a full bulk class holds the probes back"
         );
-        assert_eq!(
-            properties.gpus,
-            GpuInventory::Undetected(UndetectedReason::DetectionFailed)
-        );
-        assert_eq!(
-            properties.onnx,
-            OnnxRuntimeDetection::Undetected(UndetectedReason::DetectionFailed)
-        );
-        assert_eq!(executor.snapshot().cpu_class(CpuClass::Bulk).refused, 3);
         filled.release().await;
+        let properties = detection.await;
+        for (probe, failed, expired) in [
+            (
+                "CPU model",
+                properties.cpu_model == Detected::Undetected(UndetectedReason::DetectionFailed),
+                properties.cpu_model == Detected::Undetected(UndetectedReason::DeadlineExpired),
+            ),
+            (
+                "GPU",
+                properties.gpus == GpuInventory::Undetected(UndetectedReason::DetectionFailed),
+                properties.gpus == GpuInventory::Undetected(UndetectedReason::DeadlineExpired),
+            ),
+            (
+                "ONNX Runtime",
+                properties.onnx
+                    == OnnxRuntimeDetection::Undetected(UndetectedReason::DetectionFailed),
+                properties.onnx
+                    == OnnxRuntimeDetection::Undetected(UndetectedReason::DeadlineExpired),
+            ),
+        ] {
+            assert!(
+                !failed && !expired,
+                "the {probe} probe runs once a place frees: {properties:?}"
+            );
+        }
+        assert_eq!(
+            executor.snapshot().cpu_class(CpuClass::Bulk).refused,
+            before.refused
+        );
     }
 }

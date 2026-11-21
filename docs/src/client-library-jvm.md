@@ -96,7 +96,8 @@ bytes to recover that upload, and prepare the statement again for a different on
 `outcome.entityLabels()` returns an independently retained `EntityLabelsInspection`, or `null`
 when the command returned no label view. Close that handle when finished. It exposes the exact
 map for either presentation format, a committed revision or an explicit staged preview, and the
-captured policy revision and acceptance limits. Revision values retain all 64 bits.
+captured policy revision and acceptance limits. Revision values retain all 64 bits. `domain()` is
+`null` for a cluster user.
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/EntityLabelsTests.java:entity_labels}}
@@ -121,10 +122,10 @@ page fields. A refusal has no counts or units; a successful empty page has zero 
 `json()` preserves the complete typed envelope.
 
 `DESCRIBE LICENSE;` uses this envelope for cluster scope: `entityKind()` is `"LICENSE"`, while
-`domain()` and `entityName()` are `null`. Its unit's `summary`, `quotas` and `transitions`
-sections describe the answering node's committed policy: one summary row, one row per cluster
-quota, and one row per quota under a committed licensing transition. The command also works
-without selecting a domain.
+`domain()` and `entityName()` are `null`. Its unit's `summary`, `quotas`, `capabilities` and
+`transitions` sections describe the answering node's committed policy: one summary row, one row per
+cluster quota, one row per catalog capability, and one row per quota under a committed licensing
+transition. The command also works without selecting a domain.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

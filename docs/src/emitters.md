@@ -122,7 +122,7 @@ CREATE KAFKA TOPIC EMITTER combined_notifications
 ```
 
 Every listed relay must declare the exact same schema name. Unlike ordinary multi-input
-processors, emitter inputs may be unbranched or use differently named branches. Each source keeps
+processors, emitter inputs may be unbranched or use different parametrizers. Each source keeps
 its own branch identity until its records cross the successful external boundary.
 
 That means:
@@ -134,8 +134,8 @@ That means:
 - branch identity collapses only after successful external publication
 
 A node-wide materialized-state dependency and an `ON MESSAGE ERROR SEND TO` route must be
-exact-branch compatible with every source. Consequently, an emitter whose inputs use differently
-named branches cannot configure one branch-bound dependency or error relay across those inputs.
+exact-branch compatible with every source. Consequently, an emitter whose inputs use different
+parametrizers cannot configure one branch-bound dependency or error relay across those inputs.
 
 Nervix applies each source's declared branch TTL and `MAX INSTANCES ... EVICT LRU` to the work
 this emitter still holds for that source, with the instance limit applied per source partition.
@@ -177,7 +177,7 @@ complete `FROM <relay> [WHERE ...] [, ...]` list. This input policy runs before 
 construction, encoding, and the required output `FLUSH` policy. Omission means no additional input
 collection: each incoming relay batch enters emitter execution directly. When configured,
 collection is independent for each source relay and concrete branch and releases on the timer or
-optional size boundary. Equal keys from differently named branches are never collected together.
+optional size boundary. Equal keys from branches of different parametrizers are never collected together.
 Branch identity still collapses only after successful publication.
 
 Emitter filtering, construction, headers, direct `VALUES`, encoding, and generated integration
@@ -1380,7 +1380,7 @@ and a sensitive value requires `leak_sensitive`, as `CREATE` and `ALTER` check w
 as `envelope TIMESTAMP requires an exact, non-null, non-sensitive DATETIME value`.
 
 `KEY <expression>` on `KAFKA TOPIC` and `PULSAR TOPIC` writes the external message key. It also
-reads `branch.*` in the source's exact named branch, before external delivery collapses that
+reads `branch.*` in the source's exact parametrizer, before external delivery collapses that
 identity. For example, `KEY branch.tenant` writes the tenant string's UTF-8 bytes, while
 `KEY hex_decode('00ff10')` writes those three bytes. No other type is converted: a numeric key
 needs an explicit conversion to `STRING` or `BYTES`. Nullability and sensitivity are checked
@@ -1389,7 +1389,7 @@ empty key; an omitted `KEY` is a null key. Change it with `SET KEY <expression>`
 
 `PARTITION FROM BRANCH`, written after `KEY` and before `TIMESTAMP`, sends source branch
 partition `p` to destination partition `p mod P`, where `P` is the broker topic's partition count.
-A branch with one partition supplies `p = 0`. The source must declare a named branch. Kafka
+A parametrizer with one partition supplies `p = 0`. The source must declare a parametrizer. Kafka
 writes an explicit record partition and Pulsar writes to the selected partition topic; the key
 bytes remain exactly the declared key and do not select another partition. Provision the external
 topic and its partitions before starting the domain. Without this clause, Kafka and Pulsar use

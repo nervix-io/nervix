@@ -575,6 +575,7 @@ pub(in crate::application) fn placement_group(
 pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw: &str) {
     let domain = DomainName::parse(raw).expect("valid domain");
     let state = DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain,
         config: DomainConfig {
             pace: DomainPace::Paced {

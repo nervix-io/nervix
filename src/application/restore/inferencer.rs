@@ -67,7 +67,7 @@ pub(super) async fn prepare_inferencer_checkpoint(
         .ok_or_else(|| Report::new(InferencerRestoreError::NotScheduled))?;
     // A branch's partitions place an archived key's state in the unit the restored count gives the
     // key, whichever unit archived it: a holding unit a shrinking count dropped included.
-    if !node.units.contains_key(&descriptor.unit) && node.partition_branch().is_none() {
+    if !node.units.contains_key(&descriptor.unit) && node.partition_parametrizer().is_none() {
         return Err(Report::new(InferencerRestoreError::Unit));
     }
     if node.schema_fingerprint != descriptor.schema {

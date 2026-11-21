@@ -18,7 +18,7 @@ Feature: Kafka acknowledgements across relay-owner recovery
       CREATE WIRE JSON CODEC relay_handoff_codec
         FROM WIRE SCHEMA relay_handoff_wire TO SCHEMA relay_handoff_event;
       CREATE SCHEMA relay_handoff_key ( branch_name STRING );
-      CREATE BRANCH relay_handoff_branch SCHEMA relay_handoff_key TTL 5m;
+      CREATE PARAMETRIZER relay_handoff_branch SCHEMA relay_handoff_key TTL 5m;
       CREATE RELAY relay_handoff_records SCHEMA relay_handoff_event
         BRANCHED BY relay_handoff_branch CAPACITY 1;
       CREATE KAFKA CLIENT relay_handoff_kafka CONFIG {

@@ -1783,9 +1783,9 @@ metadata carries; see [When The Codec Refuses A Payload](./ingestors.md#when-the
 In an acknowledged mode the host gives the refused payload a confirmed root and resolves it at once,
 so its position is acknowledged together with the batch's other positions and a drain or an
 ownership handoff waits for that confirmation, as it waits for a dispatched payload's. In
-`MODE NO ACK` the host drops it. A payload the extension workers had no room to unfold was judged by
-nothing, so it still fails its whole batch: an acknowledged batch is rejected for its ingestor to
-present again, and a live unacknowledged one follows its ingestor's unacknowledged admission.
+`MODE NO ACK` the host drops it. A payload the extension workers have no room to unfold now has not
+been judged, so its whole batch waits for a place, whatever its delivery mode, as the unfolding
+admission above describes.
 At group execution, the host resolves event timestamps into one Arrow column and tests paced-domain
 admission with one bitmap. It selects the accepted batch and its ACK and metadata sidecars together.
 Each timestamp rejection retains the source row's ACK for its route-local message-error delivery;
@@ -1833,11 +1833,16 @@ The host runs four ingestor loop families, with a listener using the broker loop
 The broker, paced and request-scoped loops each drain what their instance's quiesce buffer
 retained once the ingestor resumes, oldest first. A retained payload stays in its buffer, counted
 with its bytes, until its messages enter their ingest group, and the buffer hands out nothing
-behind it until then. Its sender was already answered and its ingestor has moved past it, so the
-host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
-than to be refused, ahead of work that asks afterwards. A shutdown or a new quiesce ends the wait
-and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
-refuses leaves the buffer as a decode rejection.
+behind it until then. The host waits for a place on the node's extension workers to unfold
+retained work. A shutdown or a new quiesce interrupts unfolding and returns the payload to the
+front. A payload its codec refuses leaves the buffer as a decode rejection.
+
+HTTP and WebSocket endpoint declarations list their pause-buffer response timings per delivery
+mode. `RESPOND IMMEDIATE` completes admission while retaining the body. `RESPOND AFTER RESUME`
+owns a reply until the retained body enters the graph or the wait ends. An acknowledged request
+occupies a slot of its existing response window while it waits. A client departure, its physical
+`ACK TIMEOUT`, or an intake stop can remove a waiting body before it enters the graph. On resume
+the buffer delivers its oldest request first and keeps later live intake behind it.
 
 At the start of a graceful stop, the host closes intake on the stopping node before the control
 plane moves scheduled ingestors or emitters. The shutdown quiesce suspends broker polling and listener
@@ -1848,31 +1853,39 @@ batch's positions on the transport, so both the move and the in-place drain wait
 confirmation; see [Confirmed acknowledgements](#confirmed-acknowledgements). An ingestor started on
 the destination node after handoff uses that node's open intake.
 
-A live payload an ingestor hands over without an acknowledgement, a paced poll or a batch read in a
-`MODE NO ACK`, cannot be presented again either. An acknowledged batch the extension workers refuse
-is rejected for its ingestor to deliver again, and an endpoint refuses a body its sender sends again;
-a live unacknowledged payload follows its ingestor's unacknowledged admission instead, which each
-ingestor's composition declares. Waiting holds the ingestor's loop, so an ingestor waits for a place only
-when its transport stays connected with bounded memory while nothing reads it:
+Every other payload an ingestor hands over waits for a place too, whatever its delivery mode: a live
+batch read in `MODE NO ACK`, a paced poll, and an acknowledged batch, which is never rejected for
+its ingestor to present again because the extension workers are full. Only an endpoint answers a
+body its sender still holds with a retryable refusal. A waiting payload holds the ingestor's loop,
+so the ingestor takes nothing further from its transport, and the host keeps driving the
+transport's `IngestorReadHold` session control, without a deadline, for as long as the payload
+waits; see [Read budgets and holds](#read-budgets-and-rate-limit-holds). The waiting payload counts
+as work its execution unit admitted, so a drain, an ownership handoff and a graceful stop wait for
+it. An acknowledged batch's `ACK TIMEOUT` starts only once it is dispatched. What each transport
+does meanwhile:
 
-| Ingestor | Unacknowledged admission | The transport while its loop is held |
-| --- | --- | --- |
-| HTTP polling, Prometheus | Waits for a place | Nothing is read. The next poll is delayed, and the domain cadence coalesces the occurrences it missed. |
-| NATS SUBJECT | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
-| ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
-| Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
-| MQTT | Refused and counted | The connection's driver task keeps the event loop, and with it the keep-alive, running while the loop is held, but under `NO ACK` reads only `--mqtt-read-ahead-headroom` publishes, 64 by default, ahead of it. Once those fill, the driver stops reading, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
-| Redis Pub/Sub | Refused and counted | The dedicated reader holds at most `subscription_buffer_messages` messages and applies TCP backpressure when full. Keeping the host polling also keeps idle probes active. |
-| WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
-| `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
-| `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
+| Ingestor | The transport while a payload waits |
+| --- | --- |
+| HTTP polling, Prometheus | Nothing is read. The next poll is delayed, and the domain cadence coalesces the occurrences it missed. |
+| NATS SUBJECT | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
+| NATS STREAM, SQS | Every delivery mode is acknowledged, and the transport keeps what the ingestor has not read. |
+| ZeroMQ | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
+| Syslog | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
+| Kafka | A consumer group's member pauses fetching and services its group through the hold hook, so it stays in its group; a domain-offset reader keeps its explicit assignment. |
+| Pulsar | The connection task answers the broker's pings, and the broker stops sending once the receiver queue's flow permits are spent. |
+| RabbitMQ | Heartbeats run on the client's own task. An acknowledged mode's prefetch bounds what the broker sends; under `NO ACK` Lapin's delivery queue keeps growing, without a bound. |
+| MQTT | The connection's driver task keeps the event loop, and with it the keep-alive, running while it reads up to `--mqtt-read-ahead-headroom` publishes, 64 by default, ahead under `NO ACK`. Once those fill, the driver stops reading, and the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| Redis Pub/Sub | The dedicated reader keeps reading and sending idle probes until `subscription_buffer_messages` messages wait, then applies TCP backpressure; Redis closes the subscriber at its `client-output-buffer-limit`. |
+| WebSocket client | The hold hook keeps reading, answering the server's pings and writing the client's own, and parks one data frame in a declared read-ahead that the next read hands over first. Once a frame is parked nothing further is read: unread frames stay with the transport, and a server that pings with a deadline can close the connection. The idle window restarts when reading resumes, so the held time is not counted as the peer's silence. |
 
-A waiting payload races the ingestor's stop and every new quiesce decision. The stop drops it. A
-new decision, for an ingestor whose input passes through the quiesce control, hands the payload to the
-control as input that arrived under that decision: `BUFFER` retains it, `DROP` drops and counts it,
-and a suspension lets it dispatch, so it waits on. A refused payload is reported as an ingestor
-error and counted in `nervix_ingestor_unfolding_refused_total`. A Pulsar message the host refused
-stays unacknowledged until its consumer reconnects.
+A waiting payload races the ingestor's stop and every new quiesce decision. The stop ends the
+intake as stopped: the payload never entered its ingest group, and the loop leaves its positions
+unconfirmed, so a transport that keeps positions presents it again by its own redelivery contract.
+A new decision, for an ingestor whose input passes through the quiesce control, hands the payload
+to the control as input that arrived under that decision: `BUFFER` retains it, `DROP` drops and
+counts it, and a suspension lets it dispatch, so it waits on. An ingestor whose input bypasses the
+control waits on whatever the decision. A wait ends in a refusal only once the node's executor
+admits no more work, which the host treats as the ingestor's stop.
 
 For broker ingestors, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
@@ -1967,7 +1980,8 @@ An ingestor's [`RATE LIMIT`](./ingestors.md#rate-limits) is host policy: the ent
 whether, and in which delivery modes, its transport keeps what the host has not taken, and the host
 owns the allowance of each execution unit, its waits and its rejections. A connector learns of an
 allowance through the size of the reads it is asked for and the optional `IngestorReadHold`
-session-control hook.
+session-control hook, which the host also drives while a payload it took waits for a place on the
+node's extension workers.
 
 Before every broker read the host asks its services for the read's budget,
 `IngestorHostServices::read_budget`, given the window its delivery mode leaves: one message under
@@ -1983,14 +1997,19 @@ cadence; a quiesce change or a stop ends the hold, and every turn asks for the b
 `IngestorHostServices::record_rate_limit_hold_started` counts each hold as it starts and
 `record_rate_limit_hold_ended` adds its length once it ended.
 
-The host drives that hook during both waits for the allowance: before a read and when the
-allowance is still refilling for a measured payload the host already holds. The hook services
-transport control without taking records or deciding the outcome of records already held by the
-host. A transport error before a read goes through the broker loop's retry policy. During intake
-the host reports and retries transport maintenance while the held batch continues through its
-allowance and normal settlement.
+The host drives that hook during both waits for the allowance, before a read and when the
+allowance is still refilling for a measured payload the host already holds, and while a payload it
+took waits for a place on the node's extension workers. An allowance hold passes its deadline; a
+wait for the extension workers has none, and the host stops polling the hook once the payload has
+its place. The hook services transport control without deciding the outcome of records already
+held by the host. A transport that must read to keep its session, such as a WebSocket client that
+answers pings, parks what it reads in a declared read-ahead that its next read hands over first,
+and reads nothing further once that read-ahead is full. A transport error before a read goes
+through the broker loop's retry policy. During intake the host reports and retries transport maintenance while the held
+batch continues through its allowance, its wait and normal settlement.
 
-For a Kafka consumer group, short waits can end before maintenance is due. The connector uses
+Every Kafka consumer group and every WebSocket client offers the hook. Short Kafka waits can end
+before maintenance is due. The connector uses
 librdkafka's configured `max.poll.interval.ms` to start maintenance early enough for control
 execution. On the connector control workers, it pauses the current assignment and polls the
 driver once. The stream wakes again for group events or at its native half-interval cadence.
@@ -2381,8 +2400,8 @@ fails on its side fails the rejection.
 
 RabbitMQ registers `NO ACK` as an automatically acknowledging AMQP consumer, with no `basic.qos`
 request and no later ACK or NACK traffic. Its existing Lapin delivery queue is unbounded without
-broker prefetch; the host refuses and counts an unacknowledged payload its extension workers
-cannot admit. Closing the connection drops any auto-acknowledged deliveries it still held, and
+broker prefetch, and grows while a payload waits for the node's extension workers. Closing the
+connection drops any auto-acknowledged deliveries it still held, and
 there is no transport position to recover. The gathered batch itself is bounded by the host's
 request: one delivery under `NO ACK` or `ACK SEQUENTIAL`, and at most the parallel maximum otherwise.
 
@@ -3695,11 +3714,12 @@ sequenceDiagram
   The host reconnects on its policy. Suspension closes the connection while retaining successful
   handshake payloads, which drain before another connection opens; close clears the queue.
   Transport failure requires another resume of the retained ingestor.
-  The host composer currently resolves the named signaling protocol and chooses buffered intake,
-  a flush after each intake, and refusal with counting when unacknowledged unfolding cannot enter
-  the executor. Holding its polling loop would also stop answering the peer's pings. These
-  transport requirements belong in a connector-owned contract declaration; the composer
-  currently hard-codes them instead. The source ownership header names this boundary violation.
+  The host composer currently resolves the named signaling protocol and chooses buffered intake
+  and a flush after each intake. While the host holds its loop, such as while a frame waits for
+  the node's extension workers, the ingestor's hold hook keeps reading so it answers the peer's
+  pings, parking the first data frame it reads for its next read. These transport requirements
+  belong in a connector-owned contract declaration; the composer currently hard-codes them
+  instead. The source ownership header names this boundary violation.
   The ingestor's position carries no external acknowledgement, and its acknowledge and reject operations are
   no-ops; reconnection supplies no durable replay guarantee. The host owns graph intake, routing,
   quiesce, admission and retry cadence. Server endpoint listeners use the server's request-scoped
@@ -3814,9 +3834,9 @@ resolving labels or looking up a shared registry while recording a payload outco
 Broker read results and scheduled polls are observed once through the host's typed
 `IngestorReadOutcome`. The host counts returned raw payloads and bytes before decoding and only
 times paced polls; internal buffer replay is not another transport read. Neither observation
-changes delivery, cancellation, acknowledgement, error reporting or retry policy. An actual
-extension-worker unfolding refusal is counted on acknowledged, unacknowledged and endpoint intake;
-waiting for admission is not a refusal. The request path records each endpoint request or frame
+changes delivery, cancellation, acknowledgement, error reporting or retry policy. An
+extension-worker unfolding refusal is counted only for an endpoint request whose sender is answered
+that the node is busy; an ingestor's payload waits for admission instead, which is not a refusal. The request path records each endpoint request or frame
 once for every ingestor bound to its route, through retained children of that ingestor's unit,
 from the typed outcome that ingestor reached. A route that refuses a request before reading it
 records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.

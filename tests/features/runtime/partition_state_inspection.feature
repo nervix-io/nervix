@@ -13,13 +13,13 @@ Feature: A moving processor key has one inspection partition
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, seq integer);
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <before>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <before>;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY outgoing SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge inspect-move-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR events FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO incoming INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <definition>
@@ -39,7 +39,7 @@ Feature: A moving processor key has one inspection partition
     Given the <kind> key claim is paused before install and before forget
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS <after>;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS <after>;
       """
     And http payload is posted to node "node-1" with host "inspect-move-{{test_id}}.example.com" path "/events"
       """

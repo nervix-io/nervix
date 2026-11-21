@@ -17,8 +17,9 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_consensus::{EntityLabelReadError, TransactionState};
 use nervix_models::{
-    DomainName, DomainNodeRef, EntityLabelView, EntityLabelsInspection, InspectionFormat,
-    ShowLabels, TransactionPreviewIdentity,
+    AdministrativeLabelTarget, CommandExecutionReference, DomainName, EntityLabelOwner,
+    EntityLabelView, EntityLabelsInspection, InspectionFormat, ShowLabels,
+    TransactionPreviewIdentity,
 };
 use thiserror::Error;
 
@@ -37,12 +38,38 @@ enum LabelInspectionError {
     TransactionNotOpen,
     #[error("cannot inspect the transaction's current candidate")]
     Planning,
+    #[error("no active domain selected")]
+    DomainNotSelected,
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) async fn edit_administrative_labels(
+        &self,
+        reference: &CommandExecutionReference,
+        target: &AdministrativeLabelTarget,
+    ) -> CommandResult {
+        if let Err(error) = self
+            .inner
+            .consensus
+            .edit_administrative_labels(reference.clone())
+            .await
+        {
+            return self
+                .consensus_report_response(&error, format!("failed to edit labels on {target}"))
+                .await;
+        }
+        match self.wait_for_authoritative_visibility().await {
+            Ok(()) => command_ok(format!("updated labels on {target}")),
+            Err(error) => command_error(format!(
+                "updated labels on {target}, but authoritative visibility did not complete: \
+                 {error}"
+            )),
+        }
+    }
+
     pub(in crate::application) async fn show_entity_labels(
         &self,
-        domain: &DomainName,
+        domain: Option<&DomainName>,
         show: ShowLabels,
         session: InspectingSession<'_>,
     ) -> CommandResult {
@@ -60,18 +87,27 @@ impl SessionServiceImpl {
 
     async fn inspect_entity_labels(
         &self,
-        domain: &DomainName,
+        domain: Option<&DomainName>,
         show: &ShowLabels,
         session: InspectingSession<'_>,
     ) -> Result<EntityLabelsInspection, Report<LabelInspectionError>> {
-        let entity = DomainNodeRef::new(domain.clone(), show.entity.clone());
-        let Some(id) = session.attached_transaction else {
+        let entity = show
+            .entity
+            .resolve(domain)
+            .ok_or_else(|| Report::new(LabelInspectionError::DomainNotSelected))?;
+        let id = session
+            .attached_transaction
+            .filter(|_| entity.supports_staged_view());
+        let Some(id) = id else {
             return self
                 .inner
                 .consensus
                 .entity_labels(&entity)
                 .change_context(LabelInspectionError::Read);
         };
+        let domain = entity
+            .domain()
+            .ok_or_else(|| Report::new(LabelInspectionError::DomainNotSelected))?;
         let snapshot = self
             .inner
             .consensus
@@ -101,7 +137,15 @@ impl SessionServiceImpl {
                 0,
                 true,
                 snapshot.control,
-                |models| models.get(&show.entity).map(|model| model.labels().clone()),
+                |models, resources| match &entity {
+                    EntityLabelOwner::Model(model) => {
+                        models.get(&model.node).map(|model| model.labels().clone())
+                    }
+                    EntityLabelOwner::Resource(resource) => {
+                        resources.get(&resource.identifier).cloned()
+                    }
+                    EntityLabelOwner::Domain { .. } | EntityLabelOwner::User { .. } => None,
+                },
             )
             .await
             .change_context(LabelInspectionError::Planning)?;
@@ -136,13 +180,7 @@ fn render(inspection: &EntityLabelsInspection, format: InspectionFormat) -> Stri
             "metadata inspection contains only typed identities, integers and exact string maps",
         );
     }
-    let entity = inspection.entity();
-    let mut text = format!(
-        "{} {} in domain {}\n",
-        entity.node.kind.keyword_phrase(),
-        entity.node.identifier,
-        entity.domain
-    );
+    let mut text = format!("{}\n", inspection.entity());
     match inspection.view() {
         EntityLabelView::Committed { revision } => {
             text.push_str(&format!("Committed revision: {revision}\n"))

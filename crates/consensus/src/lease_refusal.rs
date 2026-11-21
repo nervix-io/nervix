@@ -2,9 +2,10 @@
 //! lapsed refuses a write.
 //!
 //! Layer: engines and infrastructure; arming is exposed only to test harnesses.
-//! - **Owns.** One armed refusal of a command execution write or license activation proposal, and
-//!   whether a proposal met it.
-//! - **Depends on.** The vocabulary's execution references and asynchronous synchronization.
+//! - **Owns.** One armed refusal of a command execution write, a license activation or a domain
+//!   stop's ending proposal, and whether a proposal met it.
+//! - **Depends on.** The vocabulary's execution references and domain names, and asynchronous
+//!   synchronization.
 //! - **Must not know.** How the refusal is classified, answered or recovered.
 
 use crate::ConsensusCommand;
@@ -27,7 +28,7 @@ pub use enabled::{CommandWrite, LeaseRefusal};
 
 #[cfg(any(test, feature = "testing"))]
 mod enabled {
-    use nervix_models::CommandExecutionReference;
+    use nervix_models::{CommandExecutionReference, DomainName};
     use nervix_primitives::sync::{Arc, Mutex};
 
     use super::*;
@@ -52,6 +53,10 @@ mod enabled {
             write: CommandWrite,
         },
         LicenseActivation,
+        /// The proposal that ends one domain's stop.
+        DomainStopEnding {
+            domain: DomainName,
+        },
     }
 
     impl RefusalTarget {
@@ -73,6 +78,11 @@ mod enabled {
                     (reference, CommandWrite::PauseRecovery)
                 }
                 ConsensusCommand::ActivateLicense { .. } => return Some(Self::LicenseActivation),
+                ConsensusCommand::EndDomainStop { domain_id, .. } => {
+                    return Some(Self::DomainStopEnding {
+                        domain: domain_id.clone(),
+                    });
+                }
                 _ => return None,
             };
             Some(Self::Command {
@@ -135,7 +145,7 @@ mod enabled {
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use nervix_models::{CommandExecutionReference, DomainName, Timestamp, UserName};
+    use nervix_models::{CommandExecutionReference, DomainName, StopEnding, Timestamp, UserName};
 
     use super::{CommandWrite, LeaseRefusal, RefusalTarget};
     use crate::{CommandExecutionDisposition, CommandExecutionResult, ConsensusCommand};
@@ -232,5 +242,31 @@ mod tests {
         assert!(refusal.delivered(&release_refusal()).await);
         assert!(!refusal.take(&release).await);
         assert!(!refusal.take(&finalization(armed)).await);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_domain_stop_ending_refusal_meets_that_domains_next_ending_once() {
+        let refusal = LeaseRefusal::default();
+        let domain = |name: &str| DomainName::try_from(name).assured("the test domain is valid");
+        let ending = |name: &str| ConsensusCommand::EndDomainStop {
+            domain_id: domain(name),
+            began_at_revision: 7,
+            ending: StopEnding::Completed,
+        };
+        let ending_refusal = || RefusalTarget::DomainStopEnding {
+            domain: domain("tenant"),
+        };
+        refusal.arm(ending_refusal()).await;
+        assert!(
+            !refusal.take(&ending("other")).await,
+            "another domain's ending goes ahead"
+        );
+        assert!(!refusal.delivered(&ending_refusal()).await);
+        assert!(refusal.take(&ending("tenant")).await);
+        assert!(refusal.delivered(&ending_refusal()).await);
+        assert!(
+            !refusal.take(&ending("tenant")).await,
+            "the armed ending meets the refusal once, so the owner's next attempt goes ahead"
+        );
     }
 }

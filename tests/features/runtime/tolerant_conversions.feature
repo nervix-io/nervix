@@ -44,7 +44,7 @@ Feature: Tolerant conversions
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_reading_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_reading_batch_codec
         TO raw_readings
           INHERIT ALL
           UNBRANCHED
@@ -149,7 +149,7 @@ Feature: Tolerant conversions
       CREATE HTTP ENDPOINT conversion_ingress ON edge PATH '/conversions';
       CREATE HTTP ENDPOINT INGESTOR conversion_ingestor
         FROM conversion_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conversion_input_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING conversion_input_batch_codec
         TO conversion_inputs
           INHERIT ALL
           UNBRANCHED
@@ -225,7 +225,7 @@ Feature: Tolerant conversions
       CREATE HTTP ENDPOINT routed_ingress ON edge PATH '/routed-values';
       CREATE HTTP ENDPOINT INGESTOR routed_value_ingestor
         FROM routed_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_value_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routed_value_batch_codec
         TO routed_values
           INHERIT ALL
           UNBRANCHED
@@ -335,7 +335,7 @@ Feature: Tolerant conversions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR raw_measurement_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_measurement_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_measurement_batch_codec
         TO raw_measurements
           INHERIT ALL
           UNBRANCHED

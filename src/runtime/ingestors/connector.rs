@@ -155,12 +155,6 @@ pub(super) struct IngestorStart {
     pub(super) buffered_intake: bool,
     /// Whether every accepted batch flushes its ingest group at once.
     pub(super) flush_each_intake: bool,
-    /// What a payload the ingestor hands over without an acknowledgement does when the node's
-    /// extension workers have no room for its `ON INGESTION` unfolding. The ingestor cannot present
-    /// it again, so the choice turns on what holding the ingestor's loop costs the transport:
-    /// `WaitForPlace` holds the loop until a place frees, and `RefuseWhenFull` refuses the payload
-    /// and counts it.
-    pub(super) unacknowledged_admission: QueueAdmission,
     /// The resource mounts the connector's resolved configuration reads its files from, held for
     /// as long as an instance runs.
     pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
@@ -178,7 +172,6 @@ pub(super) struct BrokerIngestorStart<'a, P> {
     pub(super) acknowledgement: IngestAcknowledgement<'a>,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
-    pub(super) unacknowledged_admission: QueueAdmission,
     pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
 }
 
@@ -201,7 +194,6 @@ impl<P> BrokerIngestorStart<'_, P> {
             acknowledgement,
             buffered_intake,
             flush_each_intake,
-            unacknowledged_admission,
             client_mounts,
         } = self;
         let acknowledgement = Runtime::parse_ingest_acknowledgement(
@@ -229,7 +221,6 @@ impl<P> BrokerIngestorStart<'_, P> {
             instance,
             buffered_intake,
             flush_each_intake,
-            unacknowledged_admission,
             client_mounts,
             connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
             domain_offsets: None,
@@ -356,9 +347,6 @@ impl<P> PacedIngestorStart<P> {
             instance,
             buffered_intake: false,
             flush_each_intake: false,
-            // The ingestor has already moved past the poll it hands over, and holding its loop only
-            // delays the next poll, whose missed occurrences the domain cadence coalesces.
-            unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts,
             connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
             domain_offsets: None,
@@ -418,7 +406,6 @@ impl Runtime {
             instance,
             buffered_intake,
             flush_each_intake,
-            unacknowledged_admission,
             client_mounts,
             connector_label,
             domain_offsets,
@@ -459,7 +446,6 @@ impl Runtime {
             readiness,
             buffered_intake,
             flush_each_intake,
-            unacknowledged_admission,
             general_error_policy: ingestor.general_error_policy.clone(),
             rate_limit,
         });
@@ -535,7 +521,6 @@ pub(super) struct RuntimeIngestorHostSpec {
     pub(super) readiness: ingestor_quiesce::IngestorInstanceReadiness,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
-    pub(super) unacknowledged_admission: QueueAdmission,
     /// The ingestor's `ON GENERAL ERROR` policy, which reports the payloads its codec refuses.
     pub(super) general_error_policy: GeneralErrorPolicy,
     /// The ingestor's `RATE LIMIT` clauses, from which this unit's allowance starts full.
@@ -567,7 +552,10 @@ pub(super) struct RuntimeIngestorHost {
     collector: IngestRouteCollector,
     buffered_intake: bool,
     flush_each_intake: bool,
-    unacknowledged_admission: QueueAdmission,
+    /// The work counters of this ingestor's execution unit. A payload the host holds while it
+    /// waits for a place on the node's extension workers counts there as work the unit admitted,
+    /// so a drain, an ownership handoff and a graceful stop wait for it rather than cutting it.
+    work: Arc<NodeQuiesceCounters>,
     /// Retained ingestor host counters, also handed to endpoint bindings where needed.
     interactions: IngestorInteractionMetrics,
     /// Consumes the payloads the ingestor's codec refuses, for this host and the endpoint bindings
@@ -652,6 +640,10 @@ impl RuntimeIngestorHost {
             .acknowledgements
             .bind_failure_source(move || failure_status.connection.failures().is_some());
         let delivery_stop = spec.shutdown.clone();
+        let work = spec.runtime.unit_quiesce_counters(
+            &spec.domain,
+            NodeUnitRef::new(NodeRef::new(ModelKind::Ingestor, &spec.ingestor), spec.unit),
+        );
         let confirmation_delay = spec
             .runtime
             .inner
@@ -685,7 +677,7 @@ impl RuntimeIngestorHost {
             collector,
             buffered_intake: spec.buffered_intake,
             flush_each_intake: spec.flush_each_intake,
-            unacknowledged_admission: spec.unacknowledged_admission,
+            work,
             interactions,
             decode_rejections,
             allowance,
@@ -699,9 +691,9 @@ impl RuntimeIngestorHost {
     /// Every request that arrives on those routes is admitted through this host's quiesce control
     /// and dispatched as its own ingest group through the same outputs, codec and branch senders
     /// the host holds, on the request path rather than in the ingestor loop.
-    pub(super) fn request_intake(&self, request: EndpointRequestPolicy) -> EndpointIngestBinding {
+    pub(super) fn request_intake(&self, plan: &EndpointRequestPlan) -> EndpointIngestBinding {
         EndpointIngestBinding {
-            request,
+            request: self.quiesce.endpoint_request_policy(plan),
             handles: self.handles.clone(),
             quiesce: self.quiesce.clone(),
             domain: self.domain.clone(),
@@ -719,6 +711,7 @@ impl RuntimeIngestorHost {
                 "only an endpoint ingestor binds request intake, and its unit's entity reads an \
                  endpoint, which registers the unit's request children",
             ),
+            work: self.work.clone(),
         }
     }
 
@@ -751,6 +744,49 @@ enum PayloadAdmission {
     HoldUntil(Instant),
 }
 
+/// The transport of an ingestor whose payload waits for a place on the node's extension workers,
+/// which the host keeps serviced for as long as the payload waits, with what it needs to report a
+/// failure of that service.
+struct WaitingTransport<'h> {
+    maintenance: Option<&'h mut dyn IngestorReadHold>,
+    runtime: &'h Runtime,
+    domain: &'h DomainName,
+    ingestor: &'h IngestorName,
+}
+
+impl WaitingTransport<'_> {
+    /// Runs `delivery`, a payload's unfolding waiting for its place, to its end while servicing
+    /// the transport. A failure the connector reports while servicing judged nothing of the
+    /// payload: it is reported as an ingestor error, and the service starts again after the
+    /// ingestor's error retry. Only the delivery ends the wait.
+    async fn serve<T>(&mut self, delivery: impl Future<Output = T>) -> T {
+        let mut delivery = pin!(delivery);
+        let mut retry_after = None;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let transport = reborrow_maintenance(&mut self.maintenance);
+            let servicing = async move {
+                if let Some(delay) = retry_after {
+                    sleep(delay).await;
+                }
+                maintain_held_transport(transport, None).await
+            };
+            nervix_primitives::select! {
+                biased;
+                output = &mut delivery => return output,
+                failure = servicing => {
+                    self.runtime.events().report_error(format!(
+                        "ingestor error for ingestor '{}' in domain '{}': {failure:#}",
+                        self.ingestor.as_str(),
+                        self.domain.as_str(),
+                    ));
+                    retry_after = Some(self.runtime.inner.data_plane.ingestor_error_retry());
+                }
+            }
+        }
+    }
+}
+
 /// The metadata rows of `messages`, which a `RATE LIMIT` allowance costs them by.
 fn metadata_rows<'a>(messages: &[IngestorIntakeMessage<'a>]) -> Vec<IngestMetadataRow<'a>> {
     messages.iter().map(|message| message.metadata).collect()
@@ -769,31 +805,38 @@ fn join_run(
 }
 
 impl RuntimeIngestorHost {
-    /// Takes in an unacknowledged run of payloads under the quiesce decision in force now.
+    /// Takes in an unacknowledged run of payloads under the quiesce decision in force now, with
+    /// `maintenance` servicing the transport for as long as a payload waits.
     async fn take_in_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         // The decision the batch is taken in under. A batch that waits for the node's extension
         // workers is decided again once a newer one arrives.
         let decided = self.quiesce.observation();
         if self.buffered_intake && decided.is_quiesced() {
-            return self.retain_unacknowledged(messages).await;
+            return self.retain_unacknowledged(messages, maintenance).await;
         }
-        self.dispatch_unacknowledged(messages, decided).await
+        self.dispatch_unacknowledged(messages, decided, maintenance)
+            .await
     }
 
-    /// Takes in an acknowledged run of payloads under the quiesce decision in force now, and
-    /// returns the acknowledgement of what it dispatched.
+    /// Takes in an acknowledged run of payloads under the quiesce decision in force now, with
+    /// `maintenance` servicing the transport for as long as a payload waits, and returns the
+    /// acknowledgement of what it dispatched.
     async fn take_in_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<RuntimeBatchAcknowledgement> {
-        let quiesced = self.quiesce.observation().is_quiesced();
-        if self.buffered_intake && quiesced {
-            return self.retain_acknowledged(messages).await;
+        // The decision the batch is taken in under, as for an unacknowledged batch.
+        let decided = self.quiesce.observation();
+        if self.buffered_intake && decided.is_quiesced() {
+            return self.retain_acknowledged(messages, maintenance).await;
         }
-        self.dispatch_acknowledged(messages).await
+        self.dispatch_acknowledged(messages, decided, maintenance)
+            .await
     }
 
     /// The charges of a payload `cost` describes, or `None` once the payload it names by `metadata`
@@ -888,7 +931,7 @@ impl RuntimeIngestorHost {
                 if let Some(delay) = retry_after {
                     sleep(delay).await;
                 }
-                maintain_held_transport(transport, until).await
+                maintain_held_transport(transport, Some(until)).await
             });
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -960,6 +1003,7 @@ impl RuntimeIngestorHost {
     async fn retain_unacknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
         let mut entries = Vec::with_capacity(messages.len());
         for message in messages {
@@ -968,16 +1012,13 @@ impl RuntimeIngestorHost {
             entries.push((message.payload.to_vec(), metadata));
         }
         let payload = BufferedIngestPayload::batch(entries, actual_utc_now());
-        self.intake_unacknowledged_payload(payload).await?;
+        self.intake_unacknowledged_payload(payload, maintenance)
+            .await?;
         Ok(())
     }
 
-    /// Acknowledged input read while the ingestor is quiesced.
-    ///
-    /// The quiesce control decides each message on its own. A message it admits is dispatched
-    /// with its acknowledgement root as it would be unquiesced. One it buffers or drops adds
-    /// nothing for the batch to wait on, because the buffer or the drop policy has taken it over
-    /// from the ingestor, so its position is settled with the rest of the batch.
+    /// Acknowledged input read while the ingestor is quiesced, with `maintenance` servicing the
+    /// transport for as long as the messages the quiesce control lets dispatch wait.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -988,7 +1029,33 @@ impl RuntimeIngestorHost {
     async fn retain_acknowledged(
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<RuntimeBatchAcknowledgement> {
+        // Observed before the decisions are taken, so a newer one is never missed.
+        let decided = self.quiesce.observation();
+        let admitted = self.admit_acknowledged(messages).await;
+        self.dispatch_acknowledged(admitted, decided, maintenance)
+            .await
+    }
+
+    /// The messages of an acknowledged run that the quiesce control lets dispatch, deciding on
+    /// each on its own as on input read while quiesced.
+    ///
+    /// A message it admits is dispatched with its acknowledgement root as it would be unquiesced.
+    /// One it buffers or drops adds nothing for the batch to wait on, because the buffer or the drop
+    /// policy has taken it over from the ingestor, so its position is settled with the rest of the
+    /// batch.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the ingestor host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
+    async fn admit_acknowledged<'m>(
+        &self,
+        messages: Vec<IngestorIntakeMessage<'m>>,
+    ) -> Vec<IngestorIntakeMessage<'m>> {
         let mut admitted = Vec::with_capacity(messages.len());
         for message in messages {
             nervix_primitives::task::consume_budget().await;
@@ -998,23 +1065,25 @@ impl RuntimeIngestorHost {
                 IngestorQuiesceIntake::Dispatch(_) => admitted.push(message),
                 IngestorQuiesceIntake::Buffered
                 | IngestorQuiesceIntake::Dropped
-                | IngestorQuiesceIntake::Rejected { .. } => {}
+                | IngestorQuiesceIntake::Rejected => {}
             }
         }
-        if admitted.is_empty() {
-            let roots = BatchRoots::new(&self.ack_root_trackers, 0);
-            return Ok(self.batch_acknowledgement(roots));
-        }
-        self.dispatch_acknowledged(admitted).await
+        admitted
     }
 
     /// Decodes an acknowledged batch into an ingest group of its own and dispatches it, returning
     /// the acknowledgement the batch's ingestor waits on.
     ///
     /// A payload its codec refuses is consumed as a decode rejection: its root resolves at once, so
-    /// the batch's positions are acknowledged once the graph acknowledged the rest. A payload the
-    /// node's extension workers cannot unfold now fails the batch, which its ingestor rejects and
-    /// presents again.
+    /// the batch's positions are acknowledged once the graph acknowledged the rest. When the node's
+    /// extension workers have no room for the batch's unfolding, the batch waits for a place and
+    /// is never refused: its ingestor takes nothing further from its transport, `maintenance`
+    /// keeps the transport serviced, and the waiting batch counts as work its unit admitted. Its
+    /// `ACK TIMEOUT` starts only once it is dispatched. The wait ends when the ingestor stops, which
+    /// leaves the batch's positions unconfirmed for its transport to present again, or when a
+    /// quiesce decision newer than `decided` arrives: the quiesce control then decides on each of
+    /// its messages as on input read while quiesced, unless the ingestor's input bypasses the
+    /// control, in which case the batch waits again.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1024,28 +1093,60 @@ impl RuntimeIngestorHost {
     )]
     async fn dispatch_acknowledged(
         &mut self,
-        messages: Vec<IngestorIntakeMessage<'_>>,
+        mut messages: Vec<IngestorIntakeMessage<'_>>,
+        mut decided: IngestorQuiesceObservation,
+        mut maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<RuntimeBatchAcknowledgement> {
-        let mut collector = IngestRouteCollector::new(
-            self.collector.projection.clone(),
-            messages.len().max(1),
-            self.metrics.clone(),
-            self.runtime.inner.data_plane.ingest_group_idle_flush(),
-        );
-        let decoded = self
-            .runtime
-            .decode_raw_ingest_payload(
+        let _held = NodeQuiesceWorkGuard::begin(self.work.clone());
+        let (mut collector, payloads) = loop {
+            nervix_primitives::task::consume_budget().await;
+            if messages.is_empty() {
+                let roots = BatchRoots::new(&self.ack_root_trackers, 0);
+                return Ok(self.batch_acknowledgement(roots));
+            }
+            let mut collector = IngestRouteCollector::new(
+                self.collector.projection.clone(),
+                messages.len(),
+                self.metrics.clone(),
+                self.runtime.inner.data_plane.ingest_group_idle_flush(),
+            );
+            let decode = self.runtime.decode_raw_ingest_payload(
                 &mut collector,
-                QueueAdmission::RefuseWhenFull,
                 &self.codec,
                 messages.iter().map(batch_payload),
-            )
-            .await;
-        let payloads = match decoded {
-            Ok(payloads) => payloads,
-            Err(refusal) => {
-                self.count_refused(messages.len());
-                return Err(refusal.change_context(IngestorIntakeError::Dispatch));
+            );
+            let mut transport = WaitingTransport {
+                maintenance: reborrow_maintenance(&mut maintenance),
+                runtime: &self.runtime,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+            };
+            let delivery = self
+                .quiesce
+                .run_until_redecided(
+                    &mut decided,
+                    &mut self.delivery_stop,
+                    transport.serve(decode),
+                )
+                .await;
+            match delivery {
+                LiveDeliveryEnd::Completed(Ok(payloads)) => break (collector, payloads),
+                LiveDeliveryEnd::Completed(Err(refusal)) => {
+                    // A wait for a place ends in a refusal only once the node's executor admits no
+                    // more work, which happens only as the node stops.
+                    return Err(refusal.change_context(IngestorIntakeError::Stopped));
+                }
+                LiveDeliveryEnd::Stopped => {
+                    return Err(Report::new(IngestorIntakeError::Stopped));
+                }
+                LiveDeliveryEnd::Redecide => {
+                    // An ingestor whose input bypasses the quiesce control dispatches what it
+                    // already read whatever the decision, so its batch waits again.
+                    if self.buffered_intake {
+                        decided = self.quiesce.observation();
+                        messages = self.admit_acknowledged(messages).await;
+                    }
+                }
             }
         };
 
@@ -1114,12 +1215,14 @@ impl RuntimeIngestorHost {
     /// Decodes an unacknowledged batch read while the ingestor was not quiesced into the instance's
     /// open ingest group, and accepts it there.
     ///
-    /// Its ingestor cannot present the batch again. When the node's extension workers have no room
-    /// for its unfolding, the batch waits for a place if this ingestor's loop may be held, and is
-    /// otherwise refused and counted. The wait ends when the ingestor stops, which drops the
-    /// batch, or when a quiesce decision newer than `decided` arrives: the quiesce control then
-    /// decides on the batch as on input read while quiesced, unless the ingestor's input bypasses the
-    /// control, in which case the batch waits again.
+    /// Its ingestor cannot present the batch again, so when the node's extension workers have no
+    /// room for its unfolding, the batch waits for a place and is never refused: its ingestor takes
+    /// nothing further from its transport, `maintenance` keeps the transport serviced, and the
+    /// waiting batch counts as work its unit admitted. The wait ends when the ingestor stops, which
+    /// leaves the batch's positions unconfirmed for a transport that keeps them to present again,
+    /// or when a quiesce decision newer than `decided` arrives: the quiesce control then decides on
+    /// the batch as on input read while quiesced, unless the ingestor's input bypasses the control,
+    /// in which case the batch waits again.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1131,46 +1234,52 @@ impl RuntimeIngestorHost {
         &mut self,
         messages: Vec<IngestorIntakeMessage<'_>>,
         mut decided: IngestorQuiesceObservation,
+        mut maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<()> {
+        let held = NodeQuiesceWorkGuard::begin(self.work.clone());
         let payloads = loop {
             nervix_primitives::task::consume_budget().await;
             let decode = self.runtime.decode_raw_ingest_payload(
                 &mut self.collector,
-                self.unacknowledged_admission,
                 &self.codec,
                 messages.iter().map(batch_payload),
             );
-            let decoded = match self.unacknowledged_admission {
-                QueueAdmission::RefuseWhenFull => decode.await,
-                QueueAdmission::WaitForPlace => {
-                    let delivery = self
-                        .quiesce
-                        .run_until_redecided(&mut decided, &mut self.delivery_stop, decode)
-                        .await;
-                    match delivery {
-                        LiveDeliveryEnd::Completed(decoded) => decoded,
-                        LiveDeliveryEnd::Stopped => {
-                            self.collector.discard_undispatched_payloads();
-                            self.report_stopped_delivery();
-                            return Ok(());
-                        }
-                        LiveDeliveryEnd::Redecide => {
-                            self.collector.discard_undispatched_payloads();
-                            // An ingestor whose input bypasses the quiesce control dispatches what
-                            // it already read whatever the decision, so its batch waits again.
-                            if !self.buffered_intake {
-                                continue;
-                            }
-                            return self.retain_unacknowledged(messages).await;
-                        }
-                    }
-                }
+            let mut transport = WaitingTransport {
+                maintenance: reborrow_maintenance(&mut maintenance),
+                runtime: &self.runtime,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
             };
-            match decoded {
-                Ok(payloads) => break payloads,
-                Err(refusal) => {
-                    self.count_refused(messages.len());
-                    return Err(refusal.change_context(IngestorIntakeError::Dispatch));
+            let delivery = self
+                .quiesce
+                .run_until_redecided(
+                    &mut decided,
+                    &mut self.delivery_stop,
+                    transport.serve(decode),
+                )
+                .await;
+            match delivery {
+                LiveDeliveryEnd::Completed(Ok(payloads)) => break payloads,
+                LiveDeliveryEnd::Completed(Err(refusal)) => {
+                    // A wait for a place ends in a refusal only once the node's executor admits no
+                    // more work, which happens only as the node stops.
+                    return Err(refusal.change_context(IngestorIntakeError::Stopped));
+                }
+                LiveDeliveryEnd::Stopped => {
+                    self.collector.discard_undispatched_payloads();
+                    self.report_stopped_delivery();
+                    return Err(Report::new(IngestorIntakeError::Stopped));
+                }
+                LiveDeliveryEnd::Redecide => {
+                    self.collector.discard_undispatched_payloads();
+                    // An ingestor whose input bypasses the quiesce control dispatches what it
+                    // already read whatever the decision, so its batch waits again.
+                    if !self.buffered_intake {
+                        continue;
+                    }
+                    // The quiesce control takes the batch over, and counts what it keeps itself.
+                    drop(held);
+                    return self.retain_unacknowledged(messages, maintenance).await;
                 }
             }
         };
@@ -1211,7 +1320,8 @@ impl RuntimeIngestorHost {
     }
 
     /// Hands an unacknowledged payload this instance read to the quiesce control, and delivers it
-    /// when the control lets it dispatch. Answers whether its messages entered the ingest group.
+    /// when the control lets it dispatch, with `maintenance` servicing the transport for as long as
+    /// it waits. Answers whether its messages entered the ingest group.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1222,16 +1332,18 @@ impl RuntimeIngestorHost {
     async fn intake_unacknowledged_payload(
         &mut self,
         payload: BufferedIngestPayload,
+        maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<bool> {
         // Observed before the decision is taken, so a newer one is never missed.
         let decided = self.quiesce.observation();
         match self.quiesce.intake(payload, false) {
             IngestorQuiesceIntake::Dispatch(payload) => {
-                self.deliver_unacknowledged(payload, decided).await
+                self.deliver_unacknowledged(payload, decided, maintenance)
+                    .await
             }
             IngestorQuiesceIntake::Buffered
             | IngestorQuiesceIntake::Dropped
-            | IngestorQuiesceIntake::Rejected { .. } => Ok(false),
+            | IngestorQuiesceIntake::Rejected => Ok(false),
         }
     }
 
@@ -1239,10 +1351,12 @@ impl RuntimeIngestorHost {
     /// answers whether its messages entered the ingest group.
     ///
     /// When the node's extension workers have no room for its unfolding, the payload waits for a
-    /// place or is refused and counted, as this ingestor's admission says. The wait ends when the
-    /// ingestor stops, which drops the payload, or when a newer quiesce decision arrives, under
-    /// which the control decides on the payload again: a buffer retains it, a drop policy drops
-    /// and counts it, and a suspension lets it dispatch, so it waits on.
+    /// place and is never refused: its ingestor takes nothing further from its transport,
+    /// `maintenance` keeps the transport serviced, and the waiting payload counts as work its unit
+    /// admitted. The wait ends when the ingestor stops, which leaves the payload undelivered, or
+    /// when a newer quiesce decision arrives, under which the control decides on the payload again:
+    /// a buffer retains it, a drop policy drops and counts it, and a suspension lets it dispatch,
+    /// so it waits on.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1254,46 +1368,51 @@ impl RuntimeIngestorHost {
         &mut self,
         mut payload: BufferedIngestPayload,
         mut decided: IngestorQuiesceObservation,
+        mut maintenance: Option<&mut dyn IngestorReadHold>,
     ) -> IngestorIntakeResult<bool> {
+        let _held = NodeQuiesceWorkGuard::begin(self.work.clone());
         let decoded = loop {
             nervix_primitives::task::consume_budget().await;
             let decode = self.runtime.decode_raw_ingest_payload(
                 &mut self.collector,
-                self.unacknowledged_admission,
                 &self.codec,
                 payload.indexed_payloads(),
             );
+            let mut transport = WaitingTransport {
+                maintenance: reborrow_maintenance(&mut maintenance),
+                runtime: &self.runtime,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+            };
             let delivery = self
                 .quiesce
-                .run_until_redecided(&mut decided, &mut self.delivery_stop, decode)
+                .run_until_redecided(
+                    &mut decided,
+                    &mut self.delivery_stop,
+                    transport.serve(decode),
+                )
                 .await;
-            let decoded = match delivery {
-                LiveDeliveryEnd::Completed(decoded) => decoded,
+            match delivery {
+                LiveDeliveryEnd::Completed(Ok(payloads)) => break payloads,
+                LiveDeliveryEnd::Completed(Err(refusal)) => {
+                    // A wait for a place ends in a refusal only once the node's executor admits no
+                    // more work, which happens only as the node stops.
+                    return Err(refusal.change_context(IngestorIntakeError::Stopped));
+                }
                 LiveDeliveryEnd::Stopped => {
                     self.collector.discard_undispatched_payloads();
                     self.report_stopped_delivery();
-                    return Ok(false);
+                    return Err(Report::new(IngestorIntakeError::Stopped));
                 }
                 LiveDeliveryEnd::Redecide => {
                     self.collector.discard_undispatched_payloads();
                     decided = self.quiesce.observation();
                     match self.quiesce.intake(payload, false) {
-                        IngestorQuiesceIntake::Dispatch(returned) => {
-                            payload = returned;
-                            continue;
-                        }
+                        IngestorQuiesceIntake::Dispatch(returned) => payload = returned,
                         IngestorQuiesceIntake::Buffered
                         | IngestorQuiesceIntake::Dropped
-                        | IngestorQuiesceIntake::Rejected { .. } => return Ok(false),
+                        | IngestorQuiesceIntake::Rejected => return Ok(false),
                     }
-                }
-            };
-            match decoded {
-                Ok(payloads) => break payloads,
-                Err(refusal) => {
-                    self.count_refused(payload.len());
-                    return Err(UnfoldingNotAdmitted::group_error(refusal)
-                        .change_context(IngestorIntakeError::Dispatch));
                 }
             }
         };
@@ -1333,14 +1452,6 @@ impl RuntimeIngestorHost {
         Ok(true)
     }
 
-    /// Counts `payloads` an intake did not deliver because the node's extension
-    /// workers had no room to unfold them.
-    fn count_refused(&self, payloads: usize) {
-        self.interactions
-            .unfolding_refused
-            .inc_by(payloads.arch_into());
-    }
-
     /// Consumes every payload of an unacknowledged or retained batch its codec refused, as the
     /// ingestor took the batch in at `ingested_at`, and returns the metadata rows of the payloads
     /// that decoded.
@@ -1356,14 +1467,14 @@ impl RuntimeIngestorHost {
         payloads.decoded
     }
 
-    /// Records that the ingestor stopped while a live payload waited for the node's extension
-    /// workers, which drops the payload with the rest of the ingestor's in-flight input.
+    /// Records that the ingestor stopped while a payload it took waited for the node's extension
+    /// workers. The payload never entered its ingest group, and its positions stay unconfirmed, so
+    /// a transport that keeps them presents it again.
     fn report_stopped_delivery(&self) {
         debug!(
             domain = self.domain.as_str(),
             ingestor = self.ingestor.as_str(),
-            "dropped an unacknowledged payload that waited for the node's extension workers when \
-             the ingestor stopped"
+            "the ingestor stopped while a payload it took waited for the node's extension workers"
         );
     }
 }
@@ -1425,7 +1536,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
                     .await
                     .change_context(IngestorIntakeError::RateLimit)?
             }
-            None => return self.take_in_unacknowledged(messages).await,
+            None => return self.take_in_unacknowledged(messages, maintenance).await,
         };
         let mut run = Vec::with_capacity(messages.len());
         for (message, cost) in messages.into_iter().zip(costs) {
@@ -1445,8 +1556,11 @@ impl IngestorHostServices for RuntimeIngestorHost {
                         // What the allowance admitted goes on before the hold, so a payload never
                         // waits for the allowance of the payloads behind it.
                         if !run.is_empty() {
-                            self.take_in_unacknowledged(std::mem::take(&mut run))
-                                .await?;
+                            self.take_in_unacknowledged(
+                                std::mem::take(&mut run),
+                                reborrow_maintenance(&mut maintenance),
+                            )
+                            .await?;
                         }
                         self.hold_intake(until, reborrow_maintenance(&mut maintenance))
                             .await?;
@@ -1457,7 +1571,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
         if run.is_empty() {
             return Ok(());
         }
-        self.take_in_unacknowledged(run).await
+        self.take_in_unacknowledged(run, maintenance).await
     }
 
     async fn intake_acknowledged(
@@ -1478,7 +1592,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
                     .change_context(IngestorIntakeError::RateLimit)?
             }
             None => {
-                let acknowledgement = self.take_in_acknowledged(messages).await?;
+                let acknowledgement = self.take_in_acknowledged(messages, maintenance).await?;
                 return Ok(IngestorBatchAcknowledgement::new(acknowledgement));
             }
         };
@@ -1502,7 +1616,12 @@ impl IngestorHostServices for RuntimeIngestorHost {
                         // join the batch's acknowledgement, which arms its ACK TIMEOUT only once
                         // the last payload was admitted and taken in.
                         if !run.is_empty() {
-                            let taken = self.take_in_acknowledged(std::mem::take(&mut run)).await?;
+                            let taken = self
+                                .take_in_acknowledged(
+                                    std::mem::take(&mut run),
+                                    reborrow_maintenance(&mut maintenance),
+                                )
+                                .await?;
                             join_run(&mut acknowledgement, taken);
                         }
                         self.hold_intake(until, reborrow_maintenance(&mut maintenance))
@@ -1512,7 +1631,7 @@ impl IngestorHostServices for RuntimeIngestorHost {
             }
         }
         if !run.is_empty() {
-            let taken = self.take_in_acknowledged(run).await?;
+            let taken = self.take_in_acknowledged(run, maintenance).await?;
             join_run(&mut acknowledgement, taken);
         }
         let acknowledgement = match acknowledgement {
@@ -1710,8 +1829,8 @@ impl RuntimeIngestorHost {
     /// Delivers the oldest payload this instance's quiesce buffer retained, and answers whether it
     /// delivered one.
     ///
-    /// Nothing can present a retained payload again: an endpoint already answered it and an ingestor
-    /// already moved past it. Its unfolding therefore waits for a place on the node's extension
+    /// Its sender gave the buffer ownership of a retained payload. Its unfolding waits for a place
+    /// on the node's extension
     /// workers rather than being refused, and the payload stays retained, counted with its bytes,
     /// until its messages are accepted into the ingest group. A shutdown or a new quiesce ends
     /// that wait and leaves the payload at the front of the buffer, so it is delivered first when
@@ -1731,16 +1850,17 @@ impl RuntimeIngestorHost {
         };
         let decode = self.runtime.decode_raw_ingest_payload(
             &mut self.collector,
-            QueueAdmission::WaitForPlace,
             &self.codec,
             retained.payload().indexed_payloads(),
         );
         let decoded = retained.run_until_interrupted(&self.shutdown, decode).await;
         let Some(decoded) = decoded else {
-            // The group keeps none of the payload's messages, and dropping the delivery puts the
-            // payload back at the front of the buffer.
+            // Dropping returns the payload to the front or removes an abandoned request. In the
+            // latter case the host can continue draining under the same pause decision.
             self.collector.discard_undispatched_payloads();
-            return Ok(false);
+            return Ok(retained
+                .reply()
+                .is_some_and(endpoint_pause::EndpointPauseReply::abandoned));
         };
         let payloads = match decoded {
             Ok(payloads) => payloads,
@@ -1756,15 +1876,50 @@ impl RuntimeIngestorHost {
                 return Ok(false);
             }
         };
+        if retained.is_endpoint() {
+            if self.quiesce.is_quiesced() {
+                self.collector.discard_undispatched_payloads();
+                return Ok(false);
+            }
+            if retained.reply().is_some_and(|reply| !reply.admit()) {
+                self.collector.discard_undispatched_payloads();
+                if let Some(reply) = retained.refuse_endpoint() {
+                    reply.answer(endpoint_pause::EndpointPauseOutcome::Finished(
+                        EndpointRequestOutcome::NotAdmitted(
+                            endpoint_acknowledgement::EndpointAdmissionRefusal::PauseExpired,
+                        ),
+                    ));
+                }
+                return Ok(true);
+            }
+            let mut delivery = retained.into_endpoint(&self.quiesce);
+            if let Some(reply) = delivery.reply.take() {
+                self.deliver_waiting_endpoint(&delivery.payload, payloads, reply)
+                    .await?;
+            } else {
+                self.dispatch_retained_payload(&delivery.payload, payloads)
+                    .await?;
+            }
+            return Ok(true);
+        }
         // What its codec refused is consumed, and the payload's other messages are in the group, so
         // it leaves the buffer before the group accepts them.
         let payload = retained.finish();
+        self.dispatch_retained_payload(&payload, payloads).await?;
+        Ok(true)
+    }
+
+    async fn dispatch_retained_payload(
+        &mut self,
+        payload: &BufferedIngestPayload,
+        payloads: SplitPayloads<usize>,
+    ) -> IngestorIntakeResult<()> {
         let payloads = payloads.map(|index| payload.metadata_row(index));
         let metadata = self
             .consume_refused_payloads(payloads, payload.observed_at())
             .await;
         if metadata.is_empty() {
-            return Ok(true);
+            return Ok(());
         }
         self.runtime
             .accept_raw_ingest_payload(RawIngestAcceptance {
@@ -1791,7 +1946,84 @@ impl RuntimeIngestorHost {
         {
             self.flush().await?;
         }
-        Ok(true)
+        Ok(())
+    }
+
+    /// Admits one retained endpoint body in order and hands its reply to the waiting request.
+    /// The request waits for the root after the replay task has moved on to the next body.
+    async fn deliver_waiting_endpoint(
+        &mut self,
+        payload: &BufferedIngestPayload,
+        decoded: SplitPayloads<usize>,
+        reply: endpoint_pause::EndpointPauseReply,
+    ) -> IngestorIntakeResult<()> {
+        use endpoint_acknowledgement::EndpointInputRefusal;
+        use endpoint_pause::EndpointPauseOutcome;
+
+        let decoded = decoded.map(|index| payload.metadata_row(index));
+        let metadata = self
+            .consume_refused_payloads(decoded, payload.observed_at())
+            .await;
+        if metadata.is_empty() {
+            reply.answer(EndpointPauseOutcome::Finished(
+                EndpointRequestOutcome::Refused(EndpointInputRefusal::Codec),
+            ));
+            return Ok(());
+        }
+        let response_root = if reply.acknowledged() {
+            Some(self.handles.tracked_root())
+        } else {
+            None
+        };
+        let routed_ack = match &response_root {
+            Some((root, _)) if self.branched_senders.is_empty() => root.clone(),
+            Some((root, _)) => root.attached(),
+            None => AckSet::empty(),
+        };
+        let dispatch = self
+            .runtime
+            .dispatch_ingested_records(IngestGroupDispatch {
+                handles: &self.handles,
+                collector: &mut self.collector,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                metadata: &metadata,
+                ingested_at: payload.observed_at(),
+                acks: vec![routed_ack],
+            })
+            .await
+            .change_context(IngestorIntakeError::Dispatch);
+        let flush = self.flush().await;
+        let completion = match response_root {
+            Some((root, completion)) => {
+                root.ack_success();
+                Some(completion)
+            }
+            None => None,
+        };
+        if let Err(error) = dispatch.and(flush) {
+            reply.answer(EndpointPauseOutcome::Finished(
+                EndpointRequestOutcome::ProcessingFailed(
+                    nervix_models::ClientProcessingFailure::Rejected,
+                ),
+            ));
+            return Err(error);
+        }
+        let outcome = match completion {
+            Some(_) if self.collector.input_refused() => EndpointPauseOutcome::Finished(
+                EndpointRequestOutcome::Refused(EndpointInputRefusal::Route),
+            ),
+            Some(completion) => EndpointPauseOutcome::Acknowledging {
+                completion,
+                intake_ending: self.shutdown.clone(),
+            },
+            None => EndpointPauseOutcome::Finished(EndpointRequestOutcome::Completed),
+        };
+        reply.answer(outcome);
+        Ok(())
     }
 }
 
@@ -2052,6 +2284,9 @@ async fn run_paced_ingestor<C, H, D>(
         match host.intake_poll(poll, intake_batch).await {
             Ok(true) => flush_paced_ingestor(&mut host).await,
             Ok(false) => {}
+            // The ingestor stopped while the poll waited, which is no failure; the loop sees the
+            // stop at its next turn.
+            Err(error) if error.current_context().stopped() => {}
             Err(error) => host.report_error(format!("{error:#}")),
         }
     }

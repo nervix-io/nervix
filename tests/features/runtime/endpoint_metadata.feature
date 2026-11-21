@@ -299,7 +299,7 @@ Feature: Endpoint request metadata
       CREATE VHOST edge http-{{test_id}}-buffered.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR buffered_in
-        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO requests
           INHERIT ALL
           SET method = metadata.method, path = metadata.path, query = metadata.query,

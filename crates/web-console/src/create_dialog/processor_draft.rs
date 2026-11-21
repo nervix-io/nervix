@@ -20,12 +20,12 @@ use std::{collections::BTreeSet, num::NonZeroU64};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    AckMode, BranchName, BranchSelection, CorrelatorName, CreateCorrelator, CreateDeduplicator,
+    AckMode, BranchSelection, CorrelatorName, CreateCorrelator, CreateDeduplicator,
     CreateGenerator, CreateInferencer, CreateJunction, CreateReingestor, CreateReorderer,
     CreateWasmProcessor, CreateWindowProcessor, DeduplicatorName, Expression, FieldName,
     FieldReference, FieldScope, GeneratorName, InferencerName, JunctionName,
     MaterializedStateDependency, MaterializedStatePolicy, Model, ModelKind, NodeRef,
-    ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
+    ParametrizerName, ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
     RequestedResourceVersion, WasmProcessorName, WindowProcessorName,
 };
 use nervix_plexus::parse_expression;
@@ -397,7 +397,7 @@ pub(super) enum NodeBranchDraft {
     #[default]
     Unselected,
     Unbranched,
-    Branched(Option<SelectedReference<BranchName>>),
+    Branched(Option<SelectedReference<ParametrizerName>>),
 }
 
 impl NodeBranchDraft {
@@ -412,16 +412,16 @@ impl NodeBranchDraft {
     }
 
     pub(super) fn select_branch(&mut self, node: &NodeRef) {
-        if node.kind == ModelKind::Branch
+        if node.kind == ModelKind::Parametrizer
             && let Self::Branched(branch) = self
         {
-            *branch = Some(SelectedReference::chosen(BranchName::from(
+            *branch = Some(SelectedReference::chosen(ParametrizerName::from(
                 &node.identifier,
             )));
         }
     }
 
-    pub(super) fn current_branch(&self) -> Option<&BranchName> {
+    pub(super) fn current_parametrizer(&self) -> Option<&ParametrizerName> {
         let Self::Branched(Some(branch)) = self else {
             return None;
         };
@@ -442,8 +442,8 @@ impl NodeBranchDraft {
             Self::Unselected => Err(Report::new(ProcessorDraftError::Branching { family })),
             Self::Unbranched => Ok(BranchSelection::Unbranched),
             Self::Branched(None) => Err(Report::new(ProcessorDraftError::Branch { family })),
-            Self::Branched(Some(branch)) => Ok(BranchSelection::BranchedBy {
-                branch: branch
+            Self::Branched(Some(parametrizer)) => Ok(BranchSelection::BranchedBy {
+                parametrizer: parametrizer
                     .current_name()
                     .ok_or_else(|| Report::new(ProcessorDraftError::BranchChanged))?
                     .clone(),
@@ -871,9 +871,9 @@ impl ProcessorDraft {
     }
 
     pub(super) fn select_branch(&mut self, node: &NodeRef) {
-        let previous = self.branching.current_branch().cloned();
+        let previous = self.branching.current_parametrizer().cloned();
         self.branching.select_branch(node);
-        if self.branching.current_branch() != previous.as_ref() {
+        if self.branching.current_parametrizer() != previous.as_ref() {
             self.invalidate_relays();
         }
     }
@@ -1363,9 +1363,9 @@ pub(super) enum ProcessorDraftError {
     CollectFor { list: InputList },
     #[error("Enter a valid node FILTER WHERE expression")]
     Filter,
-    #[error("Choose UNBRANCHED or a named branch for this {family}")]
+    #[error("Choose UNBRANCHED or a parametrizer for this {family}")]
     Branching { family: ProcessorFamily },
-    #[error("Choose the {family}'s named branch")]
+    #[error("Choose the {family}'s parametrizer")]
     Branch { family: ProcessorFamily },
     #[error("Add at least one {clause} expression")]
     Keys { clause: KeyClause },
@@ -1460,9 +1460,9 @@ pub(super) enum ProcessorDraftError {
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        BinaryOperator, BranchName, CorrelatorMatchPolicy, CreateStatement, Expression, FieldName,
+        BinaryOperator, CorrelatorMatchPolicy, CreateStatement, Expression, FieldName,
         FieldReference, FieldScope, InputCollectPolicy, Literal, MaterializedStatePolicy, Model,
-        ModelName, OutputBranch, RequestedResourceVersion, Statement,
+        ModelName, OutputBranch, ParametrizerName, RequestedResourceVersion, Statement,
     };
     use nervix_plexus::statement::parse_statement;
 
@@ -1716,7 +1716,7 @@ mod tests {
         draft.routes[1].branch.choose_branched();
         draft.routes[1]
             .branch
-            .select_branch(&node(ModelKind::Branch, "by_tenant"));
+            .select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
         draft.routes[1]
             .branch
             .add_assignment(FieldName::parse("tenant").assured("field is valid"));
@@ -1733,7 +1733,7 @@ mod tests {
             Some(OutputBranch::Unbranched)
         );
         assert!(
-            matches!(&built.output_routes.routes[1].branch, Some(OutputBranch::BranchedBy { branch, assignments }) if branch == &BranchName::parse("by_tenant").assured("valid branch") && assignments.len() == 1)
+            matches!(&built.output_routes.routes[1].branch, Some(OutputBranch::BranchedBy { parametrizer, assignments }) if parametrizer == &ParametrizerName::parse("by_tenant").assured("valid branch") && assignments.len() == 1)
         );
         let statement = statement(&draft);
         let preview = statement
@@ -1803,7 +1803,7 @@ mod tests {
                 family: ProcessorFamily::Junction
             }
         );
-        draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
+        draft.select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
         assert!(matches!(
             draft.build_junction().unwrap_err().current_context(),
             ProcessorDraftError::Input {
@@ -2457,21 +2457,21 @@ mod tests {
                 family: ProcessorFamily::Junction
             }
             .to_string(),
-            "Choose UNBRANCHED or a named branch for this junction"
+            "Choose UNBRANCHED or a parametrizer for this junction"
         );
         assert_eq!(
             ProcessorDraftError::Branching {
                 family: ProcessorFamily::Deduplicator
             }
             .to_string(),
-            "Choose UNBRANCHED or a named branch for this deduplicator"
+            "Choose UNBRANCHED or a parametrizer for this deduplicator"
         );
         assert_eq!(
             ProcessorDraftError::Branch {
                 family: ProcessorFamily::Reorderer
             }
             .to_string(),
-            "Choose the reorderer's named branch"
+            "Choose the reorderer's parametrizer"
         );
         assert_eq!(
             ProcessorDraftError::KeyExpression {

@@ -73,7 +73,12 @@ pub enum TransactionCommitStepKind {
     StopDomain,
     CreateResource {
         resource: ResourceName,
+        labels: crate::EntityLabels,
         already_existed: bool,
+    },
+    EditResourceLabels {
+        resource: ResourceName,
+        labels: crate::EntityLabels,
     },
     ResetWasmState {
         reset: Box<crate::ResetWasmState>,

@@ -134,6 +134,23 @@ impl ExecutorSnapshot {
             CpuClass::Bulk => self.bulk_cpu,
         }
     }
+
+    /// What one storage class is doing.
+    pub fn storage_class(&self, class: StorageClass) -> WorkerClassSnapshot {
+        match class {
+            StorageClass::Consensus => self.consensus_storage,
+            StorageClass::Filesystem => self.filesystem_storage,
+            StorageClass::Connector => self.connector_storage,
+        }
+    }
+
+    /// What one worker class, CPU or storage, is doing.
+    pub fn worker_class(&self, class: crate::limits::WorkerClassName) -> WorkerClassSnapshot {
+        match class {
+            crate::limits::WorkerClassName::Cpu(class) => self.cpu_class(class),
+            crate::limits::WorkerClassName::Storage(class) => self.storage_class(class),
+        }
+    }
 }
 
 impl Default for Executor {
@@ -368,8 +385,10 @@ impl Executor {
 
     /// Submit one storage job and return once it is running off the async workers.
     ///
-    /// Unlike [`Self::run_storage`], dropping the async caller after this returns does not cancel
-    /// the job. The job owns its reservation until it exits.
+    /// The job waits for a place in the class's queue rather than being refused: it carries work
+    /// no caller is waiting to be answered about, such as a consensus log append. Unlike
+    /// [`Self::run_storage`], dropping the async caller after this returns does not cancel the job.
+    /// The job owns its reservation until it exits.
     pub async fn submit_storage(
         &self,
         class: StorageClass,

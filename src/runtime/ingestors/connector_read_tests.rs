@@ -351,7 +351,7 @@ struct RecordingMaintenance {
 #[cfg(feature = "shuttle")]
 #[async_trait]
 impl IngestorReadHold for RecordingMaintenance {
-    async fn maintain(&mut self, _until: Instant) -> Report<IngestorError> {
+    async fn maintain(&mut self, _until: Option<Instant>) -> Report<IngestorError> {
         struct InFlight<'a>(&'a ReadLog);
 
         impl Drop for InFlight<'_> {

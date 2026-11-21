@@ -119,13 +119,15 @@ testing-only composition seam.
 The protocol re-exports that one type. Vocabulary consumers can use its bounded/unlimited
 distinction without depending on cryptography.
 
-The catalog declares the kind, scope and owner of every current name. Cluster quotas belong in
-`usage`; relationship quotas, durations, sets and policy belong in `operating`.
+The catalog declares the kind, scope and owner of every current name. Cluster quotas and
+capabilities belong in `usage`; relationship quotas, durations, sets and policy belong in
+`operating`.
 
 | Name | Kind and scope | Owner |
 | --- | --- | --- |
 | `cluster.nodes` | quota, cluster | committed membership admission |
 | `cluster.domains` | quota, cluster | domain admission |
+| `licensing.dummy` | capability, cluster | none: it changes nothing |
 | `license.activations.persistent` | quota, license | service activation capacity |
 | `license.activations.ephemeral` | quota, license | service activation capacity |
 | `activation.kinds` | persistent/ephemeral set, organization | service activation admission |
@@ -137,8 +139,10 @@ The catalog declares the kind, scope and owner of every current name. Cluster qu
 | `transition.capability_removal_grace` | bounded duration, organization | transition arithmetic |
 | `transition.quota_reduction_grace` | bounded duration, organization | transition arithmetic |
 
-There are no current capability entries. A bounded quota of zero, an unlimited quota, and an
-absent override are distinct. Plans provide every catalog name; overrides replace complete values
+A capability is `enabled` or `disabled`. `licensing.dummy` is the only capability, and nothing in
+Nervix reads it: a license enables it so that `DESCRIBE LICENSE` shows that a verified decision
+reached the cluster. Nothing uses it, so removing it starts no transition. A bounded quota of zero,
+an unlimited quota, and an absent override are distinct. Plans provide every catalog name; overrides replace complete values
 for only the names they contain. The service refuses unknown names. A receiving cluster retains
 an unknown name's complete external JSON and ignores it during evaluation; a known name with an
 invalid value is always refused. This extension behavior is part of the external contract.
@@ -149,7 +153,8 @@ SHA-256 over typed serialization with fixed field order and sorted maps. Active 
 from the assignment. Every non-active status uses the free usage policy, except expired ephemeral
 activations, whose usage is empty. Operating conditions remain authoritative in each state.
 An organization suspension yields suspended/free usage even when the license itself is active.
-The free policy grants every current cluster quota without a limit and has no operating half.
+The free policy grants every current cluster quota without a limit, disables every capability and
+has no operating half.
 An expired lifetime is a firm stop even if the license or activation also has another terminal state.
 
 ## Decision Acceptance

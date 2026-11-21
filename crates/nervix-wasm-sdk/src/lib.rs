@@ -4,9 +4,11 @@
 //! [`export_processor!`]. The SDK owns the complete guest side of the Nervix
 //! WASM C ABI: the reusable linear-memory buffer, FlatBuffers envelope
 //! encoding and decoding, the emit queue, the global-error channel, panic
-//! conversion, error-state latching, and guest snapshot plumbing. Processor
-//! code only sees typed inputs ([`InputBatch`]), typed outputs
-//! ([`OutputEnvelope`]), and the branch configuration ([`BranchContext`]).
+//! conversion, error-state latching, guest snapshot plumbing, and the state
+//! description an operator's inspection reads. Processor code only sees typed
+//! inputs ([`InputBatch`]), typed outputs ([`OutputEnvelope`]), the description
+//! of its state ([`StateDescription`]), and the branch configuration
+//! ([`BranchContext`]).
 //!
 //! ```ignore
 //! use error_stack::Result;
@@ -35,7 +37,8 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The complete guest half of the ABI: the reusable linear-memory buffer, envelope
-//!   encoding and decoding, the emit queue, error latching, panic conversion and snapshot plumbing.
+//!   encoding and decoding, the emit queue, error latching, panic conversion, snapshot plumbing
+//!   and the state description.
 //! - **Depends on.** `nervix-wasm-protocol`, Arrow, and `error-stack`.
 //! - **Must not know.** The host, the server, the Models or Plexus. It is compiled into user guests
 //!   and ships on its own.
@@ -47,6 +50,7 @@
 
 pub mod abi;
 mod context;
+mod description;
 mod envelope;
 mod error;
 mod processor;
@@ -64,6 +68,7 @@ pub use nervix_wasm_protocol::{
 
 pub use crate::{
     context::{BranchContext, DomainTime, GuestContext, TimeoutHandle},
+    description::StateDescription,
     envelope::{InputBatch, OutputEnvelope, ProcessorTypeArrow},
     error::GuestError,
     processor::Processor,
@@ -157,6 +162,11 @@ macro_rules! export_processor {
             #[unsafe(no_mangle)]
             pub extern "C" fn nervix_reset_state() -> i32 {
                 $crate::abi::reset_state(&INSTANCE)
+            }
+
+            #[unsafe(no_mangle)]
+            pub extern "C" fn nervix_describe_state() -> i32 {
+                $crate::abi::describe_state(&INSTANCE)
             }
         };
     };

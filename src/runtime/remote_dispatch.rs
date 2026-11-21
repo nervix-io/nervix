@@ -1045,11 +1045,13 @@ impl RemoteDispatcher {
             };
             let (batch_ipc, decoded_bytes) = match encoded_body.clone() {
                 Some(bytes) => bytes,
+                // A subscription delivery answers no waiting caller, so a full queue holds the
+                // batch back rather than dropping it for its subscribers.
                 None => match batch
                     .batch
                     .encode_arrow_ipc(
                         self.executor(),
-                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                        nervix_execution::QueueAdmission::WaitForPlace,
                     )
                     .await
                 {

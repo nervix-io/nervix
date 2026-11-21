@@ -14,12 +14,13 @@ use meticulous::ResultExt as _;
 use nervix_wasm_protocol::{
     AckSidecar, AckToken, AckTokenSet, BranchInit, Envelope, GuestSnapshot, MessageErrorSet,
     NackSet, OutputColumnRef, OutputRow, ProcessorField, ProcessorSchema, ProcessorType,
-    RoutedOutput,
+    RoutedOutput, StateDescription, StateSection,
 };
 
 use crate::{Arbitrary, Domain, Entropy};
 
-/// At most four routes/sidecar sets, six tokens per set, sixteen fields and type depth three.
+/// At most four routes/sidecar sets or state sections, six tokens per set, sixteen fields and type
+/// depth three.
 pub struct WasmValues<'a> {
     arbitrary: Arbitrary<'a>,
 }
@@ -204,5 +205,19 @@ impl<'a> WasmValues<'a> {
             init_metadata: self.branch_init().encode(),
             application_state: self.bytes(),
         }
+    }
+
+    /// A state description of up to four sections, each a schema and opaque rows: the protocol
+    /// carries the rows as bytes, and only the host reads them as Arrow.
+    pub fn state_description(&mut self) -> StateDescription {
+        let count = self.entropy().count(4);
+        let mut sections = Vec::with_capacity(count);
+        for _ in 0..count {
+            sections.push(StateSection {
+                schema: self.schema(),
+                arrow_ipc_batch: self.bytes(),
+            });
+        }
+        StateDescription { sections }
     }
 }

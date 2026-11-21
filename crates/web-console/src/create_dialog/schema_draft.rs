@@ -1,4 +1,4 @@
-//! Browser drafts for schema, wire schema, and branch creation.
+//! Browser drafts for schema, wire schema, and parametrizer creation.
 //!
 //! Layer: edges.
 //!
@@ -18,9 +18,9 @@ use std::{
 
 use error_stack::Report;
 use nervix_models::{
-    AvroType, BranchEviction, BranchName, CborType, CreateBranch, CreateSchema, CreateWireSchema,
-    FieldName, JsonType, Model, ModelKind, NodeRef, ParseAsType, SchemaField, SchemaName,
-    WireSchemaField, WireSchemaName, WireSchemaStrictness,
+    AvroType, CborType, CreateParametrizer, CreateSchema, CreateWireSchema, FieldName, JsonType,
+    Model, ModelKind, NodeRef, ParametrizerEviction, ParametrizerName, ParseAsType, SchemaField,
+    SchemaName, WireSchemaField, WireSchemaName, WireSchemaStrictness,
 };
 use thiserror::Error;
 
@@ -256,7 +256,7 @@ pub(super) struct StructuredDrafts {
     pub(super) wire_json: WireSchemaDraft,
     pub(super) wire_cbor: WireSchemaDraft,
     pub(super) wire_avro: WireSchemaDraft,
-    pub(super) branch: BranchDraft,
+    pub(super) parametrizer: ParametrizerDraft,
 }
 
 impl StructuredDrafts {
@@ -460,7 +460,7 @@ fn remove_item<T>(items: &mut Vec<T>, index: usize) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct BranchDraft {
+pub(super) struct ParametrizerDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
     /// A changed domain keeps the prior reference visible until it is reselected.
@@ -473,21 +473,21 @@ pub(super) struct BranchDraft {
     pub(super) max_instances: String,
 }
 
-impl Default for BranchDraft {
+impl Default for ParametrizerDraft {
     fn default() -> Self {
         Self {
             name: String::new(),
             if_not_exists: false,
             schema: None,
             ttl: String::new(),
-            partitions: nervix_models::BranchPartitions::ONE.to_string(),
+            partitions: nervix_models::ParametrizerPartitions::ONE.to_string(),
             limit_instances: false,
             max_instances: String::new(),
         }
     }
 }
 
-impl BranchDraft {
+impl ParametrizerDraft {
     pub(super) fn select_schema(&mut self, node: &NodeRef) {
         if node.kind == ModelKind::Schema {
             self.schema = Some(SelectedReference::chosen(SchemaName::from(
@@ -511,9 +511,9 @@ impl BranchDraft {
         }
     }
 
-    pub(super) fn build(&self) -> error_stack::Result<CreateBranch, SchemaDraftError> {
-        let name = BranchName::parse(self.name.trim())
-            .map_err(|cause| cause.change_context(SchemaDraftError::BranchName))?;
+    pub(super) fn build(&self) -> error_stack::Result<CreateParametrizer, SchemaDraftError> {
+        let name = ParametrizerName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(SchemaDraftError::ParametrizerName))?;
         let Some(schema) = &self.schema else {
             return Err(Report::new(SchemaDraftError::SchemaReferenceRequired));
         };
@@ -537,16 +537,16 @@ impl BranchDraft {
                     .map_err(|cause| {
                         Report::new(cause).change_context(SchemaDraftError::MaxInstances)
                     })?;
-            Some(BranchEviction::Lru { max_instances })
+            Some(ParametrizerEviction::Lru { max_instances })
         } else {
             None
         };
-        Ok(CreateBranch {
+        Ok(CreateParametrizer {
             labels: Default::default(),
             name,
             schema: schema.clone(),
             ttl: ttl.to_string(),
-            partitions: nervix_models::BranchPartitions::Direct(partitions),
+            partitions: nervix_models::ParametrizerPartitions::Direct(partitions),
             eviction,
         })
     }
@@ -558,8 +558,8 @@ pub(super) enum SchemaDraftError {
     SchemaName,
     #[error("Wire schema name is invalid")]
     WireSchemaName,
-    #[error("Branch name is invalid")]
-    BranchName,
+    #[error("Parametrizer name is invalid")]
+    ParametrizerName,
     #[error("Add at least one field")]
     FieldsRequired,
     #[error("Field {field} has an invalid name")]
@@ -572,7 +572,7 @@ pub(super) enum SchemaDraftError {
     ArrayLength { field: usize, layer: usize },
     #[error("Choose STRICT or LOOSE mode")]
     WireModeRequired,
-    #[error("Choose a schema for the branch")]
+    #[error("Choose a schema for the parametrizer")]
     SchemaReferenceRequired,
     #[error("The selected schema belongs to a changed context; select it again")]
     SchemaReferenceChanged,
@@ -808,20 +808,20 @@ mod tests {
         let schema = SchemaName::parse("branch_key").assured("the test name is valid");
         let mut selected = SelectedReference::chosen(schema.clone());
         selected.invalidate();
-        let mut branch = BranchDraft {
+        let mut parametrizer = ParametrizerDraft {
             name: "by_key".to_string(),
             schema: Some(selected),
             ttl: "5m".to_string(),
             limit_instances: true,
             max_instances: "3".to_string(),
-            ..BranchDraft::default()
+            ..ParametrizerDraft::default()
         };
         assert_eq!(
-            draft_error(branch.build()),
+            draft_error(parametrizer.build()),
             SchemaDraftError::SchemaReferenceChanged
         );
-        branch.schema = Some(SelectedReference::chosen(schema.clone()));
-        let model = branch
+        parametrizer.schema = Some(SelectedReference::chosen(schema.clone()));
+        let model = parametrizer
             .build()
             .assured("the selected schema and positive limit are valid");
         assert_eq!(model.schema, schema);
@@ -829,44 +829,49 @@ mod tests {
             model
                 .eviction
                 .as_ref()
-                .map(BranchEviction::max_instances)
+                .map(ParametrizerEviction::max_instances)
                 .map(NonZeroU64::get),
             Some(3)
         );
-        assert_canonical_round_trip(Model::Branch(model), false);
-        branch.max_instances = "0".to_string();
-        assert_eq!(draft_error(branch.build()), SchemaDraftError::MaxInstances);
+        assert_canonical_round_trip(Model::Parametrizer(model), false);
+        parametrizer.max_instances = "0".to_string();
+        assert_eq!(
+            draft_error(parametrizer.build()),
+            SchemaDraftError::MaxInstances
+        );
     }
 
     #[test]
     fn branch_partitions_default_to_one_and_keep_the_typed_count() {
         let schema = SchemaName::parse("branch_key").assured("the test name is valid");
-        let mut branch = BranchDraft {
+        let mut parametrizer = ParametrizerDraft {
             name: "by_key".to_string(),
             schema: Some(SelectedReference::chosen(schema)),
             ttl: "5m".to_string(),
-            ..BranchDraft::default()
+            ..ParametrizerDraft::default()
         };
-        assert_eq!(branch.partitions, "1");
-        let model = branch
+        assert_eq!(parametrizer.partitions, "1");
+        let model = parametrizer
             .build()
             .assured("a new draft declares the default single partition");
-        assert_eq!(model.partitions, nervix_models::BranchPartitions::ONE);
+        assert_eq!(model.partitions, nervix_models::ParametrizerPartitions::ONE);
 
-        branch.partitions = " 4 ".to_string();
-        let model = branch.build().assured("four partitions are a valid count");
+        parametrizer.partitions = " 4 ".to_string();
+        let model = parametrizer
+            .build()
+            .assured("four partitions are a valid count");
         assert_eq!(
             model.partitions,
-            nervix_models::BranchPartitions::Direct(
+            nervix_models::ParametrizerPartitions::Direct(
                 std::num::NonZeroU16::new(4).assured("positive test count")
             )
         );
-        assert_canonical_round_trip(Model::Branch(model), false);
+        assert_canonical_round_trip(Model::Parametrizer(model), false);
 
         for invalid in ["0", "65536", "", "four", "-1"] {
-            branch.partitions = invalid.to_string();
+            parametrizer.partitions = invalid.to_string();
             assert_eq!(
-                draft_error(branch.build()),
+                draft_error(parametrizer.build()),
                 SchemaDraftError::Partitions,
                 "{invalid:?} is not a partition count"
             );
@@ -971,18 +976,21 @@ mod tests {
             }
         );
 
-        let mut branch = BranchDraft {
+        let mut parametrizer = ParametrizerDraft {
             name: "by_tenant".to_string(),
-            ..BranchDraft::default()
+            ..ParametrizerDraft::default()
         };
         assert_eq!(
-            draft_error(branch.build()),
+            draft_error(parametrizer.build()),
             SchemaDraftError::SchemaReferenceRequired
         );
-        branch.schema = Some(SelectedReference::chosen(
+        parametrizer.schema = Some(SelectedReference::chosen(
             SchemaName::parse("tenant_key").assured("valid schema name"),
         ));
-        assert_eq!(draft_error(branch.build()), SchemaDraftError::TtlRequired);
+        assert_eq!(
+            draft_error(parametrizer.build()),
+            SchemaDraftError::TtlRequired
+        );
     }
 
     #[test]

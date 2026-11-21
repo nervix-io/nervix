@@ -11,11 +11,11 @@ use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    Assignment, AssignmentTarget, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
     CorrelatorMatchPolicy, ErrorPolicies, FieldName, InferencerExecutionMode,
     InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorOperation,
-    MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, RelayName, ResourceName,
-    RouteConstruction, StructuredMessageError, Timestamp,
+    MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, ParametrizerName, RelayName,
+    ResourceName, RouteConstruction, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -136,7 +136,7 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) revision: ProcessorPlanRevision,
     pub(super) owner: NodeUnitRef,
     pub(super) root_relay: RelayName,
-    pub(super) branch: Option<BranchName>,
+    pub(super) parametrizer: Option<ParametrizerName>,
     pub(super) branch_ttl: Option<Duration>,
     pub(super) branch_max_instances: Option<NonZeroUsize>,
     pub(super) error_policies: ErrorPolicies,

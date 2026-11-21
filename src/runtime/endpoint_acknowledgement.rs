@@ -4,7 +4,7 @@
 //! - **Owns.** Request-window admission, acknowledgement outcomes, their public projection and the
 //!   outcome an ingestor counts them under.
 //! - **Depends on.** Validated endpoint plans, shared client outcomes, the endpoint request outcome
-//!   vocabulary and primitive semaphores.
+//!   vocabulary and execution primitives.
 //! - **Must not know.** HTTP framing, source registration, configuration Models or graph decisions.
 
 #![cfg_attr(
@@ -14,12 +14,15 @@
 
 use std::time::Duration;
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClientOutcomeUncertainty, ClientProcessingFailure, ClientSubmissionOutcome,
     ClientSubmissionRefusal,
 };
-use nervix_primitives::sync::{Semaphore, SemaphorePermit};
+use nervix_primitives::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use super::EndpointRequestPlan;
 use crate::metrics::EndpointIntakeOutcome;
@@ -30,13 +33,30 @@ pub(super) enum EndpointRequestPolicy {
 }
 
 pub(super) struct EndpointRequestWindow {
-    permits: Semaphore,
+    capacity: Arc<EndpointRequestCapacity>,
+    max: usize,
     pub(super) timeout: Duration,
-    pub(super) retry_after: Duration,
+    pub(super) retry_after: Option<Duration>,
 }
 
-impl From<&EndpointRequestPlan> for EndpointRequestPolicy {
-    fn from(plan: &EndpointRequestPlan) -> Self {
+/// The outstanding responses of a logical ingestor, shared across replacements during a pause.
+#[derive(Debug, Default)]
+pub(super) struct EndpointRequestCapacity {
+    outstanding: AtomicUsize,
+}
+
+pub(super) struct EndpointResponseSlot<'a> {
+    capacity: &'a EndpointRequestCapacity,
+}
+
+impl Drop for EndpointResponseSlot<'_> {
+    fn drop(&mut self) {
+        self.capacity.outstanding.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl EndpointRequestPolicy {
+    pub(super) fn new(plan: &EndpointRequestPlan, capacity: &Arc<EndpointRequestCapacity>) -> Self {
         match plan {
             EndpointRequestPlan::NoAck => Self::NoAck,
             EndpointRequestPlan::Ack {
@@ -44,26 +64,53 @@ impl From<&EndpointRequestPlan> for EndpointRequestPolicy {
                 timeout,
                 retry_after,
             } => Self::Ack(EndpointRequestWindow {
-                permits: Semaphore::new(max.get()),
+                capacity: capacity.clone(),
+                max: max.get(),
                 timeout: *timeout,
                 retry_after: *retry_after,
             }),
         }
     }
-}
-
-impl EndpointRequestPolicy {
     pub(super) fn has_capacity(&self) -> bool {
         match self {
             Self::NoAck => true,
-            Self::Ack(window) => window.permits.available_permits() > 0,
+            Self::Ack(window) => window.capacity.outstanding.load(Ordering::Relaxed) < window.max,
         }
     }
 }
 
 impl EndpointRequestWindow {
-    pub(super) fn try_admit(&self) -> Option<SemaphorePermit<'_>> {
-        self.permits.try_acquire().ok()
+    pub(super) fn try_admit(&self) -> Option<EndpointResponseSlot<'_>> {
+        let mut outstanding = self.capacity.outstanding.load(Ordering::Relaxed);
+        while outstanding < self.max {
+            let next = outstanding
+                .checked_add(1)
+                .assured("the window bounds the outstanding count");
+            match self.capacity.outstanding.compare_exchange_weak(
+                outstanding,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(EndpointResponseSlot {
+                        capacity: &self.capacity,
+                    });
+                }
+                Err(current) => outstanding = current,
+            }
+        }
+        None
+    }
+
+    #[cfg(all(test, feature = "shuttle"))]
+    fn available_slots(&self) -> usize {
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a replacement can reduce the maximum below the outstanding count, leaving no slots",
+            self.max
+                .saturating_sub(self.capacity.outstanding.load(Ordering::Relaxed))
+        )
     }
 
     /// Holds the response slot until graph work completes, the intake ends, or its physical
@@ -74,6 +121,7 @@ impl EndpointRequestWindow {
             reason = "the host supplies graph work and the intake's ending and configured deadline"
         )
     )]
+    #[cfg(all(test, feature = "shuttle"))]
     pub(super) async fn run_until(
         &self,
         ending: impl Future<Output = ()>,
@@ -83,6 +131,20 @@ impl EndpointRequestWindow {
         let Some(_permit) = self.try_admit() else {
             return EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::WindowFull);
         };
+        Self::run_admitted_until(ending, deadline, dispatch).await
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "waits for graph work, the intake's ending and the request's deadline"
+        )
+    )]
+    pub(super) async fn run_admitted_until(
+        ending: impl Future<Output = ()>,
+        deadline: impl Future<Output = ()>,
+        dispatch: impl Future<Output = EndpointRequestOutcome>,
+    ) -> EndpointRequestOutcome {
         nervix_primitives::select! {
             biased;
             outcome = dispatch => outcome,
@@ -120,6 +182,12 @@ pub(crate) enum EndpointAdmissionRefusal {
     WindowFull,
     /// The node's extension workers had no room to unfold the payload.
     UnfoldingRefused,
+    /// The endpoint's pause buffer has no space for this request.
+    PauseBufferFull,
+    /// The response deadline elapsed before a buffered request entered the graph.
+    PauseExpired,
+    /// The intake ended before the buffered request entered the graph.
+    IntakeEnded,
 }
 
 impl EndpointAdmissionRefusal {
@@ -127,14 +195,18 @@ impl EndpointAdmissionRefusal {
     /// the extension workers are both capacity the node lacks right now.
     fn submission(self) -> ClientSubmissionRefusal {
         match self {
-            Self::Suspended => ClientSubmissionRefusal::Suspended,
-            Self::WindowFull | Self::UnfoldingRefused => ClientSubmissionRefusal::Busy,
+            Self::Suspended | Self::PauseExpired | Self::IntakeEnded => {
+                ClientSubmissionRefusal::Suspended
+            }
+            Self::WindowFull | Self::UnfoldingRefused | Self::PauseBufferFull => {
+                ClientSubmissionRefusal::Busy
+            }
         }
     }
 }
 
 impl EndpointRequestOutcome {
-    /// Every outcome a request can reach, whose replies a signaling protocol must encode.
+    /// Representatives of the replies a signaling protocol must encode.
     pub(super) fn replies() -> [Self; 9] {
         [
             Self::Completed,
@@ -165,6 +237,13 @@ impl EndpointRequestOutcome {
         }
     }
 
+    pub(crate) fn pause_buffer_full(self) -> bool {
+        matches!(
+            self,
+            Self::NotAdmitted(EndpointAdmissionRefusal::PauseBufferFull)
+        )
+    }
+
     /// The outcome the ingestor counts the request under.
     pub(super) fn counted(self) -> EndpointIntakeOutcome {
         match self {
@@ -174,10 +253,15 @@ impl EndpointRequestOutcome {
             | Self::NotAdmitted(EndpointAdmissionRefusal::Suspended) => {
                 EndpointIntakeOutcome::Refused
             }
-            Self::NotAdmitted(EndpointAdmissionRefusal::WindowFull) => EndpointIntakeOutcome::Busy,
+            Self::NotAdmitted(
+                EndpointAdmissionRefusal::WindowFull | EndpointAdmissionRefusal::PauseBufferFull,
+            ) => EndpointIntakeOutcome::Busy,
             Self::NotAdmitted(EndpointAdmissionRefusal::UnfoldingRefused) => {
                 EndpointIntakeOutcome::NotAdmitted
             }
+            Self::NotAdmitted(
+                EndpointAdmissionRefusal::PauseExpired | EndpointAdmissionRefusal::IntakeEnded,
+            ) => EndpointIntakeOutcome::NotAdmitted,
             Self::ProcessingFailed(_) | Self::Interrupted => {
                 EndpointIntakeOutcome::ProcessingFailed
             }
@@ -189,7 +273,7 @@ impl EndpointRequestOutcome {
 pub(crate) struct EndpointRequestReply {
     pub(crate) outcome: EndpointRequestOutcome,
     /// The declared retry delay, used only for an unavailable response.
-    pub(crate) retry_after: Duration,
+    pub(crate) retry_after: Option<Duration>,
 }
 
 impl EndpointRequestReply {
