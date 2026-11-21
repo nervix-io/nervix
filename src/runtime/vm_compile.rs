@@ -249,21 +249,24 @@ impl CompiledProgramWithMaterializedInterest {
         })
     }
 
-    pub(super) fn structured_side_error(
+    /// The error a side error of this program raises: an expression that could not be computed, as
+    /// any class type that holds the `REJECTED` group, so an emitter's record rejection keeps it in
+    /// that group by its type.
+    pub(super) fn structured_side_error<Class: From<RejectedErrorClass>>(
         &self,
         execution_now: Timestamp,
         reason: String,
         span: VmSpan,
         fallback_operation: MessageErrorOperation,
-    ) -> StructuredMessageError {
+    ) -> RaisedMessageError<Class> {
         let site = self.error_sites.get(&span);
         let operation = match site {
             Some(site) => site.operation,
             None => fallback_operation,
         };
-        structured_message_error(
+        raised_message_error(
             execution_now,
-            MessageErrorCode::Evaluation,
+            Class::from(RejectedErrorClass::Evaluation),
             reason,
             operation,
             site.and_then(|site| site.operation_index),
@@ -591,30 +594,6 @@ pub(super) fn compiled_message_error_sites(
     Ok(sites)
 }
 
-pub(super) fn message_error_arrow_schema() -> StdArc<arrow_schema::Schema> {
-    StdArc::new(arrow_schema::Schema::new(vec![
-        arrow_schema::Field::new("reference", ArrowDataType::Utf8, false),
-        arrow_schema::Field::new("code", ArrowDataType::Utf8, false),
-        arrow_schema::Field::new("message", ArrowDataType::Utf8, false),
-        arrow_schema::Field::new("operation", ArrowDataType::Utf8, false),
-        arrow_schema::Field::new("operation_index", ArrowDataType::UInt32, true),
-        arrow_schema::Field::new(
-            "fields",
-            ArrowDataType::List(StdArc::new(arrow_schema::Field::new(
-                "item",
-                ArrowDataType::Utf8,
-                false,
-            ))),
-            false,
-        ),
-        arrow_schema::Field::new(
-            "occurred_at",
-            ArrowDataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some("+00:00".into())),
-            false,
-        ),
-    ]))
-}
-
 pub(super) fn all_optional_arrow_schema(schema: &CompiledSchema) -> StdArc<arrow_schema::Schema> {
     StdArc::new(arrow_schema::Schema::new(
         schema
@@ -668,7 +647,7 @@ pub(super) fn compile_message_error_set_program(
     }
     bindings.push(VmCompileBinding::readonly(
         "error",
-        message_error_arrow_schema(),
+        StructuredMessageError::scope_arrow_schema(),
     ));
 
     let local_namespaces = HashSet::from_iter([

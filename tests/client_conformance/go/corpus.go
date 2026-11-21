@@ -1133,9 +1133,26 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 		if kind == nil {
 			return nil, errors.New("a notice has no kind")
 		}
-		return []string{fmt.Sprintf("EVENT NOTICE level=%s kind=%s message=%s",
+		reported := ""
+		if noticeError := notice.Error(nil); noticeError != nil {
+			class := noticeError.Class()
+			if class == nil {
+				return nil, errors.New("a notice error has no class")
+			}
+			node := noticeError.Node(nil)
+			if node == nil {
+				return nil, errors.New("a notice error has no node")
+			}
+			nodeKind := node.Kind()
+			if nodeKind == nil {
+				return nil, errors.New("a notice error's node has no kind")
+			}
+			reported = fmt.Sprintf(" error=%s node=%s/%s", session.EnumNamesErrorClass[*class],
+				session.EnumNamesModelKind[*nodeKind], node.Name())
+		}
+		return []string{fmt.Sprintf("EVENT NOTICE level=%s kind=%s message=%s%s",
 			session.EnumNamesNoticeLevel[*level], session.EnumNamesNoticeKind[*kind],
-			text(notice.Message()))}, nil
+			text(notice.Message()), reported)}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s message", message.BodyType())
 }

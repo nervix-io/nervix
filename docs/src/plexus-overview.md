@@ -724,7 +724,7 @@ Every `TO` route on an ingestor or relay-consuming processor must declare its me
 ```plexus,ignore
 ON MESSAGE ERROR IGNORE | LOG | SEND TO error_stream
 SET error_reference = error.reference,
-    error_code = error.code,
+    error_class = error.class,
     source_id = input.id,
     attempted_total = partial_output.total
 ```

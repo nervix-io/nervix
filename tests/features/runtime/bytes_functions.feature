@@ -170,7 +170,7 @@ Feature: Typed bytes and native encoding functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO binary_errors
             SET id = input.id,
-                error_code = error.code,
+                error_code = error.class,
                 operation = error.operation,
                 captured_prefix = partial_output.prefix;
       CREATE SUBSCRIPTION binary_errors_subscription TO binary_errors;

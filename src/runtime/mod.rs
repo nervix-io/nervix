@@ -72,14 +72,16 @@ use nervix_models::{
     EndpointType, EntityGateTargets, ErrorPolicies, FieldName, FieldPath, FlushPolicy,
     GeneralErrorPolicy, GeneratorName, InferencerTensorDeclaration, IngestQuiesceMode,
     IngestQuiesceOverflow, IngestTimestampSource, IngestorName, Literal as ModelLiteral,
-    LookupName, MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation,
+    LookupName, MaterializedStatePolicy, MessageErrorClass, MessageErrorOperation,
     MessageErrorPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef, OwnershipStateComponent,
     OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    PartitionSeed, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResolvedBranchPartitions, ResolvedBranching, ResourceId, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
+    PartitionSeed, RaisedMessageError, RejectedErrorClass, RelayName, RemoteAckOutcome,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ReportedError,
+    ResolvedBranchPartitions, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
+    RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
     StructuredMessageError, SubscriptionName, Timestamp, Unit, WasmCheckpointInspection,
     WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    message_error_scope,
 };
 #[cfg(test)]
 #[cfg_attr(
@@ -165,8 +167,8 @@ use crate::{
     metrics::{
         BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, EmitterAttemptOperation,
         EmitterAttemptOutcome, EmitterFinishOutcome, EmitterInteractionMetrics, EmitterOpenOutcome,
-        EmitterRejectionCode, EmitterRetryCause, IngestorQuiesceMetrics, MessageMetricsHandle,
-        NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders, RelayMetricsHandle,
+        EmitterRetryCause, IngestorQuiesceMetrics, MessageMetricsHandle, NodeBatchMetricsSpec,
+        NodeInputMetricsHandle, NodeMessageErrors, RelayMetricRecorders, RelayMetricsHandle,
         RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{
@@ -452,8 +454,8 @@ pub(crate) use domain_execution::{
     CommittedClockInstallation, DomainRoutingCache, SharedDomainRouting,
 };
 use domain_execution::{
-    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick, RelayUnitRef,
-    RuntimeDomainState,
+    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, MessageErrorCounters,
+    ObservedDomainTick, RelayUnitRef, RuntimeDomainState,
 };
 #[cfg(test)]
 use domain_rebuild::branch_relays_from_plans;
@@ -573,8 +575,7 @@ use materialized_state::{
 use message_error::{
     InvalidOutputRows, MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
     SingleRecordFilterMapOutcome, captured_partial_output, finalized_partial_output,
-    planned_structured_message_error, structured_message_error,
-    vm_partial_output_row_to_runtime_batch,
+    planned_message_error, raised_message_error, vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteRuntime, MessageErrorRouteTarget,

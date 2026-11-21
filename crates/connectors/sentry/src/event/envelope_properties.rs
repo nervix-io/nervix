@@ -150,8 +150,8 @@ fn invalid_event_json_is_a_definitive_preparation_refusal_with_its_complete_caus
     let Err(cause) = serde_json::from_slice::<Map<String, Value>>(payload) else {
         panic!("the fixture supplies non-JSON bytes");
     };
-    assert_eq!(refusal.code, MessageErrorCode::External);
-    assert_eq!(refusal.operation, MessageErrorOperation::Publish);
+    assert_eq!(refusal.class, RejectedErrorClass::Codec);
+    assert_eq!(refusal.operation, MessageErrorOperation::Encode);
     assert_eq!(refusal.occurred_at, occurred_at);
     assert_eq!(
         refusal.message,

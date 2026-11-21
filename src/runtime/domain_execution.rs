@@ -53,6 +53,8 @@ pub(super) enum DomainRoutingError {
 pub(crate) struct DomainRoutingSnapshot {
     pub(super) passive_only: bool,
     pub(super) message_error_plans: Arc<BoundMessageErrorRoutes>,
+    /// The error counters of every node of the revision, resolved when it was installed.
+    pub(super) message_errors: MessageErrorCounters,
     pub(super) relay_schemas: HashMap<RelayName, Arc<CompiledSchema>>,
     pub(super) relay_services: HashMap<RelayName, Arc<RelayBoundaryServices>>,
     pub(super) lookups: HashMap<LookupName, Arc<LookupRuntime>>,
@@ -72,6 +74,39 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
     pub(super) processor_plans: HashMap<NodeUnitRef, StdArc<PublishedProcessorPlan>>,
+}
+
+/// The counters of every error each node of an installed revision handles, resolved once when the
+/// revision is installed so that counting an error looks up nothing but this map.
+#[derive(Clone, Default)]
+pub(crate) struct MessageErrorCounters {
+    nodes: Arc<HashMap<NodeRef, NodeMessageErrors>>,
+}
+
+impl MessageErrorCounters {
+    /// The counters of every node `revision` declares in `domain`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "binds every node's retained error counters once")
+    )]
+    pub(super) fn resolve(
+        metrics: &RuntimeMetrics,
+        domain: &DomainName,
+        revision: &ExecutionRevision,
+    ) -> Self {
+        let mut nodes = HashMap::default();
+        for node in revision.nodes.keys() {
+            nodes.insert(node.clone(), metrics.node_message_errors(domain, node));
+        }
+        Self {
+            nodes: Arc::new(nodes),
+        }
+    }
+
+    /// The counters of `node`, when the installed revision declares it.
+    pub(super) fn node(&self, node: &NodeRef) -> Option<&NodeMessageErrors> {
+        self.nodes.get(node)
+    }
 }
 
 impl DomainRoutingSnapshot {
@@ -1040,6 +1075,7 @@ impl Runtime {
             Some(state) => state.start_version,
             None => 0,
         };
+        let message_errors = MessageErrorCounters::resolve(&self.inner.metrics, domain, &revision);
         self.install_domain_execution(
             domain,
             DomainExecution {
@@ -1053,6 +1089,7 @@ impl Runtime {
                     DomainRoutingSnapshot {
                         passive_only: false,
                         message_error_plans,
+                        message_errors,
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,

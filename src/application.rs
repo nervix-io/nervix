@@ -2541,7 +2541,7 @@ impl Application {
                 nervix_primitives::select! {
                     _ = runtime_event_shutdown.cancelled() => break,
                     received = runtime_event_rx.recv() => match received {
-                        Ok(RuntimeEvent::Error(message)) => {
+                        Ok(RuntimeEvent::Error(event)) => {
                             let mut node_ids =
                                 runtime_event_service.inner.cluster.live_node_ids().await;
                             node_ids.sort();
@@ -2556,7 +2556,8 @@ impl Application {
                                         &node_id,
                                         ControlEnvelope::RuntimeErrorEvent(
                                             RemoteRuntimeErrorEvent {
-                                                message: message.clone(),
+                                                message: event.message.clone(),
+                                                error: event.error.clone(),
                                             },
                                         ),
                                     )
@@ -2745,7 +2746,7 @@ impl Application {
                                 service_for_interconnect
                                     .inner
                                     .events
-                                    .report_error(NoticeKind::Runtime, event.message);
+                                    .report_runtime_error(event.message, event.error);
                             }
                         }
                     }

@@ -63,7 +63,7 @@ CREATE CLIENT PRODUCER INGESTOR simulated_readings
         timestamp_source = 'at'
     BRANCHED BY by_sensor SET sensor = message.sensor
     FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.code, error_message = error.message
+    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.class, error_message = error.message
   ON GENERAL ERROR LOG;
 
 CREATE CLIENT PRODUCER INGESTOR live_readings
@@ -75,7 +75,7 @@ CREATE CLIENT PRODUCER INGESTOR live_readings
         timestamp_source = 'now'
     BRANCHED BY by_sensor SET sensor = message.sensor
     FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.code, error_message = error.message
+    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.class, error_message = error.message
   ON GENERAL ERROR LOG;
 
 CREATE CLIENT CONSUMER EMITTER observed_readings

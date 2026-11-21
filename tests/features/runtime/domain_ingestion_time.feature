@@ -18,7 +18,7 @@ Feature: Logical ingestion time and admission
         TIMESTAMP AT occurred_at
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO admission_errors
-            SET sequence = input.sequence, error_code = error.code
+            SET sequence = input.sequence, error_code = error.class
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION observations TO events;
       CREATE SUBSCRIPTION error_observations TO admission_errors;

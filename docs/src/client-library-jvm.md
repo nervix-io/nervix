@@ -3,9 +3,9 @@
 *Plexus, the Nervix graph definition language.*
 
 Java applications use `io.nervix.client.Nervix`, the Java 21 library over Nervix's shared Rust
-client. A session executes Plexus, reads relay rows, follows a domain clock, and opens producers
-and consumers. The Rust client owns reconnection and recovery; the application owns its handles
-and decides what to do with outcomes.
+client. A session executes Plexus, reads relay rows, follows a domain clock, reads server notices,
+and opens producers and consumers. The Rust client owns reconnection and recovery; the application
+owns its handles and decides what to do with outcomes.
 
 The examples are included from the library's JUnit suite. Its `Cluster` fixture supplies a server,
 domain, credentials, certificate authority and test graph; replace those values with your own.
@@ -249,6 +249,55 @@ Detach explicitly when the application no longer follows it.
 {{#include ../../tests/client_conformance/java/suite/cluster/ClockTests.java:detach_clock}}
 ```
 
+## Read Server Notices
+
+A server notice is something the cluster tells a session without being asked: a node joined or
+left, a leadership change, a committed cluster-parameter revision, a failure the runtime or the
+control plane recovered from, or a licensing observation. `nextNotice` blocks until the session's
+next notice arrives and returns it as a `Notice`, a plain value that holds no native resources and
+needs no close.
+
+Route each notice by `kind()`, never by `message()`: the message is display text, and its wording
+can change. `level()` says how urgently the notice asks for attention: `INFO`, `WARNING` or
+`ERROR`. A `RUNTIME` notice that reports a classified error of a graph node also carries that
+error: `errorClass()` is the error's [class](errors-and-diagnostics.md#the-message-error-record),
+such as `"evaluation"` or `"refused"`, `errorNodeKind()` the kind of node that produced it, such as
+`"junction"`, and `errorNode()` that node's name. The three are present together; all three are `null` on every other notice, including
+a runtime failure that is not a classified error of a graph node. Select errors by these fields.
+
+The suite creates a junction whose division always fails. Its route's `ON MESSAGE ERROR LOG`
+publishes each failure as a runtime notice to every session on every node, and also negatively
+acknowledges the failed row, so the producer's submission fails processing as `REJECTED`:
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/NoticeTests.java:logged_error}}
+```
+
+The session was open before the row was published, so it reads that error among whatever other
+notices arrive:
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/NoticeTests.java:read_notices}}
+```
+
+Pass a `Cancel` to bound the wait. A deadline token bounds a whole read loop: once its deadline
+passes, the wait raises `DeadlineException`. A token another thread triggers ends the wait with
+`CancelledException`.
+
+```java
+{{#include ../../tests/client_conformance/java/suite/cluster/NoticeTests.java:notice_waits}}
+```
+
+Notices are delivered on a best-effort basis; they are not a log to replay. The client holds at
+most 128 notices and 1 MiB the application has not read. When one more does not fit, it drops the
+notices it holds, and the next `nextNotice` raises `EventOverflowException`; the call after that
+returns the notices that arrived after the gap, so keep reading. A notice reaches the sessions open
+when it is published, and notices end with the session that delivered them, including any not yet
+read: after a lost session, the stream continues with the notices of the next session the client
+opens. `nextNotice` never opens a session itself; it waits for the one another call opens.
+`ClosedException` means the session ended and the client knows no server to open another on. A
+notice confirms no command; read the command's outcome for that.
+
 ## Publish Through A Client Ingestor
 
 Open a producer against a `CLIENT PRODUCER INGESTOR` with its exact `Fields`, including sensitivity,
@@ -421,8 +470,8 @@ optional fields are described by the [implementation manual](client-implementati
 
 It does not expose these parts of the [Rust client](client-library.md): the typed transaction
 status, transaction attach and transaction inspection; the typed domain list, structured choice
-lookups, server notices and the leadership view; upload progress and upload identities of your
-choosing; and `DESCRIBE BACKUP`, which reads an archive without a server.
+lookups and the leadership view; upload progress and upload identities of your choosing; and
+`DESCRIBE BACKUP`, which reads an archive without a server.
 
 ## A Complete Application
 

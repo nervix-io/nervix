@@ -112,8 +112,16 @@ impl EmitterStagingDirectory for BenchmarkHost {
 }
 
 impl EmitterGeneralErrorHandler for BenchmarkHost {
-    fn handle_general_error(&self, _acks: &EmitterRecordAcknowledgements, reason: String) {
-        panic!("RabbitMQ benchmark general error: {reason}");
+    fn handle_general_error(
+        &self,
+        _acks: &EmitterRecordAcknowledgements,
+        class: nervix_models::MessageErrorClass,
+        reason: String,
+    ) {
+        panic!(
+            "RabbitMQ benchmark general error of class {}: {reason}",
+            class.as_str()
+        );
     }
 }
 

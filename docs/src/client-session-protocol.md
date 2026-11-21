@@ -1187,6 +1187,16 @@ reports, so a client routes notices by kind and never by their text:
 | `ControlPlane` | A control-plane failure the serving node recovered from | `Error` |
 | `Licensing` | A licensing lifecycle observation, a refresh/policy warning, or the licensing stop gate closing (`Error`) and lifting (`Info`) | `Info`, `Warning`, `Error` |
 
+A `Runtime` notice that reports an error of a graph node also carries that error as typed fields:
+`ServerNotice.error` is a `NoticeError` table holding the error's `ErrorClass` (one of the ten
+[error classes](./errors-and-diagnostics.md#the-message-error-record), `Codec` through `Internal`)
+and the producing node as a `NodeRef` (its `ModelKind` and its name). It is present when a route's
+`ON MESSAGE ERROR LOG`, a node's `ON GENERAL ERROR LOG` or a WASM processor's `ON GLOBAL ERROR LOG`
+reported a failure, a decode rejection or a `RATE LIMIT` rejection, on the serving node or on the
+peer whose runtime fanned the event out; it is absent on every other notice, including a runtime
+notice about a connector failure the node recovered from. A client that selects runtime errors by
+class or by node reads these fields and never parses the text.
+
 A membership notice reports only a change of the live set. Model changes, subscriptions opening or
 closing and domain starts change what members publish through gossip, not which members are live,
 so none of them produces one. The serving node still refreshes routes, prerequisites and subscription
@@ -2470,9 +2480,10 @@ The C ABI also exposes an independently retained typed state-inspection envelope
 `nx_outcome_inspection`: JSON, counts, section schemas and verified Row frames outlive the
 originating outcome. Python, Ruby and JVM project that same shared owner through typed metadata,
 JSON, section schemas and retained Row frames; [Typed Inspection](client-host-bindings.md#typed-inspection)
-owns their lifetime contract. Typed
-transaction status/inspection, choice lookups, server notices and leadership observation are
-outside the shared binding surface. The architecture chapter's
+owns their lifetime contract. Every binding reads the session's server notices through the shared
+host runtime, each with its level, kind and text and, on a runtime notice about a classified error,
+its class and the producing node's kind and name. Typed transaction status/inspection, choice
+lookups and leadership observation are outside the shared binding surface. The architecture chapter's
 [guarantees and limits](client-host-bindings.md#guarantees-and-limits) and the ledger distinguish
 available host operations from the wider Rust client API.
 

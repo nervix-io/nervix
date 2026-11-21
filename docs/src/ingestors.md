@@ -128,7 +128,7 @@ from delivery and observation time throughout the graph. The 5 ms idle close and
 domain-logical time. See [Domains And Time](domains-and-time.md#ingestion-timestamps).
 For a decoded group, timestamp selection and paced admission operate on Arrow columns. The group
 keeps admitted rows together; each rejected or missing event timestamp follows the ingestor route's
-`ON MESSAGE ERROR` policy with code `validation` and operation `admit`, preserving that row's ACK
+`ON MESSAGE ERROR` policy with class `validation` and operation `admit`, preserving that row's ACK
 and ingestor metadata. A batch containing both kinds can therefore deliver its accepted rows while
 its rejected rows reach the configured error route.
 
@@ -566,7 +566,7 @@ past it and a RabbitMQ queue no longer holds it. In `MODE NO ACK` the payload is
 rejection. A JAQ-backed codec that refuses one message an unfolding payload produced refuses the
 whole payload, and so does an unfolding that panics.
 
-A decode rejection carries a stable UUIDv7 reference, the code `validation`, the operation `decode`,
+A decode rejection carries a stable UUIDv7 reference, the class `codec`, the operation `decode`,
 the codec, the fields the codec named at fault, the instant the ingestor took the payload in, and the
 codec's diagnostic as its message. When the ingestor's metadata names where on its transport the
 payload was read, the rejection names it too: a Kafka record's topic, partition and offset, or the
@@ -724,7 +724,7 @@ General notes:
   `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11 or a `KAFKA TOPIC` record timestamp before
   1677-09-21 or after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever a route or
   `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a message error
-  with code `validation` and operation `admit` that names `metadata.<field>` and describes the
+  with class `validation` and operation `admit` that names `metadata.<field>` and describes the
   value. The field never reads as null for it, and a field no program reads refuses nothing. An
   `SQS QUEUE` system attribute out of range fails the read instead, as its reference states
 - supported ingestors expose transport headers through `read_header(name)` and `read_headers(name)`;
@@ -2094,7 +2094,7 @@ timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIM
 `TIMESTAMP AT metadata.timestamp` admits a message at the instant its producer wrote. A count no
 `DATETIME` holds, past 2262-04-11, such as milliseconds written where AMQP specifies seconds, refuses
 its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
-with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
+with class `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
 `read_header` and `read_headers` read the AMQP header table, separately from these basic properties.
 The declared model is `sorted_by_name` with exact names: one value per name, visited in ascending

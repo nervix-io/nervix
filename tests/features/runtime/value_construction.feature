@@ -206,7 +206,7 @@ Feature: Route-local value construction
           ON MESSAGE ERROR SEND TO calculation_errors
           SET input_id = input.id,
               error_reference = error.reference,
-              error_code = upper(error.code),
+              error_code = upper(error.class),
               error_message = error.message,
               operation = error.operation,
               operation_index = error.operation_index,

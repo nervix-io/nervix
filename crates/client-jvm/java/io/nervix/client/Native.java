@@ -135,6 +135,7 @@ final class Native {
     static native long execute(long session, long execution, long token);
     static native long nextEvent(long session, long token);
     static native long nextClockEvent(long session, long token);
+    static native Object nextNotice(long session, long token);
     static native long domainClock(long session, String domain);
     static native int outcomeDisposition(long handle);
     static native int outcomeUploadFailure(long handle);

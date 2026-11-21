@@ -2505,6 +2505,7 @@ mod tests {
                     level: NoticeLevel::Info,
                     kind: NoticeKind::Membership,
                     message: "node 'node-3' left".to_string(),
+                    error: None,
                 },
                 line: "[events] membership INFO: node 'node-3' left",
             },
@@ -2513,6 +2514,7 @@ mod tests {
                     level: NoticeLevel::Info,
                     kind: NoticeKind::Leadership,
                     message: "raft transition: state=Leader leader=node-1 term=2".to_string(),
+                    error: None,
                 },
                 line: "[events] leadership INFO: raft transition: state=Leader leader=node-1 \
                        term=2",
@@ -2522,6 +2524,7 @@ mod tests {
                     level: NoticeLevel::Info,
                     kind: NoticeKind::ClusterParameters,
                     message: "cluster parameters committed at revision 3".to_string(),
+                    error: None,
                 },
                 line: "[events] cluster parameters INFO: cluster parameters committed at revision \
                        3",
@@ -2531,6 +2534,7 @@ mod tests {
                     level: NoticeLevel::Error,
                     kind: NoticeKind::Runtime,
                     message: "relay 'orders' failed".to_string(),
+                    error: None,
                 },
                 line: "[events] runtime ERROR: relay 'orders' failed",
             },
@@ -2539,6 +2543,7 @@ mod tests {
                     level: NoticeLevel::Warning,
                     kind: NoticeKind::ControlPlane,
                     message: "resource refresh was delayed".to_string(),
+                    error: None,
                 },
                 line: "[events] control plane WARN: resource refresh was delayed",
             },
@@ -2554,6 +2559,7 @@ mod tests {
             level: NoticeLevel::Error,
             kind: NoticeKind::Runtime,
             message: "raft transition: state=Leader".to_string(),
+            error: None,
         });
         assert_eq!(
             rendered,

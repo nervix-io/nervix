@@ -1124,7 +1124,7 @@ Feature: Web console Plexus REPL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO correlator_errors
         SET error_reference = error.reference,
-          error_code = error.code,
+          error_code = error.class,
           error_message = error.message,
           operation = error.operation,
           tenant = left.tenant;

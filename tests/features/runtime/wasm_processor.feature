@@ -1865,7 +1865,7 @@ Feature: WASM processor runtime behavior
         SET value = value
         ON MESSAGE ERROR SEND TO error_stream
         SET error_reference = error.reference,
-            error_code = error.code,
+            error_code = error.class,
             error_message = error.message,
             operation = error.operation,
             source_value = input.value
@@ -2062,6 +2062,7 @@ Feature: WASM processor runtime behavior
       """
       wasm processor 'filter_even_rows' batch processing failed (unbranched, resource 'wasm_trapping_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm export 'nervix_process_batch' trapped: wasm trap: wasm `unreachable` instruction executed
       """
+    And the last server error reports the class "internal" of the wasm_processor "filter_even_rows"
 
     Examples:
       | cluster_size | replica_count |

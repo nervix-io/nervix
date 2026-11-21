@@ -8,7 +8,10 @@
 use nervix_connector::{EmitterFinishResult, EmitterLifecycle};
 
 use super::*;
-use crate::runtime::test_fixtures::{emitter_context, input_batch};
+use crate::runtime::{
+    events::RuntimeErrorEvent,
+    test_fixtures::{emitter_context, input_batch},
+};
 
 fn task_state(context: &EmitterConnectorContext) -> EmitterTaskState {
     let mut buffer = EmitterBatchBuffer::default();
@@ -126,18 +129,194 @@ fn emitter_error_classification_is_explicit_for_every_context() {
         assert!(!emitter_publish_error_is_retryable(&Report::new(terminal)));
     }
 
+    let failure = |error: EmitterRuntimeError, codec_route: bool| {
+        EmitterBatchFailure::of(&Report::new(error), codec_route)
+    };
     assert_eq!(
-        emitter_message_error_operation(&Report::new(EmitterRuntimeError::EncodeBatch), true),
-        MessageErrorOperation::Encode
+        failure(EmitterRuntimeError::EncodeBatch, true),
+        EmitterBatchFailure {
+            class: MessageErrorClass::CODEC,
+            operation: MessageErrorOperation::Encode,
+        }
     );
     assert_eq!(
-        emitter_message_error_operation(&Report::new(EmitterRuntimeError::EncodeBatch), false),
-        MessageErrorOperation::Values
+        failure(EmitterRuntimeError::EncodeBatch, false),
+        EmitterBatchFailure {
+            class: MessageErrorClass::CODEC,
+            operation: MessageErrorOperation::Values,
+        }
     );
     assert_eq!(
-        emitter_message_error_operation(&Report::new(EmitterRuntimeError::PublishBatch), true),
-        MessageErrorOperation::Publish
+        failure(EmitterRuntimeError::PublishBatch, true),
+        EmitterBatchFailure::REFUSED
     );
+    assert_eq!(
+        failure(EmitterRuntimeError::FaultInjected, false),
+        EmitterBatchFailure::REFUSED
+    );
+    for cut in [
+        EmitterRuntimeError::StopDeadlineElapsed,
+        EmitterRuntimeError::ShutdownWhileStalled,
+    ] {
+        assert_eq!(
+            failure(cut, true),
+            EmitterBatchFailure {
+                class: MessageErrorClass::INTERRUPTED,
+                operation: MessageErrorOperation::Publish,
+            }
+        );
+    }
+    assert_eq!(
+        failure(
+            EmitterRuntimeError::SourceFilter {
+                relay: "orders".parse().expect("a valid relay name"),
+            },
+            false
+        ),
+        EmitterBatchFailure {
+            class: MessageErrorClass::EVALUATION,
+            operation: MessageErrorOperation::Publish,
+        }
+    );
+    assert_eq!(
+        failure(EmitterRuntimeError::BuildPublishBatch, true),
+        EmitterBatchFailure {
+            class: MessageErrorClass::INTERNAL,
+            operation: MessageErrorOperation::Publish,
+        }
+    );
+}
+
+/// Every failure that can end a publish batch names the class each of its rows carries: the
+/// destination or connector refusing for good, Nervix cutting the work at a deadline, the codec,
+/// a source filter, or a broken invariant of the emitter's own bookkeeping.
+#[test]
+fn every_emitter_failure_names_the_class_of_the_rows_it_ends() {
+    let relay: RelayName = "orders".parse().expect("a valid relay name");
+    let classified = [
+        (EmitterRuntimeError::ConnectorNotInitialized, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::ResumeConnector, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::ConnectorWaiting, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::PublishBatch, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::PublishStalled, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::InvalidConnectorConfig, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::InitializeConnector, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::CloseConnector, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::FaultInjected, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::FinalFlush, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::FinishTransport, MessageErrorClass::REFUSED),
+        (EmitterRuntimeError::ShutdownWhileStalled, MessageErrorClass::INTERRUPTED),
+        (EmitterRuntimeError::StopDeadlineElapsed, MessageErrorClass::INTERRUPTED),
+        (EmitterRuntimeError::EncodeBatch, MessageErrorClass::CODEC),
+        (
+            EmitterRuntimeError::SourceFilter { relay },
+            MessageErrorClass::EVALUATION,
+        ),
+        (EmitterRuntimeError::EncodingRefused, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::UnansweredEmitterRecords {
+                unanswered: 1,
+                records: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (EmitterRuntimeError::FlushPolicyNotInitialized, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::HeaderCountMismatch {
+                header_count: 1,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::OrderingGroupCountMismatch {
+                group_count: 1,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::OrderingGroupRowOutOfBounds {
+                row: 2,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::HttpRequestCountMismatch {
+                request_count: 1,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::MissingHttpRequest { row: 0 },
+            MessageErrorClass::INTERNAL,
+        ),
+        (EmitterRuntimeError::SelectOrderingGroups, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::DeliveryRowOutOfBounds {
+                row: 2,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::AcknowledgementRowOutOfBounds {
+                row: 2,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::RejectionRowOutOfBounds {
+                row: 2,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::PreparedRowOutOfBounds {
+                row: 2,
+                row_count: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::RowAlreadyPrepared { row: 0 },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::UnknownEmitterRecord {
+                record: 2,
+                records: 2,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::EmitterRecordAnsweredTwice { record: 0 },
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::RowPreparation {
+                batch_index: 0,
+                violation: RowPreparationViolation::EmptyRequest,
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+        (EmitterRuntimeError::FlushTiming, MessageErrorClass::INTERNAL),
+        (EmitterRuntimeError::RetryTiming, MessageErrorClass::INTERNAL),
+        (EmitterRuntimeError::BuildPublishBatch, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::SplitFailedBatch {
+                publish_failure: "refused".to_owned(),
+            },
+            MessageErrorClass::INTERNAL,
+        ),
+    ];
+    for (failure, class) in classified {
+        assert_eq!(failure.batch_failure_class(), class, "{failure:?}");
+    }
 }
 
 #[test]
@@ -413,13 +592,23 @@ async fn emitter_context_reports_configuration_and_publish_failures() {
             events.recv().await.expect("error event must be emitted");
         messages.push(message);
     }
-    assert!(messages[0].contains("failed to initialize nats emitter"));
-    assert!(messages[1].contains("failed to publish nats message"));
-    assert!(messages[2].contains("failed to flush nats rows"));
-    assert!(messages[3].contains(
+    assert!(
+        messages[0]
+            .message
+            .contains("failed to initialize nats emitter")
+    );
+    assert!(
+        messages[1]
+            .message
+            .contains("failed to publish nats message")
+    );
+    assert!(messages[2].message.contains("failed to flush nats rows"));
+    assert!(messages[3].message.contains(
         "emitter 'output' in domain 'emitter_tests' has an invalid flush policy: invalid \
          flush_each 'not-a-duration'"
     ));
+    // A connector failure the emitter recovered from is no classified error of a record.
+    assert!(messages.iter().all(|event| event.error.is_none()));
 }
 
 #[nervix_primitives::test]
@@ -538,19 +727,37 @@ async fn emitter_host_delegates_runtime_services_and_general_error_policy() {
         .expect("the host must publish the event");
     assert_eq!(
         message,
-        "emitter error for emitter 'output' in domain 'emitter_tests': connector background error"
+        RuntimeErrorEvent {
+            message: "emitter error for emitter 'output' in domain 'emitter_tests': connector \
+                      background error"
+                .to_string(),
+            error: None,
+        }
     );
     assert_eq!(host.staging_directory(), context.runtime.temp_dir());
 
     let (logged_acks, logged_completion) = AckSet::root();
     let logged_acks = EmitterRecordAcknowledgements::new(logged_acks);
-    host.handle_general_error(&logged_acks, "publish failed".to_string());
+    host.handle_general_error(
+        &logged_acks,
+        MessageErrorClass::REFUSED,
+        "publish failed".to_string(),
+    );
     let logged_report = "emitter 'output' general error in domain 'emitter_tests': publish failed";
     let RuntimeEvent::Error(message) = events
         .recv()
         .await
         .expect("the logged general error must publish an event");
-    assert_eq!(message, logged_report);
+    assert_eq!(
+        message,
+        RuntimeErrorEvent {
+            message: logged_report.to_string(),
+            error: Some(ReportedError {
+                class: MessageErrorClass::REFUSED,
+                node: NodeRef::new(ModelKind::Emitter, context.emitter.clone()),
+            }),
+        }
+    );
     assert_eq!(
         logged_completion.wait().await,
         AckOutcome::NoAck(logged_report.to_string())
@@ -561,6 +768,7 @@ async fn emitter_host_delegates_runtime_services_and_general_error_policy() {
     let (ignored_acks, ignored_completion) = AckSet::root();
     ignored_context.emitter_host().handle_general_error(
         &EmitterRecordAcknowledgements::new(ignored_acks),
+        MessageErrorClass::REFUSED,
         "ignored failure".to_string(),
     );
     assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
@@ -807,7 +1015,7 @@ async fn teardown_reports_the_records_a_finish_left_unsent() {
         .await
         .expect("the unsent finish publishes an error event");
     assert_eq!(
-        message,
+        message.message,
         "emitter 'output' in domain 'emitter_tests' stopped before its test transport client sent \
          every record it held: test emitter's transport client still held 2 records when its \
          finish deadline passed"
@@ -912,7 +1120,7 @@ async fn emitter_outcomes_terminal_failure_counts_only_rows_routed_to_message_po
         .handle_publish_error_batches(
             vec![delivered, rejected, unresolved],
             "terminal publish refusal".to_owned(),
-            MessageErrorOperation::Publish,
+            EmitterBatchFailure::REFUSED,
         )
         .await;
     assert!(context.interactions.describe_lines().iter().any(|line| {

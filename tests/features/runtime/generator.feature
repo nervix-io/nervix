@@ -705,7 +705,7 @@ Feature: Generator node
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO generator_error_records
           SET id = relay_state.generator_error_sources.id,
-              code = upper(error.code),
+              code = upper(error.class),
               attempted_id = partial_output.id;
       CREATE SUBSCRIPTION generator_error_subscription TO generator_error_records;
       START;

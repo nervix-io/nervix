@@ -242,7 +242,7 @@ Feature: IP address, network and URL functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO probe_errors
           SET input_id = input.id,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message
         TO guarded_probes
           SET id = input.id,

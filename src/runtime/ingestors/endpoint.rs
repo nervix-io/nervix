@@ -647,11 +647,18 @@ pub(super) mod tests {
             .last_decode_rejection
             .assured("the refused body is the ingestor's last decode rejection");
         assert_eq!(
-            message,
+            message.message,
             format!(
                 "ingestor 'event_ingestor' general error in domain 'default': decode rejection \
                  {rejection}"
             )
+        );
+        assert_eq!(
+            message.error,
+            Some(nervix_models::ReportedError {
+                class: MessageErrorClass::CODEC,
+                node: NodeRef::new(ModelKind::Ingestor, ingestor.clone()),
+            })
         );
         assert!(
             rejection.to_string().ends_with(
@@ -1342,6 +1349,7 @@ pub(super) mod tests {
                 .await
                 .expect("the drain reports the body its codec refused")
                 .expect("the node keeps its observers while it runs");
+        let message = message.message;
         assert!(
             message.starts_with(
                 "ingestor 'event_ingestor' general error in domain 'default': decode rejection "

@@ -51,7 +51,7 @@ Feature: Conditional expressions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO calculation_errors
             SET source_id = input.id,
-                error_code = error.code;
+                error_code = error.class;
       CREATE SUBSCRIPTION calculated_subscription TO calculated;
       CREATE SUBSCRIPTION calculation_errors_subscription TO calculation_errors;
       START;

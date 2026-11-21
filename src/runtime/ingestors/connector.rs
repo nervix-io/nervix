@@ -620,6 +620,11 @@ impl RuntimeIngestorHost {
             );
         // The unit's allowance starts full when the unit starts, and its counters exist at zero
         // from then on.
+        // Every rejection the intake consumes counts under the ingestor's error counters.
+        let message_errors = spec.runtime.inner.metrics.node_message_errors(
+            &spec.domain,
+            &NodeRef::new(ModelKind::Ingestor, spec.ingestor.clone()),
+        );
         let allowance = match spec.rate_limit {
             Some(bound) => {
                 let counters = spec.runtime.inner.metrics.ingestor_rate_limit_counters(
@@ -637,6 +642,7 @@ impl RuntimeIngestorHost {
                         ingestor: spec.ingestor.clone(),
                         policy: spec.general_error_policy.clone(),
                         counters,
+                        errors: message_errors.clone(),
                     },
                 ))
             }
@@ -646,6 +652,7 @@ impl RuntimeIngestorHost {
             spec.general_error_policy,
             decode_rejections_counter,
             status.clone(),
+            message_errors,
         );
         let failure_status = status.clone();
         let failure_observation = interactions

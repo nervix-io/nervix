@@ -270,7 +270,7 @@ Feature: Typed error qualification through public streams
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO calculation_errors
           SET source_id = input.id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields;
       CREATE SUBSCRIPTION calculation_errors_subscription TO calculation_errors;

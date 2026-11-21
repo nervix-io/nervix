@@ -964,6 +964,11 @@ impl Runtime {
                     DomainRoutingSnapshot {
                         passive_only: false,
                         message_error_plans,
+                        message_errors: MessageErrorCounters::resolve(
+                            &self.inner.metrics,
+                            domain,
+                            &revision,
+                        ),
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,
@@ -1154,6 +1159,7 @@ impl Runtime {
             None => 0,
         };
         let transitions = relay_transitions(&revision);
+        let message_errors = MessageErrorCounters::resolve(&self.inner.metrics, domain, &revision);
         Ok(DomainExecution {
             mqtt_ingestor_clients: HashMap::default(),
             revision,
@@ -1165,6 +1171,7 @@ impl Runtime {
                 DomainRoutingSnapshot {
                     passive_only: true,
                     message_error_plans,
+                    message_errors,
                     relay_schemas,
                     relay_services,
                     lookups,

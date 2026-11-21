@@ -59,6 +59,7 @@ impl nervix_connector::EmitterGeneralErrorHandler for SilentHost {
     fn handle_general_error(
         &self,
         _acks: &nervix_connector::EmitterRecordAcknowledgements,
+        _class: nervix_models::MessageErrorClass,
         _reason: String,
     ) {
     }
@@ -327,8 +328,8 @@ async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_
     };
     assert_eq!(refused.id, position(2));
     assert_eq!(
-        refused.error.code,
-        nervix_models::MessageErrorCode::Validation
+        refused.error.class,
+        nervix_models::RejectedErrorClass::Validation
     );
     assert_eq!(
         refused.error.operation,
@@ -367,8 +368,8 @@ async fn preparation_refuses_a_record_whose_values_are_invalid_and_carries_the_r
     };
     assert_eq!(refused.id, position(1));
     assert_eq!(
-        refused.error.code,
-        nervix_models::MessageErrorCode::Validation
+        refused.error.class,
+        nervix_models::RejectedErrorClass::Validation
     );
 }
 

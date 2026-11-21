@@ -831,7 +831,7 @@ mod tests {
             "ALTER HTTP ENDPOINT INGESTOR event_source SET FROM ingress_b MODE NO ACK ON QUIESCE \
              BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP NOW, SET FILTER \
              WHERE concat(input.kind, ',') != '', REPLACE ROUTE TO events INHERIT ALL UNBRANCHED \
-             FLUSH IMMEDIATE ON MESSAGE ERROR SEND TO errors SET code = concat(error.code, \
+             FLUSH IMMEDIATE ON MESSAGE ERROR SEND TO errors SET class = concat(error.class, \
              ',bad'), ADD ROUTE TO audit INHERIT ALL UNBRANCHED FLUSH EACH 10ms MAX BATCH SIZE \
              1MiB ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
         )

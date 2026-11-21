@@ -48,6 +48,7 @@ GUIDE_SECTIONS = (
     "Complete A Statement",
     "Subscribe And Read Rows",
     "Follow A Domain Clock",
+    "Read Server Notices",
     "Publish Through A Client Ingestor",
     "Consume A Client Emitter",
     "Back Up And Restore",

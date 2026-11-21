@@ -188,7 +188,7 @@ Feature: Client ingestors
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO order_errors
             SET order_id = input.order_id,
-                code = error.code
+                code = error.class
         ON GENERAL ERROR LOG;
       CREATE CLIENT PRODUCER INGESTOR lenient_in
         FROM SCHEMA order_in

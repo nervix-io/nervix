@@ -26,8 +26,8 @@ use nervix_models::{
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
     ModelName, NodeEndpoint, NodePrerequisites, NodeRef, OwnershipStateRecoveryOutcome,
     OwnershipStateReset, PrerequisiteMismatch, RelayName, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, Timestamp,
-    Unit, WasmStateResetScope,
+    RemoteAckResolution, RemoteRuntimeRecordMetadata, ReportedError, ResourceName,
+    SubscriptionBinding, Timestamp, Unit, WasmStateResetScope,
 };
 use nervix_primitives::sync::{mpsc, watch};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -490,9 +490,12 @@ pub struct SubscriptionInterestVisibilityResponse {
     pub result: Result<(), RemoteOperationFailure>,
 }
 
+/// A failure a node recovered from, as it reaches every peer's sessions: its display text and, when
+/// it reports an error of a graph node, that error's class and producing node as typed fields.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeErrorEvent {
     pub message: String,
+    pub error: Option<ReportedError>,
 }
 
 /// One replaceable report from the committed authority for a domain clock.
@@ -1641,6 +1644,9 @@ pub enum TlsConfigError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod runtime_error_event_properties;
 
 mod state_inspection;
 pub use state_inspection::{

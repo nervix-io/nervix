@@ -91,11 +91,12 @@ pub(super) async fn run_session_events(shared: Arc<SessionShared>) {
                 Err(RecvError::Closed) => return,
             },
             event = runtime_events.recv() => match event {
-                Ok(RuntimeEvent::Error(message)) => {
+                Ok(RuntimeEvent::Error(event)) => {
                     let notice = ServerNotice {
                         level: NoticeLevel::Error,
                         kind: NoticeKind::Runtime,
-                        message,
+                        message: event.message,
+                        error: event.error,
                     };
                     if !shared.send_notice(notice).await {
                         return;

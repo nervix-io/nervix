@@ -45,6 +45,7 @@ mod domain_clock;
 mod endpoints;
 mod field_descriptors;
 mod inspections;
+mod notices;
 mod properties;
 
 const ROWS: i32 = 1;

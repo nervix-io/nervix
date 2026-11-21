@@ -1512,7 +1512,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         "ALTER JUNCTION route_events ADD FROM incoming_b WHERE input.kind = 'event', SET \
              COLLECT FOR 10ms MAX BATCH SIZE 1MiB, SET FILTER WHERE input.kind != '', ADD \
              MATERIALIZED STATE profiles REQUIRED WAIT, ADD ROUTE TO projected INHERIT ALL FLUSH \
-             IMMEDIATE ON MESSAGE ERROR SEND TO errors SET code = error.code, SET DETACHED;",
+             IMMEDIATE ON MESSAGE ERROR SEND TO errors SET class = error.class, SET DETACHED;",
         None,
         &[]
     )]

@@ -22,7 +22,7 @@ use futures_util::pin_mut;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_branch_instances::BranchInstanceRegistry;
 use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
-use nervix_models::{RelayName, Timestamp, Unit};
+use nervix_models::{MessageErrorClass, RelayName, Timestamp, Unit};
 use nervix_primitives::{sync::watch, time::Instant};
 use thiserror::Error;
 
@@ -346,8 +346,12 @@ impl EmitterTaskLoop<'_> {
             match self.retention.admit(source, &key, &self.context.clock) {
                 Ok(admission) => Some(admission),
                 Err(error) => {
-                    self.batch_context
-                        .report_general_error(batch.acks.iter(), &error);
+                    // The emitter's own branch retention bookkeeping failed.
+                    self.batch_context.report_general_error(
+                        batch.acks.iter(),
+                        MessageErrorClass::INTERNAL,
+                        &error,
+                    );
                     return None;
                 }
             }

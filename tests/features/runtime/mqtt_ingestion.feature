@@ -1143,9 +1143,18 @@ Feature: MQTT ingestion
       """
       codec 'notification_codec' refused the payload: codec 'notification_codec' failed to parse field 'user_id'
       """
+    And the last server error reports the class "codec" of the ingestor "mqtt_poison"
     And within "30s" DESCRIBE INGESTOR "mqtt_poison" on the leader node contains
       """
       nervix_ingestor_decode_rejections_total: 1
+      """
+    And cluster observability metric "nervix_message_errors_total" with labels eventually totals 1 across the nodes that count it
+      """
+      domain="{{domain}}"
+      node_kind="ingestor"
+      node="mqtt_poison"
+      class="codec"
+      operation="decode"
       """
 
     Examples:

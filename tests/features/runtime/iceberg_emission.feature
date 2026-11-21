@@ -253,7 +253,7 @@ Feature: Iceberg emission
         END
       } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           error_operation = error.operation,
           source_user_id = input.user_id
       ON GENERAL ERROR LOG;
@@ -632,7 +632,7 @@ Feature: Iceberg emission
         BATCH MAX MESSAGES 10 MAX SIZE 3KiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR SEND TO emitter_errors
-          SET error_code = error.code,
+          SET error_code = error.class,
               error_operation = error.operation,
               source_user_id = input.user_id
         ON GENERAL ERROR LOG;
@@ -647,7 +647,7 @@ Feature: Iceberg emission
     Then within "30s" the Iceberg table "byte_bounded_{{test_id}}" has 2 data files holding 2 rows, each with at most 10 rows and 3072 bytes
     And within "30s" the relay subscription receives a payload
       """
-      "error_code":"validation","error_operation":"encode","source_user_id":43
+      "error_code":"limit","error_operation":"encode","source_user_id":43
       """
 
     Examples:

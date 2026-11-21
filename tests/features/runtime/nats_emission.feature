@@ -111,7 +111,7 @@ Feature: NATS emission
           ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejections
-          SET error_code = error.code, operation = error.operation, error_message = error.message
+          SET error_code = error.class, operation = error.operation, error_message = error.message
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejections_output TO rejections;
       START;
@@ -123,7 +123,7 @@ Feature: NATS emission
       """
     Then within "10s" the relay subscription receives payloads containing all fragments
       """
-      "error_code":"external" | "operation":"publish" | nats JetStream rejected record
+      "error_code":"refused" | "operation":"publish" | nats JetStream rejected record
       """
     And within "10s" Kafka consumer group "outside_group_{{test_id}}" next offset for topic "outside_in_{{test_id}}" partition 0 is "at least 1"
     And NATS JetStream stream "captured_{{test_id}}" holds exactly 0 messages

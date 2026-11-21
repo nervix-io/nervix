@@ -34,8 +34,8 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, MessageErrorCode, MessageErrorOperation,
-    StructuredMessageError, Timestamp,
+    ClientConfigEntry, ConnectorKind, MessageErrorOperation, RaisedMessageError,
+    RejectedErrorClass, Timestamp,
 };
 use nervix_primitives::time::Instant;
 use reqwest::{
@@ -315,16 +315,19 @@ impl RecordEmitter for SentryEventEmitter {
         &mut self,
         payload: Vec<u8>,
         occurred_at: Timestamp,
-    ) -> Result<Vec<u8>, StructuredMessageError> {
+    ) -> Result<Vec<u8>, RaisedMessageError<RejectedErrorClass>> {
+        // The envelope is this connector's own encoding of the codec's bytes, so a payload it cannot
+        // wrap is a row that could not be encoded, never a refusal of Sentry's.
         Self::encode_envelope(&payload, occurred_at, &self.platform).map_err(|error| {
-            StructuredMessageError {
+            RaisedMessageError {
                 reference: uuid::Uuid::now_v7(),
-                code: MessageErrorCode::External,
+                class: RejectedErrorClass::Codec,
                 message: format!("{error:#}"),
-                operation: MessageErrorOperation::Publish,
+                operation: MessageErrorOperation::Encode,
                 operation_index: None,
                 fields: Default::default(),
                 occurred_at,
+                external_code: None,
             }
         })
     }

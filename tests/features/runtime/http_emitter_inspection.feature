@@ -73,7 +73,7 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
         ON MESSAGE ERROR SEND TO rejected_requests
           SET emitter = 'encoded',
               event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index,
               error_message = error.message
@@ -90,7 +90,7 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
         ON MESSAGE ERROR SEND TO rejected_requests
           SET emitter = 'empty',
               event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index,
               error_message = error.message
@@ -110,8 +110,8 @@ Feature: HTTP REQUEST emitter inspection, errors and metrics
       """
       "emitter":"encoded" | "event_id":"evt-0" | "error_code":"validation" | "operation":"invoke" | "operation_index":0 | "error_message":"emitter 'encoded' cannot publish its HTTP request: header value is invalid"
       "emitter":"empty" | "event_id":"evt-0" | "error_code":"validation" | "operation":"invoke" | "operation_index":0 | "error_message":"emitter 'empty' cannot publish its HTTP request: header value is invalid"
-      "emitter":"encoded" | "event_id":"evt-1" | "error_code":"external" | "operation":"publish" | "error_message":"HTTP endpoint answered with status 404"
-      "emitter":"empty" | "event_id":"evt-1" | "error_code":"external" | "operation":"publish" | "error_message":"HTTP endpoint answered with status 404"
+      "emitter":"encoded" | "event_id":"evt-1" | "error_code":"refused" | "operation":"publish" | "error_message":"HTTP endpoint answered with status 404"
+      "emitter":"empty" | "event_id":"evt-1" | "error_code":"refused" | "operation":"publish" | "error_message":"HTTP endpoint answered with status 404"
       """
     And HTTP receiver "encoded_api" eventually receives at least 3 requests
     And HTTP receiver "empty_api" eventually receives at least 3 requests

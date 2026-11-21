@@ -222,7 +222,7 @@ Feature: MongoDB emission
       } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           source_user_id = input.user_id,
           source_action = input.action
       ON GENERAL ERROR LOG;
@@ -371,7 +371,7 @@ Feature: MongoDB emission
       <conflict_clause> BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           error_operation = error.operation,
           error_message = error.message,
           affected_fields = error.fields,
