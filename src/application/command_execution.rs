@@ -34,9 +34,10 @@ use nervix_consensus::{
 };
 use nervix_models::{
     AdministrativeLabelTarget, Backup, BackupCapture, BackupResources, BackupScope,
-    ClusterNodeIdentity, CommandExecutionReference, DomainName, DomainStartPoint, DomainState,
-    DomainStatus, EntityLabelTarget, MutateEntityLabels, Restore, RestoreArchive, Setting,
-    Statement, Timestamp, TransactionPosition, TransactionStatus, UserName,
+    ClusterNodeIdentity, CommandExecutionReference, CreateDomain, CreateStatement, DomainName,
+    DomainStartPoint, DomainState, DomainStatus, EntityLabelTarget, MutateEntityLabels, Restore,
+    RestoreArchive, Setting, Statement, Timestamp, TransactionPosition, TransactionStatus,
+    UserName,
 };
 pub use nervix_models::{CommandExecutionCapacity, CommandRetryValidity};
 use nervix_plexus::client_statement::ClientStatement;
@@ -667,6 +668,39 @@ impl SessionServiceImpl {
         Ok(())
     }
 
+    async fn prepare_persistent_domain_creation(
+        &self,
+        create: &CreateStatement<CreateDomain>,
+    ) -> Result<CommandExecutionEffect, Box<CommandResult>> {
+        let existing = self.inner.consensus.current_domain(&create.id).await;
+        let existed_at_admission = existing.is_some();
+        let domain_quota = if existed_at_admission {
+            self.domain_quota()
+        } else {
+            self.admit_domain_creation(&create.id, false)
+                .map_err(|error| Box::new(command_error(format!("{error:#}"))))?
+        };
+        let state = match existing {
+            Some(existing) => existing,
+            None => DomainState {
+                id: create.id.clone(),
+                config: create.config.clone(),
+                labels: create.labels.clone(),
+                status: DomainStatus::Stopped,
+                start_version: 0,
+                last_start: DomainStartPoint::Resume,
+                clock: None,
+                stop: None,
+            },
+        };
+        Ok(CommandExecutionEffect::CreateDomain {
+            domain_quota,
+            if_not_exists: create.if_not_exists,
+            existed_at_admission,
+            state: Box::new(state),
+        })
+    }
+
     pub(in crate::application) async fn admit_persistent_command(
         &self,
         reference: CommandExecutionReference,
@@ -723,35 +757,7 @@ impl SessionServiceImpl {
             PersistentCommandRequestBody::Statement {
                 source: _,
                 statement: Statement::CreateDomain(create),
-            } => {
-                let existing = self.inner.consensus.current_domain(&create.id).await;
-                let existed_at_admission = existing.is_some();
-                let domain_quota = if existed_at_admission {
-                    self.domain_quota()
-                } else {
-                    self.admit_domain_creation(&create.id, false)
-                        .map_err(|error| Box::new(command_error(format!("{error:#}"))))?
-                };
-                let state = match existing {
-                    Some(existing) => existing,
-                    None => DomainState {
-                        id: create.id.clone(),
-                        config: create.config.clone(),
-                        labels: create.labels.clone(),
-                        status: DomainStatus::Stopped,
-                        start_version: 0,
-                        last_start: DomainStartPoint::Resume,
-                        clock: None,
-                        stop: None,
-                    },
-                };
-                CommandExecutionEffect::CreateDomain {
-                    domain_quota,
-                    if_not_exists: create.if_not_exists,
-                    existed_at_admission,
-                    state: Box::new(state),
-                }
-            }
+            } => self.prepare_persistent_domain_creation(create).await?,
             PersistentCommandRequestBody::Statement {
                 source: _,
                 statement: Statement::CreateUser(create),
