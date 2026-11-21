@@ -168,6 +168,92 @@ Feature: Guest-rendered WASM state sections
       | 3            | 1             |
 
   @wasm_state_inspection
+  Scenario Outline: A description larger than any read carries is reported as a failed state description
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has "oversized state description" failing WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_failing_guest;
+      UPLOAD RESOURCE wasm_failing_guest VERSION '{{wasm_processor}}';
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
+      CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
+      CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
+      CREATE SCHEMA limited_branch_key ( tenant STRING );
+      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
+      CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
+      CREATE VHOST edge wasm-description-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR limited_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
+        TO limited_input_events
+        INHERIT ALL
+        BRANCHED BY by_limited_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR failing_guest FROM limited_input_events
+        USING RESOURCE wasm_failing_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 1MiB
+        BRANCHED BY by_limited_tenant
+        TO limited_events
+        SET tenant = branch.tenant,
+            note = coalesce(note, "ok")
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION limited_events_subscription TO limited_events;
+      START;
+      """
+    When http payload is posted to host "wasm-description-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","message":"first"}
+      """
+    And http payload is posted to host "wasm-description-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","message":"first"}
+      """
+    Then within "30s" the 2 branches of WASM PROCESSOR "failing_guest" have committed revision 1 with <replica_count> confirmed replicas
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW WASM PROCESSOR failing_guest STATE FOR BRANCH KEY { tenant = 'alpha' } FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /outcome = "page"
+      /units/0/wasm/branches/0/checkpoint/stage = "replica_confirmed"
+      /units/0/wasm/branches/0/description/generation = 1
+      /units/0/wasm/branches/0/description/revision = 1
+      /units/0/wasm/branches/0/description/outcome = "failed"
+      /units/0/wasm/branches/0/description/failure/stage = "state_description"
+      """
+    And the last command output contains
+      """
+      wasm processor 'failing_guest' state description failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_failing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_describe_state', saved state revision 1): the description does not fit one read: it carries 129 sections in
+      """
+    And the last command output contains
+      """
+      bytes, where one read carries at most 128 sections in
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  @wasm_state_inspection
   Scenario: A read sent to a node that does not own the processor is rendered by the owner
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And a 3 node nervix cluster is started

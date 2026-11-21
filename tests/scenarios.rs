@@ -11969,7 +11969,8 @@ fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
 /// The state description every state-counting guest returns: one `counters` section of one
 /// required `U32` field and one row. Inspection withholds every value of a guest's state, so the
 /// row's value never reaches a read and the description can be the same for every branch.
-fn state_counting_description() -> Vec<u8> {
+/// One section of a required `count` field holding one row, as a guest describes it.
+fn count_section(name: &str) -> nervix_wasm_protocol::StateSection {
     let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
         "count",
         arrow_schema::DataType::UInt32,
@@ -11989,20 +11990,40 @@ fn state_counting_description() -> Vec<u8> {
             .finish()
             .assured("a stream writer over a buffer finishes");
     }
+    nervix_wasm_protocol::StateSection {
+        schema: nervix_wasm_protocol::ProcessorSchema {
+            name: name.to_string(),
+            fields: vec![nervix_wasm_protocol::ProcessorField {
+                name: "count".to_string(),
+                ty: nervix_wasm_protocol::ProcessorType::U32,
+                optional: false,
+            }],
+        },
+        arrow_ipc_batch: rows,
+    }
+}
+
+fn state_counting_description() -> Vec<u8> {
     nervix_wasm_protocol::StateDescription {
-        sections: vec![nervix_wasm_protocol::StateSection {
-            schema: nervix_wasm_protocol::ProcessorSchema {
-                name: "counters".to_string(),
-                fields: vec![nervix_wasm_protocol::ProcessorField {
-                    name: "count".to_string(),
-                    ty: nervix_wasm_protocol::ProcessorType::U32,
-                    optional: false,
-                }],
-            },
-            arrow_ipc_batch: rows,
-        }],
+        sections: vec![count_section("counters")],
     }
     .encode()
+}
+
+/// A valid description of one section more than one state inspection read carries under the
+/// node's default section bound.
+fn oversized_state_description() -> Vec<u8> {
+    let count = nervix_models::StateInspectionSettings::default()
+        .max_sections
+        .value()
+        .get()
+        .checked_add(1)
+        .assured("the default section bound is far below the largest count");
+    let mut sections = Vec::with_capacity(count);
+    for index in 0..count {
+        sections.push(count_section(&format!("section_{index:03}")));
+    }
+    nervix_wasm_protocol::StateDescription { sections }.encode()
 }
 
 fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize) -> Vec<u8> {
@@ -12516,6 +12537,9 @@ enum WasmLifecycleFailureFixture {
     StateDescription,
     /// The module lacks the required `nervix_describe_state` export, so no branch instantiates.
     MissingStateDescriptionExport,
+    /// Every branch processes and checkpoints normally, and the guest describes one section more
+    /// than one state inspection read carries.
+    OversizedStateDescription,
 }
 
 /// The tenant whose branch configuration the initialization fixture refuses.
@@ -12529,6 +12553,9 @@ impl WasmLifecycleFailureFixture {
     const SNAPSHOT_REFUSAL: &str = "guest cannot serialize its state";
     const RESTORE_REFUSAL: &str = "guest refuses its saved counters";
     const DESCRIPTION_REFUSAL: &str = "guest cannot describe its state";
+    /// Where the oversized description lies: past the first page, which holds every buffer the
+    /// module writes and every input the host hands it.
+    const OVERSIZED_DESCRIPTION_OFFSET: usize = 65_536;
 
     fn parse(name: &str) -> Self {
         match name {
@@ -12540,6 +12567,7 @@ impl WasmLifecycleFailureFixture {
             "state restore" => Self::StateRestore,
             "state description" => Self::StateDescription,
             "missing state description export" => Self::MissingStateDescriptionExport,
+            "oversized state description" => Self::OversizedStateDescription,
             other => panic!("unsupported failing WASM processor fixture '{other}'"),
         }
     }
@@ -12562,7 +12590,8 @@ impl WasmLifecycleFailureFixture {
             | Self::StateSnapshot
             | Self::StateRestore
             | Self::StateDescription
-            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
+            | Self::MissingStateDescriptionExport
+            | Self::OversizedStateDescription => "i32.const 0".to_string(),
         }
     }
 
@@ -12592,9 +12621,10 @@ impl WasmLifecycleFailureFixture {
                  local.get $size i32.const {large} i32.gt_u
                  if i32.const 1 global.set $poisoned end"
             ),
-            Self::Initialization | Self::StateDescription | Self::MissingStateDescriptionExport => {
-                String::new()
-            }
+            Self::Initialization
+            | Self::StateDescription
+            | Self::MissingStateDescriptionExport
+            | Self::OversizedStateDescription => String::new(),
         }
     }
 
@@ -12610,7 +12640,8 @@ impl WasmLifecycleFailureFixture {
             | Self::StateSnapshot
             | Self::StateRestore
             | Self::StateDescription
-            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
+            | Self::MissingStateDescriptionExport
+            | Self::OversizedStateDescription => "i32.const 0".to_string(),
         }
     }
 
@@ -12639,7 +12670,8 @@ impl WasmLifecycleFailureFixture {
             | Self::Initialization
             | Self::Timeout
             | Self::StateDescription
-            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
+            | Self::MissingStateDescriptionExport
+            | Self::OversizedStateDescription => "i32.const 0".to_string(),
         }
     }
 
@@ -12656,7 +12688,8 @@ impl WasmLifecycleFailureFixture {
             | Self::Timeout
             | Self::StateSnapshot
             | Self::StateDescription
-            | Self::MissingStateDescriptionExport => "i32.const 0".to_string(),
+            | Self::MissingStateDescriptionExport
+            | Self::OversizedStateDescription => "i32.const 0".to_string(),
         }
     }
 
@@ -12677,6 +12710,44 @@ impl WasmLifecycleFailureFixture {
                 r#"(func (export "nervix_describe_state") (result i32) i32.const 0)"#.to_string()
             }
             Self::MissingStateDescriptionExport => String::new(),
+            Self::OversizedStateDescription => format!(
+                r#"(func (export "nervix_describe_state") (result i32)
+            i32.const {} global.set $read_ptr i32.const {})"#,
+                Self::OVERSIZED_DESCRIPTION_OFFSET,
+                oversized_state_description().len()
+            ),
+        }
+    }
+
+    /// The pages of the module's memory and the data segment of the description it lends, which
+    /// only the oversized mode has.
+    fn described_state(self) -> (usize, String) {
+        match self {
+            Self::OversizedStateDescription => {
+                let description = oversized_state_description();
+                let end = Self::OVERSIZED_DESCRIPTION_OFFSET
+                    .checked_add(description.len())
+                    .assured("a fixture description of a few hundred sections is small");
+                let mut data = String::with_capacity(description.len() * 3);
+                for byte in &description {
+                    data.push_str(&format!("\\{byte:02x}"));
+                }
+                (
+                    end.div_ceil(65_536),
+                    format!(
+                        r#"(data (i32.const {}) "{data}")"#,
+                        Self::OVERSIZED_DESCRIPTION_OFFSET
+                    ),
+                )
+            }
+            Self::Fuel
+            | Self::Memory
+            | Self::Initialization
+            | Self::Timeout
+            | Self::StateSnapshot
+            | Self::StateRestore
+            | Self::StateDescription
+            | Self::MissingStateDescriptionExport => (1, String::new()),
         }
     }
 
@@ -12709,6 +12780,7 @@ impl WasmLifecycleFailureFixture {
         let dump_state_body = self.dump_state_body();
         let load_state_body = self.load_state_body();
         let describe_state_export = self.describe_state_export();
+        let (pages, described_data) = self.described_state();
         let init_refusal = Self::INIT_REFUSAL;
         let snapshot_refusal = Self::SNAPSHOT_REFUSAL;
         let timeout_refusal = Self::TIMEOUT_REFUSAL;
@@ -12718,7 +12790,7 @@ impl WasmLifecycleFailureFixture {
         format!(
             r#"(module
           (import "env" "nervix_timeout_after_nanos" (func $timeout (param i64) (result i64)))
-          (memory (export "memory") 1)
+          (memory (export "memory") {pages})
           (global $emitted (mut i32) (i32.const 0))
           (global $read_ptr (mut i32) (i32.const 0))
           (global $poisoned (mut i32) (i32.const 0))
@@ -12732,6 +12804,7 @@ impl WasmLifecycleFailureFixture {
           (data (i32.const 40400) "{restore_refusal}")
           (data (i32.const 40600) "\2a")
           (data (i32.const 40700) "{description_refusal}")
+          {described_data}
           (func $report (param $ptr i32) (param $len i32)
             local.get $ptr
             global.set $reason_ptr
