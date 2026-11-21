@@ -17,9 +17,9 @@ use meticulous::ResultExt as _;
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction,
     AlterParametrizer, AlterPlacement, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
-    AlterWireSchema, AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect,
-    ModelIndex, ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion, ResourceName,
-    StatePurge, Statement,
+    AlterWireSchema, AvroType, CborType, DomainName, DomainSchedule, DropModel, JsonType, Model,
+    ModelChangeAspect, ModelIndex, ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion,
+    ResourceName, StatePurge, Statement,
 };
 use nervix_recovery::Discarded;
 use thiserror::Error;
@@ -406,6 +406,32 @@ impl PlannedMutations {
         let mut changed = self.changed_models();
         changed.retain(|model| self.configuration_changes(&model.node_ref()));
         changed
+    }
+
+    /// Whether the batch changes nothing but metadata: it drops no Model, and every Model it
+    /// writes already exists with the execution configuration it keeps.
+    pub(crate) fn changes_only_metadata(&self) -> bool {
+        if !self.drops_in_batch.is_empty() {
+            return false;
+        }
+        for node in self.models_to_persist.keys() {
+            if self.configuration_changes(node) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `current` carrying the definitions this batch writes, with every unit where `current`
+    /// placed it, or `None` when `current` does not schedule a Model the batch writes.
+    pub(crate) fn definitions_in_place(&self, current: &DomainSchedule) -> Option<DomainSchedule> {
+        let mut schedule = current.clone();
+        for node in self.models_to_persist.keys() {
+            let candidate = self.domain_state.models.get(node)?;
+            let scheduled = schedule.nodes.get_mut(node)?;
+            *scheduled.config = candidate.clone();
+        }
+        Some(schedule)
     }
 
     /// Every model of one kind the batch would leave active, including the models it does not

@@ -81,6 +81,7 @@ Bolero obligation, and none of those discharges a suite.
 | `scripts/chaos/run-baseline.sh` | The controller of every scenario. It owns the arguments and their bounds, preflight, image and tool identity, TLS, the Compose deployment, graph installation, traffic, the final ledger, findings, diagnostics and the exit trap |
 | `scripts/chaos/run-*.sh` | Scenario entry points that set each scenario's default fixture size and whole-run bound |
 | `scripts/chaos/*-scenario.sh` | Each scenario's faults, observations and verdicts |
+| `label-probe.sh` | The [label probe](#the-label-probe) of the restart and recovery scenarios: its owners, edits, reads through every node and verdict |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
 | `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, graceful-stop, outward TLS and diagnostic evidence |
@@ -1683,9 +1684,10 @@ This deployment sets two ordinary retention options, a snapshot entry threshold 
 covered log entries retained, and checks them in every node's Docker inspection. The run proceeds in
 order:
 
-1. It selects the observed follower that owns execution, acknowledges a canary, and gracefully
-   stops that follower. The drain must complete, because both survivors are live replacements. A
-   drain that does not complete is a product finding, which fails the run after the catch-up checks.
+1. It selects the observed follower that owns execution, acknowledges a canary, and installs the
+   [label probe](#the-label-probe). Then it gracefully stops that follower. The drain must
+   complete, because both survivors are live replacements. A drain that does not complete is a
+   product finding, which fails the run after the catch-up checks.
 2. The follower's own consensus metrics before the stop, and its `raft transition: state=Shutdown`
    line, record the last log index it held. The survivor leader's `nervix_consensus_log_last_index`
    bounds that index from above once the survivors agree on a leader.
@@ -1699,8 +1701,9 @@ order:
    - it relocates the relay onto the survivor that does not own it
 5. Rounds of eight `CREATE RESOURCE` changes follow, one CLI session per change, until every
    survivor's `nervix_consensus_log_purged_index` exceeds the upper bound. The follower can then no
-   longer catch up from the log. Twelve rounds without that fail the run, and
-   `stale/compaction.ndjson` keeps every round's positions.
+   longer catch up from the log. Each round also sets its own label key on every probed owner.
+   Twelve rounds without that fail the run, and `stale/compaction.ndjson` keeps every round's
+   positions.
 6. The runner starts the same container. Within 120 seconds, the follower's
    `nervix_consensus_log_snapshot_index` must cover the survivors' purged index, and its
    `raft.last_applied` must reach the index the leader had applied at the restart. The survivors'
@@ -1714,14 +1717,15 @@ order:
    - all three voters
 
    A change whose outcome was uncertain must read the same through the restarted node as through the
-   leader.
+   leader. Every node must then report the label probe's verdict.
 8. Finally, the cluster must settle with every peer connected within 150 seconds, output must
    advance, and a canary through the restarted node must be acknowledged. The node events must be
    exactly the follower's signal-15 kill, its exit 0 and the explicit start. The survivors must keep
    their process incarnations and every volume its identity, and the exact ledger must pass.
 
 `stale/applied.json` holds each change, its outcome and its effect as read through each node.
-`results/stale-follower-progress.json` summarizes the policy, bounds, positions and timings.
+`stale/labels.json` holds the label probe's verdict and maps. `results/stale-follower-progress.json`
+summarizes the policy, bounds, positions and timings.
 
 ### Former Owner Restart
 
@@ -1775,9 +1779,11 @@ just chaos run cluster-restart --image nervix:debian --nodes 1
 
 The run proceeds in order:
 
-1. After the cluster settles, the run acknowledges a canary. It reads each node's committed
-   configuration through that node's own route: its domains, its voting membership, the
-   `SHOW CREATE` text of every model of the graph, and the canary. All nodes must agree.
+1. After the cluster settles, the run acknowledges a canary, installs the [label
+   probe](#the-label-probe) and sets one more label key on every probed owner. Each of those edits
+   must be acknowledged. It reads each node's committed configuration through that node's own
+   route: its domains, its voting membership, the `SHOW CREATE` text of every model of the graph,
+   labels included, and the canary. All nodes must agree.
 2. One Pumba kill names every node container. The recording must hold one signal-9 kill and one exit
    137 for each. The broker keeps accepting the independent producer's records while no node runs.
 3. After at least `--outage-seconds`, one `docker start` starts every original container, and each
@@ -1794,9 +1800,10 @@ has not heard from. When every node that led after the restart observed every vo
 seconds of its own Docker start event, each owner must keep its work. Otherwise failover is
 permitted, and the verdict says which case applied.
 
-Each node must report the same committed configuration as before the crash. The consumer group must
-run only on the scheduled ingestor owner, and a canary after the restart must be acknowledged and
-visible through every node. Each node's events must be exactly its kill, exit and start. The exact
+Each node must report the same committed configuration as before the crash, and the label probe's
+verdict through every node, in `restart/labels.json`. The consumer group must run only on the
+scheduled ingestor owner, and a canary after the restart must be acknowledged and visible through
+every node. Each node's events must be exactly its kill, exit and start. The exact
 ledger shows that every accepted record was delivered from the replayable ingestor.
 `results/cluster-restart-progress.json` records:
 
@@ -1809,6 +1816,37 @@ violation that leaves the run meaningful goes to `results/recovery-findings.ndjs
 continues through recovery and the final ledger before it exits nonzero. These are process crash and
 restart experiments on one host. The host, its page cache and its disks survive, so they establish
 nothing about host power loss or storage corruption.
+
+#### The Label Probe
+
+The stale-follower and cluster-restart scenarios carry the label probe of
+[Entity Labels](./entity-labels.md), in `label-probe.sh`. Before the fault, it creates the cluster
+user `chaos_label_user` and the logical resource `chaos_label_resource` with labels. It labels the
+baseline domain, the user, the resource and four models of the graph: the record schema, the relay,
+the ingestor and the emitter. It sets a label key on every one of them in each later edit, one CLI
+session per edit, and records each outcome beside the scenario's other changes. After recovery, it
+reads `SHOW LABELS ... FORMAT JSON` for every probed owner through every node's own route. The
+verdict requires three things:
+
+- every node answered every owner with one committed inspection
+- every node reports the same complete map for each owner
+- every acknowledged edit is in that map
+
+An uncertain edit is therefore in every node's map or in none.
+
+After its other checks, the cluster restart also judges a domain backup's label scope:
+
+1. The probe backs the baseline domain up and describes the archive offline.
+2. It restores the archive beside the baseline as `chaos_label_copy`.
+3. The copy must carry the domain's, its models' and its resource's labels exactly as they were
+   at the cut.
+4. The description must name a domain archive that lists no user, and the user must keep its own
+   labels.
+
+`restart/backup-scope/` keeps the archive, its description, the reads and the verdict. The probe
+adds no traffic of its own.
+The running graph's exact ledger, ownership and state checks show that dataflow and state continued
+beside the label edits. A label edit never adds a metric series, so the probe reads no metric.
 
 ### Stateful
 

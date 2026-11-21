@@ -2,8 +2,9 @@
 # Sourced by run-baseline.sh after the external cluster and graph are ready. Stops one follower
 # gracefully with Pumba and keeps it offline while acknowledged configuration changes make the
 # survivors snapshot and purge their Raft logs past its position. It then starts the same container
-# from its own image and volume and requires snapshot catch-up and every acknowledged change
-# through the restarted node's own public route.
+# from its own image and volume and requires snapshot catch-up, every acknowledged change through
+# the restarted node's own public route, and the label probe's complete label maps, with every
+# label edit acknowledged while the follower was offline, through every node.
 
 # shellcheck source=recovery-scenario.sh
 source "${script_dir}/recovery-scenario.sh"
@@ -213,6 +214,10 @@ judge_applied_configuration() {
                     leader_effect=unknown
                 fi
                 ;;
+            label | label-install)
+                # The label probe judges label edits through every node; see label_probe_judge.
+                continue
+                ;;
             *)
                 recovery_fail controller "unknown configuration change kind ${kind}"
                 ;;
@@ -275,6 +280,7 @@ run_stale_follower() {
         'CREATE RESOURCE chaos_stale_before;' "created resource 'chaos_stale_before'")"
     [[ "${outcome}" == acknowledged ]] \
         || recovery_fail product "the control canary before the outage was ${outcome}, not acknowledged"
+    label_probe_install "${case_dir}" "${leader_host}"
     check_support_containers
     check_other_nodes ""
 
@@ -400,6 +406,7 @@ EOF
         ((round <= stale_max_rounds)) \
             || recovery_fail product "the survivors did not purge their logs past index ${follower_log_bound} within $((stale_max_rounds * stale_resources_per_round)) resource changes"
         create_resource_round "${case_dir}" "${survivor_leader_host}" "${round}"
+        label_probe_edit "${case_dir}" "${survivor_leader_host}" "stale_r${round}" "${round}"
     done
     jq -s -e '[.[] | select(.kind == "resource")] | all(.outcome == "acknowledged")' \
         "${case_dir}/changes.ndjson" >/dev/null \
@@ -461,6 +468,14 @@ EOF
         || recovery_finding "${case_dir}" "the restarted ${follower_host} does not show these changes: ${not_applied}"
     jq -e '.membership.applied' "${case_dir}/applied.json" >/dev/null \
         || recovery_finding "${case_dir}" "the restarted ${follower_host} does not report every voter"
+
+    phase "stale follower: labels through every node"
+    for host in "${node_hosts[@]}"; do
+        wait_for "every probed owner's labels through ${host}" 60 \
+            label_probe_read "${host}" "${case_dir}/labels/${host}" || true
+    done
+    label_probe_judge "${case_dir}" "${case_dir}/labels" "${case_dir}/labels.json" "${node_hosts[@]}" \
+        || recovery_finding "${case_dir}" "the nodes do not report the same complete labels with every acknowledged edit: $(jq -c '{unanswered, disagreements, missing}' "${case_dir}/labels.json")"
 
     phase 'stale follower: public recovery'
     for host in "${node_hosts[@]}"; do
@@ -526,6 +541,7 @@ EOF
         --argjson settle_bound "${stale_convergence_bound}" \
         --slurpfile catch_up "${case_dir}/catch-up.json" \
         --slurpfile applied "${case_dir}/applied.json" \
+        --slurpfile labels "${case_dir}/labels.json" \
         --slurpfile before "${case_dir}/follower-before.json" \
         '{follower: $follower, leader_before: $leader, survivor_leader: $survivor_leader,
           snapshot_policy: {snapshot_entry_threshold: $entries, covered_log_entries_retained: $covered},
@@ -536,6 +552,9 @@ EOF
           relay_relocated_to: $relay_target,
           catch_up: $catch_up[0], catch_up_ms: $catch_up_ms, settled_recovery_ms: $settled_ms,
           bounds: {catch_up_seconds: $catch_up_bound, settlement_seconds: $settle_bound},
+          labels: {acknowledged_edits: $labels[0].acknowledged_edits,
+                   uncertain_edits: $labels[0].uncertain_edits,
+                   passed: $labels[0].passed, verdict: "stale/labels.json"},
           applied_configuration: {acknowledged: $applied[0].acknowledged_changes,
                                   uncertain: $applied[0].uncertain_changes,
                                   not_applied: $applied[0].not_applied,

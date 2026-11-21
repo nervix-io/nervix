@@ -396,4 +396,111 @@ expect_rejected 'an owner on a node that is not live' "${verify}" ownership \
 jq -e '.contract == "failover permitted" and .leaders_observed == []' "${tmp_dir}/ownership-unobserved.json" \
     >/dev/null || fail 'a restart without an observed leader was judged against the grace'
 
+# The label probe: each node's typed inspections become one map per owner, and the judge requires
+# every node to report every owner, the same map on every node, and every acknowledged edit in it.
+(
+    label_dir="${tmp_dir}/labels"
+    mkdir -p "${label_dir}"
+    # Stands in for the packaged CLI: every owner answers its committed inspection, except the
+    # owner LABEL_UNANSWERED names, whose read fails.
+    admin_cli_batch() {
+        local output_dir="$3"
+        shift 4
+        mkdir -p "${output_dir}"
+        while [[ "$#" -ge 2 ]]; do
+            local name="$1"
+            shift 2
+            if [[ "${name}" == "labels-${LABEL_UNANSWERED:-}" ]]; then
+                printf 'Error: transport error\n' >"${output_dir}/${name}.txt"
+                printf '1\n' >"${output_dir}/${name}.status"
+                continue
+            fi
+            printf '{"entity":{},"labels":{"probe":"installed","restart":"before-crash"},"view":{"state":"committed","revision":41},"policy":{}}\n' \
+                >"${output_dir}/${name}.txt"
+            printf '0\n' >"${output_dir}/${name}.status"
+        done
+    }
+    label_probe_read nervix-1 "${label_dir}/read/nervix-1" || fail 'a node that answered every inspection was not read'
+    jq -e --argjson owners "$(printf '%s\n' "${label_probe_owners[@]}" | jq -R . | jq -sc 'sort')" \
+        'keys == $owners and all(.[]; . == {"probe":"installed","restart":"before-crash"})' \
+        "${label_dir}/read/nervix-1.json" >/dev/null || fail "label maps were read incorrectly: $(cat "${label_dir}/read/nervix-1.json")"
+    if LABEL_UNANSWERED=user label_probe_read nervix-2 "${label_dir}/read/nervix-2"; then
+        fail 'a node that left one owner unanswered was accepted'
+    fi
+    jq -e '.user == null' "${label_dir}/read/nervix-2.json" >/dev/null \
+        || fail 'an unanswered owner did not read as null'
+
+    maps='{"domain":{"probe":"installed"},"user":{"probe":"installed","stale_r1":"1"}}'
+    mkdir -p "${label_dir}/agree" "${label_dir}/differ"
+    for host in nervix-1 nervix-2 nervix-3; do
+        printf '%s\n' "${maps}" >"${label_dir}/agree/${host}.json"
+        printf '%s\n' "${maps}" >"${label_dir}/differ/${host}.json"
+    done
+    jq '.user.stale_r1 = null | del(.user.stale_r1)' "${label_dir}/agree/nervix-3.json" \
+        >"${label_dir}/differ/nervix-3.json"
+    cat >"${label_dir}/changes.ndjson" <<'EOF'
+{"name":"label-probe-domain","kind":"label","target":"domain","key":"probe","value":"installed","outcome":"acknowledged"}
+{"name":"label-probe-user","kind":"label","target":"user","key":"probe","value":"installed","outcome":"acknowledged"}
+{"name":"label-stale_r1-user","kind":"label","target":"user","key":"stale_r1","value":"1","outcome":"uncertain"}
+{"name":"chaos_stale_before","kind":"resource","outcome":"acknowledged"}
+EOF
+    label_probe_judge "${label_dir}" "${label_dir}/agree" "${label_dir}/agree.json" nervix-1 nervix-2 nervix-3 \
+        || fail "maps every node agrees on were rejected: $(cat "${label_dir}/agree.json")"
+    jq -e '.acknowledged_edits == 2 and .uncertain_edits == 1 and .hosts == ["nervix-1","nervix-2","nervix-3"]' \
+        "${label_dir}/agree.json" >/dev/null || fail 'the label verdict miscounted its edits'
+    if label_probe_judge "${label_dir}" "${label_dir}/differ" "${label_dir}/differ.json" nervix-1 nervix-2 nervix-3; then
+        fail 'an uncertain edit only some nodes show was accepted'
+    fi
+    jq -e '.disagreements == ["user"] and .missing == [] and .unanswered == []' "${label_dir}/differ.json" \
+        >/dev/null || fail "a disagreement was not reported by owner: $(cat "${label_dir}/differ.json")"
+    printf '%s\n' '{"name":"label-stale_r2-domain","kind":"label","target":"domain","key":"stale_r2","value":"2","outcome":"acknowledged"}' \
+        >>"${label_dir}/changes.ndjson"
+    if label_probe_judge "${label_dir}" "${label_dir}/agree" "${label_dir}/lost.json" nervix-1 nervix-2 nervix-3; then
+        fail 'an acknowledged edit no node shows was accepted'
+    fi
+    jq -e '.missing == ["label-stale_r2-domain"] and .disagreements == []' "${label_dir}/lost.json" \
+        >/dev/null || fail "a lost acknowledged edit was not reported: $(cat "${label_dir}/lost.json")"
+    jq '.user = null' "${label_dir}/agree/nervix-2.json" >"${label_dir}/unanswered-nervix-2.json"
+    mkdir -p "${label_dir}/unanswered"
+    cp "${label_dir}/agree/nervix-1.json" "${label_dir}/unanswered/nervix-1.json"
+    cp "${label_dir}/unanswered-nervix-2.json" "${label_dir}/unanswered/nervix-2.json"
+    head -n 3 "${label_dir}/changes.ndjson" >"${label_dir}/changes-first.ndjson"
+    mv "${label_dir}/changes-first.ndjson" "${label_dir}/changes.ndjson"
+    if label_probe_judge "${label_dir}" "${label_dir}/unanswered" "${label_dir}/unanswered.json" nervix-1 nervix-2; then
+        fail 'a node that left an owner unanswered was accepted'
+    fi
+    jq -e '.unanswered == [{"host":"nervix-2","owner":"user"}]' "${label_dir}/unanswered.json" >/dev/null \
+        || fail "an unanswered owner was not reported by node: $(cat "${label_dir}/unanswered.json")"
+
+    # A domain archive's label scope: the restored copy carries the source's domain, model and
+    # resource maps exactly, the archive holds no user, and the user keeps its own map.
+    scope_dir="${label_dir}/scope"
+    mkdir -p "${scope_dir}"
+    printf '%s\n' '{"domain":{"probe":"installed"},"schema":{"probe":"installed","restart":"before-crash"},"resource":{"probe":"installed"},"user":{"probe":"installed"}}' \
+        >"${scope_dir}/source.json"
+    cp "${scope_dir}/source.json" "${scope_dir}/copy.json"
+    cp "${scope_dir}/source.json" "${scope_dir}/after.json"
+    printf '%s\n' '{"scope":"domain","users":null,"domains":[{"domain":"chaos_baseline"}]}' \
+        >"${scope_dir}/description.json"
+    label_probe_judge_backup_scope "${scope_dir}/source.json" "${scope_dir}/copy.json" \
+        "${scope_dir}/after.json" "${scope_dir}/description.json" "${scope_dir}/verdict.json" \
+        || fail "a domain archive with its labels in scope was rejected: $(cat "${scope_dir}/verdict.json")"
+    jq '.schema.restart = "after-crash"' "${scope_dir}/source.json" >"${scope_dir}/copy-lost.json"
+    if label_probe_judge_backup_scope "${scope_dir}/source.json" "${scope_dir}/copy-lost.json" \
+        "${scope_dir}/after.json" "${scope_dir}/description.json" "${scope_dir}/lost.json"; then
+        fail 'a restored copy whose model labels differ from the cut was accepted'
+    fi
+    printf '%s\n' '{"scope":"domain","users":["chaos_label_user"],"domains":[]}' \
+        >"${scope_dir}/description-users.json"
+    if label_probe_judge_backup_scope "${scope_dir}/source.json" "${scope_dir}/copy.json" \
+        "${scope_dir}/after.json" "${scope_dir}/description-users.json" "${scope_dir}/users.json"; then
+        fail 'a domain archive that holds users was accepted'
+    fi
+    jq '.user = {"probe":"restored"}' "${scope_dir}/source.json" >"${scope_dir}/after-user.json"
+    if label_probe_judge_backup_scope "${scope_dir}/source.json" "${scope_dir}/copy.json" \
+        "${scope_dir}/after-user.json" "${scope_dir}/description.json" "${scope_dir}/user.json"; then
+        fail 'a domain restore that changed a user was accepted'
+    fi
+)
+
 printf 'chaos recovery self-test passed\n'
