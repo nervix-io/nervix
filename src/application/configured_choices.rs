@@ -39,7 +39,7 @@ mod emitter;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application) enum ConfiguredQuestion {
     Schemas,
-    Branches,
+    Parametrizers,
     Relays,
     Codecs,
     Vhosts,
@@ -96,7 +96,7 @@ impl<'a> ConfiguredQuery<'a> {
         }
         let question = match request.target() {
             ChoiceTarget::Schema => ConfiguredQuestion::Schemas,
-            ChoiceTarget::Parametrizer => ConfiguredQuestion::Branches,
+            ChoiceTarget::Parametrizer => ConfiguredQuestion::Parametrizers,
             ChoiceTarget::Relay => ConfiguredQuestion::Relays,
             ChoiceTarget::Codec => ConfiguredQuestion::Codecs,
             ChoiceTarget::Vhost => ConfiguredQuestion::Vhosts,
@@ -412,7 +412,7 @@ impl ConfiguredChoices {
         let search = search.to_lowercase();
         match question {
             ConfiguredQuestion::Schemas
-            | ConfiguredQuestion::Branches
+            | ConfiguredQuestion::Parametrizers
             | ConfiguredQuestion::Relays
             | ConfiguredQuestion::Codecs
             | ConfiguredQuestion::Vhosts
@@ -460,7 +460,7 @@ impl ConfiguredChoices {
                 (ConfiguredQuestion::Schemas, Model::Schema(schema)) => {
                     ModelCandidate::schema(schema)?
                 }
-                (ConfiguredQuestion::Branches, Model::Parametrizer(parametrizer)) => {
+                (ConfiguredQuestion::Parametrizers, Model::Parametrizer(parametrizer)) => {
                     ModelCandidate::parametrizer(parametrizer)?
                 }
                 (ConfiguredQuestion::Relays, Model::Relay(relay)) => ModelCandidate::relay(relay)?,
@@ -1546,7 +1546,10 @@ mod tests {
         }];
         for (target, question) in [
             (ChoiceTarget::Schema, ConfiguredQuestion::Schemas),
-            (ChoiceTarget::Parametrizer, ConfiguredQuestion::Branches),
+            (
+                ChoiceTarget::Parametrizer,
+                ConfiguredQuestion::Parametrizers,
+            ),
             (ChoiceTarget::Relay, ConfiguredQuestion::Relays),
             (
                 ChoiceTarget::PlacementMember,
@@ -1628,7 +1631,7 @@ mod tests {
             ["order_record", "tenant_key"]
         );
         assert_eq!(
-            labels(&ConfiguredQuestion::Branches, ""),
+            labels(&ConfiguredQuestion::Parametrizers, ""),
             ["bounded_tenants", "by_tenant"]
         );
         assert_eq!(
@@ -1636,7 +1639,7 @@ mod tests {
             ["audit", "dangling", "orders"]
         );
         assert_eq!(labels(&ConfiguredQuestion::Relays, "ORD"), ["orders"]);
-        assert!(labels(&ConfiguredQuestion::Branches, "nothing").is_empty());
+        assert!(labels(&ConfiguredQuestion::Parametrizers, "nothing").is_empty());
 
         let relays = configuration()
             .resolve(&ConfiguredQuestion::Relays, "")
@@ -1652,7 +1655,7 @@ mod tests {
             Some("schema order_record · unbranched")
         );
         let branches = configuration()
-            .resolve(&ConfiguredQuestion::Branches, "")
+            .resolve(&ConfiguredQuestion::Parametrizers, "")
             .assured("branches resolve");
         assert_eq!(
             branches.choices[0].presentation.detail.as_deref(),
