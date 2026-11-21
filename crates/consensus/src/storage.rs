@@ -96,13 +96,13 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_endpoint_pause_logs";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_endpoint_pause_logs";
 const KEYSPACE_META: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_endpoint_pause_meta";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_endpoint_pause_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_endpoint_pause_state";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_endpoint_pause_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_endpoint_pause_snapshots";
+    "raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_endpoint_pause_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.

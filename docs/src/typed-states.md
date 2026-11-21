@@ -379,7 +379,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_endpoint_pause_` keyspaces and current
+Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_transactionalstart_endpoint_pause_` keyspaces and current
 `ClusterState` metadata encoding, 43, identify its stored shapes, including endpoint pause response choices,
 node selector statements and the partition count of every resolved
 branch declaration in the committed schedule, the partition epoch the schedule records for each

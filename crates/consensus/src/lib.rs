@@ -560,20 +560,6 @@ pub enum ConsensusCommand {
         mutation: Option<Box<DomainMutationLease>>,
         domain_quota: nervix_licensing_vocabulary::Quota,
     },
-    StartDomain {
-        domain_id: DomainName,
-        start: DomainStartPoint,
-        clock: Option<DomainClockState>,
-        authority: Option<ClusterNodeIdentity>,
-        mutation: Option<Box<DomainMutationLease>>,
-    },
-    /// Stops a domain that has run no work since it last stopped, as the rollback of a failed
-    /// `START` does: nothing is in motion, so nothing drains and nothing is cut.
-    StopDomainBeforeAnyWork {
-        domain_id: DomainName,
-        mutation: Option<Box<DomainMutationLease>>,
-        cause: nervix_models::DomainStopCause,
-    },
     /// Asks a domain to stop. A running domain no other execution holds begins stopping, a paused
     /// one only under the mutation that pauses it, and a stopping one takes the request beside the
     /// requests it holds, whatever holds it. A repeated request, or one for a stopped domain,
@@ -956,10 +942,6 @@ impl std::fmt::Display for ConsensusCommand {
                 write!(f, "reconcile-ownership-handoff-preparations:{authority}")
             }
             Self::PutDomain { domain, .. } => write!(f, "put-domain:{}", domain.id.as_str()),
-            Self::StartDomain { domain_id, .. } => write!(f, "start-domain:{}", domain_id.as_str()),
-            Self::StopDomainBeforeAnyWork { domain_id, .. } => {
-                write!(f, "stop-domain-before-any-work:{}", domain_id.as_str())
-            }
             Self::RequestDomainStop { domain_id, .. } => {
                 write!(f, "request-domain-stop:{}", domain_id.as_str())
             }
@@ -1982,19 +1964,6 @@ impl StateMachineData {
         } else {
             self.domain_clock_authorities.remove(domain_id);
         }
-        true
-    }
-
-    fn commit_domain_stop_before_any_work(
-        &mut self,
-        domain_id: &DomainName,
-        cause: nervix_models::DomainStopCause,
-    ) -> bool {
-        let Some(domain) = self.domains.get_mut(domain_id) else {
-            return false;
-        };
-        domain.record_stop_before_any_work(cause);
-        self.release_stopped_domain_clock(domain_id);
         true
     }
 
@@ -4456,46 +4425,6 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
-    pub async fn start_domain(
-        &self,
-        domain_id: DomainName,
-        start: DomainStartPoint,
-        clock: Option<DomainClockState>,
-        authority: Option<ClusterNodeIdentity>,
-        mutation: Option<&DomainMutationLease>,
-    ) -> error_stack::Result<(), ConsensusError> {
-        let response = self
-            .inner
-            .client_write(ConsensusCommand::StartDomain {
-                domain_id,
-                start,
-                clock,
-                authority,
-                mutation: mutation.cloned().map(Box::new),
-            })
-            .await?;
-        Self::applied_response(response.data)
-    }
-
-    /// Stops a domain that has run no work since it last stopped, as the rollback of a failed
-    /// `START` does.
-    pub async fn stop_domain_before_any_work(
-        &self,
-        domain_id: DomainName,
-        mutation: Option<&DomainMutationLease>,
-        cause: nervix_models::DomainStopCause,
-    ) -> error_stack::Result<(), ConsensusError> {
-        let response = self
-            .inner
-            .client_write(ConsensusCommand::StopDomainBeforeAnyWork {
-                domain_id,
-                mutation: mutation.cloned().map(Box::new),
-                cause,
-            })
-            .await?;
-        Self::applied_response(response.data)
-    }
-
     /// Asks a domain to stop: begins its stop, or joins the stop it is in. A repeated request, or
     /// one for a stopped domain, changes nothing; the domain's committed record then tells the
     /// caller what became of its request.
@@ -6867,36 +6796,6 @@ fn apply_consensus_command_at(
             state.domains.insert(domain.id.clone(), (**domain).clone());
             changes.domains_changed = true;
         }
-        ConsensusCommand::StartDomain {
-            domain_id,
-            start,
-            clock,
-            authority,
-            mutation,
-        } => {
-            if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            if let Some(reason) = state.licensing_stop() {
-                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingStop {
-                    reason,
-                });
-            }
-            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            changes.domains_changed = state.commit_domain_start(domain_id, start, clock, authority);
-        }
-        ConsensusCommand::StopDomainBeforeAnyWork {
-            domain_id,
-            mutation,
-            cause,
-        } => {
-            if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
-                return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            changes.domains_changed = state.commit_domain_stop_before_any_work(domain_id, *cause);
-        }
         ConsensusCommand::RequestDomainStop {
             domain_id,
             request,
@@ -9038,6 +8937,79 @@ mod tests {
         }
     }
 
+    /// Commits the step of the one-step transaction a client's `START` of the unpaced domain `raw`
+    /// commits: the step's effect is validated against the committed state as the commit
+    /// validates it and, once valid, applied. The refusal is the commit's.
+    pub(super) fn commit_start_step(
+        state: &mut StateMachineData,
+        raw: &str,
+    ) -> error_stack::Result<(), TransactionMutationError> {
+        let domain_id = domain(raw);
+        let owner = UserName::parse("operator")
+            .assured("the fixture owner is an identifier-shaped literal");
+        let activity = TransactionActivity::from_timeout(
+            Timestamp::from_unix_nanos(1),
+            Duration::from_secs(60),
+        );
+        let mut transaction = ReplicatedTransaction::open(
+            "start".to_owned(),
+            domain_id.clone(),
+            owner.clone(),
+            activity,
+        );
+        transaction
+            .queue(
+                &owner,
+                &domain_id,
+                activity,
+                1,
+                TransactionStatement::test_admitted(TransactionStatementRequest {
+                    request_reference: nervix_models::CommandExecutionReference::parse("start.0")
+                        .assured("the fixture reference is a valid request reference"),
+                    expected_position: 0,
+                    source: "START".to_owned(),
+                    statement: Statement::StartDomain(nervix_models::StartDomain {
+                        start: DomainStartPoint::Resume,
+                    }),
+                }),
+                TransactionQueueLimits {
+                    max_statements: 1,
+                    max_source_bytes: 1024,
+                },
+            )
+            .assured("an open transaction of its owner queues one statement within its limits");
+        let effect = TransactionStepEffect::StartDomain {
+            inputs: captured_inputs(state, raw),
+            start: DomainStartPoint::Resume,
+            clock: None,
+            authority: None,
+        };
+        let result = TransactionStepResult {
+            impact: crate::transaction::test_commit_plan("start", 1).steps[0]
+                .impact
+                .clone(),
+            result: TransactionCommandResult {
+                success: true,
+                message: format!("starting domain '{raw}'"),
+                diagnostics: Vec::new(),
+                already_existed: false,
+                admission: None,
+            },
+        };
+        super::validate_transaction_step_effect(
+            state,
+            &transaction,
+            0,
+            1,
+            &result,
+            &effect,
+            Some(&TransactionOutcome::Committed),
+        )?;
+        let mut changes = StateMachineChanges::default();
+        apply_transaction_step_effect(state, &domain_id, &effect, None, &mut changes);
+        Ok(())
+    }
+
     fn node_identity(raw: &str, incarnation: u64) -> ClusterNodeIdentity {
         ClusterNodeIdentity::new(
             ClusterNodeName::parse(raw).expect("valid node name"),
@@ -10243,18 +10215,21 @@ mod tests {
             DomainTimeRate::ONE,
         );
 
-        apply_consensus_command(
+        let inputs = captured_inputs(&state, "paced");
+        apply_transaction_step_effect(
             &mut state,
-            &ConsensusCommand::StartDomain {
-                domain_id: domain_id.clone(),
+            &domain_id,
+            &TransactionStepEffect::StartDomain {
+                inputs,
                 start: DomainStartPoint::At {
                     timestamp: Timestamp::from_unix_nanos(1_000),
                     time_rate: DomainTimeRate::ONE,
                 },
                 clock: Some(mapping.clone()),
                 authority: Some(first_owner.clone()),
-                mutation: None,
             },
+            None,
+            &mut StateMachineChanges::default(),
         );
         let first = state
             .domain_clock_authorities
@@ -10342,7 +10317,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_transactional_lifecycle_commit_the_same_clock_state() {
+    fn direct_and_transactional_stop_requests_commit_the_same_clock_state() {
         let domain_id = domain("paced");
         let mut stopped = running_domain_state("paced");
         stopped.config.pace = DomainPace::Paced {
@@ -10357,48 +10332,29 @@ mod tests {
         stopped.start_version = 0;
         let mut direct = StateMachineData::default();
         direct.domains.insert(domain_id.clone(), stopped);
-        let mut transactional = direct.clone();
-        let owner = node_identity("node-1", 10);
-        let start = DomainStartPoint::At {
-            timestamp: Timestamp::from_unix_nanos(1_000),
-            time_rate: DomainTimeRate::ONE,
-        };
-        let mapping = DomainClockState::new(
-            Timestamp::from_unix_nanos(100),
-            Timestamp::from_unix_nanos(1_000),
-            DomainTimeRate::ONE,
-        );
-
-        apply_consensus_command(
-            &mut direct,
-            &ConsensusCommand::StartDomain {
-                domain_id: domain_id.clone(),
-                start: start.clone(),
-                clock: Some(mapping.clone()),
-                authority: Some(owner.clone()),
-                mutation: None,
-            },
-        );
         let mut changes = StateMachineChanges::default();
-        let inputs = captured_inputs(&transactional, "paced");
+        let inputs = captured_inputs(&direct, "paced");
         apply_transaction_step_effect(
-            &mut transactional,
+            &mut direct,
             &domain_id,
             &TransactionStepEffect::StartDomain {
                 inputs,
-                start,
-                clock: Some(mapping),
-                authority: Some(owner),
+                start: DomainStartPoint::At {
+                    timestamp: Timestamp::from_unix_nanos(1_000),
+                    time_rate: DomainTimeRate::ONE,
+                },
+                clock: Some(DomainClockState::new(
+                    Timestamp::from_unix_nanos(100),
+                    Timestamp::from_unix_nanos(1_000),
+                    DomainTimeRate::ONE,
+                )),
+                authority: Some(node_identity("node-1", 10)),
             },
             None,
             &mut changes,
         );
         assert!(changes.domains_changed);
-        assert_eq!(transactional.domains, direct.domains);
-        assert_eq!(
-            transactional.domain_clock_authorities,
-            direct.domain_clock_authorities
-        );
+        let mut transactional = direct.clone();
 
         let stop = test_operator_stop_request("transactional-stop");
         apply_consensus_command(
@@ -11239,11 +11195,8 @@ mod tests {
         assert!(matches!(blocked.response, ConsensusResponse::Conflict(_)));
         let blocked_lifecycle = apply_consensus_command(
             &mut state,
-            &ConsensusCommand::StartDomain {
+            &ConsensusCommand::PauseDomain {
                 domain_id: tenant.clone(),
-                start: DomainStartPoint::Resume,
-                clock: None,
-                authority: None,
                 mutation: None,
             },
         );

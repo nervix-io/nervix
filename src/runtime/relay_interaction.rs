@@ -117,6 +117,15 @@ pub(super) trait RelayInteractionCommand: Send {
 /// How many commands an owner task's command channel queues. A sender waits for room, and every
 /// command either awaits its answer or reports work its sender already finished, so one queued
 /// command keeps the task busy without letting senders run ahead of it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a single queued command is the owner task's backpressure contract: it keeps the \
+                  task busy without letting senders run ahead, and every command awaits its \
+                  answer or reports work already finished"
+    )
+)]
 pub(super) const RELAY_INTERACTION_COMMAND_CAPACITY: usize = 1;
 
 #[derive(Debug)]
