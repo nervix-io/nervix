@@ -22,7 +22,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE VHOST edge explicit-keys-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE <connector> CLIENT destination CONFIG { <config> };
@@ -93,7 +93,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE VHOST edge keyed-batches-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE <connector> CLIENT destination CONFIG { <config> };
@@ -145,7 +145,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE VHOST edge explicit-partitions-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE <connector> CLIENT destination CONFIG { <config> };
@@ -201,7 +201,7 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE VHOST edge key-routing-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE PULSAR CLIENT destination CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE PULSAR TOPIC EMITTER keyed FROM events
@@ -253,11 +253,11 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE HTTP ENDPOINT first_intake ON edge PATH '/a';
       CREATE HTTP ENDPOINT second_intake ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR first_source FROM first_intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO first_events INHERIT ALL BRANCHED BY tenant_source SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR second_source FROM second_intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO second_events INHERIT ALL BRANCHED BY location_source
         SET zone = message.zone, tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -407,11 +407,11 @@ Feature: Explicit emitter record keys and destination partitions
       CREATE HTTP ENDPOINT first_intake ON edge PATH '/a';
       CREATE HTTP ENDPOINT second_intake ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR first_source FROM first_intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO first_events INHERIT ALL BRANCHED BY tenant_source SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR second_source FROM second_intake MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO second_events INHERIT ALL BRANCHED BY location_source
         SET zone = message.zone, tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

@@ -35,7 +35,7 @@ Feature: Checked numeric execution
       CREATE HTTP ENDPOINT operand_ingress ON edge PATH '/operands';
       CREATE HTTP ENDPOINT INGESTOR operand_ingestor
         FROM operand_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING operand_batch_codec
         TO operands
           INHERIT ALL
           UNBRANCHED
@@ -138,7 +138,7 @@ Feature: Checked numeric execution
       CREATE HTTP ENDPOINT narrow_operand_ingress ON edge PATH '/operands';
       CREATE HTTP ENDPOINT INGESTOR narrow_operand_ingestor
         FROM narrow_operand_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING narrow_operand_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING narrow_operand_batch_codec
         TO narrow_operands
           INHERIT ALL
           UNBRANCHED
@@ -238,7 +238,7 @@ Feature: Checked numeric execution
       CREATE HTTP ENDPOINT measurement_ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
         FROM measurement_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING measurement_batch_codec
         TO measurements
           INHERIT ALL
           UNBRANCHED
@@ -320,7 +320,7 @@ Feature: Checked numeric execution
       CREATE HTTP ENDPOINT operand_ingress ON edge PATH '/operands';
       CREATE HTTP ENDPOINT INGESTOR operand_ingestor
         FROM operand_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING operand_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING operand_batch_codec
         TO operands
           INHERIT ALL
           UNBRANCHED

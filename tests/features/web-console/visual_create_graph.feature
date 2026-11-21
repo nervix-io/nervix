@@ -96,7 +96,7 @@ Feature: A complete graph is built from the console's visual forms
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "graph_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='graph_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='graph_endpoint']" is clicked
-    And selector ".create-ingestor-quiesce [data-quiesce='buffer']" is clicked
+    And selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']" is clicked
     And selector ".create-ingestor-buffer-size" is filled with "1MiB"
     And selector ".create-ingestor-codec .create-choice-search" is filled with "graph_codec"
     Then selector ".create-ingestor-codec [data-value='graph_codec']" exists

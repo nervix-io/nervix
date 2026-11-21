@@ -32,7 +32,7 @@ Feature: Reingestor metrics
         CREATE HTTP ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics';
         CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_ingestor
         FROM reingestor_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_reingestor_metrics_source

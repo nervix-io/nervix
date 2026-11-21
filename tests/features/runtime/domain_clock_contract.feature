@@ -29,7 +29,7 @@ Feature: Domain clock contract regressions
         PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR http2_clock_ingestor
         FROM http2_clock_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING http2_clock_request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING http2_clock_request_codec
         TIMESTAMP NOW
         TO http2_clock_observations
           SET sequence = message.sequence,
@@ -123,7 +123,7 @@ Feature: Domain clock contract regressions
         PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR authority_clock_ingestor
         FROM authority_clock_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING authority_clock_request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING authority_clock_request_codec
         TIMESTAMP NOW
         TO authority_clock_observations
           SET sequence = message.sequence,
@@ -372,7 +372,7 @@ Feature: Domain clock contract regressions
         PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR joined_clock_ingestor
         FROM joined_clock_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING joined_clock_request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING joined_clock_request_codec
         TIMESTAMP NOW
         TO joined_clock_observations
           SET sequence = message.sequence,
@@ -634,7 +634,7 @@ Feature: Domain clock contract regressions
         PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR clock_request_ingestor
         FROM clock_request_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING clock_request_codec
         TIMESTAMP NOW
         TO clock_observations
           SET sequence = message.sequence,
@@ -750,7 +750,7 @@ Feature: Domain clock contract regressions
         PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR historical_event_ingestor
         FROM historical_event_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING historical_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING historical_event_codec
         TIMESTAMP AT occurred_at
         TO historical_events
           INHERIT ALL
@@ -814,7 +814,7 @@ Feature: Domain clock contract regressions
         PATH '/stamp';
       CREATE HTTP ENDPOINT INGESTOR stamp_ingestor
         FROM stamp_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stamp_request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING stamp_request_codec
         TIMESTAMP NOW
         TO stamp_requests
           INHERIT ALL

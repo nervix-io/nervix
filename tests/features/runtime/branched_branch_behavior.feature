@@ -40,7 +40,7 @@ Feature: Branched branch behavior
         ON edge
         PATH '/notifications'; CREATE HTTP ENDPOINT INGESTOR ingestor_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_source_notifications
@@ -99,7 +99,7 @@ Feature: Branched branch behavior
         PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns
@@ -182,7 +182,7 @@ Feature: Branched branch behavior
         PATH '/metrics';
         CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_ingestor
@@ -260,7 +260,7 @@ Feature: Branched branch behavior
         PATH '/ingest-b';
         CREATE HTTP ENDPOINT INGESTOR ingestor_one
         FROM ingress_one MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -270,7 +270,7 @@ Feature: Branched branch behavior
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR ingestor_two
         FROM ingress_two MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO ss2
         INHERIT ALL
         BRANCHED BY by_source_one
@@ -342,7 +342,7 @@ Feature: Branched branch behavior
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

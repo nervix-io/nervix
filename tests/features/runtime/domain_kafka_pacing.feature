@@ -213,7 +213,7 @@ Feature: Kafka ingestor domain pacing
       CREATE VHOST edge control-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
-        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION healthy_subscription TO events;

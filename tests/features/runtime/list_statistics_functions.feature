@@ -46,7 +46,7 @@ Feature: Statistics over one list
       CREATE HTTP ENDPOINT series_ingress ON edge PATH '/series';
       CREATE HTTP ENDPOINT INGESTOR series_ingestor
         FROM series_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING series_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING series_codec
         TO series_in
           INHERIT ALL
           UNBRANCHED
@@ -124,7 +124,7 @@ Feature: Statistics over one list
       CREATE HTTP ENDPOINT probe_ingress ON edge PATH '/probes';
       CREATE HTTP ENDPOINT INGESTOR probe_ingestor
         FROM probe_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING probe_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING probe_codec
         TO probes
           INHERIT ALL
           UNBRANCHED
@@ -192,7 +192,7 @@ Feature: Statistics over one list
       CREATE VHOST edge history-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/history';
       CREATE HTTP ENDPOINT INGESTOR history_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING history_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING history_codec
         TO history_readings INHERIT ALL BRANCHED BY history_branch
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

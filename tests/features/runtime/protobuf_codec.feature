@@ -42,7 +42,7 @@ Feature: Protobuf codec
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -104,7 +104,7 @@ Feature: Protobuf codec
       CREATE HTTP ENDPOINT readings_endpoint ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR http_readings
         FROM readings_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING exact_reading_codec
         TO readings
         INHERIT ALL
         UNBRANCHED

@@ -30,7 +30,7 @@ Feature: Junction metrics
       PATH '/junction-metrics';
       CREATE HTTP ENDPOINT INGESTOR junction_metrics_ingestor
       FROM junction_metrics_ingress MODE NO ACK
-      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+      ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
       TO incoming
         INHERIT ALL
         BRANCHED BY by_junction_metrics

@@ -18,7 +18,7 @@ Feature: Integrated client wire qualification
       CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

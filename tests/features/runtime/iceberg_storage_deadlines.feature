@@ -22,7 +22,7 @@ Feature: Iceberg storage deadlines and retry ownership
       CREATE HTTP ENDPOINT notification_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notification_input
         FROM notification_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE S3 CLIENT s3_main CONFIG {

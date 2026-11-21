@@ -612,13 +612,17 @@ earliest `ENFORCE AFTER` has passed, counted from each request's admission, or o
 licensing time reaches the licensing stop's fixed minute after the expiry; and it withdraws each
 request whose `CANCEL AFTER` passed, the last withdrawal calling the stop off. An ending names the
 stop it ends by the revision that began it, so a stop called off and begun again is never ended by
-the owner of the first. Once the domain is stopped, a task of its own collects every node's report
-of what its teardown cut and commits it beside the ending, and each request's `STOP` answers from
-that record. A `STOP` that a leader change interrupts is resumed under its execution reference: its
-request is already held, its stop already ended, or, when the domain has started again since the
-command was admitted, the stop it requested is long over. [Stopping A
-Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its answers, and [A
-Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
+the owner of the first. An owner whose ending fails to commit keeps the stop and ends it again
+rather than leaving it without an owner until something else changes. The owner applies nothing it
+commits: every node, the leader among them, tears the stopped domain down by applying the
+committed ending as it applies every committed change, so the owner's task, which ends as soon as
+that ending is applied, never takes a teardown with it. Once the domain is stopped, a task of its
+own collects every node's report of what its teardown cut and commits it beside the ending, and
+each request's `STOP` answers from that record. A `STOP` that a leader change interrupts is resumed
+under its execution reference: its request is already held, its stop already ended, or, when the
+domain has started again since the command was admitted, the stop it requested is long over.
+[Stopping A Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its
+answers, and [A Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
 
 ## Backing Up A Domain
 

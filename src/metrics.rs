@@ -75,8 +75,8 @@ use connector::ConnectorInteractionMetrics;
 pub(crate) use connector::{
     EmitterAttemptOperation, EmitterAttemptOutcome, EmitterFinishOutcome,
     EmitterInteractionMetrics, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
-    EmitterWork, EmitterWorkKind, EndpointIntakeOutcome, IngestorEndpointMetrics,
-    IngestorInteractionMetrics, TaskFailureBinding,
+    EmitterWork, EmitterWorkKind, EndpointIntakeOutcome, EndpointPauseRefusal,
+    IngestorEndpointMetrics, IngestorInteractionMetrics, TaskFailureBinding,
 };
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
@@ -1902,6 +1902,7 @@ struct IngestorQuiesceSeries {
     buffered_bytes: IntGauge,
     dropped: IntCounter,
     rejected: IntCounter,
+    endpoint: Option<IngestorEndpointMetrics>,
 }
 
 struct JemallocMetricsCollector {
@@ -3893,7 +3894,7 @@ impl RuntimeMetrics {
         physical_node_id: Option<&ClusterNodeName>,
         kind: nervix_models::IngestorEntityKind,
     ) -> IngestorQuiesceMetrics {
-        let _reads = self.register_ingestor_reads(domain, ingestor, unit, physical_node_id, kind);
+        let reads = self.register_ingestor_reads(domain, ingestor, unit, physical_node_id, kind);
         let connector = kind.connector().to_string();
         let instance = instance_label(unit);
         let values = [
@@ -3918,6 +3919,7 @@ impl RuntimeMetrics {
             rejected: prometheus
                 .ingestor_quiesce_rejected_total
                 .with_label_values(&values),
+            endpoint: reads.endpoint_requests(),
         };
         series.buffered_records.set(0);
         series.buffered_bytes.set(0);

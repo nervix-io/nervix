@@ -29,6 +29,7 @@ fn http_endpoint(endpoint: &str) -> HttpEndpointIngestor {
         mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::EndpointBuffer {
             max_size: "1MiB".to_string(),
+            response: crate::EndpointPauseResponse::Immediate,
         },
     }
 }

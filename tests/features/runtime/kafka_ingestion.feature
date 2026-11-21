@@ -720,7 +720,7 @@ Feature: Kafka ingestion
       CREATE VHOST edge retire-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
-        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION retirement_subscription TO retired_events;

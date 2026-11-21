@@ -1919,6 +1919,8 @@ mod tests {
                                         mode: nervix_models::EndpointIngestMode::NoAck,
                                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                             max_size: "1MiB".to_string(),
+                                            response:
+                                                nervix_models::EndpointPauseResponse::Immediate,
                                         },
                                     },
                                 )),
@@ -2033,6 +2035,8 @@ mod tests {
                                         mode: nervix_models::EndpointIngestMode::NoAck,
                                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                                             max_size: "1MiB".to_string(),
+                                            response:
+                                                nervix_models::EndpointPauseResponse::Immediate,
                                         },
                                     },
                                 )),

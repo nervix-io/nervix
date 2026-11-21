@@ -30,8 +30,8 @@ use super::super::{
     SessionServiceImpl,
 };
 
-const INGESTOR: &str =
-    "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB";
+const INGESTOR: &str = "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE \
+                        BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE";
 const EMITTER: &str = "CREATE KAFKA TOPIC EMITTER sink FROM readings TO broker TOPIC 'events' \
                        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
 const CORRELATOR: &str = "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels CORRELATE \

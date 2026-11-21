@@ -255,7 +255,7 @@ Feature: Typed error qualification through public streams
       CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING calculation_codec
         TO calculations
           INHERIT ALL
           BRANCHED BY by_tenant SET tenant = message.tenant

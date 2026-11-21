@@ -79,20 +79,20 @@ Feature: Web console Plexus REPL
 
     Examples:
       | cluster_size | prefix                                                                                                                                                                             | function    |
-      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec FILTER WHERE read_                                   | read_header |
       | 1            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
       | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
       | 1            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
       | 1            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
-      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE read_                                                     | read_header |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec FILTER WHERE read_                                   | read_header |
       | 3            | CREATE KAFKA TOPIC EMITTER e FROM incoming WHERE co                                                                                                                                | coalesce    |
       | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD co                                                                                                                    | coalesce    |
       | 3            | CREATE HTTP REQUEST EMITTER e FROM incoming TO client METHOD 'POST' PATH co                                                                                                        | coalesce    |
       | 3            | ALTER HTTP ENDPOINT INGESTOR i ADD ROUTE TO outgoing SET value = read_                                                                                                             | read_header |
       | 1            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
-      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
+      | 1            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec FILTER WHERE coalesce(read_                          | read_header |
       | 3            | CREATE KAFKA TOPIC INGESTOR i FROM broker TOPIC 'events' OFFSET BY CONSUMER GROUP 'g' START AT EARLIEST MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec FILTER WHERE metadata.to | topic       |
-      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec FILTER WHERE coalesce(read_                                            | read_header |
+      | 3            | CREATE HTTP ENDPOINT INGESTOR i FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec FILTER WHERE coalesce(read_                          | read_header |
 
   Scenario: Web console sends simple Plexus commands and renders responses
     Given a 3 node nervix cluster is started
@@ -599,7 +599,7 @@ Feature: Web console Plexus REPL
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING codec TO outgoing SET value = read_"
+    When selector ".prompt-row input" is filled with "CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec TO outgoing SET value = read_"
     Then selector ".suggestions" contains "read_header"
     And selector ".suggestions" contains "read_headers"
     When selector ".prompt-row input" is filled with "CREATE MQTT TOPIC INGESTOR ingestor FROM broker TOPIC 'events' SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
@@ -964,7 +964,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE UNPACED DOMAIN {{domain}}_empty;
       """
     And the web console is opened on the leader node
@@ -998,7 +998,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1017,7 +1017,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1107,7 +1107,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY correlator_errors SCHEMA correlator_error BRANCHED BY by_left_profile_ingestor;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT left_ingress ON edge PATH '/left';
-      CREATE HTTP ENDPOINT right_ingress ON edge PATH '/right'; CREATE HTTP ENDPOINT INGESTOR left_profile_ingestor FROM left_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec TO left_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE HTTP ENDPOINT INGESTOR right_profile_ingestor FROM right_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec TO right_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT right_ingress ON edge PATH '/right'; CREATE HTTP ENDPOINT INGESTOR left_profile_ingestor FROM left_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING left_profile_codec TO left_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG; CREATE HTTP ENDPOINT INGESTOR right_profile_ingestor FROM right_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING right_profile_codec TO right_profiles INHERIT ALL BRANCHED BY by_left_profile_ingestor SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE CORRELATOR correlate_profiles
         LEFT FROM left_profiles
         RIGHT FROM right_profiles
@@ -1164,7 +1164,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -1203,7 +1203,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1279,7 +1279,7 @@ Feature: Web console Plexus REPL
       CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest'; CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest'; CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1345,7 +1345,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1395,7 +1395,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
@@ -1627,7 +1627,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge ended-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO events SET id = message.id, secret = message.secret UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec TO events SET id = message.id, secret = message.secret UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -1856,7 +1856,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR rust_filter FROM raw_metrics FILTER WHERE input.rust_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO rust_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR go_filter FROM rust_filtered_metrics FILTER WHERE input.go_keep DEDUPLICATE ON input.value MAX TIME 10m UNBRANCHED TO go_filtered_metrics INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
@@ -1973,7 +1973,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ZEROMQ CLIENT zeromq_main CONFIG { 'addr' = '{{zeromq_emit_addr}}', 'bind' = 'false' };
       CREATE ZEROMQ PUSH EMITTER zeromq_notifications FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -2007,7 +2007,7 @@ Feature: Web console Plexus REPL
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -2038,7 +2038,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "http_notifications"
     And selector ".graph-hit-layer" contains "notifications"
@@ -2233,7 +2233,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY telemetry_by_site SCHEMA telemetry BRANCHED BY by_primary_telemetry;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT primary_telemetry_endpoint ON edge PATH '/primary';
-      CREATE HTTP ENDPOINT INGESTOR primary_telemetry FROM primary_telemetry_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR primary_telemetry FROM primary_telemetry_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
@@ -2244,7 +2244,7 @@ Feature: Web console Plexus REPL
     When these Plexus commands are executed on the leader node
       """
       CREATE HTTP ENDPOINT backup_telemetry_endpoint ON edge PATH '/backup';
-      CREATE HTTP ENDPOINT INGESTOR backup_telemetry FROM backup_telemetry_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR backup_telemetry FROM backup_telemetry_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING telemetry_codec TO telemetry_by_site INHERIT ALL BRANCHED BY by_primary_telemetry SET site = message.site FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then selector ".graph-hit-layer" contains "backup_telemetry"
@@ -2277,7 +2277,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY deduped_events SCHEMA event BRANCHED BY by_ingest_events;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT raw_events_endpoint ON edge PATH '/raw';
-      CREATE HTTP ENDPOINT INGESTOR ingest_events FROM raw_events_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO raw_events INHERIT ALL BRANCHED BY by_ingest_events SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR ingest_events FROM raw_events_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec TO raw_events INHERIT ALL BRANCHED BY by_ingest_events SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_events FROM raw_events DEDUPLICATE ON input.value MAX TIME 10m BRANCHED BY by_ingest_events TO deduped_events INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -2306,7 +2306,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY filtered_events SCHEMA event UNBRANCHED;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT raw_events_endpoint ON edge PATH '/raw';
-      CREATE HTTP ENDPOINT INGESTOR ingest_events FROM raw_events_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO raw_events INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR ingest_events FROM raw_events_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec TO raw_events INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WASM PROCESSOR filter_events FROM raw_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO filtered_events SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       """
     And the web console is opened on the leader node
@@ -2349,7 +2349,7 @@ Feature: Web console Plexus REPL
       CREATE HTTP ENDPOINT reingestor_metrics_ingress ON edge PATH '/reingestor-metrics';
       CREATE HTTP ENDPOINT INGESTOR reingestor_metrics_ingestor
         FROM reingestor_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_reingestor_metrics_source
@@ -2420,7 +2420,7 @@ Feature: Web console Plexus REPL
       CREATE HTTP ENDPOINT telemetry_ingress ON edge PATH '/telemetry';
       CREATE REDIS CLIENT redis_alerts POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379/' }; CREATE HTTP ENDPOINT INGESTOR http_telemetry
         FROM telemetry_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING telemetry_codec
         TO telemetry_by_site
         INHERIT ALL
         BRANCHED BY by_http_telemetry
@@ -2507,7 +2507,7 @@ Feature: Web console Plexus REPL
       CREATE VHOST edge http-{{test_id}}-buffer.example.com;
       CREATE HTTP ENDPOINT relay_buffer_ingress ON edge PATH '/relay-buffer'; CREATE HTTP ENDPOINT INGESTOR relay_buffer_ingestor
         FROM relay_buffer_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_relay_buffer_source
@@ -2582,7 +2582,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY ss2 SCHEMA txn BRANCHED BY by_source_txns;
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT source_txns_endpoint ON edge PATH '/source';
-      CREATE HTTP ENDPOINT INGESTOR ingestor_txns FROM source_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns FROM source_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING txn_codec TO ss1 INHERIT ALL BRANCHED BY by_source_txns SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_txns FROM ss1 DEDUPLICATE ON input.value MAX TIME 10m BRANCHED BY by_source_txns TO ss2 INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "ingestor_txns"
@@ -2594,7 +2594,7 @@ Feature: Web console Plexus REPL
       CREATE RELAY state_txns SCHEMA txn BRANCHED BY by_state_txns_ingestor WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY rr1 SCHEMA txn BRANCHED BY by_state_txns_ingestor;
       CREATE HTTP ENDPOINT state_txns_endpoint ON edge PATH '/state';
-      CREATE HTTP ENDPOINT INGESTOR state_txns_ingestor FROM state_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING txn_codec TO state_txns INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR state_txns_ingestor FROM state_txns_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING txn_codec TO state_txns INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE REINGESTOR fwd FROM ss2 TO rr1 INHERIT ALL BRANCHED BY by_state_txns_ingestor SET value = message.value FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then selector ".graph-hit-layer" contains "state_txns_ingestor"

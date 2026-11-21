@@ -322,6 +322,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                     mode: EndpointIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
+                        response: crate::EndpointPauseResponse::Immediate,
                     },
                 })),
                 codec: named("codec"),

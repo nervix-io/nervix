@@ -270,7 +270,7 @@ mod tests {
     use crate::parser_support::RelayRole;
 
     const INGESTOR: &str = "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON \
-                            QUIESCE BUFFER MAX SIZE 1MiB";
+                            QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE";
     const EMITTER_DELIVERY: &str =
         "TO broker TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s";
     const CORRELATOR: &str = "CREATE CORRELATOR pairs LEFT FROM readings RIGHT FROM labels \

@@ -157,7 +157,7 @@ Feature: Web console execution graph
       CREATE HTTP ENDPOINT notifications_ingress ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_tenant_user
@@ -204,7 +204,7 @@ Feature: Web console execution graph
       CREATE HTTP ENDPOINT retry_ingress ON edge PATH '/retries';
       CREATE HTTP ENDPOINT INGESTOR retry_ingestor
         FROM retry_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retry_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retry_codec
         TO pending
         INHERIT ALL
         UNBRANCHED

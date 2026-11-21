@@ -129,7 +129,7 @@ Feature: Cluster leader failover
         };
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_notification_source
@@ -139,7 +139,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_a_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_a
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -149,7 +149,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_b_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_b
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -159,7 +159,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR transaction_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_transaction_source
@@ -169,7 +169,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_source
@@ -179,7 +179,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source
@@ -308,7 +308,7 @@ Feature: Cluster leader failover
         };
       CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_notification_source
@@ -318,7 +318,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_a_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_a
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -328,7 +328,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR notifications_b_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications_b
         INHERIT ALL
         BRANCHED BY by_notifications_a_source
@@ -338,7 +338,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR transaction_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_transaction_source
@@ -348,7 +348,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR metric_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics
         INHERIT ALL
         BRANCHED BY by_metric_source
@@ -358,7 +358,7 @@ Feature: Cluster leader failover
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features
         INHERIT ALL
         BRANCHED BY by_feature_source

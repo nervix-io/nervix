@@ -716,6 +716,9 @@ their process-local history across task restarts.
 | `nervix_ingestor_read_bytes_total` | Counter | Bytes of those raw payloads. |
 | `nervix_ingestor_poll_duration_seconds` | Histogram | Elapsed wall seconds of scheduled polls, including failed and interrupted polls. |
 | `nervix_ingestor_endpoint_requests_total` | Counter, `outcome` as listed below | Requests and data frames answered by each bound endpoint ingestor. |
+| `nervix_ingestor_endpoint_pause_waiting_requests` | Gauge | Requests whose senders are waiting for the body to enter the graph. |
+| `nervix_ingestor_endpoint_pause_waiting_bytes` | Gauge | Bytes in those waiting request bodies. |
+| `nervix_ingestor_endpoint_pause_refusals_total` | Counter, `cause="buffer_full\|deadline\|intake_ended"` | Requests refused by the pause buffer, grouped by the reason they could not proceed. |
 
 A returned nonempty message batch is `delivered`; a successful answer carrying no payload, including
 an oversized-only answer, a resume request or end of input, is `empty`. A read returning an error is
@@ -742,11 +745,15 @@ route, under the outcome that ingestor reached:
 | `outcome` | The ingestor |
 | --- | --- |
 | `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
-| `busy` | had no free slot in its `MODE ACK MAX` response window (HTTP 503, `not_admitted` with `busy`). |
-| `refused` | refused it: its quiesce refused new intake, such as `ON QUIESCE REJECT` while it is quiesced or a full endpoint `BUFFER` (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | could not have it unfolded because the node's extension workers had no room, which `nervix_ingestor_unfolding_refused_total` counts too (HTTP 503). |
+| `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
+| `refused` | refused new intake under quiesce, overflowed or ended a waiting `MODE NO ACK` request (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
+| `not_admitted` | had no extension-worker capacity to unfold the request or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). Extension-worker refusals also count in `nervix_ingestor_unfolding_refused_total`. |
 | `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
 | `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
+
+The pause metrics appear under `source:` in `DESCRIBE INGESTOR` and in the node's `/metrics`.
+The waiting gauges count requests still waiting for admission. The quiesce buffer gauges also
+count bodies already answered with `RESPOND IMMEDIATE`. Each `cause` has its own refusal counter.
 
 A route refuses a request before reading its body, or a WebSocket upgrade, only when none of its
 ingestors can take it, and counts that refusal once for each of them there. Otherwise every

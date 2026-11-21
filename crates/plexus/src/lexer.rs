@@ -384,6 +384,7 @@ pub enum Identifier {
     Deliver,
     Delay,
     Reply,
+    Respond,
     Id,
     Deduplication,
     Properties,

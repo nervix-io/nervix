@@ -35,12 +35,12 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT later_ingress ON edge PATH '/later';
       CREATE HTTP ENDPOINT INGESTOR first_ingestor
         FROM first_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO first_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR later_ingestor
         FROM later_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO later_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -128,7 +128,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -191,7 +191,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -259,7 +259,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -419,12 +419,12 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR routes_ingestor
         FROM routes_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routes_codec
         TO routes INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -523,7 +523,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           BRANCHED BY by_tenant
@@ -610,7 +610,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TIMESTAMP NOW
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -676,7 +676,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {

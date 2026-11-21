@@ -228,7 +228,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR physical_wait_state_ingestor
         FROM physical_wait_state_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_preference_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING physical_wait_preference_codec
         TIMESTAMP NOW
         TO physical_wait_preferences
           INHERIT ALL
@@ -239,7 +239,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR physical_wait_input_ingestor
         FROM physical_wait_input_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING physical_wait_notification_codec
         TIMESTAMP NOW
         TO physical_wait_pending
           INHERIT ALL

@@ -24,7 +24,8 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_ingest_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_ingest_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_ingest_endpoint']" is clicked
-    And selector ".create-ingestor-quiesce [data-quiesce='buffer']" is clicked
+    Then selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-after-resume']:enabled" exists
+    When selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']" is clicked
     And selector ".create-ingestor-buffer-size" is filled with "1MiB"
     And selector ".create-ingestor-codec .create-choice-search" is filled with "visual_ingest_codec"
     Then selector ".create-ingestor-codec [data-value='visual_ingest_codec']" exists
@@ -55,6 +56,26 @@ Feature: Web console visual ingestor creation
       """
       "message":"created visually"
       """
+    When selector ".node-hit[data-label='visual_ingest_ingestor']" is clicked
+    And selector ".graph-action-menu [data-action='change-pause-settings']" is clicked
+    Then selector ".endpoint-pause-ingestor" contains "visual_ingest_ingestor"
+    And selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate'].active" exists
+    And selector ".create-ingestor-buffer-size" has value "1MiB"
+    When selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-after-resume']" is clicked
+    Then selector ".create-preview" contains "SET QUIESCE BUFFER MAX SIZE 1MiB RESPOND AFTER RESUME"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And selector ".prompt-row input" is filled with "ALTER HTTP ENDPOINT INGESTOR visual_ingest_ingestor SET QUIESCE BUFFER MAX SIZE 2MiB "
+    Then selector ".suggestions" contains "RESPOND IMMEDIATE"
+    And selector ".suggestions" contains "RESPOND AFTER RESUME"
+    When selector ".prompt-row input" is filled with "ALTER HTTP ENDPOINT INGESTOR visual_ingest_ingestor SET QUIESCE BUFFER MAX SIZE 2MiB RESPOND IMMEDIATE;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "altered ingestor 'visual_ingest_ingestor' in domain '{{domain}}'" exactly 2 times
+    When selector ".node-hit[data-label='visual_ingest_ingestor']" is clicked
+    And selector ".graph-action-menu [data-action='change-pause-settings']" is clicked
+    Then selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate'].active" exists
+    And selector ".create-ingestor-buffer-size" has value "2MiB"
 
     Examples:
       | cluster_size |
@@ -148,7 +169,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_tx_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_tx_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_tx_endpoint']" is clicked
-    And selector ".create-ingestor-quiesce [data-quiesce='buffer']" is clicked
+    And selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']" is clicked
     And selector ".create-ingestor-buffer-size" is filled with "1MiB"
     And selector ".create-ingestor-codec .create-choice-search" is filled with "staged_ingest_codec"
     Then selector ".create-ingestor-codec [data-value='staged_ingest_codec']" exists
@@ -205,7 +226,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_reconnect_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_reconnect_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_reconnect_endpoint']" is clicked
-    And selector ".create-ingestor-quiesce [data-quiesce='buffer']" is clicked
+    And selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']" is clicked
     And selector ".create-ingestor-buffer-size" is filled with "1MiB"
     And selector ".create-ingestor-codec .create-choice-search" is filled with "visual_reconnect_codec"
     Then selector ".create-ingestor-codec [data-value='visual_reconnect_codec']" exists
@@ -258,7 +279,7 @@ Feature: Web console visual ingestor creation
     And selector ".create-ingestor-source-ref .create-choice-search" is filled with "visual_branch_endpoint"
     Then selector ".create-ingestor-source-ref [data-value='visual_branch_endpoint']" exists
     When selector ".create-ingestor-source-ref [data-value='visual_branch_endpoint']" is clicked
-    And selector ".create-ingestor-quiesce [data-quiesce='buffer']" is clicked
+    And selector ".create-ingestor-quiesce [data-quiesce='buffer-respond-immediate']" is clicked
     And selector ".create-ingestor-buffer-size" is filled with "1MiB"
     And selector ".create-ingestor-codec .create-choice-search" is filled with "visual_branch_codec"
     Then selector ".create-ingestor-codec [data-value='visual_branch_codec']" exists

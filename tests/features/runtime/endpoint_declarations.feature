@@ -24,7 +24,7 @@ Feature: Declared endpoint surfaces
         TO candidate_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WEBSOCKETS ENDPOINT INGESTOR candidate_websocket
-        FROM websocket_intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
+        FROM websocket_intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE
         DECODE USING event_codec
         TO candidate_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -85,10 +85,6 @@ Feature: Declared endpoint surfaces
       | 3            | CREATE    | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
       | 1            | CREATE    | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
       | 3            | CREATE    | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
-      | 1            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
-      | 3            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
-      | 1            | CREATE    | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
-      | 3            | CREATE    | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
       | 1            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
       | 3            | CREATE    | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
       | 1            | CREATE    | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
@@ -97,10 +93,6 @@ Feature: Declared endpoint surfaces
       | 3            | ALTER     | HTTP       | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
       | 1            | ALTER     | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
       | 3            | ALTER     | WEBSOCKETS | MODE ACK PARALLEL MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s |
-      | 1            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
-      | 3            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
-      | 1            | ALTER     | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
-      | 3            | ALTER     | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s ON QUIESCE BUFFER MAX SIZE 1MiB                                           |
       | 1            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
       | 3            | ALTER     | HTTP       | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |
       | 1            | ALTER     | WEBSOCKETS | MODE ACK MAX 8 ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE REJECT RETRY AFTER 1s          |

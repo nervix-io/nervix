@@ -1310,6 +1310,7 @@ mod tests {
             mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         }));
         endpoint_models.extend([
@@ -1403,6 +1404,7 @@ mod tests {
             mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         }));
         let listener = Model::Ingestor(listener);

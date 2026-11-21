@@ -676,12 +676,12 @@ mod tests {
         let text = "CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant_shard;\nCREATE \
                     RELAY regions SCHEMA order_event BRANCHED BY by_region;\nCREATE RELAY audit \
                     SCHEMA order_event UNBRANCHED;\nCREATE HTTP ENDPOINT INGESTOR source FROM \
-                    ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec \
-                    TO orders INHERIT ALL BRANCHED BY by_tenant_shard SET tenant = \
-                    message.tenant, shard = message.shard FLUSH IMMEDIATE ON MESSAGE ERROR LOG TO \
-                    regions INHERIT ALL BRANCHED BY by_region SET region = message.tenant FLUSH \
-                    IMMEDIATE ON MESSAGE ERROR LOG TO audit INHERIT ALL UNBRANCHED FLUSH \
-                    IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;\n";
+                    ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE \
+                    USING order_codec TO orders INHERIT ALL BRANCHED BY by_tenant_shard SET \
+                    tenant = message.tenant, shard = message.shard FLUSH IMMEDIATE ON MESSAGE \
+                    ERROR LOG TO regions INHERIT ALL BRANCHED BY by_region SET region = \
+                    message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG TO audit INHERIT ALL \
+                    UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;\n";
         let schedule = schedule(
             text,
             &[

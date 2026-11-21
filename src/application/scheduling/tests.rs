@@ -757,6 +757,7 @@ fn server_intakes_follow_live_membership_through_schedule_reconciliation() {
                     mode: nervix_models::EndpointIngestMode::NoAck,
                     quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
+                        response: nervix_models::EndpointPauseResponse::Immediate,
                     },
                 },
             )),

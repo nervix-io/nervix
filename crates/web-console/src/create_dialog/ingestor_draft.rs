@@ -327,7 +327,7 @@ mod tests {
         draft
             .source
             .select_reference(&node(ModelKind::Endpoint, "edge"));
-        draft.source.quiesce = Some(IngestQuiesceKind::EndpointBuffer);
+        draft.source.quiesce = Some(IngestQuiesceKind::EndpointBufferImmediate);
         draft.source.buffer_size = "1MiB".into();
         draft.source.overflow = Some(IngestQuiesceOverflow::DropOldest);
         draft.codec = Some(SelectedReference::chosen(

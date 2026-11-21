@@ -291,7 +291,7 @@ pub(crate) enum EndpointRequestPlan {
     Ack {
         max: NonZeroUsize,
         timeout: Duration,
-        retry_after: Duration,
+        retry_after: Option<Duration>,
     },
 }
 
@@ -314,28 +314,23 @@ impl EndpointRequestPlan {
                 if timeout.is_zero() || timeout > nervix_models::ClientDeadline::LONGEST {
                     return Err(Report::new(invalid));
                 }
-                let IngestQuiesceMode::Reject { retry_after } = quiesce else {
-                    return Err(Report::new(
-                        EntrypointPlanError::UnsupportedEndpointAckQuiesce {
-                            ingestor: ingestor.clone(),
-                            quiesce: quiesce.kind(),
-                        },
-                    ));
-                };
-                let retry_after = parse_duration_text(retry_after).change_context_lazy(|| {
-                    EntrypointPlanError::InvalidEndpointDuration {
-                        ingestor: ingestor.clone(),
-                        clause: "ON QUIESCE REJECT RETRY AFTER",
-                        value: retry_after.clone(),
+                let retry_after = match quiesce {
+                    IngestQuiesceMode::Reject { retry_after } => {
+                        Some(Self::retry_delay(ingestor, retry_after)?)
                     }
-                })?;
-                if retry_after > nervix_models::ClientDeadline::LONGEST {
-                    return Err(Report::new(EntrypointPlanError::InvalidEndpointDuration {
-                        ingestor: ingestor.clone(),
-                        clause: "ON QUIESCE REJECT RETRY AFTER",
-                        value: humantime::format_duration(retry_after).to_string(),
-                    }));
-                }
+                    IngestQuiesceMode::EndpointBuffer {
+                        response: nervix_models::EndpointPauseResponse::AfterResume,
+                        ..
+                    } => None,
+                    _ => {
+                        return Err(Report::new(
+                            EntrypointPlanError::UnsupportedEndpointAckQuiesce {
+                                ingestor: ingestor.clone(),
+                                quiesce: quiesce.kind(),
+                            },
+                        ));
+                    }
+                };
                 let max = NonZeroUsize::new(usize::from(max.get()))
                     .assured("a positive u16 fits every supported native usize");
                 Ok(Self::Ack {
@@ -345,6 +340,22 @@ impl EndpointRequestPlan {
                 })
             }
         }
+    }
+
+    fn retry_delay(
+        ingestor: &IngestorName,
+        written: &str,
+    ) -> Result<Duration, Report<EntrypointPlanError>> {
+        let invalid = || EntrypointPlanError::InvalidEndpointDuration {
+            ingestor: ingestor.clone(),
+            clause: "ON QUIESCE REJECT RETRY AFTER",
+            value: written.to_string(),
+        };
+        let delay = parse_duration_text(written).change_context_lazy(invalid)?;
+        if delay > nervix_models::ClientDeadline::LONGEST {
+            return Err(Report::new(invalid()));
+        }
+        Ok(delay)
     }
 }
 
@@ -552,6 +563,13 @@ impl IngestorStartPlan {
                 }
                 true
             }
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_)) => {
+                replacement.is_none_or(|replacement| {
+                    replacement.ingestor.declared_input.entity_kind()
+                        != self.ingestor.declared_input.entity_kind()
+                })
+            }
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
             | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
             | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
@@ -561,8 +579,6 @@ impl IngestorStartPlan {
             | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
             | IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(_))
             | IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(_))
-            | IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
-            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_))
             | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(_))
             | IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(_)) => false,
         }
@@ -650,16 +666,15 @@ impl IngestorStartPlan {
             declared_input: DeclaredIngestorInput {
                 entity: ingestor.input.entity_kind(),
                 quiesce: ingestor.input.quiesce().clone(),
-                allowed_quiesce: [
-                    IngestQuiesceKind::Suspend,
-                    IngestQuiesceKind::Buffer,
-                    IngestQuiesceKind::Drop,
-                    IngestQuiesceKind::Reject,
-                    IngestQuiesceKind::EndpointBuffer,
-                ]
-                .into_iter()
-                .filter(|kind| ingestor.input.supports_quiesce_kind(*kind))
-                .collect(),
+                allowed_quiesce: ingestor
+                    .input
+                    .entity_kind()
+                    .capabilities()
+                    .quiesce
+                    .iter()
+                    .map(|declared| declared.kind)
+                    .filter(|kind| ingestor.input.supports_quiesce_kind(*kind))
+                    .collect(),
             },
             general_error_policy: ingestor.general_error_policy.clone(),
         };
@@ -1723,6 +1738,7 @@ mod tests {
                 mode: nervix_models::EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
+                    response: nervix_models::EndpointPauseResponse::Immediate,
                 },
             })),
             source_model: Model::Endpoint(CreateEndpoint {
@@ -1853,7 +1869,7 @@ mod tests {
                 EndpointRequestPlan::Ack {
                     max: NonZeroUsize::new(usize::from(max)).assured("a positive u16 fits usize"),
                     timeout: Duration::from_millis(250),
-                    retry_after: Duration::from_millis(1500),
+                    retry_after: Some(Duration::from_millis(1500)),
                 }
             );
         }
@@ -1894,6 +1910,7 @@ mod tests {
             &mode,
             &IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_owned(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         )
         .expect_err("request acknowledgement requires sender-owned retries");

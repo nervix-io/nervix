@@ -68,7 +68,7 @@ Feature: Relay correlation
         PATH '/right-alias';
         CREATE HTTP ENDPOINT INGESTOR left_profile_ingestor
         FROM left_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING left_profile_codec
         TO left_profiles
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
@@ -78,7 +78,7 @@ Feature: Relay correlation
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR left_profile_alias_ingestor
         FROM left_alias_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING left_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING left_profile_codec
         TO left_profile_aliases
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
@@ -88,7 +88,7 @@ Feature: Relay correlation
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR right_profile_ingestor
         FROM right_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING right_profile_codec
         TO right_profiles
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
@@ -98,7 +98,7 @@ Feature: Relay correlation
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR right_profile_alias_ingestor
         FROM right_alias_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING right_profile_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING right_profile_codec
         TO right_profile_aliases
         INHERIT ALL
         BRANCHED BY by_left_profile_ingestor
@@ -240,12 +240,12 @@ Feature: Relay correlation
       CREATE HTTP ENDPOINT settle_orders_endpoint ON settle_host PATH '/orders';
       CREATE HTTP ENDPOINT settle_payments_endpoint ON settle_host PATH '/payments';
       CREATE HTTP ENDPOINT INGESTOR settle_orders_ingestor FROM settle_orders_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING settle_order_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING settle_order_codec
         TO settle_orders INHERIT ALL BRANCHED BY settle_by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR settle_payments_ingestor FROM settle_payments_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING settle_payment_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING settle_payment_codec
         TO settle_payments INHERIT ALL BRANCHED BY settle_by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

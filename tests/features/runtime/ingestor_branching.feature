@@ -10,13 +10,13 @@ Feature: Ingestor branching
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       SHOW CREATE INGESTOR http_notifications;
       """
     Then the last command output contains
       """
       CREATE HTTP ENDPOINT INGESTOR http_notifications
-        FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
+        FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE
         DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -81,7 +81,7 @@ Feature: Ingestor branching
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_batch_codec
         TO readings
           INHERIT ALL
           BRANCHED BY by_bucket SET bucket = message.amount / message.divisor

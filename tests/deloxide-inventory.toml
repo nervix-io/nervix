@@ -861,6 +861,7 @@ tags = [
   "@client_wire_tombstone_retention",
   "@client_wire_tombstone_recovery",
   "@deadlock_diagnostics",
+  "@endpoint_pause_websocket",
   "@restore_installation",
   "@password_credentials",
   "@client_ingestor_alter_drain",
@@ -1004,7 +1005,7 @@ tags = [
 ]
 target = "test:scenarios"
 
-# The ten endpoint ACK lifecycle examples have a separate bounded serial phase. They do not
+# The endpoint ACK lifecycle and pause examples have a separate bounded serial phase. They do not
 # consume the baseline lifecycle process's suite budget; both phases share the lane's unchanged
 # workload budget and retain the same teardown reserve.
 [[invocation]]
@@ -1012,7 +1013,10 @@ bound_seconds = 900
 concurrency = 1
 evidence = true
 id = "stress-endpoint-acknowledgement"
-inputs = ["tests/features/runtime/endpoint_acknowledgement.feature"]
+inputs = [
+  "tests/features/runtime/endpoint_acknowledgement.feature",
+  "tests/features/runtime/endpoint_quiesce_response.feature",
+]
 kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide-stress"]
@@ -5020,6 +5024,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.endpoint-pause-websocket",
+  "stress.endpoint-pause-websocket",
   "scenario.ingestor-instance-01",
   "stress.ingestor-instance-01",
   "scenario.ingestor-instance-02",
@@ -5601,6 +5607,33 @@ invariant = "Both text and binary frames retain their exact upgrade response hea
 invocation = "scenarios"
 scenario = "A buffered WebSockets connection preserves upgrade headers and frame types through a codec change"
 selections = ["deloxide", "deloxide-order"]
+
+[[owner]]
+path = "src/runtime/endpoint_pause.rs"
+workloads = [
+  "scenario.endpoint-pause-websocket",
+  "stress.endpoint-pause-websocket",
+]
+
+[[workload]]
+coverage = "One- and three-node WebSocket clients reach the tracked locks for frame wait observation, removal and ordered replay. The response race, connection I/O and elapsed time are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/endpoint_quiesce_response.feature"
+id = "scenario.endpoint-pause-websocket"
+invariant = "A second frame or disconnect ends only its client's buffered request. The other connection's request resumes and answers once."
+invocation = "scenarios"
+scenario = "A second WebSocket frame closes only its connection while the first is held"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: One- and three-node WebSocket clients reach the tracked locks for frame wait observation, removal and ordered replay. The response race, connection I/O and elapsed time are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/endpoint_quiesce_response.feature"
+id = "stress.endpoint-pause-websocket"
+invariant = "A second frame or disconnect ends only its client's buffered request. The other connection's request resumes and answers once."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "A second WebSocket frame closes only its connection while the first is held"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Under scheduling stress: Public connection metadata retention and replay reaches tracked entity engagement and quiesce-buffer ownership. Socket waits and ping timer ordering remain outside the detector."

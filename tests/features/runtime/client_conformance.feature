@@ -132,7 +132,7 @@ Feature: Cross-language client conformance
       CREATE HTTP ENDPOINT typed_ingress ON edge PATH '/typed';
       CREATE HTTP ENDPOINT INGESTOR typed_ingestor
         FROM typed_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING typed_row_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING typed_row_codec
         TO typed_rows
           SET id = message.id,
               tenant = message.tenant,

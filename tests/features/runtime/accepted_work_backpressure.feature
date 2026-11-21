@@ -19,7 +19,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge accepted-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR IGNORE;
       CREATE JUNCTION transform FROM accepted UNBRANCHED
@@ -83,7 +83,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge accepted-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR IGNORE;
       CREATE JUNCTION transform FROM accepted UNBRANCHED
@@ -135,7 +135,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge accepted-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR IGNORE;
       CREATE JUNCTION transform FROM accepted UNBRANCHED
@@ -220,7 +220,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge stateful-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR IGNORE;
       CREATE DEDUPLICATOR unique_events FROM accepted DEDUPLICATE ON input.id MAX TIME 5m
@@ -339,7 +339,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge model-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR IGNORE;
       CREATE INFERENCER running FROM features

@@ -65,7 +65,7 @@ CREATE HTTP ENDPOINT proto_ingress ON edge PATH '/proto-orders';
 
 CREATE HTTP ENDPOINT INGESTOR proto_order_source
   FROM proto_ingress MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_protobuf_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_protobuf_codec
   TO proto_orders
     INHERIT ALL
     UNBRANCHED

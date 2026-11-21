@@ -143,7 +143,7 @@ Feature: Client wire failure regressions
       CREATE HTTP ENDPOINT held_ingress ON held_edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_codec
         TO held_records INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -1167,7 +1167,7 @@ Feature: Client wire failure regressions
       CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wire_record_codec
         TO wire_records INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -1285,7 +1285,7 @@ Feature: Client wire failure regressions
       CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR wire_source
         FROM wire_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wire_record_codec
         TO wire_records INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -1347,7 +1347,7 @@ Feature: Client wire failure regressions
       CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
       CREATE HTTP ENDPOINT INGESTOR wire_ingestor
         FROM wire_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wire_record_codec
         TO wire_records
         SET tenant = message.tenant, sequence = message.sequence
         UNBRANCHED

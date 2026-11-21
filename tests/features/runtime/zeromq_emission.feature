@@ -110,7 +110,7 @@ Feature: ZeroMQ emission
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR state_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO state_notifications
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -120,7 +120,7 @@ Feature: ZeroMQ emission
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR notifications_ingestor
         FROM notifications_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_state_source
@@ -186,7 +186,7 @@ Feature: ZeroMQ emission
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/notifications';
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

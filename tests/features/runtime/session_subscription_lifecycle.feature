@@ -14,7 +14,7 @@ Feature: Session subscription lifecycle
       CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         SET id = message.id, secret = message.secret
         UNBRANCHED
@@ -127,7 +127,7 @@ Feature: Session subscription lifecycle
       CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -189,7 +189,7 @@ Feature: Session subscription lifecycle
       CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -307,7 +307,7 @@ Feature: Session subscription lifecycle
       CREATE HTTP ENDPOINT seed_endpoint ON edge PATH '/seeds';
       CREATE HTTP ENDPOINT INGESTOR seed_ingestor
         FROM seed_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING seed_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING seed_codec
         TIMESTAMP NOW
         TO seeds
         INHERIT ALL
@@ -346,7 +346,7 @@ Feature: Session subscription lifecycle
       CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED

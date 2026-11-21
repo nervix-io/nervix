@@ -36,7 +36,7 @@ Feature: Deduplicator state replication
         PATH '/dedup';
         CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
         BRANCHED BY by_source_txns

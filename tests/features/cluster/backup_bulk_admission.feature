@@ -19,7 +19,7 @@ Feature: Materialized capture under bulk memory contention
       CREATE VHOST edge backup-bulk-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO state INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

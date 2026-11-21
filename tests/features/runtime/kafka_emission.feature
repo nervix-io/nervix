@@ -22,7 +22,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT queue_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR queue_ingestor
         FROM queue_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING queue_ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING queue_ingest_codec
         TO queue_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT small_queue CONFIG {
@@ -110,7 +110,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING incoming_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -566,7 +566,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -637,7 +637,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_events
           INHERIT ALL
@@ -723,7 +723,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT unsent_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR unsent_ingestor
         FROM unsent_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING unsent_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING unsent_event_codec
         TIMESTAMP NOW
         TO unsent_events
           INHERIT ALL
@@ -819,7 +819,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT swap_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR swap_ingestor
         FROM swap_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING swap_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING swap_codec
         TIMESTAMP NOW
         TO swap_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -900,7 +900,7 @@ Feature: Kafka emission
       CREATE VHOST edge retire-out-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
-        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT retiring_kafka CONFIG {
@@ -1000,7 +1000,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -1098,7 +1098,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -1165,7 +1165,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED

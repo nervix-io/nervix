@@ -55,7 +55,7 @@ Feature: Relay branch presence
 
       CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_tenant
@@ -66,7 +66,7 @@ Feature: Relay branch presence
 
       CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
         BRANCHED BY by_tenant
