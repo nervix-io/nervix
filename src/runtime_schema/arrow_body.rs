@@ -27,11 +27,11 @@ use std::num::NonZeroUsize;
 use arch_into::ArchInto as _;
 use arrow_array::{RecordBatch, RecordBatchOptions, new_empty_array};
 use arrow_ipc::writer::StreamWriter;
-use arrow_schema::Schema as ArrowSchema;
+use arrow_schema::{ArrowError, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, Executor, MemoryClass, QueueAdmission,
-    Reservation,
+    BudgetedBuffer, BufferLimitExceeded, ChargedBytes, CpuClass, ExecutionError, Executor,
+    MemoryClass, QueueAdmission, Reservation,
 };
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
@@ -52,6 +52,9 @@ pub enum ArrowBodyError {
     Cancelled,
     #[error("a relay body of {size} bytes exceeds the {limit} byte limit")]
     BodyTooLarge { size: u64, limit: u64 },
+    /// The writer's output outgrew the carriage's encoded limit before the body was complete.
+    #[error("the encoded body reached {reached} bytes, past the {limit} byte limit")]
+    EncodedPastLimit { reached: u64, limit: u64 },
     #[error("a decoded relay batch of {size} bytes exceeds the {limit} byte limit")]
     DecodedTooLarge { size: u64, limit: u64 },
     #[error("a relay body of {sections} Arrow sections exceeds the {limit} this operation accepts")]
@@ -71,6 +74,22 @@ impl ArrowBodyError {
         Report::new(Self::Encode {
             reason: error.to_string(),
         })
+    }
+
+    /// A failure of the Arrow writer. It is past the carriage's limit exactly when the budgeted
+    /// buffer it writes into refused to grow beyond that limit; anything else fails the encoding.
+    fn writing(error: ArrowError) -> Report<Self> {
+        if let ArrowError::IoError(_, source) = &error
+            && let Some(cause) = source.get_ref()
+            && let Some(exceeded) = cause.downcast_ref::<BufferLimitExceeded>()
+        {
+            let context = Self::EncodedPastLimit {
+                reached: exceeded.required,
+                limit: exceeded.limit,
+            };
+            return Report::new(error).change_context(context);
+        }
+        Self::encoding(error)
     }
 
     #[cfg_attr(
@@ -186,6 +205,25 @@ impl RuntimeRecordBatch {
             .await
     }
 
+    /// Encode this batch as one Arrow section of a sealed runtime snapshot, as
+    /// [`Self::encode_arrow_snapshot_section`] does, into `charge`, bulk memory its caller already
+    /// holds for it, instead of first waiting for room in the bulk pool. The body grows past
+    /// `charge` only while the pool can back it at once.
+    pub(crate) async fn encode_arrow_snapshot_section_within(
+        &self,
+        executor: &Executor,
+        admission: QueueAdmission,
+        charge: Reservation,
+    ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
+        self.encode_body_within(
+            executor,
+            ArrowBodyCarriage::SnapshotSection,
+            admission,
+            charge,
+        )
+        .await
+    }
+
     /// Admit projection and its encoded result together, so neither allocation waits for a
     /// second grant while retaining the first. The projection and IPC writer run as one bounded
     /// CPU job; only the encoded allocation survives that job, which `admission` queues or refuses
@@ -246,12 +284,26 @@ impl RuntimeRecordBatch {
             .reserve(carriage.memory_class(), estimate.min(limit))
             .await
             .change_context(ArrowBodyError::Admission)?;
+        self.encode_body_within(executor, carriage, admission, reservation)
+            .await
+    }
+
+    /// Encode this batch for `carriage` into `charge`, memory of the carriage's class its caller
+    /// already holds, on the carriage's CPU class.
+    async fn encode_body_within(
+        &self,
+        executor: &Executor,
+        carriage: ArrowBodyCarriage,
+        admission: QueueAdmission,
+        charge: Reservation,
+    ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
+        let limit = carriage.encoded_limit(executor);
         let batch = self.batch.clone();
         executor
             .run_cpu_with(
                 carriage.cpu_class(),
                 admission,
-                reservation,
+                charge,
                 move |charge, cancellation| {
                     cancellation
                         .check()
@@ -344,10 +396,10 @@ fn encode_admitted_body(
 ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
     let buffer = BudgetedBuffer::with_limit(charge, limit);
     let mut writer =
-        StreamWriter::try_new(buffer, batch.schema_ref()).map_err(ArrowBodyError::encoding)?;
-    writer.write(&batch).map_err(ArrowBodyError::encoding)?;
-    writer.finish().map_err(ArrowBodyError::encoding)?;
-    let buffer = writer.into_inner().map_err(ArrowBodyError::encoding)?;
+        StreamWriter::try_new(buffer, batch.schema_ref()).map_err(ArrowBodyError::writing)?;
+    writer.write(&batch).map_err(ArrowBodyError::writing)?;
+    writer.finish().map_err(ArrowBodyError::writing)?;
+    let buffer = writer.into_inner().map_err(ArrowBodyError::writing)?;
     Ok(ChargedBytes::from_buffer(buffer))
 }
 

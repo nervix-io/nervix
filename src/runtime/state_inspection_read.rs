@@ -34,6 +34,10 @@ use crate::runtime_schema::batch_payload_bytes;
 #[path = "state_inspection_read_publication_tests.rs"]
 mod publication_tests;
 
+#[cfg(test)]
+#[path = "state_inspection_read_cost_tests.rs"]
+mod cost_tests;
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StatePageReadError {
     #[error("the materialized state assignment is not ready")]

@@ -919,6 +919,7 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
+"${script_dir}/state-inspection-self-test.sh"
 "${script_dir}/endpoint-self-test.sh"
 "${script_dir}/lifetimes-self-test.sh"
 "${script_dir}/correctness-harness-self-test.sh"

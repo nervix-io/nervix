@@ -1322,6 +1322,13 @@ bench-materialized-state: build-web-console wasm-processor-guests download-onnxr
 bench-materialized-state-bodies:
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib materialized_owner_cost -- --ignored --nocapture
 
+# Measure the owner's record application and the window's publication while state inspection
+# reads them near the session reply bound, with and without the concurrent pages.
+bench-state-inspection: build-web-console wasm-processor-guests download-onnxruntime bench-state-inspection-bodies
+
+bench-state-inspection-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib state_inspection_cost -- --ignored --nocapture
+
 # Measure the endpoint's actual request routing and per-thread allocations on the same host.
 bench-endpoint-routing: build-web-console download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing,benchmarks --lib endpoint_routing_cost -- --ignored --nocapture
@@ -3931,6 +3938,7 @@ bench-smoke-bodies:
     just bench-retained-channels-bodies
     just bench-remote-owners-bodies
     just bench-materialized-state-bodies
+    just bench-state-inspection-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
 # one branched input prepared into its branch batches, and an emitter batch encoded through a JAQ
@@ -5500,6 +5508,11 @@ verify-chaos-clock *args:
 # Run the state, clock and window verifier controls without the other external harness checks.
 test-chaos-stateful-verifiers:
     exec bash scripts/chaos/tests/stateful-self-test.sh
+
+# Run the stateful scenario's state inspection option checks, observation reader and verifier
+# controls without the other external harness checks.
+test-chaos-inspection-verifiers:
+    exec bash scripts/chaos/tests/state-inspection-self-test.sh
 
 # Validate suite selection, budgets and the controller against its deterministic stand-ins.
 test-chaos-suites:

@@ -446,6 +446,7 @@ async fn a_unit_still_restoring_its_branches_refuses_its_page_without_reading_a_
     let bounds = || ProcessorStatePageBounds {
         rows: 10,
         bytes: u64::MAX,
+        reply: PageReply::Local,
     };
 
     let (branch, mut branch_commands) = branch_channels();

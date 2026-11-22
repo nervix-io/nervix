@@ -28,6 +28,13 @@ stateful_owned_entities=(
 stateful_ingestors=('INGESTOR chaos_state_ingestor' 'INGESTOR chaos_profile_ingestor')
 stateful_output_topics=(chaos_unique_output chaos_window_output chaos_enriched_output chaos_counted_output
     chaos_inferred_output)
+# A run that inspects state also places the inspection graph with the stateful work.
+if [[ "${inspect_state:-false}" == true ]]; then
+    # shellcheck source=state-inspection.sh
+    source "${script_dir}/state-inspection.sh"
+    stateful_owned_entities+=("${inspection_owned_entities[@]}")
+    stateful_ingestors+=("${inspection_ingestors[@]}")
+fi
 
 # The stateful fixture, its phases and the profile versions the runner publishes. The load holds
 # after the milestone's records, when every branch holds two rows in an open 12-row window, and
@@ -399,6 +406,9 @@ stateful_failover() {
     local case_dir="${stateful_case_dir}"
     local target_node="${stateful_target_node}"
     local survivor="${stateful_survivor}"
+    if [[ "${inspect_state:-false}" == true ]]; then
+        inspection_outage_start "${survivor}" "${case_dir}/inspection/outage/reads"
+    fi
     wait_for 'survivors agree on a caught-up leader' 90 \
         survivors_settled "nervix-${target_node##*-}" "${case_dir}" \
         || stateful_fail product 'the survivors did not settle while the state owner was out'
@@ -406,6 +416,10 @@ stateful_failover() {
         stateful_moved_off "${target_node}" "${survivor}" "${case_dir}/placement-during" \
         || stateful_fail product "the stateful work did not fail over from ${target_node}"
     stateful_failover_ms="$(( $(epoch_ms) - node_fault_started_ms ))"
+    if [[ "${inspect_state:-false}" == true ]]; then
+        inspection_outage_join "${case_dir}/inspection/outage/reads"
+        inspection_after_failover "${case_dir}" "${survivor}" "${target_node}"
+    fi
     local counted_before
     counted_before="$(topic_end_offset chaos_counted_output)"
     wait_for 'stateful outputs advanced on the survivors' "${stateful_delivery_bound}" \
@@ -577,7 +591,22 @@ run_stateful() {
     wait_for "stateful work on ${state_owner}, ingestion on ${ingest_node}" "${stateful_placement_bound}" \
         stateful_placed_on "${state_owner}" "${ingest_node}" "${case_dir}/placement-before"
 
+    # Inspection reads through a node the fault leaves running.
+    local inspection_host=""
+    if [[ "${inspect_state:-false}" == true ]]; then
+        local inspection_candidate
+        for inspection_candidate in "${node_hosts[@]}"; do
+            if [[ "${inspection_candidate}" != "nervix-${state_owner##*-}" ]]; then
+                inspection_host="${inspection_candidate}"
+                break
+            fi
+        done
+    fi
+
     phase 'stateful: traffic startup'
+    if [[ "${inspect_state:-false}" == true ]]; then
+        inspection_startup "${case_dir}"
+    fi
     stateful_publish_profiles "${stateful_profile_loaded}" "${case_dir}/profiles-loaded"
     wait_for "materialized profile version ${stateful_profile_loaded} for both branches" 90 \
         stateful_profiles_at "${stateful_profile_loaded}" "${node_hosts[0]}" "${case_dir}/profiles-loaded" \
@@ -596,6 +625,9 @@ run_stateful() {
     stateful_publish_profiles "${stateful_profile_milestone}" "${case_dir}/profiles-milestone"
 
     stateful_milestone "${case_dir}"
+    if [[ "${inspect_state:-false}" == true ]]; then
+        inspection_milestone "${case_dir}" "${inspection_host}" "${state_owner}"
+    fi
 
     phase 'stateful: volatile interval'
     stateful_hold_after "$((stateful_milestone_records_observed + stateful_volatile_records))"
@@ -652,11 +684,19 @@ run_stateful() {
     else
         stateful_recover "${case_dir}"
         node_fault_check_events "${case_dir}"
+        if [[ "${inspect_state:-false}" == true ]]; then
+            inspection_after_recovery "${case_dir}" "${inspection_host}"
+        fi
     fi
     check_support_containers
 
     stateful_final_boundary "${case_dir}"
     stateful_verify "${case_dir}"
+    if [[ "${inspect_state:-false}" == true ]]; then
+        inspection_verify "${case_dir}" "${state_owner}"
+    else
+        jq -n '{verdict: "not inspected"}' >"${case_dir}/verdict-inspection.json"
+    fi
     capture_all_metrics "${case_dir}"
     jq -n \
         --arg fault "${fault}" \
@@ -682,6 +722,7 @@ run_stateful() {
         --slurpfile enrich "${case_dir}/verdict-enrich.json" \
         --slurpfile counter "${case_dir}/verdict-counter.json" \
         --slurpfile inferencer "${case_dir}/verdict-inferencer.json" \
+        --slurpfile inspection "${case_dir}/verdict-inspection.json" \
         '{fault: $fault, topology_nodes: $nodes, fault_seconds: (if $fault == "none" then null else $fault_seconds end),
           deployment: {replica_count: $replicas, state_snapshot_interval: $snapshot_interval,
                        state_owner: $state_owner, ingestion_node: $ingest_node},
@@ -698,7 +739,8 @@ run_stateful() {
                      window: ($window[0] | {verdict, checks, volatile_losses, replay_duplicates, durability, failures}),
                      materialized_relay: ($enrich[0] | {verdict, checks, versions_after_recovery, replay_duplicates, durability, failures}),
                      wasm_processor: ($counter[0] | {verdict, checks, replay_excess_after_recovery, replay_duplicates, durability, failures}),
-                     inferencer: ($inferencer[0] | {verdict, checks, restored_counts, final_counts, count_excess, replay_duplicates, durability, failures})},
+                     inferencer: ($inferencer[0] | {verdict, checks, restored_counts, final_counts, count_excess, replay_duplicates, durability, failures}),
+                     inspection: ($inspection[0] | {verdict, owners, stages, outage, failover_refusals, stale_continuation, failures})},
           evidence_class: (if $fault == "none" then "healthy baseline" else "process and network faults on one host; host power loss and storage corruption are not established" end),
           qualification_limit: $milestone[0].not_observable}' \
         >"${artifact_dir}/results/stateful-progress.json"

@@ -4038,6 +4038,17 @@ budget; transport descriptors keep their existing Bulk bound, and the frontend's
 deadline covers the census and pages together. Reads outside a transition request no catalogs.
 The release, checkpoint fetch, installation and forget protocol is unchanged, and passive snapshots
 use the same retained publications. This adds no publication, lock or recurring-path lookup.
+
+`just bench-state-inspection` measures both inspection paths beside the work they read, on one
+host. A materialized relay owner holds 1,024 branches of 63 KiB rows and keeps applying records.
+A window branch retains 1,024 such inputs and keeps publishing its window, on an executor resolved
+for an 8 GiB node, whose bulk class holds a whole page's column charge. Each runs alone and with a
+concurrent reader building owner-side pages of the whole state, at the default row bound and within
+a tenth of the 64 MiB session transfer bound. The benchmark prints the cost of each application or
+publication, with and without the reader. It requires the reader to complete pages during the
+measurement, and a page it holds to keep its captured generation while the owner publishes past it.
+Its bodies also run in `bench-smoke`, where instrumented timings are coverage, not performance
+evidence.
 Deterministic owner tests cover growing, shrinking and a return to one partition, both unit read
 orders, catalog races and admission refusal. Public one- and three-node cases hold claims before
 installation and before forget and verify exact branch/row/byte counts, retained values and paging.

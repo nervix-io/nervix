@@ -277,8 +277,9 @@ is redacted. Keys are listed oldest first within each branch. Expired keys are e
 domain-clock reading, including when no new input has caused the branch task to prune them.
 
 The ordered `FOR`, `LIMIT ... AFTER` and `FORMAT` clauses, owner routing and typed refusals are
-shared with materialized-state inspection. A continuation is refused as `stale_continuation` when
-its publication or visible expiry prefix changes. Reading state does not refresh a key's expiry.
+shared with materialized-state inspection. A page also ends before a key whose columns the owner's
+bulk memory cannot hold, as a [window page](#inspect-retained-window-state) does. A continuation is
+refused as `stale_continuation` when its publication or visible expiry prefix changes. Reading state does not refresh a key's expiry.
 During a [partition transition](relay.md#changing-the-partition-count), each concrete branch is read from its holder
 until installation and from its claimant afterwards. Retained transfer copies add no duplicate
 rows or counts; a branch-catalog change racing the read produces `not_ready`.
@@ -506,9 +507,15 @@ Two additional typed sections describe each selected branch, including an empty 
 
 `LIMIT`, continuation offsets and complete row counts count only retained input rows. Headers and
 accumulator facts do not advance the row position; they do consume the reply's byte bound and are
-repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Every section uses
-the same captured publication, and a changed publication or branch lifetime invalidates its
-continuation. Branch selectors, formats and owner routing use the shared inspection contract.
+repeated on each page. Metadata that cannot fit is refused as `reply_too_large`. Gathering a row's
+columns charges the owner's bulk memory twice the row's bytes, after every selected branch's
+metadata is charged. A page read through another node also sets the row's bytes aside once more for
+the Arrow body that carries it, so it holds fewer rows than one its owner presents. A page therefore
+also ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
+and the read is refused as `not_ready` only when not even its first row can be held. Read through
+another node, a single row whose encoded columns exceed the owner's snapshot section bound, 8 MiB,
+refuses the page as `reply_too_large`. Every section uses the same captured publication, and a changed publication
+or branch lifetime invalidates its continuation. Branch selectors, formats and owner routing use the shared inspection contract.
 During a [partition transition](relay.md#changing-the-partition-count), the selected partition contributes the branch's
 rows, header, accumulator facts and byte charge once, including while its holder retains the
 transfer checkpoint. A branch-catalog change racing the read produces `not_ready`.

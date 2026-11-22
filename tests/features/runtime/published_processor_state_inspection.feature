@@ -253,3 +253,104 @@ Feature: Typed inspection of published deduplicator keys and window state
       | cluster_size |
       | 1            |
       | 3            |
+
+  @published_processor_state_inspection
+  Scenario Outline: A window read the bulk memory cannot hold in one page pages through every retained row
+    Given runtime replication is configured with replica count 0 and snapshot interval "1h"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event (tenant STRING, message STRING);
+      CREATE SCHEMA summary (samples I64);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, message string);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
+      CREATE VHOST edge paged-window-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR events FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 4MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO incoming INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR retained FROM incoming
+        WIDTH 100 MESSAGES 1h DURATION STEP 100 MESSAGES MAX STATE SIZE 64MiB BRANCHED BY by_tenant
+        TO summaries SET samples = COUNT(input.message) ON MESSAGE ERROR LOG;
+      START;
+      """
+    And http payload for tenant "east" with a 524288 byte message is posted to host "paged-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with a 524288 byte message is posted to host "paged-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "east" with a 524288 byte message is posted to host "paged-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with a 524288 byte message is posted to host "paged-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "east" with a 524288 byte message is posted to host "paged-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with a 524288 byte message is posted to host "paged-window-{{test_id}}.example.com" path "/events"
+    Given client "reader" is connected to node "node-1"
+    Then within "30s" client "reader" sees window "retained" hold 6 rows
+    And the last processor state counts 6 rows in 2 branches
+    # Each retained row carries its 512 KiB message as input and as the COUNT argument, 1 MiB, and
+    # gathering its columns takes twice that. A page read through another node also sets the row's
+    # bytes aside for the body that carries it. With 5 MiB left on every node, the owner's reads of
+    # its own state return two rows a page and every other node's reads one, each page ending
+    # where the next row no longer fits, and the rest follow on the next pages.
+    When bulk memory on every node keeps only "5242880" bytes free
+    Then a client of every node reads window "retained" state at the default limit in more than one page with unchanged complete counts
+    When bulk memory on every node is released
+    Then within "30s" every node reserves only the bulk memory the scenario holds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @published_processor_state_inspection
+  Scenario Outline: Every node reads a window holding more rows than one snapshot section carries
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA event (tenant STRING, message STRING);
+      CREATE SCHEMA summary (samples I64);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (tenant string, message string);
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
+      CREATE VHOST edge sectioned-window-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR events FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 4MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO incoming INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR retained FROM incoming
+        WIDTH 100 MESSAGES 1h DURATION STEP 100 MESSAGES MAX STATE SIZE 64MiB BRANCHED BY by_tenant
+        TO summaries SET samples = COUNT(input.message) ON MESSAGE ERROR LOG;
+      START;
+      """
+    And http payload for tenant "east" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "east" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "east" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "east" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    And http payload for tenant "west" with a 1048576 byte message is posted to host "sectioned-window-{{test_id}}.example.com" path "/events"
+    # Each retained row carries its 1 MiB message as input and as the COUNT argument, so the rows
+    # section holds about 16 MiB, twice what one snapshot section carries between nodes. Every node
+    # asks the window's owner, so on three nodes at least two of the reads cross the interconnect.
+    Then within "30s" a client of every node sees window "retained" hold 8 rows
+    And a client of every node reads window "retained" state at the default limit with every row once
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

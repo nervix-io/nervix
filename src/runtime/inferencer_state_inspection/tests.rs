@@ -133,7 +133,11 @@ async fn read(
                 &plan,
                 nervix_models::StateInspectionKeyCatalog::Unrequested,
                 after,
-                ProcessorStatePageBounds { rows, bytes },
+                ProcessorStatePageBounds {
+                    rows,
+                    bytes,
+                    reply: crate::runtime::PageReply::Local,
+                },
                 memory,
                 cancellation,
             )

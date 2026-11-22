@@ -243,6 +243,7 @@ impl Page {
             memory: Some(ProcessorStatePageMemory {
                 _reservation: self.memory,
                 _windows: Vec::new(),
+                reply: None,
             }),
         })
     }

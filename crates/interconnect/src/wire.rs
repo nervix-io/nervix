@@ -60,8 +60,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0x98, 0x9c, 0x05, 0xa1, 0x73, 0xa0, 0x19, 0x71, 0x1d, 0x0c, 0x39, 0x1b, 0x88, 0xda, 0xe4, 0x60,
-    0xa4, 0xa5, 0x0f, 0xce, 0x8f, 0x5f, 0xe9, 0x4a, 0xf8, 0x13, 0x46, 0x23, 0x70, 0x41, 0xfb, 0x71,
+    0xfc, 0xa4, 0xee, 0x67, 0x4c, 0xa6, 0x61, 0x08, 0x01, 0x82, 0x43, 0xf7, 0xfd, 0x80, 0x48, 0xd7,
+    0x79, 0xf1, 0x3c, 0x59, 0x2e, 0x87, 0xfc, 0xcb, 0x52, 0xbb, 0x35, 0x7b, 0x48, 0xee, 0xa7, 0x7e,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -291,6 +291,25 @@ where
         .reserve(class, INITIAL_MESSAGE_CHARGE.min(limit))
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
+    encode_rkyv_buffer_within(executor, cpu, limit, admission, value, reservation).await
+}
+
+/// Serialize one typed value into `reservation`, memory its caller already holds, on the CPU class
+/// as `admission` says. The writer grows past `reservation` only while the class can back it at
+/// once.
+async fn encode_rkyv_buffer_within<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    limit: u64,
+    admission: QueueAdmission,
+    value: T,
+    reservation: Reservation,
+) -> Result<BudgetedBuffer, Report<TransportError>>
+where
+    T: Send
+        + 'static
+        + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
+{
     let encoding = RkyvEncoding {
         value,
         _input_charge: None,
@@ -393,6 +412,27 @@ where
         + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
 {
     let buffer = encode_rkyv_buffer(executor, class, cpu, limit, admission, value).await?;
+    let (bytes, reservation) = buffer.into_parts();
+    Ok(EncodedPayload { bytes, reservation })
+}
+
+/// Serialize a typed value as [`encode_rkyv_payload`] does, into `reservation`, memory its caller
+/// already holds for it, instead of first waiting for room in the class.
+pub(crate) async fn encode_rkyv_payload_within<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    limit: u64,
+    admission: QueueAdmission,
+    value: T,
+    reservation: Reservation,
+) -> Result<EncodedPayload, Report<TransportError>>
+where
+    T: Send
+        + 'static
+        + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
+{
+    let buffer =
+        encode_rkyv_buffer_within(executor, cpu, limit, admission, value, reservation).await?;
     let (bytes, reservation) = buffer.into_parts();
     Ok(EncodedPayload { bytes, reservation })
 }

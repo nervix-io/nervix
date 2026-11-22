@@ -25,10 +25,10 @@ use nervix_models::{ProcessorStateSection, SchemaField, StateInspectionRejection
 use nervix_primitives::sync::StdArc;
 
 use super::{
-    MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,
-    state_inspection_read::MaterializedInspectionPage,
+    MaterializedGenerationRecord, PageReply, ProcessorStatePageMemory, ReplyMemory,
+    RestoredMaterializedSnapshot, SealedSource, state_inspection_read::MaterializedInspectionPage,
 };
-use crate::runtime_schema::RuntimeRecordBatch;
+use crate::runtime_schema::{ArrowBodyError, RuntimeRecordBatch, batch_payload_bytes};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum StatePageExchangeError {
@@ -187,15 +187,15 @@ pub(crate) async fn stream_materialized_page(
     page_stream(executor, header, charge, body.into_iter().collect())
 }
 
-/// One section's returned rows as the owner hands them to its page stream; absent when the page
-/// returns none of the section's rows.
+/// One section's returned rows as the owner hands them to its page stream, in row order; empty
+/// when the page returns none of the section's rows.
 pub(crate) struct ProcessorPageSection {
-    pub(crate) batch: Option<RecordBatch>,
+    pub(crate) batches: Vec<RecordBatch>,
 }
 
-/// Stream framing is the descriptor framing of every page, then one native Arrow snapshot section
-/// for each section that returns rows, in the descriptor's section order. A page whose sections
-/// exceed `max_bytes` is refused as too large and carries no body.
+/// Stream framing is the descriptor framing of every page, then the bodies
+/// [`processor_page_reply`] names, in order. `memory` is what the owner's page holds, with what it
+/// set aside for this reply; the rest goes back to the bulk pool once the bodies carry the rows.
 pub(crate) async fn stream_processor_page(
     executor: &Executor,
     result: Result<
@@ -203,58 +203,349 @@ pub(crate) async fn stream_processor_page(
         StateInspectionRejection,
     >,
     max_bytes: u64,
+    mut memory: Option<ProcessorStatePageMemory>,
 ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
-    let (reply, bodies) = match result {
-        Ok((mut descriptor, sections)) => {
-            if descriptor.sections.len() != sections.len() {
-                return Err(StreamHandlerError::with_cause(Report::new(
-                    StatePageExchangeError::Framing,
-                )));
+    let set_aside = match memory.as_mut() {
+        Some(memory) => memory.take_reply(),
+        None => None,
+    };
+    let PageReplyParts {
+        reply,
+        bodies,
+        descriptor,
+        split,
+    } = processor_page_reply(executor, result, max_bytes, set_aside).await?;
+    // The bodies now carry the page's rows, so the memory that held them goes back to the pool
+    // before the descriptor is encoded.
+    drop(memory);
+    let limit = PoolClass::Bulk.payload_limit(executor);
+    let descriptor = match (descriptor, split) {
+        (Some(charge), _) => Some(charge),
+        (None, false) => None,
+        // A page whose sections travel in more bodies than one each takes no memory it would wait
+        // for while it holds them: without room for its descriptor now, it is not ready.
+        (None, true) => match executor.try_reserve(MemoryClass::Bulk, limit) {
+            Ok(charge) => Some(charge),
+            Err(_refused) => {
+                drop(bodies);
+                return stream_refusal(executor, StateInspectionRejection::NotReady).await;
             }
-            let mut bodies = Vec::new();
-            let mut bytes = 0_u64;
-            let mut too_large = false;
-            for (transfer, section) in descriptor.sections.iter_mut().zip(sections) {
-                let Some(batch) = section.batch else {
-                    continue;
-                };
-                let batch = RuntimeRecordBatch::from_record_batch(batch.schema(), batch)
-                    .map_err(StreamHandlerError::with_cause)?;
-                let body = batch
-                    .encode_arrow_snapshot_section(
+        },
+    };
+    let encoded = match descriptor {
+        Some(charge) => {
+            reply
+                .encode_rkyv_within(
+                    executor.clone(),
+                    PoolClass::Bulk,
+                    limit,
+                    nervix_execution::QueueAdmission::RefuseWhenFull,
+                    charge,
+                )
+                .await
+        }
+        None => {
+            reply
+                .encode_rkyv(executor.clone(), PoolClass::Bulk, limit)
+                .await
+        }
+    };
+    let (header, charge) = encoded.map_err(StreamHandlerError::with_cause)?;
+    page_stream(executor, header, charge, bodies)
+}
+
+/// The page stream of an owner's typed refusal, which carries no body. It holds nothing else
+/// while it waits for the room its descriptor takes.
+async fn stream_refusal(
+    executor: &Executor,
+    reason: StateInspectionRejection,
+) -> Result<StreamingResponse, Report<StreamHandlerError>> {
+    let reply: ProcessorStatePageReply = Err(reason);
+    let (header, charge) = reply
+        .encode_rkyv(
+            executor.clone(),
+            PoolClass::Bulk,
+            PoolClass::Bulk.payload_limit(executor),
+        )
+        .await
+        .map_err(StreamHandlerError::with_cause)?;
+    page_stream(executor, header, charge, Vec::new())
+}
+
+/// A processor page reply ready to frame.
+struct PageReplyParts {
+    reply: ProcessorStatePageReply,
+    /// The bodies the reply names, in order.
+    bodies: Vec<ChargedBytes>,
+    /// What the page set aside for encoding the reply's descriptor; absent for a page that set
+    /// nothing aside, and for a refusal.
+    descriptor: Option<Reservation>,
+    /// Whether a section travels in more than one body.
+    split: bool,
+}
+
+impl PageReplyParts {
+    /// A refusal: it names no body, and everything the page set aside goes back to the pool.
+    fn refused(reason: StateInspectionRejection) -> Self {
+        Self {
+            reply: Err(reason),
+            bodies: Vec::new(),
+            descriptor: None,
+            split: false,
+        }
+    }
+}
+
+/// The reply a processor page stream frames and the bodies it names: each section that returns
+/// rows as one or more native Arrow snapshot sections, in row order and each within the node's
+/// section bound, in the descriptor's section order. The bodies take their memory from what the
+/// page set aside in `set_aside`, or from the bulk pool for a page that set nothing aside. A page
+/// whose bodies exceed `max_bytes`, or that returns a row whose own body exceeds the section
+/// bound, is refused as too large, and one whose bodies its set-aside memory and the pool cannot
+/// hold at once is not ready. A refusal names no body.
+async fn processor_page_reply(
+    executor: &Executor,
+    result: Result<
+        (ProcessorStatePageDescriptor, Vec<ProcessorPageSection>),
+        StateInspectionRejection,
+    >,
+    max_bytes: u64,
+    set_aside: Option<ReplyMemory>,
+) -> Result<PageReplyParts, Report<StreamHandlerError>> {
+    let (mut descriptor, sections) = match result {
+        Ok(page) => page,
+        Err(reason) => return Ok(PageReplyParts::refused(reason)),
+    };
+    if descriptor.sections.len() != sections.len() {
+        return Err(StreamHandlerError::with_cause(Report::new(
+            StatePageExchangeError::Framing,
+        )));
+    }
+    let (descriptor_charge, mut charges) = match set_aside {
+        Some(reply) => (
+            Some(reply.descriptor),
+            BodyCharges::SetAside {
+                remaining: Some(reply.bodies),
+                framing: reply.framing,
+            },
+        ),
+        None => (
+            None,
+            BodyCharges::Pool {
+                framing: PageReply::body_framing(executor),
+            },
+        ),
+    };
+    let mut bodies = Vec::new();
+    let mut bytes = 0_u64;
+    let mut split = false;
+    for (transfer, section) in descriptor.sections.iter_mut().zip(sections) {
+        let encoded = match section_bodies(executor, section.batches, &mut charges).await? {
+            Ok(encoded) => encoded,
+            Err(reason) => return Ok(PageReplyParts::refused(reason)),
+        };
+        if encoded.len() > 1 {
+            split = true;
+        }
+        for body in encoded {
+            bytes = bytes
+                .checked_add(u64::try_from(body.len()).assured("resident allocations fit u64"))
+                .assured("resident page allocations fit u64");
+            if bytes > max_bytes {
+                return Ok(PageReplyParts::refused(
+                    StateInspectionRejection::ReplyTooLarge,
+                ));
+            }
+            let (identity, body) = identified_body(executor, body).await?;
+            transfer.bodies.push(identity);
+            bodies.push(body);
+        }
+    }
+    Ok(PageReplyParts {
+        reply: Ok(descriptor),
+        bodies,
+        descriptor: descriptor_charge,
+        split,
+    })
+}
+
+/// Where a page's Arrow bodies take their memory.
+enum BodyCharges {
+    /// What the page set aside for its bodies when it admitted their rows. Each body takes its
+    /// rows' bytes and `framing` from it, and only what it lacks from the bulk pool, at once.
+    SetAside {
+        remaining: Option<Reservation>,
+        framing: u64,
+    },
+    /// The bulk pool, for a page that set nothing aside. A section's first body waits for room
+    /// there, as every section's one body did before sections could travel in more than one; a
+    /// further body of the same section takes its rows' bytes and `framing` at once or not at
+    /// all, since it would otherwise wait while holding the section's earlier bodies.
+    Pool { framing: u64 },
+}
+
+/// What encoding one part of a section's rows came to.
+enum PartBody {
+    /// The part's body, within the section bound.
+    Encoded(ChargedBytes),
+    /// The part's body would pass the section bound.
+    PastLimit,
+    /// The memory for the part's body cannot be had at once.
+    Declined,
+}
+
+impl BodyCharges {
+    /// Encodes `part`, whose columns take `payload` bytes, as one body within `limit`. `first`
+    /// says whether it is its section's first body.
+    async fn encode(
+        &mut self,
+        executor: &Executor,
+        part: RuntimeRecordBatch,
+        payload: u64,
+        limit: u64,
+        first: bool,
+    ) -> Result<PartBody, Report<StreamHandlerError>> {
+        let encoded = match self {
+            Self::Pool { framing } => {
+                if first {
+                    part.encode_arrow_snapshot_section(
                         executor,
                         nervix_execution::QueueAdmission::RefuseWhenFull,
                     )
                     .await
-                    .map_err(StreamHandlerError::with_cause)?;
-                bytes = bytes
-                    .checked_add(u64::try_from(body.len()).assured("resident allocations fit u64"))
-                    .assured("resident page allocations fit u64");
-                if bytes > max_bytes {
-                    too_large = true;
-                    break;
+                } else {
+                    let wanted = body_charge(payload, *framing, limit);
+                    let charge = match executor.try_reserve(MemoryClass::Bulk, wanted) {
+                        Ok(charge) => charge,
+                        Err(_refused) => return Ok(PartBody::Declined),
+                    };
+                    part.encode_arrow_snapshot_section_within(
+                        executor,
+                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                        charge,
+                    )
+                    .await
                 }
-                let (identity, body) = identified_body(executor, body).await?;
-                transfer.body = Some(identity);
-                bodies.push(body);
             }
-            if too_large {
-                (Err(StateInspectionRejection::ReplyTooLarge), Vec::new())
-            } else {
-                (Ok(descriptor), bodies)
+            Self::SetAside { remaining, framing } => {
+                let wanted = body_charge(payload, *framing, limit);
+                let Some(charge) = take_body_charge(executor, remaining, wanted)? else {
+                    return Ok(PartBody::Declined);
+                };
+                part.encode_arrow_snapshot_section_within(
+                    executor,
+                    nervix_execution::QueueAdmission::RefuseWhenFull,
+                    charge,
+                )
+                .await
+            }
+        };
+        match encoded {
+            Ok(body) => Ok(PartBody::Encoded(body)),
+            Err(error) => {
+                if let ArrowBodyError::EncodedPastLimit { .. } = error.current_context() {
+                    return Ok(PartBody::PastLimit);
+                }
+                Err(StreamHandlerError::with_cause(error))
             }
         }
-        Err(reason) => (Err(reason), Vec::new()),
+    }
+}
+
+/// The memory one body of rows taking `payload` bytes is encoded into: its rows' bytes and its
+/// `framing`, at most the section bound `limit`.
+fn body_charge(payload: u64, framing: u64, limit: u64) -> u64 {
+    match payload.checked_add(framing) {
+        Some(wanted) => wanted.min(limit),
+        None => limit,
+    }
+}
+
+/// Takes `wanted` bytes for one body from what the page set aside, topping them up from the bulk
+/// pool at once when the set-aside memory falls short. `None` when the pool has no room for the
+/// rest now.
+fn take_body_charge(
+    executor: &Executor,
+    remaining: &mut Option<Reservation>,
+    wanted: u64,
+) -> Result<Option<Reservation>, Report<StreamHandlerError>> {
+    let Some(held) = remaining.take() else {
+        // Nothing is left of what the page set aside: all of it from the pool now, or none.
+        return match executor.try_reserve(MemoryClass::Bulk, wanted) {
+            Ok(charge) => Ok(Some(charge)),
+            Err(_refused) => Ok(None),
+        };
     };
-    let (header, charge) = ProcessorStatePageReply::encode_rkyv(
-        reply,
-        executor.clone(),
-        PoolClass::Bulk,
-        PoolClass::Bulk.payload_limit(executor),
-    )
-    .await
-    .map_err(StreamHandlerError::with_cause)?;
-    page_stream(executor, header, charge, bodies)
+    let available = held.bytes();
+    if available >= wanted {
+        let (charge, rest) = held.split(wanted).map_err(StreamHandlerError::with_cause)?;
+        *remaining = Some(rest);
+        return Ok(Some(charge));
+    }
+    let lacking = wanted
+        .checked_sub(available)
+        .verified("the set-aside memory falls short of the body");
+    match executor.try_reserve(MemoryClass::Bulk, lacking) {
+        Ok(extra) => {
+            let charge = held.merge(extra).map_err(StreamHandlerError::with_cause)?;
+            Ok(Some(charge))
+        }
+        Err(_refused) => Ok(None),
+    }
+}
+
+/// One section's returned rows as the native Arrow snapshot sections a page carries them in, in
+/// row order, each within the node's section bound. Rows whose body would pass the bound travel
+/// in halves until each part fits. The page goes without them as too large when a single row's
+/// body passes the bound, and as not ready when the memory for a body cannot be had at once.
+async fn section_bodies(
+    executor: &Executor,
+    batches: Vec<RecordBatch>,
+    charges: &mut BodyCharges,
+) -> Result<Result<Vec<ChargedBytes>, StateInspectionRejection>, Report<StreamHandlerError>> {
+    let limit = executor.limits().snapshot_section_bytes.as_u64();
+    let mut bodies = Vec::with_capacity(batches.len());
+    for batch in batches {
+        // The row ranges still to carry, the next one last, so the bodies keep the rows' order.
+        let mut pending = Vec::<std::ops::Range<usize>>::new();
+        pending.push(0..batch.num_rows());
+        while let Some(rows) = pending.pop() {
+            nervix_primitives::task::consume_budget().await;
+            if rows.is_empty() {
+                continue;
+            }
+            let part = batch.slice(rows.start, rows.len());
+            let payload = batch_payload_bytes(&part);
+            // Rows whose columns alone pass the bound cannot fit one body, so they are halved
+            // without being encoded first.
+            let encoded = if payload <= limit {
+                let part = RuntimeRecordBatch::from_record_batch(part.schema(), part)
+                    .map_err(StreamHandlerError::with_cause)?;
+                let first = bodies.is_empty();
+                charges
+                    .encode(executor, part, payload, limit, first)
+                    .await?
+            } else {
+                PartBody::PastLimit
+            };
+            match encoded {
+                PartBody::Encoded(body) => bodies.push(body),
+                PartBody::Declined => return Ok(Err(StateInspectionRejection::NotReady)),
+                PartBody::PastLimit => {
+                    if rows.len() == 1 {
+                        return Ok(Err(StateInspectionRejection::ReplyTooLarge));
+                    }
+                    let middle = rows
+                        .start
+                        .checked_add(rows.len().div_ceil(2))
+                        .assured("half of a range ends inside it");
+                    pending.push(middle..rows.end);
+                    pending.push(rows.start..middle);
+                }
+            }
+        }
+    }
+    Ok(Ok(bodies))
 }
 
 pub(crate) struct ReceivedMaterializedPage {
@@ -442,12 +733,13 @@ pub(crate) async fn receive_materialized_page(
 }
 
 /// One received section of a processor page: every row of it the unit holds, its complete fields,
-/// and its returned rows, absent when the page returned none of them.
+/// and its returned rows in the batches its bodies carried, in row order; empty when the page
+/// returned none of them.
 pub(crate) struct ReceivedProcessorSection {
     pub(crate) section: ProcessorStateSection,
     pub(crate) fields: Vec<SchemaField>,
     pub(crate) rows: u64,
-    pub(crate) batch: Option<RecordBatch>,
+    pub(crate) batches: Vec<RecordBatch>,
 }
 
 pub(crate) struct ReceivedProcessorPage {
@@ -546,52 +838,65 @@ struct ProcessorPageBodies<'a> {
 }
 
 impl ProcessorPageBodies<'_> {
-    /// The `rows` returned rows of one section. A section names no body exactly when it returns no
-    /// row; otherwise its next body is bounded, verified against its digest and decoded with
-    /// exactly the section's declared fields, and must hold exactly those rows.
+    /// The `rows` returned rows of one section, in the batches its bodies carry them in. A
+    /// section names no body exactly when it returns no row. Otherwise each body it names is the
+    /// next in the stream, within the read's byte bound, verified against its digest and decoded
+    /// with exactly the section's declared fields; each holds at least one row, and together they
+    /// hold exactly those rows.
     async fn section(
         &mut self,
         executor: &Executor,
         transfer: &ProcessorStateSectionTransfer,
         rows: u64,
-    ) -> Result<Option<RecordBatch>, Report<StatePageExchangeError>> {
+    ) -> Result<Vec<RecordBatch>, Report<StatePageExchangeError>> {
         let framing = || Report::new(StatePageExchangeError::Framing);
-        let Some(identity) = &transfer.body else {
+        if transfer.bodies.is_empty() {
             if rows != 0 {
                 return Err(framing());
             }
-            return Ok(None);
-        };
-        if rows == 0 {
+            return Ok(Vec::new());
+        }
+        // Every body holds at least one row, so a section names no more bodies than rows.
+        let named = u64::try_from(transfer.bodies.len()).map_err(|_| framing())?;
+        if named > rows {
             return Err(framing());
         }
-        self.received = self
-            .received
-            .checked_add(identity.bytes)
-            .ok_or_else(framing)?;
-        if self.received > self.max_bytes {
-            return Err(framing());
-        }
-        let length = usize::try_from(identity.bytes).map_err(|_| framing())?;
-        let end = self.offset.checked_add(length).ok_or_else(framing)?;
-        let body = self.bytes.slice(self.offset, end).ok_or_else(framing)?;
-        self.offset = end;
-        let body = verified_body(executor, body, identity.clone()).await?;
         let schema = StdArc::new(SchemaField::arrow_schema(&transfer.fields));
-        let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
-            executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-            schema,
-            body,
-        )
-        .await
-        .change_context(StatePageExchangeError::Columns)?;
-        let decoded_rows =
-            u64::try_from(decoded.batch().num_rows()).assured("a decoded row count fits u64");
-        if decoded_rows != rows {
+        let mut batches = Vec::with_capacity(transfer.bodies.len());
+        let mut carried = 0_u64;
+        for identity in &transfer.bodies {
+            self.received = self
+                .received
+                .checked_add(identity.bytes)
+                .ok_or_else(framing)?;
+            if self.received > self.max_bytes {
+                return Err(framing());
+            }
+            let length = usize::try_from(identity.bytes).map_err(|_| framing())?;
+            let end = self.offset.checked_add(length).ok_or_else(framing)?;
+            let body = self.bytes.slice(self.offset, end).ok_or_else(framing)?;
+            self.offset = end;
+            let body = verified_body(executor, body, identity.clone()).await?;
+            let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
+                executor,
+                nervix_execution::QueueAdmission::RefuseWhenFull,
+                StdArc::clone(&schema),
+                body,
+            )
+            .await
+            .change_context(StatePageExchangeError::Columns)?;
+            let decoded_rows =
+                u64::try_from(decoded.batch().num_rows()).assured("a decoded row count fits u64");
+            if decoded_rows == 0 {
+                return Err(framing());
+            }
+            carried = carried.checked_add(decoded_rows).ok_or_else(framing)?;
+            batches.push(decoded.batch().clone());
+        }
+        if carried != rows {
             return Err(framing());
         }
-        Ok(Some(decoded.batch().clone()))
+        Ok(batches)
     }
 }
 
@@ -648,7 +953,7 @@ impl ReceivedProcessorPage {
             if let Some((expected, fields)) = payload.get(index) {
                 let declared = transfer.fields.get(..fields.len());
                 if transfer.section != *expected
-                    || (transfer.body.is_some() && declared != Some(fields.as_slice()))
+                    || (!transfer.bodies.is_empty() && declared != Some(fields.as_slice()))
                 {
                     return Err(framing());
                 }
@@ -657,12 +962,12 @@ impl ReceivedProcessorPage {
             if rows > transfer.rows {
                 return Err(framing());
             }
-            let batch = bodies.section(executor, transfer, rows).await?;
+            let batches = bodies.section(executor, transfer, rows).await?;
             sections.push(ReceivedProcessorSection {
                 section: transfer.section,
                 fields: transfer.fields.clone(),
                 rows: transfer.rows,
-                batch,
+                batches,
             });
         }
         if bodies.offset != bytes.len() {

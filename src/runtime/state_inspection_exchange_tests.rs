@@ -34,7 +34,7 @@ use nervix_models::{
 };
 
 use super::*;
-use crate::runtime::named;
+use crate::runtime::{PageReply, named};
 
 fn owner() -> ClusterNodeIdentity {
     ClusterNodeIdentity::new(named("node-1"), ClusterNodeIncarnation::new(1))
@@ -65,7 +65,7 @@ fn section(section: ProcessorStateSection, rows: u64) -> ProcessorStateSectionTr
         section,
         rows,
         fields: Vec::new(),
-        body: None,
+        bodies: Vec::new(),
     }
 }
 
@@ -432,7 +432,7 @@ fn returning_page(
         section: ProcessorStateSection::Pending,
         rows: 5,
         fields,
-        body,
+        bodies: body.into_iter().collect(),
     }];
     page
 }
@@ -511,10 +511,9 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         (ProcessorStateSection::Pending, 5, &declared_fields()),
         "the section keeps its complete count and its declared fields"
     );
-    let rows = section
-        .batch
-        .as_ref()
-        .assured("a section that returned rows carries them");
+    let [rows] = section.batches.as_slice() else {
+        panic!("a section that returned rows carries them in its one body");
+    };
     assert_eq!(
         rows.column(1).as_primitive::<Int64Type>().values().to_vec(),
         vec![1, 2, 3],
@@ -539,7 +538,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         panic!("a reorderer page carries its one held-row section");
     };
     assert_eq!(
-        (section.rows, section.batch.is_none()),
+        (section.rows, section.batches.is_empty()),
         (5, true),
         "a count-only page carries the section's complete count and none of its rows"
     );
@@ -720,6 +719,22 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
         .await,
         read(10),
     ));
+    // The section's bodies hold more rows than its runs return.
+    let mut doubled = full();
+    doubled.sections[0].bodies.push(other_identity.clone());
+    cases.push((
+        "bodies holding more rows than the runs return",
+        sent_page(&executor, Ok(doubled), &[&body[..], &other_body[..]]).await,
+        read(10),
+    ));
+    // The section names more bodies than it returns rows, which every body holds one of at least.
+    let mut crowded = returning_page(1, declared_fields(), Some(identity.clone()));
+    crowded.sections[0].bodies.push(other_identity.clone());
+    cases.push((
+        "more bodies than returned rows",
+        sent_page(&executor, Ok(crowded), &[&body[..], &other_body[..]]).await,
+        read(10),
+    ));
     // The section's declared fields, with a body that decodes under them, do not begin with the
     // payload fields the read expects.
     let mut reordered = declared_fields();
@@ -745,4 +760,268 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
             "{case} is a framing violation, found {error:?}"
         );
     }
+}
+
+/// The node's bound on one snapshot section, narrowed so a fixture page outgrows it.
+const NARROW_SECTION_BYTES: u64 = 64 * 1024;
+
+/// An executor whose snapshot sections hold at most [`NARROW_SECTION_BYTES`], as a node with a
+/// narrower section bound than the default.
+fn narrow_sections() -> Executor {
+    Executor::new(nervix_execution::ExecutionConfig {
+        limits: nervix_execution::OperationLimits {
+            snapshot_section_bytes: ubyte::ByteUnit::Byte(NARROW_SECTION_BYTES),
+            ..nervix_execution::OperationLimits::default()
+        },
+        ..nervix_execution::ExecutionConfig::default()
+    })
+    .assured("a narrow section bound within the default budgets is valid")
+}
+
+/// One row of `fields` per sequence, like [`held_rows`], whose text columns carry `width` bytes.
+fn wide_rows(fields: &[SchemaField], sequences: &[i64], width: usize) -> RecordBatch {
+    let mut columns = Vec::<ArrayRef>::with_capacity(fields.len());
+    for field in fields {
+        let column: ArrayRef = match &field.ty {
+            ParseAsType::String => StdArc::new(StringArray::from_iter_values(
+                sequences
+                    .iter()
+                    .map(|sequence| format!("{sequence:08}{}", "w".repeat(width))),
+            )),
+            ParseAsType::I64 => {
+                StdArc::new(Int64Array::from_iter_values(sequences.iter().copied()))
+            }
+            ParseAsType::U32 => StdArc::new(UInt32Array::from_iter_values(
+                sequences.iter().map(|_| 0_u32),
+            )),
+            other => panic!("the fixture builds no {other:?} column"),
+        };
+        columns.push(column);
+    }
+    RecordBatch::try_new(StdArc::new(SchemaField::arrow_schema(fields)), columns)
+        .assured("every fixture column matches its declared field")
+}
+
+/// The first and only page of a reorderer holding `held` rows, returning all of them in one run.
+fn whole_page(held: u64) -> ProcessorStatePageDescriptor {
+    let mut page = pending_page();
+    page.counts.rows = held;
+    page.offset = held;
+    page.more = false;
+    page.runs = vec![run(ProcessorStateSection::Pending, held)];
+    page.sections = vec![ProcessorStateSectionTransfer {
+        section: ProcessorStateSection::Pending,
+        rows: held,
+        fields: declared_fields(),
+        bodies: Vec::new(),
+    }];
+    page
+}
+
+/// A section whose rows outgrow one snapshot section reaches the coordinator whole. The owner
+/// carries it in bodies that each stay within the section bound, and the coordinator presents
+/// every row, in the order the owner returned them.
+#[nervix_primitives::test]
+async fn a_section_beyond_one_snapshot_section_reaches_the_coordinator_whole() {
+    let executor = narrow_sections();
+    let sequences = (1..=48).collect::<Vec<i64>>();
+    let held = u64::try_from(sequences.len()).assured("a fixture row count fits u64");
+    // 48 rows of 4 KiB text are about three times the section bound.
+    let rows = wide_rows(&declared_fields(), &sequences, 4096);
+    let request = read(held);
+    let parts = processor_page_reply(
+        &executor,
+        Ok((
+            whole_page(held),
+            vec![ProcessorPageSection {
+                batches: vec![rows],
+            }],
+        )),
+        request.max_bytes,
+        None,
+    )
+    .await
+    .assured("an owner carries a section beyond one snapshot section instead of failing");
+    let PageReplyParts { reply, bodies, .. } = parts;
+    assert!(
+        reply.is_ok(),
+        "an owner refused a page it can carry: {reply:?}"
+    );
+    assert!(bodies.len() > 1, "the section outgrows one body");
+    for body in &bodies {
+        let length = u64::try_from(body.len()).assured("a bounded body fits u64");
+        assert!(
+            length <= NARROW_SECTION_BYTES,
+            "a body of {length} bytes exceeds the {NARROW_SECTION_BYTES}-byte section bound"
+        );
+    }
+    let sent = bodies.iter().map(|body| &body[..]).collect::<Vec<_>>();
+    let stream = sent_page(&executor, reply, &sent).await;
+    let received =
+        ReceivedProcessorPage::decode(&executor, &stream, &request, &expected_sections())
+            .await
+            .assured("the coordinator accepts the bodies the owner sent");
+    let Ok(page) = received else {
+        panic!("an owner that returned rows did not refuse the read");
+    };
+    let [section] = page.sections.as_slice() else {
+        panic!("a reorderer page carries its one held-row section");
+    };
+    assert!(
+        section.batches.len() > 1,
+        "the section arrives in the batches its bodies carried"
+    );
+    let mut returned = Vec::new();
+    for batch in &section.batches {
+        returned.extend_from_slice(batch.column(1).as_primitive::<Int64Type>().values());
+    }
+    assert_eq!(
+        returned, sequences,
+        "every row arrives once, in the order the owner returned them"
+    );
+}
+
+/// A row whose own body would exceed the section bound cannot travel, and the owner refuses the
+/// page as too large instead of failing its stream.
+#[nervix_primitives::test]
+async fn a_row_beyond_one_snapshot_section_is_refused_as_too_large() {
+    let executor = narrow_sections();
+    // One row of twice the section bound.
+    let rows = wide_rows(&declared_fields(), &[1], 128 * 1024);
+    let request = read(1);
+    let PageReplyParts { reply, bodies, .. } = processor_page_reply(
+        &executor,
+        Ok((
+            whole_page(1),
+            vec![ProcessorPageSection {
+                batches: vec![rows],
+            }],
+        )),
+        request.max_bytes,
+        None,
+    )
+    .await
+    .assured("an owner answers a row it cannot carry with a typed refusal");
+    assert!(
+        matches!(reply, Err(StateInspectionRejection::ReplyTooLarge)),
+        "a row beyond the section bound is refused as too large, found {reply:?}"
+    );
+    assert!(bodies.is_empty(), "a refused page names no body");
+}
+
+/// A page whose own memory leaves the bulk pool less room than its reply takes is still answered.
+/// Its owner encodes the bodies and the descriptor from what the page set aside for them while
+/// admitting its rows, and never waits for room in the pool, which only that page could free.
+#[nervix_primitives::test]
+async fn a_page_holding_most_of_the_pool_is_answered_without_waiting_for_room() {
+    let executor = Executor::default();
+    let capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    let left = 1024 * 1024;
+    // The page's own memory: all of the bulk pool but one MiB.
+    let held_memory = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(left)
+                .assured("the bulk pool holds more than one MiB"),
+        )
+        .assured("an idle pool admits the page's memory");
+    let sequences = (1..=4).collect::<Vec<i64>>();
+    let held = u64::try_from(sequences.len()).assured("a fixture row count fits u64");
+    // Four rows of 1 MiB text: more than the pool has left.
+    let rows = wide_rows(&declared_fields(), &sequences, 1024 * 1024);
+    let PageReply::Remote {
+        descriptor,
+        framing,
+    } = PageReply::remote(&executor)
+    else {
+        panic!("a reply to another node sets memory aside");
+    };
+    // What the page set aside while admitting its rows: the descriptor, and its one section's
+    // rows with their body's framing.
+    let bodies = batch_payload_bytes(&rows)
+        .checked_add(framing)
+        .assured("a fixture page fits u64");
+    let (descriptor_memory, rest) = held_memory
+        .split(descriptor)
+        .assured("the page holds its descriptor's memory");
+    let (body_memory, rest) = rest
+        .split(bodies)
+        .assured("the page holds its bodies' memory");
+    let memory = ProcessorStatePageMemory {
+        _reservation: rest,
+        _windows: Vec::new(),
+        reply: Some(ReplyMemory {
+            descriptor: descriptor_memory,
+            bodies: body_memory,
+            framing,
+        }),
+    };
+    let mut request = read(held);
+    request.max_bytes = 16 * 1024 * 1024;
+    nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream_processor_page(
+            &executor,
+            Ok((
+                whole_page(held),
+                vec![ProcessorPageSection {
+                    batches: vec![rows],
+                }],
+            )),
+            request.max_bytes,
+            Some(memory),
+        ),
+    )
+    .await
+    .assured("the owner answers without waiting for room in the pool")
+    .assured("the page's reply is framed");
+}
+
+/// A page that set nothing aside for its reply waits for room only for each section's first body,
+/// as before a section could travel in more than one. A further body of a split section takes its
+/// memory at once or the page is refused as not ready, since waiting would hold the section's
+/// earlier bodies.
+#[nervix_primitives::test]
+async fn a_split_section_of_a_page_without_reply_memory_never_waits_for_a_further_body() {
+    let executor = narrow_sections();
+    let capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    // Room for the first body, at most one section bound, but not for a second as well.
+    let left = NARROW_SECTION_BYTES + NARROW_SECTION_BYTES / 2;
+    let held_memory = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(left)
+                .assured("the bulk pool holds more than a section and a half"),
+        )
+        .assured("an idle pool admits the held memory");
+    let sequences = (1..=48).collect::<Vec<i64>>();
+    let held = u64::try_from(sequences.len()).assured("a fixture row count fits u64");
+    // 48 rows of 4 KiB text travel in four bodies under a 64 KiB section bound.
+    let rows = wide_rows(&declared_fields(), &sequences, 4096);
+    let request = read(held);
+    let PageReplyParts { reply, bodies, .. } = nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        processor_page_reply(
+            &executor,
+            Ok((
+                whole_page(held),
+                vec![ProcessorPageSection {
+                    batches: vec![rows],
+                }],
+            )),
+            request.max_bytes,
+            None,
+        ),
+    )
+    .await
+    .assured("the owner never waits for a further body's room")
+    .assured("the owner answers");
+    assert!(
+        matches!(reply, Err(StateInspectionRejection::NotReady)),
+        "a further body without room refuses the page as not ready, found {reply:?}"
+    );
+    assert!(bodies.is_empty(), "a refused page names no body");
+    drop(held_memory);
 }

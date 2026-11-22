@@ -550,7 +550,8 @@ catalog pages, fetches and acknowledgements retain that exact identity. The nati
 the revision, branch incarnation, tensor shapes and float bits. The interconnect moves the opaque
 bounded frame through the existing snapshot bulk quota; the inferencer codec validates its shape.
 The current fingerprint also covers materialized inspection page requests and their typed
-descriptors, so checkpoint identity and inspection operations advance as one wire contract.
+descriptors, so checkpoint identity and inspection operations advance as one wire contract. It also
+covers processor state pages whose sections name every one of their bounded bodies.
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
@@ -2732,22 +2733,39 @@ and the filtered branch count before accepting a page. Catalog metadata stays in
 bounded descriptor, with no new stream framing or checkpoint-transfer operation.
 
 The stream frames an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
-one native Arrow snapshot section per returned section. The descriptor carries the read origin, the
-complete counts, the returned offset and last branch, the returned rows as runs of one section and
-one branch with the branch's typed key fields, and each section's complete field list, held row
-count and body identity: exact byte length and SHA-256 digest. A descriptor names the sections of
+each returned section's rows as one or more native Arrow snapshot sections, in row order, each
+within the owner's snapshot section bound. The descriptor carries the read origin, the complete
+counts, the returned offset and last branch, the returned rows as runs of one section and one
+branch with the branch's typed key fields, and each section's complete field list, held row count
+and the identity of each of its bodies, in order: exact byte length and SHA-256 digest. Rows whose
+body would pass the bound travel in halves until each part fits; a single row whose own body passes
+it refuses the page as `reply_too_large`. A descriptor names the sections of
 its committed processor layout: reorderer `pending`; correlator `left` and `right`; deduplicator
 `keys`; window `rows`, `header` and `accumulators`; or inferencer `header` and one typed tensor-index
 section per declared state entry. Tensor indices address the declared order directly and are
 checked before body access. The existing section, descriptor and reply-byte bounds govern every
 kind. Window and inferencer metadata runs count toward section
 bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The receiver bounds all buffering, verifies every digest before decoding,
-checks each section's payload fields against its own committed schema, decodes each section with
-exactly the declared field list, and checks the run rows, the returned offset and the row counts
-against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
+checks each section's payload fields against its own committed schema, decodes each body with
+exactly its section's declared field list, requires every body to hold at least one row and a
+section's bodies to hold exactly its returned rows, and checks the run rows, the returned offset and
+the row counts against the descriptor before any row reaches a Row frame. A typed refusal carries no body. No operator payload crosses as Row frames or row maps; the
 coordinator writes Row frames at the session reporting boundary, as for materialized pages.
 The inspection deadline controls stream admission and setup through
 `request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
+
+A deduplicator or window owner that serves a page to another node sets aside, before it admits
+any row, what encoding the descriptor and each section body's Arrow framing take, and every row it
+admits sets its bytes aside once more for the body that carries it. The page therefore ends where
+the bulk pool cannot hold a row's columns and its body together, with complete counts and a
+continuation. The owner encodes the bodies and the descriptor from that memory and never waits for
+room the page itself holds: a body the set-aside memory falls short of takes the rest from the pool
+at once, or the page is refused as `not_ready`. The memory that held the rows goes back to the pool
+as soon as the bodies carry them. Other kinds take their bodies' memory from the pool: a section's
+first body waits for room there, as each section's one body did before a section could travel in
+more than one, while a further body of a split section, and the descriptor of a page with a split
+section, takes its memory at once or refuses the page as `not_ready`, so the owner never waits
+while it holds a split section's bodies.
 
 Duplex setup selects its budget through `DuplexSetupDeadline`. Client producer and consumer
 links select the active transport connection-setup budget. Engine operations retain their

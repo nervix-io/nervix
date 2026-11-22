@@ -239,6 +239,18 @@ pub trait RkyvMessage: Archive + Sized + Send + 'static {
         admission: QueueAdmission,
     ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
 
+    /// Serialize as [`Self::encode_rkyv_with`] does, into `charge`, memory of the class the caller
+    /// already holds for it, instead of first waiting for room in the class. The message grows past
+    /// `charge` only while the class can back it at once.
+    fn encode_rkyv_within(
+        self,
+        executor: Executor,
+        class: PoolClass,
+        limit: u64,
+        admission: QueueAdmission,
+        charge: Reservation,
+    ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
+
     fn decode_rkyv(
         executor: Executor,
         class: PoolClass,
@@ -279,6 +291,26 @@ where
             limit,
             admission,
             self,
+        )
+        .await
+        .map(wire::EncodedPayload::into_parts)
+    }
+
+    async fn encode_rkyv_within(
+        self,
+        executor: Executor,
+        class: PoolClass,
+        limit: u64,
+        admission: QueueAdmission,
+        charge: Reservation,
+    ) -> Result<(Vec<u8>, Reservation), Report<TransportError>> {
+        wire::encode_rkyv_payload_within(
+            &executor,
+            class.cpu_class(),
+            limit,
+            admission,
+            self,
+            charge,
         )
         .await
         .map(wire::EncodedPayload::into_parts)

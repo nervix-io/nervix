@@ -521,6 +521,37 @@ pub(crate) enum ProcessorStatePageError {
 pub(crate) struct ProcessorStatePageBounds {
     pub(crate) rows: usize,
     pub(crate) bytes: u64,
+    /// What admitting the page's rows also sets aside for the reply that carries them.
+    pub(crate) reply: PageReply,
+}
+
+/// How an owner page reaches its reader, which decides what admitting its rows also sets aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageReply {
+    /// This node presents the page itself and writes its rows as Row frames: nothing is set aside.
+    Local,
+    /// Another node reads the page, which travels as a descriptor and native Arrow bodies. A
+    /// deduplicator or window page sets aside `descriptor` for the descriptor's encoding and,
+    /// when it can return rows, `framing` for each section body's Arrow framing; every row it
+    /// admits sets its bytes aside once more for the body that carries it.
+    Remote { descriptor: u64, framing: u64 },
+}
+
+impl PageReply {
+    /// The reply to another node under `executor`'s bounds: the largest descriptor a bulk page
+    /// stream carries and each body's framing.
+    pub(crate) fn remote(executor: &nervix_execution::Executor) -> Self {
+        Self::Remote {
+            descriptor: nervix_interconnect::PoolClass::Bulk.payload_limit(executor),
+            framing: Self::body_framing(executor),
+        }
+    }
+
+    /// The most one Arrow body's framing, its schema, record batch header and buffer padding, adds
+    /// to its rows' bytes under `executor`'s bounds: the bound on one sealed snapshot header.
+    pub(crate) fn body_framing(executor: &nervix_execution::Executor) -> u64 {
+        executor.limits().snapshot_header_bytes.as_u64()
+    }
 }
 
 /// The ordinary branch selector and, only during repartitioning, copies selected elsewhere.
@@ -570,6 +601,27 @@ pub(crate) struct ProcessorStatePage {
 pub(crate) struct ProcessorStatePageMemory {
     pub(super) _reservation: nervix_execution::Reservation,
     pub(super) _windows: Vec<super::window_state::AdmittedWindowSnapshot>,
+    /// What a page read for another node set aside for its reply; absent for a page that set
+    /// nothing aside.
+    pub(super) reply: Option<ReplyMemory>,
+}
+
+impl ProcessorStatePageMemory {
+    /// Takes what the page set aside for its reply to another node.
+    pub(crate) fn take_reply(&mut self) -> Option<ReplyMemory> {
+        self.reply.take()
+    }
+}
+
+/// What a page read for another node set aside for its reply when it admitted its rows, so that
+/// encoding the reply never waits for room the page itself holds.
+pub(crate) struct ReplyMemory {
+    /// Encodes the reply's descriptor.
+    pub(crate) descriptor: nervix_execution::Reservation,
+    /// Encodes the bodies: every admitted row's bytes, and each section body's framing.
+    pub(crate) bodies: nervix_execution::Reservation,
+    /// The most one body's Arrow framing adds to its rows' bytes.
+    pub(crate) framing: u64,
 }
 
 /// One section of a unit page: how many rows of it the unit holds, and the returned rows as Arrow

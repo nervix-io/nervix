@@ -175,13 +175,14 @@ pub struct ProcessorStateRunTransfer {
 }
 
 /// One section of a processor page: every row of it the unit holds, its complete fields, and the
-/// identity of the Arrow body holding its returned rows, absent when the page returns none.
+/// identities of the Arrow bodies holding its returned rows, in row order, each within the owner's
+/// snapshot section bound; empty when the page returns none.
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub struct ProcessorStateSectionTransfer {
     pub section: ProcessorStateSection,
     pub rows: u64,
     pub fields: Vec<SchemaField>,
-    pub body: Option<StatePageBody>,
+    pub bodies: Vec<StatePageBody>,
 }
 
 pub type ProcessorStatePageReply = Result<ProcessorStatePageDescriptor, StateInspectionRejection>;
@@ -351,15 +352,18 @@ mod tests {
                     }
                     let mut transfers = Vec::new();
                     for section in sections {
-                        let body = arbitrary.entropy().flag().then(|| StatePageBody {
-                            bytes: arbitrary.positive_u64().get(),
-                            digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
-                        });
+                        let mut bodies = Vec::new();
+                        for _ in 0..arbitrary.entropy().byte() % 4 {
+                            bodies.push(StatePageBody {
+                                bytes: arbitrary.positive_u64().get(),
+                                digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
+                            });
+                        }
                         transfers.push(ProcessorStateSectionTransfer {
                             section,
                             rows: arbitrary.positive_u64().get(),
                             fields: arbitrary.schema_fields(1),
-                            body,
+                            bodies,
                         });
                     }
                     let last_branch = arbitrary.entropy().flag().then_some(branch);

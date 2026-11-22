@@ -2622,7 +2622,12 @@ declares what Arrow's reader would panic on, a field type Nervix does not carry 
 at odds with its own schema, is refused by the same scan as `ArrowBodyError::Decode`, a defect of
 the body, before the reader reads it. Should the reader still panic on a body the scan admitted,
 that ends its decode job, and the decoder reports it as `ArrowBodyError::Decode` too rather than
-as work the node could not execute: decoding the same body again would panic again. A decoded
+as work the node could not execute: decoding the same body again would panic again. On the
+encoding side, a writer whose output outgrows its carriage's limit before the body is complete is
+`ArrowBodyError::EncodedPastLimit`, carrying the bytes it reached and the limit, with Arrow's
+writer error beneath; any other writer failure stays `ArrowBodyError::Encode`. A processor state
+page owner decides on that variant alone to carry the rows in smaller bodies, and refuses a single
+row past the limit as `reply_too_large`. A decoded
 batch the local relay boundary refuses is the separate
 `RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is

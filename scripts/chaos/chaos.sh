@@ -23,7 +23,7 @@ Usage:
   just chaos run stale-follower --image IMAGE [--records N]
   just chaos run former-owner-restart --image IMAGE [--isolation-seconds N] [--records N]
   just chaos run cluster-restart --image IMAGE [--nodes 1|3] [--outage-seconds N] [--records N]
-  just chaos run stateful --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
+  just chaos run stateful --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N] [--inspect-state]
   just chaos run endpoints --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run binding-endpoints --image IMAGE --binding-image IMAGE [--nodes 1|3] [--fault FAULT]
   just chaos run lifetimes --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
@@ -110,6 +110,8 @@ stateful  Interleaved branches through a deduplicator, a window, materialized re
           milestone, then one fault
           faults: none (default), owner-crash, owner-pause, owner-partition, cluster-restart
           topologies: one-node (--nodes 1: none, cluster-restart), three-node (--nodes 3, default)
+          --inspect-state with --fault owner-crash also reads every state inspection family,
+          beside a reorderer and a correlator, before, during and after the owner crash
 endpoints  HTTP intake under MODE ACK through every node's listener into two domains that share one
            host and path, one domain withdrawn and bound again, a WebSocket kept open across the
            replacement of its source, then one fault while intake continues
