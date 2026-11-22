@@ -163,7 +163,14 @@ Feature: Committed cluster parameters
     And node "node-3" is stopped
     # A refused finalization leaves the committed change recoverable under its original
     # reference. The returning node must install that same revision before recovery completes.
-    Given the leader refuses the finalization of execution reference "parameter-change" as a leader whose lease lapsed
+    # The leader also resumes an applying execution on its own. A lapsed lease or a leadership
+    # move on a loaded machine can end the request's attempt before it records the outcome, and
+    # that resumption then meets the refusal first. Held on every node, it leaves the refusal to
+    # this scenario's requests, whichever node leads when they record the outcome.
+    Given command reconciliation of execution reference "parameter-change" pauses on node "node-1"
+    And command reconciliation of execution reference "parameter-change" pauses on node "node-2"
+    And command reconciliation of execution reference "parameter-change" pauses on node "node-3"
+    And the leader refuses the finalization of execution reference "parameter-change" as a leader whose lease lapsed
     When the active session begins this Plexus command request with execution reference "parameter-change" in the background
       """
       ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
@@ -194,6 +201,32 @@ Feature: Committed cluster parameters
     When this Plexus command request with execution reference "parameter-change" is executed on the leader node
       """
       ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
+      """
+    Then the last command request succeeded
+    And node "node-1" eventually reports status containing "node-unavailability-timeout committed=15s revision=2"
+
+  Scenario: A parameter change whose leader moves after admitting it still reports its refused finalization as unknown
+    Given a 3 node nervix cluster is started
+    Then the current leader node is saved as placeholder "admitting_leader"
+    And a node other than placeholder "admitting_leader" is saved as placeholder "next_leader"
+    # The move ends the admitting leader's attempt before it records the outcome, while the next
+    # leader would resume the applying execution on its own. With that resumption held on every
+    # node, the request's retry meets the refusal on the next leader and learns no outcome.
+    Given command reconciliation of execution reference "moved-parameter-change" pauses on node "node-1"
+    And command reconciliation of execution reference "moved-parameter-change" pauses on node "node-2"
+    And command reconciliation of execution reference "moved-parameter-change" pauses on node "node-3"
+    And the leader refuses the finalization of execution reference "moved-parameter-change" as a leader whose lease lapsed
+    And leadership moves from node "{{admitting_leader}}" to node "{{next_leader}}" under its next durably admitted command
+    When this Plexus command request with execution reference "moved-parameter-change" begins executing in the background on the leader node
+      """
+      ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s;
+      """
+    Then the background command request reports an unknown outcome because the leader could not confirm its lease
+    And the leader refused the finalization of execution reference "moved-parameter-change" as a leader whose lease lapsed
+    And the leadership move under the durably admitted command completed
+    When this Plexus command request with execution reference "moved-parameter-change" is executed on the leader node
+      """
+      ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s;
       """
     Then the last command request succeeded
     And node "node-1" eventually reports status containing "node-unavailability-timeout committed=15s revision=2"
