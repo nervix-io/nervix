@@ -22329,6 +22329,64 @@ async fn when_bulk_execution_is_occupied_on_every_node_for(
     });
 }
 
+/// The window processor of the scenario's domain named `processor`.
+fn window_processor_ref(world: &ScenarioWorld, processor: &str) -> nervix_models::DomainNodeRef {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let processor =
+        nervix_models::ModelName::try_from(expand_placeholders(world, processor).as_str())
+            .assured("the scenario window processor is an identifier-shaped name");
+    nervix_models::DomainNodeRef::node_in(
+        domain,
+        nervix_models::ModelKind::WindowProcessor,
+        processor,
+    )
+}
+
+/// The window processor's next restore of its branches stops after reading their lifecycle and
+/// before it opens any of their windows, wherever its task starts.
+#[when(expr = "the next branch restore of window processor {string} is held")]
+async fn when_window_processor_branch_restore_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .pause_processor_branch_restore(processor);
+}
+
+#[then(expr = "within {string} the branch restore of window processor {string} reaches its hold")]
+async fn then_window_processor_branch_restore_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let processor = window_processor_ref(world, &processor);
+    nervix_primitives::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_processor_branch_restore(&processor),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the branch restore of {processor:?} did not reach its hold within {duration:?}")
+    });
+}
+
+#[when(expr = "the held branch restore of window processor {string} is released")]
+async fn when_held_window_processor_branch_restore_is_released(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .release_processor_branch_restore(&processor);
+}
+
 /// Leave room for transport on the selected node while refusing larger decoding reservations.
 #[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
 async fn when_bulk_memory_on_node_keeps_only_bytes_free(

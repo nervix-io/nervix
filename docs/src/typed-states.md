@@ -369,9 +369,10 @@ the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the sessi
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
-that header state, inferencer state bindings with their initial expressions, the typed `payload`
-expression scope, an emitter's `INSTANCES` declaration, and the `DURATION` type with the duration
-literals expressions, subscription bindings and branch selections hold.
+that header state, inferencer state bindings with their initial expressions, an inferencer's
+required working memory, the typed `payload` expression scope, an emitter's `INSTANCES`
+declaration, and the `DURATION` type with the duration literals expressions, subscription
+bindings and branch selections hold.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
@@ -382,10 +383,10 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_duration_` keyspaces and `ClusterState`
-metadata encoding 48 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_` keyspaces and `ClusterState`
+metadata encoding 49 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
-each node's trace export capabilities, the database volume size each node record's capacity claim carries, and the partition
+inferencer working memory, each node's trace export capabilities, the database volume size each node record's capacity claim carries, and the partition
 count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity

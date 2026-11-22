@@ -106,7 +106,7 @@ CREATE WINDOW PROCESSOR collect_samples FROM order_samples
     ON MESSAGE ERROR LOG;
 
 CREATE INFERENCER score_sequence FROM order_sequences
-  USING RESOURCE sequence_model VERSION 1 FILE 'score.onnx'
+  USING RESOURCE sequence_model VERSION 1 FILE 'score.onnx' WORKING MEMORY RELEASED
   INPUTS { 'features' DENSE TENSOR<F32>[2] = input.series }
   OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }
   BRANCHED BY by_customer TO order_scores SET score = score
@@ -215,7 +215,7 @@ CREATE JUNCTION normalize_samples FROM histories BRANCHED BY by_tenant
         matrix = list_reshape(output.normalized AS ARRAY<F32, 6>, 2, 3)
     FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
 CREATE INFERENCER read_matrix FROM matrices
-  USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx'
+  USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx' WORKING MEMORY RELEASED
   INPUTS { 'matrix' DENSE TENSOR<F32>[2, 3] = input.matrix }
   OUTPUT SCHEMA { 'transformed' DENSE TENSOR<F32>[2, 3] }
   BRANCHED BY by_tenant TO scores SET transformed = transformed

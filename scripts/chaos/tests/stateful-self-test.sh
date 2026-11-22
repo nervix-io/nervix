@@ -815,6 +815,7 @@ inferencer_description() {
 inferencer: chaos_running
 resource: chaos_running_model@1
 file: models/running_sum.onnx
+working memory: released
 execution: per message
 state bytes per branch: 8
 definition:
@@ -823,6 +824,7 @@ definition:
     ATTACHED
     USING RESOURCE chaos_running_model VERSION 1
     FILE 'models/running_sum.onnx'
+    WORKING MEMORY RELEASED
 EOF
 }
 inferencer_unit() {

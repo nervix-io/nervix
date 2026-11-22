@@ -55,7 +55,10 @@ codec and every transfer act on those typed values.
 ## Branch Ownership
 
 Every concrete branch of an inferencer has its own native ONNX session and, with `STATE`, its own
-carried tensors. The branch task owns both and is the only task that changes them. A session is
+carried tensors. The branch task owns both and is the only task that changes them. The session
+keeps working memory from one model run to the next only under `WORKING MEMORY RETAINED`; see
+[Working memory](./processors.md#working-memory). Carried state never lives there: it enters a
+run as model input and leaves as model output. A session is
 loaded on the branch's first admitted batch from the one resource version the inferencer pins, on
 the node's bulk workers; a full bulk class makes the branch wait, because it already holds the batch
 that needs the session. Every branch shares the inferencer's prepared definition: its ports, its
@@ -341,7 +344,7 @@ whose writes are idempotent.
 
 | Signal | What it shows |
 | --- | --- |
-| `DESCRIBE INFERENCER <name>` | The pinned resource version and file, the execution mode, the `INPUTS`, `STATE` and `OUTPUT SCHEMA` declarations, the static state bytes per branch, the branch policy and routes, and per unit its owner and replicas, the branches in its published state and their bytes, and publication, persistence and replica progress, rendered as text; any node serves it by asking the unit owners for their typed facts |
+| `DESCRIBE INFERENCER <name>` | The pinned resource version and file, the working memory, the execution mode, the `INPUTS`, `STATE` and `OUTPUT SCHEMA` declarations, the static state bytes per branch, the branch policy and routes, and per unit its owner and replicas, the branches in its published state and their bytes, and publication, persistence and replica progress, rendered as text; any node serves it by asking the unit owners for their typed facts |
 | `SHOW INFERENCER <name> STATE` | Through the shared state inspection envelope: one `header` row per selected branch with its fingerprint, incarnation, publication and persisted revisions, tensor bytes, replica counts and persistence stage, then one section per `STATE` entry with its ports, shape and values |
 | Metrics | `nervix_inferencer_state_bytes`, `nervix_inferencer_snapshot_failures_total`, `nervix_inferencer_restored_branches_total` and `nervix_inferencer_reset_branches_total` per unit |
 | `SHOW CLUSTER STATUS` | A forced recovery's `state_recovery` outcome and the `inferencer` component it reset, with the cause |

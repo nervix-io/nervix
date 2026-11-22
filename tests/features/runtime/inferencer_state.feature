@@ -27,7 +27,7 @@ Feature: Stateful inferencer tensors
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
@@ -114,7 +114,7 @@ Feature: Stateful inferencer tensors
         TO features INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/checked_running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/checked_running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' DENSE TENSOR<F32>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }
@@ -154,7 +154,7 @@ Feature: Stateful inferencer tensors
         TO features INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE '<model_file>'
+        USING RESOURCE inference VERSION 1 FILE '<model_file>' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = <mapping> }
         <state_clause>
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
@@ -197,7 +197,7 @@ Feature: Stateful inferencer tensors
     When these Plexus commands fail with "would store sensitive data in a non-sensitive output field"
       """
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE '<model_file>'
+        USING RESOURCE inference VERSION 1 FILE '<model_file>' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         <state_clause>
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
@@ -246,7 +246,7 @@ Feature: Stateful inferencer tensors
     When these Plexus commands are executed on the leader node
       """
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RETAINED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
@@ -328,7 +328,7 @@ Feature: Stateful inferencer tensors
         TO features INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features FILTER WHERE input.wanted
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = [input.amount AS F32, input.other AS F32] }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2]
           INITIAL [1 AS F32, 10 AS F32] }
@@ -381,7 +381,7 @@ Feature: Stateful inferencer tensors
     When these Plexus commands fail with "<expected_error>"
       """
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[<input_dimensions>] = input.vector }
         STATE { '<state_input>' FROM '<state_output>' <tensor_type>[<state_dimensions>]
           INITIAL <initial> }
@@ -427,7 +427,7 @@ Feature: Stateful inferencer tensors
         TO features INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/checked_running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/checked_running_sum.onnx' WORKING MEMORY RETAINED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
@@ -478,7 +478,7 @@ Feature: Stateful inferencer tensors
     When these Plexus commands fail with "state_in"
       """
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' DENSE TENSOR<F32>[2] = input.vector }
         OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }
         UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -498,7 +498,7 @@ Feature: Stateful inferencer tensors
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' DENSE TENSOR<F32>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' DENSE TENSOR<F32>[2]
           INITIAL [1 AS F32, 10 AS F32] }

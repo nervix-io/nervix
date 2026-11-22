@@ -15,7 +15,7 @@ Feature: Inferencer configuration and state summaries
       CREATE RELAY features SCHEMA features UNBRANCHED;
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER scoring FROM features
-        USING RESOURCE inference VERSION 1 FILE '<model_file>'
+        USING RESOURCE inference VERSION 1 FILE '<model_file>' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[<input_axes>] = input.vector <extra_input> }
         <state_clause>
         OUTPUT SCHEMA { '<output_tensor>' <tensor_type>[<output_axes>] }
@@ -30,6 +30,7 @@ Feature: Inferencer configuration and state summaries
       inferencer: scoring
       resource: inference@1
       file: <model_file>
+      working memory: released
       execution: <execution_mode>
       state bytes per branch: <state_bytes>
       """
@@ -93,6 +94,119 @@ Feature: Inferencer configuration and state summaries
       | 1            | models/batch_score.onnx  |                                                                          | 0           | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 2> | BATCH, 2   | BATCH, 2    | scores        | , 'mask' DENSE TENSOR<F32>[BATCH, 2] = input.mask | batched        |
       | 3            | models/batch_score.onnx  |                                                                          | 0           | DENSE TENSOR<F32> | ARRAY<F32, 2> | ARRAY<F32, 2> | BATCH, 2   | BATCH, 2    | scores        | , 'mask' DENSE TENSOR<F32>[BATCH, 2] = input.mask | batched        |
 
+  @inferencer_describe @inferencer_working_memory
+  Scenario Outline: An inferencer states its working memory, which SHOW CREATE renders, DESCRIBE reports and every model run keeps
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      CREATE SCHEMA matrices ( matrix <matrix_type> );
+      CREATE SCHEMA transformed_matrices ( transformed <matrix_type> );
+      CREATE WIRE JSON SCHEMA matrices_wire MODE STRICT ( matrix array );
+      CREATE WIRE JSON CODEC matrices_codec FROM WIRE SCHEMA matrices_wire TO SCHEMA matrices;
+      CREATE RELAY matrices SCHEMA matrices UNBRANCHED;
+      CREATE RELAY transformed_matrices SCHEMA transformed_matrices UNBRANCHED;
+      CREATE VHOST edge infer-memory-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/matrix';
+      CREATE HTTP ENDPOINT INGESTOR matrix_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING matrices_codec
+        TO matrices
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INFERENCER transform_matrix FROM matrices
+        USING RESOURCE inference VERSION 1
+        FILE 'models/matrix_identity.onnx'
+        WORKING MEMORY <policy>
+        INPUTS { "matrix" <tensor_type>[2, 3] = input.matrix }
+        OUTPUT SCHEMA { "transformed" <tensor_type>[2, 3] }
+        UNBRANCHED
+        TO transformed_matrices
+        SET transformed = transformed
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE INFERENCER transform_matrix;
+      """
+    Then the last command output contains
+      """
+      WORKING MEMORY <policy>
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE INFERENCER transform_matrix;
+      """
+    Then the last command output contains
+      """
+      working memory: <reported>
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION transformed_matrices_subscription TO transformed_matrices;
+      START;
+      """
+    And http payload is posted to host "infer-memory-{{test_id}}.example.com" path "/matrix"
+      """
+      {"matrix":[[1.0,2.0,3.0],[4.0,5.0,6.0]]}
+      """
+    And http payload is posted to host "infer-memory-{{test_id}}.example.com" path "/matrix"
+      """
+      {"matrix":[[7.0,8.0,9.0],[10.0,11.0,12.0]]}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"transformed":[[1.0,2.0,3.0],[4.0,5.0,6.0]]}
+      {"transformed":[[7.0,8.0,9.0],[10.0,11.0,12.0]]}
+      """
+
+    Examples:
+      | cluster_size | policy   | reported | matrix_type      | tensor_type       |
+      | 1            | RELEASED | released | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+      | 1            | RETAINED | retained | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+      | 3            | RELEASED | released | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+      | 3            | RETAINED | retained | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+
+  @inferencer_describe @inferencer_working_memory
+  Scenario Outline: An inferencer that does not state its working memory is refused
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      CREATE SCHEMA matrices ( matrix <matrix_type> );
+      CREATE SCHEMA transformed_matrices ( transformed <matrix_type> );
+      CREATE RELAY matrices SCHEMA matrices UNBRANCHED;
+      CREATE RELAY transformed_matrices SCHEMA transformed_matrices UNBRANCHED;
+      """
+    When these Plexus commands fail with "expected WORKING MEMORY, found INPUTS"
+      """
+      CREATE INFERENCER transform_matrix FROM matrices
+        USING RESOURCE inference VERSION 1
+        FILE 'models/matrix_identity.onnx'
+        INPUTS { "matrix" <tensor_type>[2, 3] = input.matrix }
+        OUTPUT SCHEMA { "transformed" <tensor_type>[2, 3] }
+        UNBRANCHED
+        TO transformed_matrices
+        SET transformed = transformed
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size | matrix_type      | tensor_type       |
+      | 1            | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+      | 3            | ARRAY<F32, 2, 3> | DENSE TENSOR<F32> |
+
   @inferencer_describe @stateful_inferencer_persistence @deloxide_stress_restore
   Scenario Outline: Every node reads state counts and progress while interleaved branches keep their values private
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -120,7 +234,7 @@ Feature: Inferencer configuration and state summaries
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER scoring FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }

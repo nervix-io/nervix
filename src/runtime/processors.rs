@@ -227,6 +227,8 @@ pub(super) enum RelayProcessorOperationTemplate {
         inputs: Vec<InferencerTensorMapping>,
         output_schema: Vec<InferencerTensorDeclaration>,
         mode: InferencerExecutionMode,
+        /// What every branch's session keeps of a model run's working memory for its next run.
+        working_memory: nervix_models::InferencerWorkingMemory,
         state: Option<crate::registry::InferencerStatePlan>,
         compiled_input_program: Box<CompiledInferencerInputProgram>,
         /// Prepared once the template's programs are bound, before the revision is published.

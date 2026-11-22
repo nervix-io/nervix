@@ -2630,6 +2630,10 @@ impl<Version: Display> CreateInferencer<Version> {
             self.resource_version
         )));
         clauses.push(Clause::line(format!("FILE {}", string_literal(&self.file))));
+        clauses.push(Clause::line(format!(
+            "WORKING MEMORY {}",
+            self.working_memory.as_ref()
+        )));
         clauses.push(Clause::braced(
             "INPUTS",
             inference_mapping_items(&self.inputs)?,

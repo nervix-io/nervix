@@ -380,9 +380,9 @@ pub use processor::{
     FlushPolicy, InferencerExecutionMode, InferencerStateBinding, InferencerStateInitial,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    InferencerTensorSchemaError, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
-    WindowStateLimit,
+    InferencerTensorSchemaError, InferencerWorkingMemory, InputCollectPolicy, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, WasmProcessorLimits,
+    WasmRejectedStatePolicy, WindowBound, WindowStateLimit,
 };
 pub use quiesce::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,

@@ -312,6 +312,7 @@ impl Runtime {
                         let mut decoded = decode_window_processor_layout(
                             payload,
                             &executor,
+                            nervix_execution::QueueAdmission::RefuseWhenFull,
                             WindowSnapshotSchemas { input, arguments },
                             admitted.layout,
                         )
