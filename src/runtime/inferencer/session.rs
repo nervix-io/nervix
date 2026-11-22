@@ -90,6 +90,19 @@ impl std::fmt::Debug for PreparedInference {
     }
 }
 
+/// What one inferencer's shared definition is prepared from: the tensor ports, execution mode and
+/// working memory it declares, its `STATE` plan, and what that plan's initial expressions are
+/// evaluated with.
+pub(in crate::runtime) struct PreparedInferenceInit<'a> {
+    pub(in crate::runtime) inputs: &'a [InferencerTensorMapping],
+    pub(in crate::runtime) outputs: &'a [InferencerTensorDeclaration],
+    pub(in crate::runtime) mode: InferencerExecutionMode,
+    pub(in crate::runtime) working_memory: InferencerWorkingMemory,
+    pub(in crate::runtime) state: Option<&'a InferencerStatePlan>,
+    pub(in crate::runtime) udfs: Option<&'a UdfExecutor>,
+    pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
+}
+
 impl PreparedInference {
     #[cfg_attr(
         nervix_lint,
@@ -100,14 +113,17 @@ impl PreparedInference {
     )]
     pub(in crate::runtime) async fn prepare(
         executor: &Executor,
-        inputs: &[InferencerTensorMapping],
-        outputs: &[InferencerTensorDeclaration],
-        mode: InferencerExecutionMode,
-        working_memory: InferencerWorkingMemory,
-        state: Option<&InferencerStatePlan>,
-        udfs: Option<&UdfExecutor>,
-        vm_settings: nervix_vm::VmSettings,
+        init: PreparedInferenceInit<'_>,
     ) -> error_stack::Result<Self, InferencerError> {
+        let PreparedInferenceInit {
+            inputs,
+            outputs,
+            mode,
+            working_memory,
+            state,
+            udfs,
+            vm_settings,
+        } = init;
         let state = match state {
             Some(plan) => Some(PreparedState {
                 plan: plan.clone(),

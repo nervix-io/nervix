@@ -133,13 +133,15 @@ async fn prepared(
     Arc::new(
         PreparedInference::prepare(
             executor,
-            &inputs,
-            &outputs,
-            mode,
-            nervix_models::InferencerWorkingMemory::Released,
-            state,
-            None,
-            nervix_vm::VmSettings::default(),
+            PreparedInferenceInit {
+                inputs: &inputs,
+                outputs: &outputs,
+                mode,
+                working_memory: nervix_models::InferencerWorkingMemory::Released,
+                state,
+                udfs: None,
+                vm_settings: nervix_vm::VmSettings::default(),
+            },
         )
         .await
         .expect("the test definition prepares"),
@@ -285,13 +287,15 @@ async fn identity_keeping(
     let matrix = vec![fixed(2), fixed(3)];
     PreparedInference::prepare(
         executor,
-        &[port("matrix", matrix.clone())],
-        &[output("transformed", matrix)],
-        InferencerExecutionMode::PerMessage,
-        working_memory,
-        None,
-        None,
-        nervix_vm::VmSettings::default(),
+        PreparedInferenceInit {
+            inputs: &[port("matrix", matrix.clone())],
+            outputs: &[output("transformed", matrix)],
+            mode: InferencerExecutionMode::PerMessage,
+            working_memory,
+            state: None,
+            udfs: None,
+            vm_settings: nervix_vm::VmSettings::default(),
+        },
     )
     .await
     .expect("the identity definition prepares")

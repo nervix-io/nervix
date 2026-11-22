@@ -36,7 +36,9 @@ mod columns;
 mod session;
 mod session_options;
 mod stateful;
-pub(super) use session::{InferenceRun, InferenceSession, MessageRefusal, PreparedInference};
+pub(super) use session::{
+    InferenceRun, InferenceSession, MessageRefusal, PreparedInference, PreparedInferenceInit,
+};
 pub(crate) use session_options::OnnxSessionOptions;
 pub(super) use stateful::{CarriedState, NativeGeneration};
 

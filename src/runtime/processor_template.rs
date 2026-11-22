@@ -751,13 +751,15 @@ impl BranchInstanceTemplate {
                 *prepared = Some(Arc::new(
                     inferencer::PreparedInference::prepare(
                         executor,
-                        inputs,
-                        output_schema,
-                        *mode,
-                        *working_memory,
-                        state.as_ref(),
-                        udfs,
-                        vm_settings,
+                        inferencer::PreparedInferenceInit {
+                            inputs,
+                            outputs: output_schema,
+                            mode: *mode,
+                            working_memory: *working_memory,
+                            state: state.as_ref(),
+                            udfs,
+                            vm_settings,
+                        },
                     )
                     .await
                     .change_context_lazy(|| {
