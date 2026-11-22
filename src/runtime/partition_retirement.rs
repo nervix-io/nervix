@@ -197,7 +197,7 @@ impl Runtime {
         unit: Unit,
         task: ScheduledNodeTask,
     ) {
-        match task.handoff(self.task_stop_grace()).await {
+        match task.handoff().await {
             Ok(handoffs) => {
                 if !handoffs.is_empty() {
                     warn!(
@@ -215,7 +215,7 @@ impl Runtime {
                     entity = node.identifier.as_str(),
                     ?unit,
                     error = %format_args!("{error:#}"),
-                    "a retired transition's holding unit did not stop within its grace"
+                    "a retired transition's holding unit failed to hand over"
                 );
             }
         }

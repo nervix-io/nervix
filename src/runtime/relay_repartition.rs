@@ -35,6 +35,7 @@ use super::{
     ExecutionBuildError, ExecutionRevision, ExecutionStep, RelayPartitioning,
     RelaySubscriptionDefinition, RelayUnitRef, Runtime, RuntimeError,
     domain_rebuild::branch_relays_from_plans,
+    entity_swap_restore::{EntitySwapJournal, RelayRepartitionSwap},
 };
 
 /// How the previous partition count placed the keys of every relay of `revision` whose branch is in
@@ -106,6 +107,7 @@ impl Runtime {
         domain: &DomainName,
         revision: &ExecutionRevision,
         local_node_id: Option<&ClusterNodeName>,
+        journal: &mut EntitySwapJournal,
     ) -> error_stack::Result<BTreeSet<RelayName>, RuntimeError> {
         let build = || RuntimeError::build_domain_execution(domain);
         let execution_unavailable = || {
@@ -135,6 +137,7 @@ impl Runtime {
         let mut replaced = BTreeSet::new();
         for (relay, previous) in repartitioned {
             nervix_primitives::task::consume_budget().await;
+            let step = journal.record(RelayRepartitionSwap::new(relay.name.clone()));
             let owner_tasks = {
                 let Some(mut execution) = self.inner.executions.get_mut(domain) else {
                     return Err(execution_unavailable());
@@ -148,19 +151,30 @@ impl Runtime {
                 let mut tasks = Vec::with_capacity(units.len());
                 for owned in units {
                     if let Some(task) = execution.relay_owner_tasks.remove(&owned) {
-                        tasks.push(task);
+                        tasks.push((owned.unit, task));
                     }
                 }
                 tasks
             };
-            for task in owner_tasks {
+            // Every owner ends, even after one fails to drain: an owner that does not drain
+            // within its grace is aborted, and a restore starts each of them again.
+            let mut drain_failure = None;
+            for (unit, task) in owner_tasks {
                 nervix_primitives::task::consume_budget().await;
-                task.stop(self.branch_task_stop_timeout())
-                    .await
-                    .change_context_lazy(|| ExecutionBuildError::DrainRelay {
+                let stopped = task.stop(self.branch_task_stop_timeout()).await;
+                journal.step(step).record_owner_stopped(unit);
+                if let Err(error) = stopped
+                    && drain_failure.is_none()
+                {
+                    drain_failure = Some(error);
+                }
+            }
+            if let Some(error) = drain_failure {
+                return Err(error
+                    .change_context(ExecutionBuildError::DrainRelay {
                         relay: relay.name.clone(),
                     })
-                    .change_context_lazy(build)?;
+                    .change_context(build()));
             }
             let node = revision
                 .nodes
@@ -171,6 +185,7 @@ impl Runtime {
                 .assured("the domain plan contains exactly the scheduled relays");
             // The fan-out takes the definition of the new count; its subscribers keep reading,
             // since the relay's rows are the same under either count.
+            journal.step(step).record_redefined();
             Box::pin(self.relay_boundary_fanout_with_capacity(
                 domain,
                 &relay.name,
@@ -229,6 +244,7 @@ impl Runtime {
                 execution
                     .relay_owner_tasks
                     .insert(RelayUnitRef::new(relay.name.clone(), unit), task);
+                journal.step(step).record_owner_started(unit);
             }
             replaced.insert(relay.name.clone());
         }

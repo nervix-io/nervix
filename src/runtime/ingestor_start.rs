@@ -103,7 +103,28 @@ impl Runtime {
         domain: &DomainName,
         desired: Option<&ExecutionRevision>,
     ) -> error_stack::Result<Vec<IngestorName>, RuntimeError> {
-        let layouts = match (self.inner.executions.get(domain), desired) {
+        let layouts = self.replaced_ingestor_layouts(domain, desired);
+        for ingestor in &layouts {
+            nervix_primitives::task::consume_budget().await;
+            self.stop_ingestor(domain, ingestor).await?;
+            let dispatcher = self.inner.remote_dispatcher.load_full();
+            self.inner.metrics.remove_ingestor_metrics(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            );
+        }
+        Ok(layouts)
+    }
+
+    /// The ingestors whose unit layout `desired` changes from the one `domain`'s execution has
+    /// installed.
+    pub(super) fn replaced_ingestor_layouts(
+        &self,
+        domain: &DomainName,
+        desired: Option<&ExecutionRevision>,
+    ) -> Vec<IngestorName> {
+        match (self.inner.executions.get(domain), desired) {
             (Some(existing), Some(desired)) => existing
                 .revision
                 .nodes
@@ -116,18 +137,7 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
-        };
-        for ingestor in &layouts {
-            nervix_primitives::task::consume_budget().await;
-            self.stop_ingestor(domain, ingestor).await?;
-            let dispatcher = self.inner.remote_dispatcher.load_full();
-            self.inner.metrics.remove_ingestor_metrics(
-                domain,
-                ingestor,
-                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-            );
         }
-        Ok(layouts)
     }
 
     pub(super) fn withdraw_ingestor_unit_metrics(
@@ -346,18 +356,25 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
     ) -> error_stack::Result<(), RuntimeError> {
+        for unit in self.running_ingestor_units(domain, ingestor) {
+            self.stop_ingestor_unit(domain, ingestor, unit).await?;
+        }
+        Ok(())
+    }
+
+    /// The units of `ingestor` that run on this node.
+    pub(in crate::runtime) fn running_ingestor_units(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) -> Vec<Unit> {
         let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        let units = self
-            .inner
+        self.inner
             .ingestors
             .iter()
             .filter(|entry| entry.key().entity == entity)
             .map(|entry| entry.key().unit)
-            .collect::<Vec<_>>();
-        for unit in units {
-            self.stop_ingestor_unit(domain, ingestor, unit).await?;
-        }
-        Ok(())
+            .collect::<Vec<_>>()
     }
 
     pub(in crate::runtime) async fn stop_ingestor_unit(

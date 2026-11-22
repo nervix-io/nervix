@@ -16,7 +16,10 @@ use nervix_models::{
     AckMode, ModelKind, RelayName, ResolvedBranching, SchemaFingerprint,
     StateInspectionBranchSelection, Timestamp, Unit,
 };
-use nervix_primitives::{sync::StdArc, time::timeout};
+use nervix_primitives::{
+    sync::{StdArc, watch},
+    time::timeout,
+};
 
 use super::{MaterializedPageBounds, MaterializedPageQuery};
 use crate::{
@@ -137,6 +140,7 @@ async fn subscription_delivery_can_precede_the_materialized_inspection_generatio
                 Unit::SINGLE,
                 &batch,
                 &runtime.inner.fault_injection,
+                &watch::channel(false).1,
             )
             .await
             .assured("the owner fans out to both independent consumers");

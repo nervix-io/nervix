@@ -258,6 +258,8 @@ mod endpoint_acknowledgement;
 mod endpoint_pause;
 mod endpoint_route_table;
 mod entity_gate;
+mod entity_swap;
+mod entity_swap_restore;
 mod entrypoint_routes;
 mod error;
 mod events;
@@ -653,7 +655,8 @@ use relay_boundary::{
     RelayRuntimeFanIn, RemoteRuntimeConsumer, addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
-    OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
+    OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateHold, RelayDispatchGateLease,
+    RelayTryRecv,
 };
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
