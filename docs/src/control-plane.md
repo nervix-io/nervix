@@ -130,7 +130,7 @@ Only the bound domain's replicated configuration effects may be queued:
 
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
-- `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, `DROP LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
+- `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
 
 `START` and `STOP` switch the domain's processing on and off and change none of its configuration,
 so they never run inside a transaction. Queuing either is refused at once with

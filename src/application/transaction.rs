@@ -701,7 +701,7 @@ impl TransactionQueueRefusal {
 
 pub(in crate::application) fn transaction_statement_label(statement: &Statement) -> &'static str {
     match statement {
-        Statement::MutateEntityLabels(edit) => edit.mutation.statement_keyword(),
+        Statement::MutateEntityLabels(_) => "SET LABELS",
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::ActivateLicense(_) => "ACTIVATE LICENSE",
         Statement::RefreshLicense(_) => "REFRESH LICENSE",

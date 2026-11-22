@@ -56,7 +56,7 @@ fn every_current_model_has_the_same_trailing_metadata_and_typed_address() {
         let target = format!("{} {}", model.kind().keyword_phrase(), model.name());
         for source in [
             format!("SET LABELS ON {target} {{ 'owner' = 'Platform', 'empty' = '' }};"),
-            format!("DROP LABELS ON {target} {{ 'owner', 'absent' }};"),
+            format!("SET LABELS ON {target} {{ 'region' = 'east', 'owner' DROP, 'absent' DROP }};"),
             format!("SHOW LABELS ON {target};"),
             format!("SHOW LABELS ON {target} FORMAT JSON;"),
         ] {
@@ -94,7 +94,12 @@ fn metadata_clause_has_one_position_and_duplicates_are_never_overwritten() {
         "CREATE SCHEMA event ( value U32 ); LABELS { 'owner' = 'one' };",
         "CREATE SCHEMA event ( value U32 ) LABELS {} LABELS {};",
         "SET LABELS ON SCHEMA event { 'owner' = 'one', 'owner' = 'two' };",
-        "DROP LABELS ON SCHEMA event { 'owner', 'owner' };",
+        "SET LABELS ON SCHEMA event { 'owner' DROP, 'owner' DROP };",
+        "SET LABELS ON SCHEMA event { 'owner' = 'one', 'owner' DROP };",
+        "SET LABELS ON SCHEMA event { 'owner' };",
+        "SET LABELS ON SCHEMA event { 'owner' DROP = 'one' };",
+        "SET LABELS ON SCHEMA event { DROP 'owner' };",
+        "SET LABELS ON SCHEMA event { 'Owner' DROP };",
         "SHOW LABELS ON DOMAIN;",
         "SHOW LABELS ON RESOURCE event VERSION 1;",
         "SHOW LABELS ON USER event LABELS {};",
@@ -128,7 +133,7 @@ fn administrative_creations_and_catalog_targets_use_the_shared_grammar() {
         for source in [
             format!("{creation} LABELS {{ 'team/path' = ' Δ ' }};"),
             format!("SET LABELS ON {target} {{ 'team/path' = ' Δ ' }};"),
-            format!("DROP LABELS ON {target} {{ 'team/path' }};"),
+            format!("SET LABELS ON {target} {{ 'team/path' DROP }};"),
             format!("SHOW LABELS ON {target} FORMAT JSON;"),
         ] {
             let statement =
@@ -156,11 +161,7 @@ fn administrative_creations_and_catalog_targets_use_the_shared_grammar() {
 
 #[test]
 fn label_commands_complete_composed_heads_and_existing_reference_kinds() {
-    for (prefix, expected) in [
-        ("SET ", "LABELS ON"),
-        ("DROP ", "LABELS ON"),
-        ("SHOW ", "LABELS ON"),
-    ] {
+    for (prefix, expected) in [("SET ", "LABELS ON"), ("SHOW ", "LABELS ON")] {
         let suggestions = suggest_statement(prefix, prefix.len());
         assert!(
             suggestions.iter().any(|item| item == expected),
@@ -205,5 +206,69 @@ fn server_and_client_completion_derive_metadata_tails_without_consuming_open_gro
         client
             .suggest_statement(terminated, terminated.len())
             .is_empty()
+    );
+}
+
+#[test]
+fn one_edit_sets_and_removes_keys_and_reads_back_in_key_order() {
+    let statement = parse_statement("SET LABELS ON SCHEMA event { 'team' DROP, 'owner' = '' , };")
+        .assured("an assignment and a removal form one edit");
+    let Statement::MutateEntityLabels(edit) = &statement else {
+        panic!("the source is a label edit: {statement:?}");
+    };
+    let mut changes = Vec::new();
+    for (key, change) in edit.mutation.iter() {
+        changes.push((key.as_str().to_owned(), change.clone()));
+    }
+    assert_eq!(
+        changes,
+        vec![
+            (
+                "owner".to_owned(),
+                nervix_models::LabelChange::Set(String::new())
+            ),
+            ("team".to_owned(), nervix_models::LabelChange::Drop),
+        ]
+    );
+    assert_eq!(
+        statement
+            .to_canonical_plexus()
+            .assured("a label edit renders"),
+        "SET LABELS ON SCHEMA event { 'owner' = '', 'team' DROP };"
+    );
+    assert_reads_back_canonically(&statement);
+    let empty = parse_statement("SET LABELS ON SCHEMA event {};")
+        .assured("an empty edit is a valid statement");
+    assert_reads_back_canonically(&empty);
+}
+
+#[test]
+fn an_edit_entry_completes_an_assignment_or_a_removal() {
+    let client = crate::client_statement::ClientStatementGrammar::new();
+    for (prefix, expected) in [
+        ("SET LABELS ON SCHEMA event { 'owner' ", "="),
+        ("SET LABELS ON SCHEMA event { 'owner' ", "DROP"),
+        ("SET LABELS ON SCHEMA event { 'owner' DROP, 'team' ", "DROP"),
+    ] {
+        let server = suggest_statement(prefix, prefix.len());
+        assert!(
+            server.iter().any(|label| label == expected),
+            "{prefix:?} must offer {expected:?}: {server:?}"
+        );
+        assert_eq!(client.suggest_statement(prefix, prefix.len()), server);
+    }
+    let removal = "SET LABELS ON SCHEMA event { 'owner' DROP ";
+    let suggestions = suggest_statement(removal, removal.len());
+    assert!(
+        suggestions
+            .iter()
+            .all(|label| label != "=" && label != "DROP"),
+        "a removal takes no value: {suggestions:?}"
+    );
+    let creation = "CREATE SCHEMA event (value U32) LABELS { 'owner' ";
+    let suggestions = suggest_statement(creation, creation.len());
+    assert!(
+        suggestions.iter().all(|label| label != "DROP"),
+        "a creation sets every label it names: {suggestions:?}"
     );
 }

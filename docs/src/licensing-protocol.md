@@ -139,13 +139,22 @@ capabilities belong in `usage`; relationship quotas, durations, sets and policy 
 | `transition.capability_removal_grace` | bounded duration, organization | transition arithmetic |
 | `transition.quota_reduction_grace` | bounded duration, organization | transition arithmetic |
 
-A capability is `enabled` or `disabled`. `licensing.dummy` is the only capability, and nothing in
-Nervix reads it: a license enables it so that `DESCRIBE LICENSE` shows that a verified decision
-reached the cluster. Nothing uses it, so removing it starts no transition. A bounded quota of zero,
-an unlimited quota, and an absent override are distinct. Plans provide every catalog name; overrides replace complete values
-for only the names they contain. The service refuses unknown names. A receiving cluster retains
-an unknown name's complete external JSON and ignores it during evaluation; a known name with an
-invalid value is always refused. This extension behavior is part of the external contract.
+A capability is `enabled` or `disabled`, and a capability a document does not list is disabled.
+`licensing.dummy` is the only capability, and nothing in Nervix reads it: a license enables it so
+that `DESCRIBE LICENSE` shows that a verified decision reached the cluster. Nothing uses it, so
+removing it starts no transition. A bounded quota of zero, an unlimited quota, and an absent
+override are distinct. Plans provide every catalog name except capabilities; overrides replace
+complete values for only the names they contain. The service refuses unknown names. A receiving
+cluster retains an unknown name's complete external JSON and ignores it during evaluation; a known
+name with an invalid value is always refused. This extension behavior is part of the external
+contract.
+
+Capabilities keep a cluster and a service built from different catalogs compatible in both
+directions. A service that does not know a capability yet signs decisions without it, and a
+cluster that knows it treats it as disabled. A cluster that does not know a capability ignores it
+and counts it among the conditions it did not understand. Every other kind of condition stays
+required: a cluster refuses a decision that lacks a quota, duration, set or policy it knows, so the
+service learns such a condition before a cluster that knows it activates against that service.
 
 Resolution validates the complete plan and partial overrides, applies overrides, derives status
 from the supplied organization/license/activation facts and instant, and hashes the complete result using
@@ -175,7 +184,8 @@ caller inputs and returns `DecisionRejection` on failure:
    its typed completion context checks the next key generation, and consensus requires the signed
    timing to equal the committed timing. The stored decision retains that acceptance context for
    recovery verification. Term and ephemeral timing remain internally consistent.
-7. Status and complete known conditions are valid. Acknowledged transitions have unique identities,
+7. Status and known conditions are valid, and every known condition other than a capability is
+   present. Acknowledged transitions have unique identities,
    known revisions, affected catalog entries and a deadline at or after their start.
 
 Validation mutates nothing. Its owner keeps committed state on rejection and decides how to report

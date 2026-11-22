@@ -79,6 +79,13 @@ draft's own typed error. The dialog lifts that error into its own, with the draf
 it, and shows its message inline. The form is `novalidate`, so the browser's constraint checks
 never pre-empt the draft's validation, and the canonical preview stays empty until the draft builds.
 
+Every family that creates a stored entity also keeps its own label rows, which the shared **Labels**
+section of its form edits. They build into one exact label set, keys parsed by the vocabulary's key
+rule and values kept verbatim, and that set becomes the created Model's labels, or the labels of the
+domain, user or resource statement, before the statement is rendered; the canonical renderer then
+writes the trailing `LABELS { … }` clause. A row without a key, an invalid key and a repeated key
+fail the build like any other field. Subscriptions carry no labels.
+
 A completed Model becomes a `CREATE` statement with its `IF NOT EXISTS` flag. Domains, users and
 resources build their own statements, and a subscription builds the client statement
 `CREATE SUBSCRIPTION`. The statement is rendered by the vocabulary's canonical renderer, and the
@@ -163,6 +170,27 @@ attempt's form and retained draft, including **PLACE** and **SUBSCRIBE**. Anothe
 open after the attempt has its outcome. A pending form opens with **Close** focused, since its
 editable controls are disabled. **Escape** closes the dialog, and closing returns focus to the
 control that opened it.
+
+### Changing An Existing Entity
+
+Two forms change an entity that exists instead of creating one, and the dialog treats both as
+families outside the Create menu: the endpoint pause settings, opened from the graph, and the label
+editor, opened from an entity's sidebar row, from the graph's **LABELS** action or from the top
+bar. Both read the entity first and save through the same submission path.
+
+The label editor captures its target, a typed label target with the domain a Model or a resource
+resolves in, when it opens or when the operator chooses one. Its read is a `SHOW LABELS` command
+whose typed inspection, not its text, fills the editor, so the editor shows exactly the labels,
+committed revision or staged transaction view and captured limits the server returned. Every read
+carries a number, and the editor takes only the answer to its latest read, and only when the
+inspection names the captured entity. The operator's change to each read label, kept, changed or
+removed, and the labels being added build into one `SET LABELS` edit that names only those
+changes; the editor checks the complete result against the captured limits before it can submit.
+A later read keeps every change: a label the operator left alone follows the read, and a changed
+label whose read value changed meanwhile is marked as a conflict that blocks the save until the
+operator keeps the change or takes the current value. A completed or queued save reads the labels
+again. Domain and user labels are administrative, so the server, not the editor, refuses their save
+inside a transaction.
 
 ### Captured Domains
 
@@ -612,6 +640,7 @@ domains and bounds.
 | `console-ingestor-source-drafts` | The ingestor source draft rebuilds every declared entity's configuration |
 | `console-emitter-drafts` | Emitter drafts rebuild every complete entity |
 | `console-processor-drafts` | Processor drafts rebuild every complete Model of the nine processor families |
+| `console-label-drafts` | A form's label rows build the exact set written, and a label edit builds the one `SET LABELS` edit whose result is the set the operator intended |
 | `client-requests`, `client-replies` | Suggestion and choice requests and outcomes keep their complete values through the wire codec |
 | `client-processor-choice-request` | A processor's choice request keeps its target and dependencies through the wire codec |
 | `completion-page-continuations`, `choice-page-continuations` | A page continuation keeps its revision, position, query digest and candidate digest through its text, and paging with the continuations a basis issues returns every candidate once and in order |
@@ -631,6 +660,11 @@ reads, and the Go and Node probes reproduce the corpus report in the client conf
   are used.
 - `connector_presentation.feature` checks that visual connector choices follow the entity
   declarations, on one and three nodes.
+- `entity_labels.feature` creates entities with labels and edits labels through the label editor
+  on one and three nodes: one edit that sets, changes and removes, a staged edit through revert and
+  commit, an edit that keeps its entity while the console selects another domain with the same
+  names, inline refusals before sending, another session's change shown instead of overwritten, a
+  save recovered across a leader change and the administrative domain and user owners.
 - `plexus_repl.feature` covers REPL completion, connector completion and a full request window.
   `runtime/session_protocol.feature` pages semantic completion through every domain and covers the
   rejection of a cursor inside a character and of page sizes 0 and 101, and

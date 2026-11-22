@@ -29,7 +29,7 @@ The planner and executor partition that ordered sequence the same way:
 
 | Content | Execution boundary |
 | --- | --- |
-| Consecutive model `CREATE`, supported `ALTER`, `DROP`, `SET LABELS`, `DROP LABELS`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
+| Consecutive model `CREATE`, supported `ALTER`, `DROP`, `SET LABELS`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
 | `CREATE RESOURCE`, a resource's label edit, or `RESET WASM PROCESSOR ... STATE` | One step each; each ends a preceding model run. |
 
 `START` and `STOP` are never transaction content. They switch the domain's processing on and off
