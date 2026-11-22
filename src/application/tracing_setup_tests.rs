@@ -17,14 +17,14 @@ use nervix_primitives::{
     time::{Instant, timeout},
 };
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
-use opentelemetry_sdk::trace::SpanExporter as _;
+use opentelemetry_sdk::{error::OTelSdkError, trace::SpanExporter as _};
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt as _;
 use tower_service::Service as _;
 
 use super::{
-    super::AppError, NodeTraceConnector, TraceConnectError, TraceExportGuard, TraceExporter,
-    TracingGuard,
+    super::AppError, NodeTraceConnector, TraceCollector, TraceConnectError, TraceExportGuard,
+    TraceExporter, TracingGuard,
 };
 
 const NAME: &str = "node-traces.nervix.test";
@@ -81,8 +81,7 @@ impl Fixture {
 #[nervix_primitives::test]
 async fn node_trace_channel_is_lazy_and_resolves_through_the_installed_node_resolver() {
     let fixture = Fixture::name_not_found().await;
-    let trace = TraceExporter::from_endpoint(ENDPOINT.to_string(), TEST_WAIT)
-        .assured("the configured HTTP collector endpoint is valid");
+    let trace = TraceExporter::new(http::Uri::from_static(ENDPOINT), TEST_WAIT);
     nervix_primitives::task::yield_now().await;
     assert_eq!(fixture.authority.questions_for(NAME), 0);
     trace.dns.send_replace(Some(fixture.resolver.clone()));
@@ -158,8 +157,7 @@ async fn the_trace_export_timeout_bounds_a_silent_node_dns_lookup() {
     const _: () = assert!(EXPORT_TIMEOUT.as_nanos() < TEST_WAIT.as_nanos());
 
     let fixture = Fixture::new(DnsAnswer::Silent).await;
-    let trace = TraceExporter::from_endpoint(ENDPOINT.to_string(), EXPORT_TIMEOUT)
-        .assured("the configured HTTP collector endpoint is valid");
+    let trace = TraceExporter::new(http::Uri::from_static(ENDPOINT), EXPORT_TIMEOUT);
     trace.dns.send_replace(Some(fixture.resolver.clone()));
     let started = Instant::now();
     let result = timeout(TEST_WAIT, trace.exporter.export(Vec::new()))
@@ -188,8 +186,10 @@ async fn https_trace_export_requires_configured_tonic_tls() {
     let address = listener
         .local_addr()
         .assured("a bound listener has an address");
-    let trace = TraceExporter::from_endpoint(format!("https://{address}"), TEST_WAIT)
+    let endpoint = format!("https://{address}")
+        .parse::<http::Uri>()
         .assured("the HTTPS collector URI is valid");
+    let trace = TraceExporter::new(endpoint, TEST_WAIT);
     trace.dns.send_replace(Some(fixture.resolver.clone()));
     let exporting =
         nervix_primitives::task::spawn(async move { trace.exporter.export(Vec::new()).await });
@@ -211,64 +211,41 @@ async fn https_trace_export_requires_configured_tonic_tls() {
     );
 }
 
-#[test]
-fn trace_endpoint_validation_reports_the_tracing_owner() {
-    let failure = TraceExporter::from_endpoint("http://bad\nhost".to_string(), TEST_WAIT)
-        .err()
-        .assured("a newline is invalid in a collector URI");
-    assert!(matches!(failure.current_context(), AppError::InitTracing));
+#[nervix_primitives::test]
+async fn a_shut_down_exporter_refuses_further_exports_and_a_second_shutdown() {
+    let mut trace = TraceExporter::new(http::Uri::from_static(ENDPOINT), TEST_WAIT);
+    assert_eq!(
+        format!("{:?}", trace.exporter),
+        "NodeSpanExporter { shut_down: false, .. }"
+    );
+    assert!(trace.exporter.shutdown().is_ok());
+    assert_eq!(
+        format!("{:?}", trace.exporter),
+        "NodeSpanExporter { shut_down: true, .. }"
+    );
+    assert!(matches!(
+        trace.exporter.export(Vec::new()).await,
+        Err(OTelSdkError::AlreadyShutdown)
+    ));
+    assert!(matches!(
+        trace.exporter.shutdown(),
+        Err(OTelSdkError::AlreadyShutdown)
+    ));
 }
 
 #[test]
-fn trace_export_timeout_keeps_signal_precedence_and_ignores_invalid_values() {
-    for (variables, expected) in [
-        ([None, None], Duration::from_secs(10)),
-        ([Some("17"), Some("25")], Duration::from_millis(17)),
-        ([Some("invalid"), Some("25")], Duration::from_millis(25)),
-        ([Some(""), Some("invalid")], Duration::from_secs(10)),
-        ([Some("0"), None], Duration::ZERO),
-    ] {
-        assert_eq!(TraceExporter::timeout_from(variables), expected);
+fn a_collector_endpoint_that_is_not_a_uri_refuses_the_node_before_it_starts() {
+    for endpoint in ["http://bad\nhost", ""] {
+        let failure = TraceCollector::new(endpoint, "nervix".to_owned())
+            .err()
+            .assured("a newline or nothing at all is no collector URI");
+        assert!(matches!(
+            failure.current_context(),
+            AppError::ParseTraceCollectorEndpoint
+        ));
     }
-}
-
-#[test]
-fn trace_endpoint_keeps_the_sdk_configuration_precedence() {
-    struct Case {
-        configured: &'static str,
-        variables: [Option<&'static str>; 2],
-        expected: &'static str,
-    }
-    for case in [
-        Case {
-            configured: ENDPOINT,
-            variables: [Some("http://trace:4317"), Some("http://general:4317")],
-            expected: ENDPOINT,
-        },
-        Case {
-            configured: "",
-            variables: [Some("http://trace:4317"), Some("http://general:4317")],
-            expected: "http://trace:4317",
-        },
-        Case {
-            configured: "",
-            variables: [None, Some("http://general:4317")],
-            expected: "http://general:4317",
-        },
-        Case {
-            configured: "",
-            variables: [Some(""), Some("http://general:4317")],
-            expected: "",
-        },
-        Case {
-            configured: "",
-            variables: [None, None],
-            expected: "http://localhost:4317",
-        },
-    ] {
-        assert_eq!(
-            TraceExporter::endpoint_from(case.configured, case.variables),
-            case.expected
-        );
-    }
+    let collector = TraceCollector::new(ENDPOINT, "nervix".to_owned())
+        .assured("an HTTP collector URI names a collector");
+    assert_eq!(collector.endpoint, http::Uri::from_static(ENDPOINT));
+    assert_eq!(collector.service_name, "nervix");
 }
