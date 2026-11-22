@@ -554,16 +554,17 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
 group and payload unfold policy. Their durations use validated, lossless seconds and nanoseconds
 projections so ordinary Raft records keep their inline footprint bound. Admitted node capabilities
-carry runtime capacities, local shutdown budgets and listener bounds.
+carry runtime capacities, local shutdown budgets, listener bounds and the size of the volume that
+holds the node's database directory.
 This namespace also includes durable cluster identity rotation and activation release operations.
 It identifies the current Model and stored transaction statement layouts, including
 `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE`,
