@@ -14368,49 +14368,6 @@ async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
     });
 }
 
-#[then(
-    expr = "within {string} HTTP admission on node {string} host {string} path {string} refuses \
-            with retry-after"
-)]
-async fn then_http_admission_refuses_without_waiting(
-    world: &mut ScenarioWorld,
-    duration: String,
-    node: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    let uri = world
-        .cluster()
-        .http_uri(
-            &expand_placeholders(world, &node),
-            &expand_placeholders(world, &path),
-        )
-        .assured("the configured endpoint has a listener");
-    let request = reqwest::Client::new()
-        .post(uri)
-        .header("Host", expand_placeholders(world, &host))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(expand_placeholders(world, docstring(step)));
-    let response = nervix_primitives::time::timeout(
-        parse_duration_text(&duration).assured("the step duration is valid"),
-        request.send(),
-    )
-    .await
-    .assured("request admission answers while the worker remains held")
-    .assured("the HTTP listener answers");
-    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    let retry = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .assured("typed admission refusal supplies Retry-After")
-        .to_str()
-        .assured("Retry-After is ASCII")
-        .parse::<u64>()
-        .assured("Retry-After is a delay in seconds");
-    assert!(retry > 0);
-}
-
 /// The junction's first read of a message's dependency is slowed too, so a payload that reached
 /// the junction's input may still be read rather than parked. This waits until the junction, whose
 /// reads the scenario slowed, has parked a message on `REQUIRED WAIT`.
