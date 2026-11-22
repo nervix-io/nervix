@@ -68,7 +68,7 @@ datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR c
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
 values, including inferencer state bindings and their initial expressions.
-The `NERVIX NODE RULE` registry signature and `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_`
+The `NERVIX NODE RULE` registry signature and `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_`
 consensus namespace identify the current Model layout before decoding, including the `parametrizer` kind text of the
 declared entity that defines a parametrization, the ordered `RATE LIMIT` clauses an
 ingestor body writes, the `SET RATE LIMIT` and `DROP RATE LIMIT` alterations and the required
@@ -86,7 +86,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_` consensus namespace identifies the
+and the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_` consensus namespace identifies the
 stored transaction statement layout before decoding.
 
 The complete cluster-parameter record uses each declaration's validated inline storage. Its
@@ -94,8 +94,10 @@ The complete cluster-parameter record uses each declaration's validated inline s
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_` namespace and `ClusterState` encoding 45
-identify the current layout, which includes labels on domains, logical resources and users.
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_` namespace and `ClusterState` encoding 47
+identify the current layout, which includes labels on domains, logical resources and users and
+the one label edit, setting and removing keys, that administrative label commands and transaction
+statements store, and each node's trace export capabilities in its committed capability claim.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
 all-branches or concrete-branch scope; the statement takes its domain from the transaction that

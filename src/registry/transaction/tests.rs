@@ -687,10 +687,19 @@ fn label_map(entries: serde_json::Value) -> nervix_models::EntityLabels {
     serde_json::from_value(entries).assured("the fixture label map has valid keys and values")
 }
 
+/// One `SET LABELS` edit that sets every label `entries` names on the Model.
 fn set_model_labels(kind: ModelKind, name: &str, entries: serde_json::Value) -> Statement {
+    let edits = label_map(entries)
+        .iter()
+        .map(|(key, value)| nervix_models::LabelEdit {
+            key: key.clone(),
+            change: nervix_models::LabelChange::Set(value.to_owned()),
+        })
+        .collect::<Vec<_>>();
     Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
         entity: nervix_models::EntityLabelTarget::Model(node_ref(kind, name)),
-        mutation: nervix_models::EntityLabelMutation::Set(label_map(entries)),
+        mutation: nervix_models::EntityLabelMutation::try_from(edits)
+            .assured("a label map names each key once"),
     })
 }
 

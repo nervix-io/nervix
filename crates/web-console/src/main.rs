@@ -54,11 +54,11 @@ use nervix_dataflow_graph::{
     DataflowStatistics,
 };
 use nervix_models::{
-    CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus,
-    IngestorEntityKind, IngestorName, ModelKind, ModelName, RelayName, ResourceDescription,
-    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionDescription,
-    ResourceVersionEntries, Statement, SubscriptionName, Timestamp, TransactionLifecycle,
-    TransactionStatus, expression_to_plexus,
+    AdministrativeLabelTarget, CommandExecutionReference, CreateSubscription, DomainName,
+    DomainPace, DomainStatus, EntityLabelTarget, IngestorEntityKind, IngestorName, ModelKind,
+    ModelName, RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
+    ResourceName, ResourceUsage, ResourceVersionDescription, ResourceVersionEntries, Statement,
+    SubscriptionName, Timestamp, TransactionLifecycle, TransactionStatus, expression_to_plexus,
 };
 use nervix_plexus::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
@@ -94,7 +94,8 @@ use command_retry::{CommandRetries, CommandRetryWait};
 use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
     CreateDispatch, CreateKind, CreateMenu, CreateSignals, CreateSubmission,
-    EndpointPauseSettingsResponse, SubscriptionDispatch,
+    EndpointPauseSettingsResponse, KnownLabelTarget, LabelReadResponse, LabelTarget,
+    LabelTargetKind, SubscriptionDispatch,
 };
 use node_panel::{ClusterEventLog, NodePanel};
 use request_handoff::{RequestReceiver, RequestSender, request_handoff};
@@ -653,6 +654,8 @@ enum CommandPurpose {
     /// The resource dialog reads the versions of `resource` from its typed `DESCRIBE RESOURCE`
     /// description.
     ResourceDescription { resource: String },
+    /// The label editor shows the typed inspection of the `SHOW LABELS` read numbered `sequence`.
+    EntityLabels { sequence: u64 },
     /// The REPL prints a `BACKUP`'s outcome, and the backup dialog downloads its archive.
     Backup(BackupCommand),
 }
@@ -2165,6 +2168,16 @@ fn App() -> impl IntoView {
         Callback::new(move |(domain, ingestor): (DomainName, IngestorName)| {
             request_endpoint_pause(create, create_request_tx, domain, ingestor);
         });
+    let open_labels = Callback::new(move |opening: LabelOpening| {
+        request_label_edit(create, create_request_tx, opening);
+    });
+    let read_labels = Callback::new(move |target: LabelTarget| {
+        request_label_read(create, create_request_tx, target);
+    });
+    let known_label_targets = Signal::derive(move || {
+        let entities = active_entities();
+        domains.with(|domains| label_target_choices(entities, domains))
+    });
     let submit_create = move |submission: CreateSubmission, attempt: u64, draft_revision: u64| {
         let CreateSubmission {
             kind,
@@ -2218,9 +2231,10 @@ fn App() -> impl IntoView {
                     inspector=inspector
                     create=create
                     backups=backups
+                    open_labels=open_labels
                 />
                 <div class="console-body">
-                    <Sidebar active_domain=active_domain clock_display=clock_display clock_now=clock_now domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details selected_resource=selected_resource upload_status=upload_status create=create web_console_session=web_console_session run_command=run_command />
+                    <Sidebar active_domain=active_domain clock_display=clock_display clock_now=clock_now domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details selected_resource=selected_resource upload_status=upload_status create=create web_console_session=web_console_session run_command=run_command open_labels=open_labels />
                     <section class="main-pane">
                         <TransactionInspector
                             inspector=inspector
@@ -2236,6 +2250,7 @@ fn App() -> impl IntoView {
                             run_command=run_command
                             create=create
                             open_endpoint_pause=open_endpoint_pause
+                            open_labels=open_labels
                         />
                         <ReplPanel
                             domain=active_domain_name
@@ -2262,6 +2277,8 @@ fn App() -> impl IntoView {
                     session_generation=session_generation
                     request_tx=web_console_session.request_tx
                     submit=submit_create
+                    read_labels=read_labels
+                    known_label_targets=known_label_targets
                 />
                 <BackupDialog
                     backups=backups
@@ -2369,9 +2386,16 @@ fn submit_create_command(
         lines.push(TermLine::prompt(presentation.clone(), prompt_transaction));
     });
     let transaction = transaction_status.get_untracked();
-    let expected_transaction_position = match &transaction {
-        Some(status) if status.lifecycle().is_active() => Some(status.accepted_operations()),
-        Some(_) | None => None,
+    // Inside the session's transaction a request names a domain, as every REPL request does: the
+    // server places a statement against the transaction's domain before it decides whether the
+    // transaction can queue it, so a cluster statement without one would be refused for the
+    // missing domain instead of with the transaction's refusal.
+    let (expected_transaction_position, domain) = match &transaction {
+        Some(status) if status.lifecycle().is_active() => (
+            Some(status.accepted_operations()),
+            domain.or_else(|| Some(status.domain().clone())),
+        ),
+        Some(_) | None => (None, domain),
     };
     let context = CreateCommandContext {
         attempt,
@@ -2433,6 +2457,126 @@ fn request_endpoint_pause(
         None => SESSION_UNAVAILABLE.to_string(),
     };
     create.endpoint_pause_loaded(revision, EndpointPauseSettingsResponse::Refused(error));
+}
+
+/// Where the label editor opens: the domain its target choice resolves Models and resources in,
+/// the target it reads at once, and the control focus returns to when it closes.
+#[derive(Clone)]
+struct LabelOpening {
+    scope: Option<DomainName>,
+    target: Option<LabelTarget>,
+    return_focus: String,
+}
+
+/// Opens the label editor. A known target is read at once; without one, the editor waits for
+/// the operator to choose.
+fn request_label_edit(
+    create: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    opening: LabelOpening,
+) {
+    let LabelOpening {
+        scope,
+        target,
+        return_focus,
+    } = opening;
+    let Some(target) = target else {
+        create.open_label_choice(scope, LabelTargetKind::Domain, String::new(), &return_focus);
+        return;
+    };
+    let Some(sequence) = create.open_label_edit(scope, target.clone(), &return_focus) else {
+        return;
+    };
+    send_label_read(create, request_tx, &target, sequence);
+}
+
+/// Reads `target`'s labels again into the open editor, which compares them with its changes.
+fn request_label_read(
+    create: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    target: LabelTarget,
+) {
+    let sequence = create.begin_label_read(target.clone());
+    send_label_read(create, request_tx, &target, sequence);
+}
+
+/// Hands the read numbered `sequence` to the session loop. A read the console cannot hand over
+/// leaves the editor showing why.
+fn send_label_read(
+    create: CreateSignals,
+    request_tx: RwSignal<Option<RequestSender>>,
+    target: &LabelTarget,
+    sequence: u64,
+) {
+    let queued = label_read_request(target, sequence);
+    let reason = match request_tx.get_untracked() {
+        Some(sender) => match sender.send(queued) {
+            Ok(()) => return,
+            Err(refusal) => refusal.current_context().to_string(),
+        },
+        None => SESSION_UNAVAILABLE.to_string(),
+    };
+    create.label_read_answered(sequence, LabelReadResponse::Refused(reason));
+}
+
+/// The `SHOW LABELS` read of `target` numbered `sequence`, sent in the domain the target resolves
+/// in. Its typed inspection fills the editor; the REPL does not print it.
+fn label_read_request(target: &LabelTarget, sequence: u64) -> ConsoleRequest {
+    ConsoleRequest::Command {
+        request: CommandRequest {
+            query: target.show_statement(),
+            domain: target.domain().cloned(),
+            execution_reference: command_execution_reference(),
+            expected_transaction_position: None,
+            expected_preview: None,
+        },
+        purpose: CommandPurpose::EntityLabels { sequence },
+    }
+}
+
+/// The label editor's answer from the outcome of its read.
+fn label_read_response(outcome: CommandOutcome) -> LabelReadResponse {
+    match outcome.disposition {
+        CommandDisposition::Completed { .. } => match outcome.entity_labels {
+            Some(inspection) => LabelReadResponse::Inspection(inspection),
+            None => LabelReadResponse::Refused(
+                "The server answered the read without the entity's typed labels".to_string(),
+            ),
+        },
+        _ => LabelReadResponse::Refused(outcome.message),
+    }
+}
+
+/// Reads the labels the label editor saved, so the editor shows the committed or staged result.
+fn reread_saved_labels(signals: WebConsoleSignals, requests: &mut SessionRequests) {
+    let Some(target) = signals.create.label_edit_saved() else {
+        return;
+    };
+    let sequence = signals.create.begin_label_read(target.clone());
+    let issued = requests.issue(label_read_request(&target, sequence));
+    requests.hold_again(issued);
+}
+
+/// The entities the label editor offers by name: the cluster's domains and the selected domain's
+/// Models and resources. Users are named by the operator, since the console lists none.
+fn label_target_choices(
+    entities: Vec<EntityView>,
+    domains: &[DomainView],
+) -> Vec<KnownLabelTarget> {
+    let mut known = Vec::new();
+    for domain in domains {
+        known.push(KnownLabelTarget {
+            kind: LabelTargetKind::Domain,
+            name: domain.domain.to_string(),
+        });
+    }
+    for entity in entities {
+        known.push(KnownLabelTarget {
+            kind: entity.kind.label_target_kind(),
+            name: entity.name,
+        });
+    }
+    known
 }
 
 #[component]
@@ -3585,6 +3729,11 @@ fn apply_command_outcome(
             };
             signals.create.endpoint_pause_loaded(revision, settings);
         }
+        CommandPurpose::EntityLabels { sequence } => {
+            signals
+                .create
+                .label_read_answered(sequence, label_read_response(outcome));
+        }
         CommandPurpose::ResourceDescription { resource } => {
             let detail = ResourceDetailView::from_description(outcome);
             signals.resource_details.update(|details| {
@@ -3666,9 +3815,13 @@ fn show_create_outcome(
         .update(|terminal| terminal.extend(lines));
 
     if let Some(position) = queued_transaction_position {
-        signals
-            .create
-            .queued_transaction(context.attempt, context.draft_revision, position);
+        let current =
+            signals
+                .create
+                .queued_transaction(context.attempt, context.draft_revision, position);
+        if current && context.kind == CreateKind::EntityLabels {
+            reread_saved_labels(signals, requests);
+        }
         return;
     }
     if !completed {
@@ -3682,6 +3835,9 @@ fn show_create_outcome(
         .completed(context.attempt, context.draft_revision)
     {
         return;
+    }
+    if context.kind == CreateKind::EntityLabels {
+        reread_saved_labels(signals, requests);
     }
     if context.kind == CreateKind::Domain
         && let Some(domain) = context.created_domain
@@ -3975,6 +4131,14 @@ fn fail_request(signals: WebConsoleSignals, request: ConsoleRequest, reason: Str
             signals
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::error(reason)));
+        }
+        ConsoleRequest::Command {
+            purpose: CommandPurpose::EntityLabels { sequence },
+            ..
+        } => {
+            signals
+                .create
+                .label_read_answered(sequence, LabelReadResponse::Refused(reason));
         }
         ConsoleRequest::Command {
             purpose: CommandPurpose::ResourceDescription { resource },
@@ -4616,6 +4780,7 @@ fn Header(
     inspector: InspectorSignals,
     create: CreateSignals,
     backups: BackupSignals,
+    open_labels: Callback<LabelOpening>,
 ) -> impl IntoView {
     let theme_open = RwSignal::new(false);
     let selected_domain = move || {
@@ -4637,6 +4802,34 @@ fn Header(
             <span class="crumb">"console"</span>
             <div class="topbar-status">
                 <CreateMenu signals=create active_domain=active_domain />
+                <button
+                    id="labels-menu-button"
+                    class="labels-menu-button"
+                    type="button"
+                    title="Show and edit the labels of a domain, user, resource or domain entity"
+                    on:click=move |_| {
+                        // A label edit left with unsaved changes reopens as it was left.
+                        if create.reopen_label_edit("labels-menu-button") {
+                            return;
+                        }
+                        let scope = active_domain.get_untracked();
+                        let target = match scope.clone() {
+                            Some(domain) => LabelTarget::new(
+                                None,
+                                EntityLabelTarget::Administrative(AdministrativeLabelTarget::Domain(domain)),
+                            )
+                            .ok(),
+                            None => None,
+                        };
+                        open_labels.run(LabelOpening {
+                            scope,
+                            target,
+                            return_focus: "labels-menu-button".to_string(),
+                        });
+                    }
+                >
+                    "Labels"
+                </button>
                 <BackupMenuButton backups=backups active_domain=active_domain />
                 <Show when=move || transaction_status.get().is_some_and(|status| status.lifecycle().is_active()) fallback=|| ()>
                     <button class="transaction-indicator" type="button" on:click=move |_| inspector.open_attached()>
@@ -4772,6 +4965,7 @@ fn Sidebar(
     create: CreateSignals,
     web_console_session: WebConsoleSession,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
+    open_labels: Callback<LabelOpening>,
 ) -> impl IntoView {
     let domain_open = RwSignal::new(false);
     let schemas_open = RwSignal::new(true);
@@ -4928,7 +5122,12 @@ fn Sidebar(
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Schema))
                         key=|entity| entity.name.clone()
-                        children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="schemas" on_click=|| () /> }}
+                        children={move |entity| view! {
+                            <div class="nav-entry">
+                                <NavLabelsAction entity=entity.clone() active_domain=active_domain open_labels=open_labels />
+                                <NavItem name=entity.name meta=entity.detail kind="schemas" on_click=|| () />
+                            </div>
+                        }}
                     />
                 </Show>
                 <div class="nav-section">
@@ -4939,7 +5138,12 @@ fn Sidebar(
                     <For
                         each=wire_schema_entities
                         key=|entity| (entity.kind, entity.name.clone())
-                        children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="wire" on_click=|| () /> }}
+                        children={move |entity| view! {
+                            <div class="nav-entry">
+                                <NavLabelsAction entity=entity.clone() active_domain=active_domain open_labels=open_labels />
+                                <NavItem name=entity.name meta=entity.detail kind="wire" on_click=|| () />
+                            </div>
+                        }}
                     />
                 </Show>
                 <div class="nav-section">
@@ -4950,7 +5154,12 @@ fn Sidebar(
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Codec))
                         key=|entity| entity.name.clone()
-                        children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="codecs" on_click=|| () /> }}
+                        children={move |entity| view! {
+                            <div class="nav-entry">
+                                <NavLabelsAction entity=entity.clone() active_domain=active_domain open_labels=open_labels />
+                                <NavItem name=entity.name meta=entity.detail kind="codecs" on_click=|| () />
+                            </div>
+                        }}
                     />
                 </Show>
                 <NavHeader title="Resources" count=move || entities_for(EntityKind::Resource).len().to_string() kind="resources" open=resources_open />
@@ -4966,7 +5175,10 @@ fn Sidebar(
                             let describe_name = entity.name.clone();
                             let request_tx = web_console_session.request_tx;
                             let describe_command = entity.describe_command();
+                            let labelled = entity.clone();
                             view! {
+                                <div class="nav-entry">
+                                <NavLabelsAction entity=labelled active_domain=active_domain open_labels=open_labels />
                                 <NavItem
                                     name=entity.name
                                     meta=entity.detail
@@ -4985,6 +5197,7 @@ fn Sidebar(
                                         );
                                     }
                                 />
+                                </div>
                             }
                         }}
                     />
@@ -4997,7 +5210,12 @@ fn Sidebar(
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Client))
                         key=|entity| entity.name.clone()
-                        children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () /> }}
+                        children={move |entity| view! {
+                            <div class="nav-entry">
+                                <NavLabelsAction entity=entity.clone() active_domain=active_domain open_labels=open_labels />
+                                <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () />
+                            </div>
+                        }}
                     />
                 </Show>
                 <div class="nav-section">
@@ -5008,7 +5226,12 @@ fn Sidebar(
                     <For
                         each=move || entities_for(EntityKind::Model(ModelKind::Vhost))
                         key=|entity| entity.name.clone()
-                        children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () /> }}
+                        children={move |entity| view! {
+                            <div class="nav-entry">
+                                <NavLabelsAction entity=entity.clone() active_domain=active_domain open_labels=open_labels />
+                                <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () />
+                            </div>
+                        }}
                     />
                 </Show>
                 <div class="nav-section">
@@ -5021,7 +5244,10 @@ fn Sidebar(
                         key=|entity| entity.name.clone()
                         children={move |entity| {
                             let describe_command = entity.describe_command();
+                            let labelled = entity.clone();
                             view! {
+                                <div class="nav-entry">
+                                <NavLabelsAction entity=labelled active_domain=active_domain open_labels=open_labels />
                                 <NavItem
                                     name=entity.name
                                     meta=entity.detail
@@ -5032,6 +5258,7 @@ fn Sidebar(
                                         }
                                     }
                                 />
+                                </div>
                             }
                         }}
                     />
@@ -5193,6 +5420,54 @@ fn NavItem(
             <SidebarIcon kind=kind />
             <span>{name}</span>
             <em>{meta}</em>
+        </button>
+    }
+}
+
+/// The sidebar's labels action for one entity of the selected domain: it opens the label editor
+/// on that entity, in the domain the sidebar lists.
+#[component]
+fn NavLabelsAction(
+    entity: EntityView,
+    active_domain: RwSignal<Option<DomainName>>,
+    open_labels: Callback<LabelOpening>,
+) -> impl IntoView {
+    let kind = entity.kind.label_target_kind();
+    let description = format!("Edit labels of {} {}", kind.phrase(), entity.name);
+    let id = format!("nav-labels-{}-{}", kind.key(), entity.name);
+    let focus_id = id.clone();
+    let name = entity.name.clone();
+    view! {
+        <button
+            id=id
+            class="nav-labels"
+            type="button"
+            title=description.clone()
+            aria-label=description
+            on:click=move |_| {
+                let scope = active_domain.get_untracked();
+                let addressed = match entity.kind {
+                    EntityKind::Model(model_kind) => match ModelName::parse(&name) {
+                        Ok(model) => Some(EntityLabelTarget::Model(nervix_models::NodeRef::new(model_kind, model))),
+                        Err(_) => None,
+                    },
+                    EntityKind::Resource => match ResourceName::parse(&name) {
+                        Ok(resource) => Some(EntityLabelTarget::Resource(resource)),
+                        Err(_) => None,
+                    },
+                };
+                let target = match addressed {
+                    Some(addressed) => LabelTarget::new(scope.clone(), addressed).ok(),
+                    None => None,
+                };
+                open_labels.run(LabelOpening {
+                    scope,
+                    target,
+                    return_focus: focus_id.clone(),
+                });
+            }
+        >
+            "labels"
         </button>
     }
 }
@@ -5739,6 +6014,7 @@ fn GraphPanel(
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
     create: CreateSignals,
     open_endpoint_pause: Callback<(DomainName, IngestorName)>,
+    open_labels: Callback<LabelOpening>,
 ) -> impl IntoView {
     let selected_action_target = RwSignal::new(None::<GraphActionTarget>);
     let selected_branch_group = RwSignal::new(None::<String>);
@@ -6324,7 +6600,7 @@ fn GraphPanel(
                                     on:mouseleave=move |_| graph_hover.set(None)
                                     on:click=move |_| {
                                         if !graph_moved.get() {
-                                            selected_action_target.set(Some(GraphActionTarget::relay(&click_relay)));
+                                            selected_action_target.set(Some(GraphActionTarget::relay(&click_relay, active_domain.get_untracked())));
                                         }
                                     }
                                 >
@@ -6517,6 +6793,26 @@ fn GraphPanel(
                                     }
                                 >
                                     "Change pause settings"
+                                </button>
+                            </Show>
+                            <Show when=move || selected_action_target.get().is_some_and(|target| target.labels.is_some()) fallback=|| ()>
+                                <button
+                                    type="button"
+                                    data-action="edit-labels"
+                                    on:click=move |_| {
+                                        if let Some(target) = selected_action_target.get_untracked()
+                                            && let Some(labels) = target.labels
+                                        {
+                                            selected_action_target.set(None);
+                                            open_labels.run(LabelOpening {
+                                                scope: active_domain.get_untracked(),
+                                                target: Some(labels),
+                                                return_focus: "graph-search".to_string(),
+                                            });
+                                        }
+                                    }
+                                >
+                                    "LABELS"
                                 </button>
                             </Show>
                             <Show when=move || selected_action_target.get().and_then(|target| target.relay).is_some() fallback=|| ()>
@@ -7565,6 +7861,8 @@ struct GraphActionTarget {
     /// The runtime node a PLACE action starts a placement corridor from.
     placement_member: Option<ModelName>,
     endpoint_pause_ingestor: Option<(DomainName, IngestorName)>,
+    /// The entity a LABELS action opens the label editor on, in the domain the graph draws.
+    labels: Option<LabelTarget>,
 }
 
 impl GraphActionTarget {
@@ -7585,9 +7883,17 @@ impl GraphActionTarget {
                 kind.phrase() == transport.as_str()
                     && kind.capabilities().reference.endpoint_type().is_some()
             }) {
-            domain.zip(IngestorName::parse(&name).ok())
+            domain.clone().zip(IngestorName::parse(&name).ok())
         } else {
             None
+        };
+        let labels = match (node.label_model_kind(), ModelName::parse(&name)) {
+            (Some(kind), Ok(model)) => LabelTarget::new(
+                domain.clone(),
+                EntityLabelTarget::Model(nervix_models::NodeRef::new(kind, model)),
+            )
+            .ok(),
+            (Some(_) | None, _) => None,
         };
         Self {
             kind,
@@ -7597,13 +7903,22 @@ impl GraphActionTarget {
             relay: None,
             placement_member,
             endpoint_pause_ingestor,
+            labels,
         }
     }
 
     /// A relay's actions. SUBSCRIBE and PLACE are offered for a relay whose drawn label names it,
     /// which is every relay the server draws.
-    fn relay(relay: &GraphViewRelay) -> Self {
+    fn relay(relay: &GraphViewRelay, domain: Option<DomainName>) -> Self {
         let name = relay.label.clone();
+        let labels = match ModelName::parse(&name) {
+            Ok(model) => LabelTarget::new(
+                domain,
+                EntityLabelTarget::Model(nervix_models::NodeRef::new(ModelKind::Relay, model)),
+            )
+            .ok(),
+            Err(_) => None,
+        };
         Self {
             kind: "RELAY",
             name: name.clone(),
@@ -7612,6 +7927,7 @@ impl GraphActionTarget {
             relay: RelayName::parse(&name).ok(),
             placement_member: ModelName::parse(&name).ok(),
             endpoint_pause_ingestor: None,
+            labels,
         }
     }
 }
@@ -7720,6 +8036,28 @@ impl GraphViewNode {
             return None;
         }
         self.branch.as_ref().map(|branch| branch.name.as_str())
+    }
+
+    /// The Model kind the label editor addresses the node as. A processor whose family the graph
+    /// does not name has none.
+    fn label_model_kind(&self) -> Option<ModelKind> {
+        match self.role.processor() {
+            Some(DataflowProcessorKind::Junction) => Some(ModelKind::Junction),
+            Some(DataflowProcessorKind::Deduplicator) => Some(ModelKind::Deduplicator),
+            Some(DataflowProcessorKind::Correlator) => Some(ModelKind::Correlator),
+            Some(DataflowProcessorKind::Reorderer) => Some(ModelKind::Reorderer),
+            Some(DataflowProcessorKind::WindowProcessor) => Some(ModelKind::WindowProcessor),
+            Some(DataflowProcessorKind::WasmProcessor) => Some(ModelKind::WasmProcessor),
+            Some(DataflowProcessorKind::Inferencer) => Some(ModelKind::Inferencer),
+            Some(DataflowProcessorKind::Generator) => Some(ModelKind::Generator),
+            Some(DataflowProcessorKind::Reingestor) => Some(ModelKind::Reingestor),
+            None => match self.kind {
+                NodeKind::Client => Some(ModelKind::Client),
+                NodeKind::Ingestor => Some(ModelKind::Ingestor),
+                NodeKind::Emitter => Some(ModelKind::Emitter),
+                NodeKind::Processor => None,
+            },
+        }
     }
 
     fn command_kind(&self) -> &'static str {
@@ -8369,6 +8707,14 @@ impl EntityKind {
         match self {
             Self::Model(kind) => kind.as_str(),
             Self::Resource => "resource",
+        }
+    }
+
+    /// The kind the label editor addresses the entity as.
+    fn label_target_kind(self) -> LabelTargetKind {
+        match self {
+            Self::Model(kind) => LabelTargetKind::Model(kind),
+            Self::Resource => LabelTargetKind::Resource,
         }
     }
 
@@ -12528,7 +12874,7 @@ mod tests {
         );
         let relay = view_relay("relay:orders", None, &[]);
         assert_eq!(
-            GraphActionTarget::relay(&relay).placement_member,
+            GraphActionTarget::relay(&relay, None).placement_member,
             Some(ModelName::parse("orders").assured("valid name"))
         );
     }
@@ -13482,6 +13828,54 @@ mod tests {
                 attempt,
                 revision,
             );
+        });
+    }
+
+    /// A cluster statement names no domain of its own. Outside a transaction its request names
+    /// none; inside the session's transaction it names the transaction's domain, so the server
+    /// refuses it as a statement the transaction cannot queue rather than for a missing domain.
+    #[test]
+    fn a_cluster_statement_inside_a_transaction_names_the_transaction_domain() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let submitted_domain = || {
+                signals.create.open(CreateKind::User, None, "trigger");
+                let (attempt, revision) = signals.create.begin_submission(true);
+                let (sender, mut receiver) = request_handoff();
+                submit_create_command(
+                    signals,
+                    RwSignal::new(Some(sender)),
+                    CreateKind::User,
+                    "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                    CommandDispatch {
+                        query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
+                        domain: None,
+                        resource: None,
+                        created_domain: None,
+                    },
+                    attempt,
+                    revision,
+                );
+                let ConsoleRequest::Command { request, .. } = receiver
+                    .try_take()
+                    .assured("the shared command queue receives the form command")
+                else {
+                    panic!("a form submission sends a command request");
+                };
+                request.domain
+            };
+
+            assert_eq!(submitted_domain(), None);
+            let transaction = TransactionStatus::new(
+                "attached".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(0),
+                0,
+            )
+            .assured("the open test transaction has accepted no operation");
+            signals.transaction_status.set(Some(transaction));
+            assert_eq!(submitted_domain(), Some(domain_name("demo")));
         });
     }
 

@@ -350,6 +350,48 @@ fn unknown_condition_values_are_retained_and_never_reinterpret_known_names() {
 }
 
 #[test]
+fn a_decision_may_leave_out_a_capability_and_carry_one_the_receiver_does_not_know() {
+    let fixture = Fixture::new();
+    let mut decision = fixture.decision();
+    let removed = decision
+        .conditions
+        .usage
+        .capabilities
+        .remove(LICENSING_DUMMY);
+    assert!(
+        removed.is_some(),
+        "the fixture decision lists the capability"
+    );
+    assert_eq!(
+        validate(&fixture, &decision, &decision.activation, None)
+            .assured("a service that does not know the capability leaves it out"),
+        DecisionDisposition::Apply {
+            unknown_conditions: 0
+        }
+    );
+    assert_eq!(
+        decision
+            .conditions
+            .usage
+            .capability(LICENSING_DUMMY)
+            .assured("an absent capability has a state"),
+        Capability::Disabled
+    );
+    decision.conditions.usage.capabilities.insert(
+        "licensing.unreleased".to_owned(),
+        ConditionValue::Known(Capability::Enabled),
+    );
+    assert_eq!(
+        validate(&fixture, &decision, &decision.activation, None)
+            .assured("a newer service's capability is ignored"),
+        DecisionDisposition::Apply {
+            unknown_conditions: 1
+        }
+    );
+    signed_round_trip(&fixture.working, &decision);
+}
+
+#[test]
 fn every_binding_field_and_pending_rotation_are_checked_against_committed_identity() {
     let fixture = Fixture::new();
     let original = fixture.decision();
