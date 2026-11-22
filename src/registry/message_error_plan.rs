@@ -355,7 +355,7 @@ mod tests {
         let policy = MessageErrorPolicy::Dlq {
             relay: named("errors"),
             assignments: nervix_plexus::parse_route_construction(
-                "SET value = error.code, operation = error.operation",
+                "SET value = error.class, operation = error.operation",
             )
             .expect("error assignments should parse")
             .assignments,

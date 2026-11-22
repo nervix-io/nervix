@@ -680,10 +680,11 @@ impl BranchRuntime {
             if self.owner.node.kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
-                    self.owner.node.kind,
-                    &self.owner.node.identifier,
+                    &self.owner.node,
                     &self.error_policies,
                     batch.acks.iter(),
+                    // The entrypoint's own route machinery failed, as a processor's internal error.
+                    MessageErrorClass::INTERNAL,
                     &error,
                 );
             } else {
@@ -887,10 +888,11 @@ impl IngestorRouteTask {
         if self.template.branch.owner.node.kind == ModelKind::Ingestor {
             self.runtime_handle.handle_general_error_for_acks(
                 &self.domain,
-                self.template.branch.owner.node.kind,
-                &self.ingestor,
+                &NodeRef::new(self.template.branch.owner.node.kind, &self.ingestor),
                 &self.template.branch.error_policies,
                 acks.iter(),
+                // The entrypoint's own route machinery failed, as a processor's internal error.
+                MessageErrorClass::INTERNAL,
                 error,
             );
         } else {
@@ -1524,10 +1526,11 @@ impl BranchExecutionRuntime {
         if template.owner.node.kind == ModelKind::Ingestor {
             runtime_handle.handle_general_error_for_acks(
                 domain,
-                template.owner.node.kind,
-                ingestor,
+                &NodeRef::new(template.owner.node.kind, ingestor),
                 &template.error_policies,
                 acks,
+                // The entrypoint's own route machinery failed, as a processor's internal error.
+                MessageErrorClass::INTERNAL,
                 error,
             );
         } else {

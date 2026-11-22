@@ -772,7 +772,7 @@ pub(super) struct IngestorMessageError<'a> {
     pub(super) record: &'a RuntimeRow,
     pub(super) ingest_metadata: Option<IngestFilterMapMetadata>,
     pub(super) acks: AckSet,
-    pub(super) error: StructuredMessageError,
+    pub(super) error: RaisedMessageError,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
     pub(super) execution_now: Timestamp,
 }
@@ -1553,10 +1553,11 @@ impl Runtime {
             for group in &groups {
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     group.messages.iter().map(|message| &message.acks),
+                    // Nervix stopped the domain or the branch the payload was for: it cut the work.
+                    MessageErrorClass::INTERRUPTED,
                     &error,
                 );
             }
@@ -1577,10 +1578,11 @@ impl Runtime {
                 });
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     acks.iter(),
+                    // The ingestor's own routing failed, which breaks Nervix's contract.
+                    MessageErrorClass::INTERNAL,
                     &error,
                 );
                 first_error.get_or_insert(error);
@@ -1594,10 +1596,11 @@ impl Runtime {
                     });
                     self.handle_general_error_for_acks(
                         domain,
-                        ModelKind::Ingestor,
-                        ingestor,
+                        &NodeRef::new(ModelKind::Ingestor, ingestor),
                         &ErrorPolicies::handled_by_log(),
                         acks.iter(),
+                        // The ingestor's own routing failed, which breaks Nervix's contract.
+                        MessageErrorClass::INTERNAL,
                         &error,
                     );
                     first_error.get_or_insert(error);
@@ -1611,10 +1614,11 @@ impl Runtime {
                 });
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
+                    // The ingestor's own routing failed, which breaks Nervix's contract.
+                    MessageErrorClass::INTERNAL,
                     &error,
                 );
                 first_error.get_or_insert(error);
@@ -1628,10 +1632,11 @@ impl Runtime {
                 });
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
+                    // Nervix stopped the domain or the branch the payload was for: it cut the work.
+                    MessageErrorClass::INTERRUPTED,
                     &error,
                 );
                 first_error.get_or_insert(error);
@@ -1850,9 +1855,9 @@ impl Runtime {
                     .iter()
                     .any(|output| matches!(output.message_error_policy, MessageErrorPolicy::Log));
                 let missing = event_timestamps.is_null(row);
-                let error = structured_message_error(
+                let error = raised_message_error(
                     execution_now,
-                    MessageErrorCode::Validation,
+                    MessageErrorClass::VALIDATION,
                     ingestion_time
                         .rejection(timestamp_source, missing)
                         .to_string(),
@@ -1912,7 +1917,7 @@ impl Runtime {
         /// One route that failed, waiting for its share of the input row's ACK.
         struct RouteError {
             output_index: usize,
-            error: StructuredMessageError,
+            error: RaisedMessageError,
             partial_output: Option<RuntimeRecordBatch>,
             materialized_state: HashMap<String, RuntimeValue>,
         }
@@ -2087,9 +2092,9 @@ impl Runtime {
                             Err(error) => routed[row].push(RoutedOutcome {
                                 output_index,
                                 outcome: SingleRecordFilterMapOutcome::MessageError {
-                                    error: structured_message_error(
+                                    error: raised_message_error(
                                         execution_now,
-                                        MessageErrorCode::Evaluation,
+                                        MessageErrorClass::EVALUATION,
                                         error.to_string(),
                                         MessageErrorOperation::Set,
                                         None,
@@ -2217,9 +2222,9 @@ impl Runtime {
                 keep.append(true);
                 continue;
             };
-            let error = structured_message_error(
+            let error = raised_message_error(
                 execution_now,
-                MessageErrorCode::Validation,
+                MessageErrorClass::VALIDATION,
                 refusal.message(),
                 MessageErrorOperation::Admit,
                 None,

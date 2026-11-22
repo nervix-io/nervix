@@ -729,6 +729,7 @@ fn request_identity_is_read_before_decoding() {
         level: NoticeLevel::Warning,
         kind: NoticeKind::ControlPlane,
         message: "no request".to_string(),
+        error: None,
     }
     .encode(&limits())
     .assured("a notice fits the default limits");

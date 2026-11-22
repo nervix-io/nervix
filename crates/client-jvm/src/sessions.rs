@@ -240,6 +240,18 @@ fn next_clock_event<'local>(
     Ok(Value::ClockEvent(Arc::new(event)).into_handle())
 }
 
+native!(next_notice(session: long, token: long) -> JObject);
+
+fn next_notice<'local>(
+    env: &mut jni::Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    session: jlong,
+    token: jlong,
+) -> Result<jni::objects::JObject<'local>, crate::error::Error> {
+    let notice = value!(session).session()?.next_notice(cancel!(token))?;
+    crate::notices::notice(env, &notice)
+}
+
 native!(domain_clock(session: long, domain: JString) -> long);
 
 fn domain_clock<'local>(
@@ -422,6 +434,7 @@ pub(crate) const METHODS: &[jni::NativeMethod] = &[
     execute::METHOD,
     next_event::METHOD,
     next_clock_event::METHOD,
+    next_notice::METHOD,
     domain_clock::METHOD,
     outcome_disposition::METHOD,
     outcome_upload_failure::METHOD,

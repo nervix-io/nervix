@@ -25,7 +25,7 @@ use std::{
 
 use error_stack::{AttachmentKind, FrameKind, Report};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{MessageErrorCode, MessageErrorOperation, Timestamp};
+use nervix_models::{MessageErrorOperation, RejectedErrorClass, Timestamp};
 use nervix_primitives::{
     sync::oneshot,
     time::{Instant, Sleep, sleep, sleep_until},
@@ -613,7 +613,7 @@ impl WindowCase {
 fn rejected_records(outcome: &PerRecordOutcomeParts<EmitterRecordId>) -> Vec<RejectedRecord> {
     let mut rejected = Vec::new();
     for rejection in &outcome.rejected {
-        assert_eq!(rejection.error.code, MessageErrorCode::External);
+        assert_eq!(rejection.error.class, RejectedErrorClass::Refused);
         assert_eq!(rejection.error.operation, MessageErrorOperation::Publish);
         assert_eq!(
             rejection.error.occurred_at,

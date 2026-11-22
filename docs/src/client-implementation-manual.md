@@ -77,7 +77,7 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 | `LeadershipObserved` | Which node leads, first after the limits are announced and again on every change |
 | `DomainsObserved` | The domain list, after leadership and again on every change |
 | `DomainSnapshotObserved`, `ClusterObserved` | The selected domain's live graph and entities, and the cluster summary, after `SelectDomainRequest` |
-| `ServerNotice` | Text for display at `Info`, `Warning`, or `Error`, of one kind: `Membership`, `Leadership`, `ClusterParameters`, `Runtime`, or `ControlPlane` |
+| `ServerNotice` | Text for display at `Info`, `Warning`, or `Error`, of one kind: `Membership`, `Leadership`, `ClusterParameters`, `Runtime`, `ControlPlane`, or `Licensing`; a `Runtime` notice about an error of a graph node also carries that error's class and producing node in `error` |
 | `SubscriptionRows`, `SubscriptionDeliveryLost`, `SubscriptionRowsSkipped`, `SubscriptionEnded` | Frames of one subscription generation |
 | `DomainClockObserved`, `DomainClockTicked`, `DomainClockAttachmentEnded` | State, accepted tick progress, and end frames of one domain clock attachment |
 | `ProducerAdmissionChanged`, `ProducerEnded` | The admission state and the end of one producer |
@@ -86,6 +86,14 @@ Unsolicited `ServerMessage` bodies carry no request identity:
 A client that presents notices MUST route each by its `kind`, as [What A Session Is
 Told](./client-session-protocol.md#what-a-session-is-told) defines the kinds, and MUST NOT derive
 meaning from a notice's text, which is for display only.
+
+A client that selects runtime errors by their class or by the node that produced them MUST read
+`ServerNotice.error`, whose `NoticeError` holds the error's `ErrorClass` and the producing node's
+`NodeRef`, and MUST NOT parse either from the text. It MUST accept a notice without `error`: only a
+`Runtime` notice that reports an error of a graph node carries one, and a `Runtime` notice about a
+failure that is no classified error, such as a connector failure the node recovered from, carries
+none. A `NoticeError` without its class or node, or with an undeclared `ErrorClass`, is a protocol
+violation under F-4.
 
 A `Membership` notice describes the serving node's observation of a join, leave or incarnation
 change. A command's application progress is internal node-to-node traffic; its client-visible
@@ -1025,6 +1033,14 @@ examples, including explicit C cleanup and C++ custom-deleter ownership:
   read before it can be settled, and what they carried is delivered again. It MUST treat
   `NX_ERROR_REOPEN_REQUIRED` as the end of the handle, read why with the handle's reopen reason,
   and open a new one only after checking the endpoint it now expects.
+- **B-17.** A host MUST release every `nx_notice` that `nx_session_next_notice` or
+  `nx_notice_retain` returns exactly once, and MAY release it on any thread. It MUST route a notice
+  by `nx_notice_kind_of` and select runtime errors by the class and node `nx_notice_error` reads,
+  never by the text `nx_notice_message` borrows, and MUST accept a runtime notice for which
+  `nx_notice_error` returns false, which reports no classified error. It MUST treat
+  `NX_ERROR_OVERFLOW` from `nx_session_next_notice` as a gap: the client dropped the notices it
+  held, and the next call returns the ones that arrived after it. [C and C++ Client
+  Library](./client-library-c.md#read-server-notices) shows the calls.
 
 The binding never raises SIGPIPE. A write to a connection whose peer has gone fails with the
 transport error that the waiting call reports or that the client recovers from, so a host MAY keep
@@ -1232,7 +1248,7 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 `just test-client-conformance`. Beside its probe, each host binding's language-level suite under
 `tests/client_conformance/<host>/suite` holds the host rules in that host's own test framework:
 pytest for N-1 to N-5, JUnit 5 for J-1 to J-5, minitest for the Ruby gem's R-1 to R-5, and C11
-and C++17 programs with named B-1 through B-16 tests, whose boundary tiers also run under
+and C++17 programs with named B-1 through B-17 tests, whose boundary tiers also run under
 AddressSanitizer and UndefinedBehaviorSanitizer. `tests/client-suites-inventory.toml` registers
 every suite test, `just validate-client-suites` holds each suite to its binding's whole public
 surface, and every host guide includes its suite's checked source. [Host Suites And
@@ -1275,6 +1291,7 @@ beside the probes and the representation properties.
 | B-9 | `a_retained_clock_event_outlives_a_reference_released_on_another_thread`, `a_session_reads_every_clock_event_kind_and_bounds_its_wait`, and `a_restoration_failure_names_its_domain_and_carries_no_clock` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for C, C++, Java, and Ruby; the C11 and C++17 application suites' named `test_b*` cases for these rules, with both programs' public header references checked by Clang |
 | B-11 | `a_clock_attached_after_start_is_read_before_its_first_tick`, `every_state_reports_only_the_fields_and_projections_it_carries`, `a_refused_attach_leaves_the_session_following_what_it_followed`, `an_attach_cancelled_after_it_was_sent_is_resolved_by_executing_it_again`, `several_domains_are_read_apart_until_a_detach_or_an_end_withdraws_one`, `an_interrupted_attachment_reads_its_last_clock_without_a_tick_until_it_is_restored`, and `a_domain_clock_outlives_references_released_on_another_thread_and_its_session` in `nervix-client-ffi`; the clock cases of `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; the C11 and C++17 application suites' named `test_b*` cases for these rules, with both programs' public header references checked by Clang |
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi`; the C11 and C++17 application suites' named `test_b*` cases for these rules, with both programs' public header references checked by Clang |
+| B-17 | `a_runtime_notice_reads_its_level_kind_text_and_the_error_it_reports`, `a_notice_that_reports_no_classified_error_writes_none`, `a_retained_notice_outlives_a_reference_released_on_another_thread` and `a_session_reads_notices_in_order_past_a_gap_and_from_the_next_session` in `nervix-client-ffi`; the C11 and C++17 application suites' `test_boundary_notice_reads_refuse_a_missing_session_or_result` and `test_b17_runtime_notices_report_the_class_and_node_of_a_junction_error`, and the C++17 suite's `test_cpp_owned_notices_are_routed_by_kind_and_read_on_another_thread`, through the `@client_suite_c` and `@client_suite_cpp` one-/three-node outlines of `client_suites.feature` |
 | N-1 to N-5 | The three outlines of `client_conformance.feature` for CPython over the Python package, on one and three nodes, whose probe also checks a retained frame view, a wait cancelled from another thread and Arrow data pyarrow builds and reads; the package's pytest suite, `tests/client_conformance/python/suite`, whose boundary tier `just test-client-python-api` runs and whose cluster tier is `A <runtime> client's suite passes its cluster tests over <transport> on <cluster_size> nodes` in `client_suites.feature`, with `with` blocks, collection-driven lifetimes, threads, typed exceptions and Arrow exchange with pyarrow and polars; `a_wait_releases_the_gil_and_another_python_thread_cancels_it`, `every_failure_kind_raises_its_exception`, `a_frame_view_keeps_its_event_alive`, `an_ended_restoration_and_a_refused_one_say_why`, `a_producer_outlives_its_session`, `a_with_block_releases_its_object_and_a_view_outlives_the_release` and `a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds` in `nervix-client-python`; `bolero_host_columns_round_trip_through_the_arrow_c_data_interface` and `bolero_typed_field_descriptions_round_trip` in `nervix-client-host` |
 | J-1 to J-5 | The inventoried JUnit 5 suite in `tests/client_conformance/java/suite` and the [JVM guide](client-library-jvm.md), with the `@client_suite_java` one-/three-node outlines; Java 21's three conformance probe outlines; `BoundaryTests` checks columns, Cleaner release and cancellation from another Java thread; `nervix-client-jvm` embeds the JVM to check every host failure kind, restoration messages/waits, and registered complete JNI field/column properties. The Java row probe checks native Cleaner release and derived-buffer retention after its session closes. |
 | R-1 to R-5 (Ruby gem) | The inventoried minitest suite in `tests/client_conformance/ruby/suite` and the [Ruby guide](client-library-ruby.md), with the `@client_suite_ruby` TLS/plaintext one-/three-node outlines; `just test-client-ruby-api` checks the prepared gem without a cluster. The suite covers retained String/IO::Buffer data and slices, collection, GVL release and cancellation, native metadata, typed failures and endpoint recovery. The existing embedded Ruby tests retain the sibling-token interrupt, field-snapshot and native representation evidence; the Ruby conformance probe remains independent. |

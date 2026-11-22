@@ -743,7 +743,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
@@ -854,7 +854,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
@@ -962,7 +962,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index
         ON GENERAL ERROR LOG;
@@ -1082,7 +1082,7 @@ Feature: HTTP REQUEST emitter
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
               tenant = input.tenant,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation,
               state_prefix = relay_state.routes.prefix,
@@ -1121,7 +1121,7 @@ Feature: HTTP REQUEST emitter
       """
     And within "30s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"2" | "tenant":"south" | "error_code":"external" | "operation":"encode" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND" | emitter 'guarded' failed to encode record
+      "event_id":"2" | "tenant":"south" | "error_code":"codec" | "operation":"encode" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND" | emitter 'guarded' failed to encode record
       """
     And HTTP receiver "api" has captured exactly 2 requests
 
@@ -1197,7 +1197,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index,
               affected_fields = error.fields
@@ -1340,7 +1340,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index,
               affected_fields = error.fields
@@ -1460,7 +1460,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
@@ -1904,7 +1904,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation,
               operation_index = error.operation_index,

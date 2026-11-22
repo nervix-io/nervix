@@ -37,7 +37,7 @@ use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeName, DomainName, DomainNodeRef, EmitterName, IngestorName,
-    ModelKind, ModelName, NodeUnitRef, ParametrizerName, PartitionEpochNumber, RelayName,
+    ModelKind, ModelName, NodeRef, NodeUnitRef, ParametrizerName, PartitionEpochNumber, RelayName,
     Timestamp, Unit,
 };
 use nervix_primitives::{
@@ -63,7 +63,9 @@ use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 
 mod command_execution;
 mod inferencer;
+mod message_errors;
 pub(crate) use inferencer::{InferencerBranchBytes, InferencerStateMetrics};
+pub(crate) use message_errors::NodeMessageErrors;
 mod connector;
 mod control_plane;
 mod interconnection;
@@ -74,9 +76,9 @@ use command_execution::CommandExecutionMetrics;
 use connector::ConnectorInteractionMetrics;
 pub(crate) use connector::{
     EmitterAttemptOperation, EmitterAttemptOutcome, EmitterFinishOutcome,
-    EmitterInteractionMetrics, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
-    EmitterWork, EmitterWorkKind, EndpointIntakeOutcome, EndpointPauseRefusal,
-    IngestorEndpointMetrics, IngestorInteractionMetrics, TaskFailureBinding,
+    EmitterInteractionMetrics, EmitterOpenOutcome, EmitterRetryCause, EmitterWork, EmitterWorkKind,
+    EndpointIntakeOutcome, EndpointPauseRefusal, IngestorEndpointMetrics,
+    IngestorInteractionMetrics, TaskFailureBinding,
 };
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
@@ -1768,6 +1770,20 @@ pub struct RuntimeMetrics {
 }
 
 impl RuntimeMetrics {
+    /// The counters of every error `node` in `domain` handles, which its domain's routing and its
+    /// intake resolve once and count through without looking anything up.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "binds a node's retained error counters once")
+    )]
+    pub(crate) fn node_message_errors(
+        &self,
+        domain: &DomainName,
+        node: &NodeRef,
+    ) -> NodeMessageErrors {
+        message_errors::MessageErrorMetrics::node(&self.series.message_errors, domain, node)
+    }
+
     /// Sets how many of `domain`'s units break a node rule now.
     pub(crate) fn set_placement_node_rule_units(
         &self,
@@ -1823,6 +1839,7 @@ impl RuntimeMetrics {
 #[derive(Debug)]
 struct MetricSeries {
     inferencer: Arc<inferencer::InferencerStateMetricSeries>,
+    message_errors: Arc<message_errors::MessageErrorMetrics>,
     connector: ConnectorInteractionMetrics,
     counters: DashMap<MetricKey, Arc<CounterSeries>>,
     histograms: DashMap<MetricKey, Arc<HistogramSeries>>,
@@ -1967,9 +1984,11 @@ impl Default for RuntimeMetrics {
         let prometheus = PrometheusMetrics::new();
         let connector = ConnectorInteractionMetrics::register(&prometheus.registry);
         let inferencer = inferencer::InferencerStateMetricSeries::register(&prometheus.registry);
+        let message_errors = message_errors::MessageErrorMetrics::register(&prometheus.registry);
         Self {
             series: Arc::new(MetricSeries {
                 inferencer,
+                message_errors,
                 connector,
                 counters: DashMap::new(),
                 histograms: DashMap::new(),

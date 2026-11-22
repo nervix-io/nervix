@@ -131,7 +131,13 @@ impl EmitterBoundedExecution for SilentHost {
 }
 
 impl EmitterGeneralErrorHandler for SilentHost {
-    fn handle_general_error(&self, _acks: &EmitterRecordAcknowledgements, _reason: String) {}
+    fn handle_general_error(
+        &self,
+        _acks: &EmitterRecordAcknowledgements,
+        _class: nervix_models::MessageErrorClass,
+        _reason: String,
+    ) {
+    }
 }
 
 /// A waker that holds the thread that wakes it until the test lets it go.

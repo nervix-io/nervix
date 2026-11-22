@@ -234,7 +234,7 @@ Feature: Paced simulation drivers
         BRANCHED BY by_sensor SET sensor = message.sensor
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id,
-          occurred_at = input.occurred_at, error_code = error.code, error_message = error.message;
+          occurred_at = input.occurred_at, error_code = error.class, error_message = error.message;
       ALTER CLIENT CONSUMER EMITTER observed_readings SET FLUSH IMMEDIATE;
       ALTER CLIENT CONSUMER EMITTER rejection_notices SET FLUSH IMMEDIATE;
       START AT NOW TIME RATE 0.5;
@@ -315,7 +315,7 @@ Feature: Paced simulation drivers
         BRANCHED BY by_sensor SET sensor = message.sensor
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id,
-          occurred_at = input.occurred_at, error_code = error.code, error_message = error.message;
+          occurred_at = input.occurred_at, error_code = error.class, error_message = error.message;
       CREATE SCHEMA revised_reading (sensor STRING, reading_id STRING, tick U64, occurred_at DATETIME, value I64);
       CREATE SCHEMA revised_observed_reading (sensor STRING, reading_id STRING, tick U64, occurred_at DATETIME, admitted_at DATETIME, timestamp_source STRING, value I64);
       START AT NOW TIME RATE 0.05;

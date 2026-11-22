@@ -299,6 +299,7 @@ fn notice() -> Vec<u8> {
         level: NoticeLevel::Info,
         kind: NoticeKind::Membership,
         message: "a notice for every session".to_string(),
+        error: None,
     };
     let frame = notice
         .encode(&LIMITS)

@@ -91,6 +91,17 @@ delayed destructor cannot withdraw that replacement. Entries are bounded by live
 lifetimes, and no concrete branch key is a label or cache key. The standalone warning-cadence
 mutex never nests another guard or crosses a wait.
 
+`MessageErrorMetrics::nodes` in `src/metrics/message_errors.rs` is a lifecycle-only weak cache of
+every graph node's `nervix_message_errors_total` cells, keyed by domain and `NodeRef`. A domain's
+routing snapshot resolves the cells of every node of an installed revision once, and an ingestor's
+intake resolves its own for decode and `RATE LIMIT` rejections when it starts; counting an error
+adds to one relaxed atomic cell of the retained handle and performs no map access. The last
+retained handle removes its exact entry, compared by identity, so a delayed destructor never
+withdraws a replacement, and resolving a dead weak entry registers a fresh one. A scrape reads the
+map as an observer, upgrading the live entries before it renders any of them, so no shard guard is
+held when a destructor retires an entry. Entries are bounded by the nodes of installed revisions and
+their live intakes; no branch key or payload value is a key or a label.
+
 `DESCRIBE INFERENCER` reads the execution registry once to validate its current unit and pinned
 identity. The guard ends before admission or transport. Its charged, cancellable worker visits one
 immutable replication-routing publication and reads only scalar counts, revisions and confirmed

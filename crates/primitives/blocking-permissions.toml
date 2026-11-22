@@ -203,6 +203,13 @@ reason = "Test participants exercise this owner concurrently outside a node exec
 [[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
 items = ["thread::spawn"]
+owner = "C binding server-notice retention, cancellation and release tests."
+path = "crates/client-ffi/src/tests/notices.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
 owner = "Consensus restore-publication unit tests."
 path = "crates/consensus/src/restore.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."

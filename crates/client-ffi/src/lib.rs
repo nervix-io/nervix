@@ -38,6 +38,7 @@ mod failure;
 mod fields;
 mod inspection;
 mod node_inspection;
+mod notice;
 mod outcome;
 mod producer;
 mod schema;
@@ -98,10 +99,14 @@ pub use nervix_client_host::{
     Admission, Batch, BatchBuilder, BatchDefect, Cancel, CellState, ClockEndReason, ClockEvent,
     ClockEventKind, ClockState, CompletionKind, CompletionStatus, Consumer, Delivery, Disposition,
     DomainClock, EndReason, EndpointState, Event, EventKind, Execution, Failure, FailureKind,
-    FieldType, Fields, OpenRefusal, Outcome, Part, ProcessingFailure, Producer, Reopen,
-    ReopenReason, RestorationCause, Schema, Session, Settlement, SubmissionOutcome,
-    SubmissionRefusal, SubmissionResult, Suggestions, Uncertainty, UploadFailure, Window,
-    WindowKind,
+    FieldType, Fields, Notice, NoticeKind, NoticeLevel, OpenRefusal, Outcome, Part,
+    ProcessingFailure, Producer, Reopen, ReopenReason, RestorationCause, Schema, Session,
+    Settlement, SubmissionOutcome, SubmissionRefusal, SubmissionResult, Suggestions, Uncertainty,
+    UploadFailure, Window, WindowKind,
+};
+pub use notice::{
+    nx_notice_error, nx_notice_kind_of, nx_notice_level_of, nx_notice_message, nx_notice_release,
+    nx_notice_retain,
 };
 pub use outcome::{
     nx_outcome_backup, nx_outcome_diagnostic, nx_outcome_diagnostic_count, nx_outcome_disposition,
@@ -121,7 +126,7 @@ pub use schema::{
 pub use session::{
     nx_execution_free, nx_execution_reference, nx_session_connect, nx_session_domain_clock,
     nx_session_execute, nx_session_free, nx_session_next_clock_event, nx_session_next_event,
-    nx_session_prepare,
+    nx_session_next_notice, nx_session_prepare,
 };
 pub use submission::{
     nx_submission_outcome_defect, nx_submission_outcome_failure, nx_submission_outcome_free,

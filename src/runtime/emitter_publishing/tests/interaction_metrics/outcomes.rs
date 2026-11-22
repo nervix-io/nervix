@@ -335,9 +335,9 @@ async fn emitter_outcomes_classify_member_and_prepare_refusals_without_error_tex
         .apply(&context, &mut batches, DeliveredAcknowledgements::Host)
         .await
         .assured("member errors follow message policy");
-    let container = structured_message_error(
+    let container = raised_message_error(
         at,
-        MessageErrorCode::Validation,
+        RejectedErrorClass::Codec,
         "refused".to_owned(),
         MessageErrorOperation::Encode,
         None,
@@ -349,17 +349,17 @@ async fn emitter_outcomes_classify_member_and_prepare_refusals_without_error_tex
         vec![
             RejectedEmitterRecord::message(
                 position(3),
-                EmitterRejectionCode::Encode,
+                RejectedErrorClass::Codec,
                 "refused".to_owned(),
             ),
-            RejectedEmitterRecord::structured(position(4), EmitterRejectionCode::Encode, container),
+            RejectedEmitterRecord::structured(position(4), container),
         ],
         MessageErrorOperation::Encode,
     )
     .await
     .assured("prepare refusals follow the same owner");
     let metrics = DestinationProbe { context: &context };
-    for code in ["external", "oversize", "invalid"] {
+    for code in ["refused", "limit", "validation"] {
         metrics.event(
             "nervix_emitter_records_rejected_total",
             &[("code", code)],
@@ -368,8 +368,13 @@ async fn emitter_outcomes_classify_member_and_prepare_refusals_without_error_tex
     }
     metrics.event(
         "nervix_emitter_records_rejected_total",
-        &[("code", "encode")],
+        &[("code", "codec")],
         2.0,
+    );
+    metrics.event(
+        "nervix_emitter_records_rejected_total",
+        &[("code", "evaluation")],
+        0.0,
     );
     metrics.event("nervix_emitter_records_failed_total", &[], 0.0);
     for batch in &batches {

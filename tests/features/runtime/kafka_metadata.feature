@@ -192,7 +192,7 @@ Feature: Kafka record keys, timestamps and tombstones
         TO readings INHERIT ALL SET source = 'stamped', record_time = metadata.timestamp UNBRANCHED
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO refusals
-            SET value = input.value, source = 'stamped', code = error.code,
+            SET value = input.value, source = 'stamped', code = error.class,
               operation = error.operation, message = error.message
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR timed FROM source TOPIC 'stamps_{{test_id}}'
@@ -202,7 +202,7 @@ Feature: Kafka record keys, timestamps and tombstones
         TO readings INHERIT ALL SET source = 'timed' UNBRANCHED
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO refusals
-            SET value = input.value, source = 'timed', code = error.code,
+            SET value = input.value, source = 'timed', code = error.class,
               operation = error.operation, message = error.message
         ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR typed FROM source TOPIC 'stamps_{{test_id}}'

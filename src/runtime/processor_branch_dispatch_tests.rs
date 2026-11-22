@@ -63,7 +63,7 @@ async fn report_of_dispatched_input(
         .recv()
         .await
         .expect("the processor reports the failure to the node's observers");
-    (message, completion.wait().await)
+    (message.message, completion.wait().await)
 }
 
 #[nervix_primitives::test]
