@@ -448,7 +448,9 @@ belong to the client rather than to one session, so a reader keeps calling them 
   them, including the ones not read yet, and the stream continues with the notices of the next
   session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
   `Leadership`, `ClusterParameters`, `Runtime`, `ControlPlane` or `Licensing`) and its display text; a reader
-  routes notices by `kind` and never by their text.
+  routes notices by `kind` and never by their text. A `Runtime` notice about an error of a graph node
+  also carries `error: Some(ReportedError)`, the error's `MessageErrorClass` and the producing node's
+  `NodeRef`, which a reader selects runtime errors by; every other notice carries `None`.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
 notices arrived faster than they were read: the client dropped the ones it held, and the next read

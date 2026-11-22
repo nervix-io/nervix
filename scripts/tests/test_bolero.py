@@ -257,6 +257,7 @@ class InventoryTests(unittest.TestCase):
             "branch-membership",
             "restore-installation-wire",
             "partition-transition-wire",
+            "runtime-error-event-wire",
             "backup-capture-wire",
             "domain-stop-wire",
             "backup-capture-wire-malformed",

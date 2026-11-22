@@ -223,16 +223,20 @@ the failed operation, and the message then takes its context's error handling:
   them with a conditional, `TRY_CAST`, or `TRY_JSON_VALUE`.
 
 In an `ON MESSAGE ERROR SEND TO ... SET`, a function failure has the `error` scope below. Every
-failure an expression reports has the code `evaluation`; the kind appears in the message, which
+failure an expression reports has the class `evaluation`; the kind appears in the message, which
 names the node, the program, the kind, and the reason, such as `junction 'enrich' FILTER-MAP side
 error division_by_zero: integer division by zero at 12..18`. The range at the end locates the
 failed operation within the route's program. When several operations fail for one message, the
-record reports the first.
+record reports the first. The scope is the one error record every error of a node has; [Runtime
+Message Errors](errors-and-diagnostics.md#runtime-message-errors) lists its ten classes.
 
 | Field | Type | Holds |
 | --- | --- | --- |
 | `error.reference` | `STRING` | A stable UUIDv7 that identifies this failure |
-| `error.code` | `STRING` | `evaluation` for every expression failure |
+| `error.class` | `STRING` | `evaluation` for every expression failure |
+| `error.node` | `STRING` | The name of the node whose route failed, such as `enrich` |
+| `error.node_kind` | `STRING` | The kind of that node, such as `junction`, `emitter` or `window_processor` |
+| `error.external_code` | optional `STRING` | The outside system's own code for a refusal, such as a PostgreSQL SQLSTATE; null for every expression failure |
 | `error.message` | `STRING` | The message above. It never contains a value of the message, except as the [regular expressions](#regular-expressions) section describes |
 | `error.operation` | `STRING` | The clause that failed, such as `set`, `inherit`, `route_where`, `filter_where`, `source_where`, `values`, or `invoke` |
 | `error.operation_index` | optional `U32` | The zero-based position of the failed assignment, counting `INHERIT` fields first, or null for a `WHERE` |

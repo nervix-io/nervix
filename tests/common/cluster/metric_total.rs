@@ -1,7 +1,8 @@
 //! Public metric aggregation across a node's independently labeled series.
 //!
 //! Outside the layer order: a scenario harness.
-//! - **Owns.** Summing every matching public sample and distinguishing absent metric families.
+//! - **Owns.** Summing every matching public sample and distinguishing absent metric families, or
+//!   reporting them as undeclared for a family a node declares only once it counts a series.
 //! - **Depends on.** The cluster's HTTP metric reader and Prometheus sample parsing.
 //! - **Must not know.** Product metric storage, runtime instances or placement implementation.
 
@@ -16,20 +17,21 @@ impl Cluster {
         metric_name: &str,
         label_fragments: &[String],
     ) -> io::Result<f64> {
-        self.exposed_observability_metric_sum(node_id, metric_name, label_fragments)
+        match self
+            .sum_declared_observability_metric(node_id, metric_name, label_fragments)
             .await?
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "node '{node_id}' exposed no metric family '{metric_name}'"
-                ))
-            })
+        {
+            Some(total) => Ok(total),
+            None => Err(io::Error::other(format!(
+                "node '{node_id}' exposed no metric family '{metric_name}'"
+            ))),
+        }
     }
 
-    /// The sum of every matching sample of `metric_name` on `node_id`, or `None` when the node
-    /// exposes no such family. The exposition leaves a family out until it holds a series, so a
-    /// node that never ran an instance the family counts, such as a node without any ingestor,
-    /// exposes none.
-    pub(crate) async fn exposed_observability_metric_sum(
+    /// The total of every matching sample of `metric_name` on the node, or `None` when the node
+    /// declares no such family, as a family whose series appear only once the node counts one
+    /// leaves it undeclared on a node that has counted nothing.
+    pub(crate) async fn sum_declared_observability_metric(
         &self,
         node_id: &str,
         metric_name: &str,
@@ -62,6 +64,6 @@ impl Cluster {
                 total += value;
             }
         }
-        Ok(present.then_some(total))
+        if present { Ok(Some(total)) } else { Ok(None) }
     }
 }

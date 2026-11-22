@@ -952,6 +952,7 @@ async fn a_branch_holding_output_reports_what_it_cannot_publish_without_its_cloc
         .await
         .expect("a branch reports the output it loses as it ends")
         .expect("the runtime keeps its event bus open");
+    let message = message.message;
     assert!(
         message.contains("stopped without its clock and cannot publish its accepted output"),
         "unexpected report: {message}"

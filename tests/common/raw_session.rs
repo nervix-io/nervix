@@ -93,6 +93,9 @@ pub(crate) struct TestSubscriptionEvent {
 pub(crate) struct TestServerEvent {
     pub(crate) level: NoticeLevel,
     pub(crate) message: String,
+    /// The class and producing node of the error a runtime notice reports; absent on a notice
+    /// that reports no classified error and on a subscription failure.
+    pub(crate) error: Option<nervix_models::ReportedError>,
 }
 
 /// A subscription the session opened, and the schema its rows are read against.
@@ -1035,6 +1038,7 @@ impl TestSession {
                     self.pending_server_errors.push_back(TestServerEvent {
                         level: notice.level,
                         message: notice.message,
+                        error: notice.error,
                     });
                 }
             }
@@ -1062,6 +1066,7 @@ impl TestSession {
                 self.pending_server_errors.push_back(TestServerEvent {
                     level: NoticeLevel::Error,
                     message: skipped.message,
+                    error: None,
                 });
             }
             ServerEvent::SubscriptionEnded(ended) => {
@@ -1072,6 +1077,7 @@ impl TestSession {
                 self.pending_server_errors.push_back(TestServerEvent {
                     level: NoticeLevel::Error,
                     message: ended.message.clone(),
+                    error: None,
                 });
                 self.pending_subscription_ends.push_back(ended);
             }

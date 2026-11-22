@@ -3,10 +3,10 @@
 *Plexus, the Nervix graph definition language.*
 
 The Nervix C ABI runs the [Rust Client Library](client-library.md) in your process. C and C++
-programs use the same session, execution recovery, subscriptions, clocks and client endpoints as
-other Nervix clients. Include `nervix_client.h` and link the shared binding. The
+programs use the same session, execution recovery, subscriptions, clocks, server notices and client
+endpoints as other Nervix clients. Include `nervix_client.h` and link the shared binding. The
 [Client Implementation Manual](client-implementation-manual.md#using-the-c-abi) gives
-the normative B-1 to B-16 host rules.
+the normative B-1 to B-17 host rules.
 
 Every example below comes from the C11 or C++17 application suite under
 `tests/client_conformance/{c,cpp}/suite`. The common cases compile and execute in both languages;
@@ -290,6 +290,60 @@ injected `IN_TRANSACTION` refusal:
 {{#include ../../tests/client_conformance/c/suite/contract.h:clock_restoration_failed}}
 ```
 
+## Read Server Notices
+
+A server notice tells your application about something that belongs to no request and deserves an
+operator's attention: a node joined or left the cluster, leadership changed, a cluster parameter
+revision was installed, a licensing event happened, or the runtime or control plane recovered from a
+failure, such as a row that a graph node's `ON MESSAGE ERROR LOG` route reported.
+`nx_session_next_notice` blocks until the next notice arrives, bounded by the same `nx_cancel`
+tokens and deadlines as every blocking call, so an application usually reads notices on a thread of
+its own. It hands out an `nx_notice` reference. A notice never changes and stays valid after the
+session is freed. Count further references with `nx_notice_retain`, and release each one once with
+`nx_notice_release`, on any thread.
+
+- `nx_notice_kind_of` reads what the notice reports: `NX_NOTICE_KIND_MEMBERSHIP`,
+  `NX_NOTICE_KIND_LEADERSHIP`, `NX_NOTICE_KIND_CLUSTER_PARAMETERS`, `NX_NOTICE_KIND_RUNTIME`,
+  `NX_NOTICE_KIND_CONTROL_PLANE` or `NX_NOTICE_KIND_LICENSING`. Route every notice by its kind.
+  `nx_notice_level_of` reads how urgent it is: `NX_NOTICE_LEVEL_INFO`, `NX_NOTICE_LEVEL_WARNING`
+  or `NX_NOTICE_LEVEL_ERROR`.
+- `nx_notice_message` borrows the notice's display text as UTF-8 bytes. Show it to people, but never
+  branch on it or parse it: its wording is not part of the contract.
+- `nx_notice_error` returns true for a runtime notice that reports a classified error of a graph
+  node, and writes that error's class as its lower-case name (`evaluation`, `refused`, `limit` and
+  the other [error classes](errors-and-diagnostics.md#the-message-error-record)), the kind of the
+  node that produced it as its snake_case name (`junction`, `emitter`, `window_processor` and so
+  on), and the node's name. Select runtime errors by these fields. The names are borrowed until the
+  notice is released, and you may pass NULL for those you do not read. It returns false and writes
+  nothing for every other notice, including a runtime notice about a failure that is no classified
+  error, such as a connector failure an emitter recovered from.
+
+A session receives the notices published while it is open: those of its own node and, for runtime
+errors, those of every other node of the cluster. Open it before the work whose errors you want to
+see. A notice is never the outcome of a command; read that from the command's own outcome. The
+library holds at most 128 notices you have not read, and at most 1 MiB of them. When more arrive, it
+drops the ones it holds, and the next call fails once with `NX_ERROR_OVERFLOW`; the call after it
+returns the notices that arrived after the gap. Notices also end with the session that delivered
+them, including those you have not read: after a lost session, the wait continues with the notices
+of the next session the library opens, and reading notices never opens a session itself.
+`NX_ERROR_CLOSED` means the session ended and no server is known to open another on.
+
+This example reads notices under one deadline until it finds the runtime error of the junction it
+created, releasing every other notice. It keeps a reference of its own to that notice, which any
+thread may release later, and reads the error's fields and its text:
+
+```c
+{{#include ../../tests/client_conformance/c/suite/contract.h:notices}}
+```
+
+In C++, each notice's owner releases it when the loop iteration that read it ends, unless the loop
+keeps it. The kept notice's retained reference moves into a reader thread, which releases it when it
+ends:
+
+```cpp
+{{#include ../../tests/client_conformance/cpp/suite/main.cpp:cpp_notices}}
+```
+
 ## Publish Through A Client Ingestor
 
 The shared C binding exposes the same producers and consumers to C and C++ hosts,
@@ -424,8 +478,8 @@ action, which would end the process: a connection that breaks while the client w
 transport error, which the waiting call reports or the client recovers from by reconnecting. Both
 suite programs restore the default action before their first test to hold the binding to this. Sessions, producers, consumers, deliveries and batches may be shared;
 field lists and builders are used from one thread at a time. Never release a handle while another
-thread still uses that same owned reference. An independently retained event, clock, delivery or
-batch reference may be released on any host thread.
+thread still uses that same owned reference. An independently retained event, clock, notice,
+delivery or batch reference may be released on any host thread.
 
 ## Lifetimes And Memory
 
@@ -484,8 +538,8 @@ uncertain application effect.
 
 It does not expose these parts of the [Rust client](client-library.md): the typed transaction
 status, transaction attach and transaction inspection; the typed domain list, structured choice
-lookups, server notices and the leadership view; upload progress and upload identities of your
-choosing; and `DESCRIBE BACKUP`, which reads an archive without a server.
+lookups and the leadership view; upload progress and upload identities of your choosing; and
+`DESCRIBE BACKUP`, which reads an archive without a server.
 
 ## A Complete Application
 

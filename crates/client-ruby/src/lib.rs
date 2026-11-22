@@ -29,6 +29,7 @@ mod errors;
 mod gvl;
 mod inspection;
 mod node_inspection;
+mod notices;
 mod schema;
 mod sessions;
 mod subscriptions;
@@ -51,6 +52,7 @@ pub fn register(ruby: &Ruby) -> Result<(), Error> {
     node_inspection::register(ruby, client)?;
     subscriptions::register(ruby, client)?;
     clocks::register(ruby, client)?;
+    notices::register(ruby, client)?;
     endpoints::register(ruby, client)?;
     client.const_set("RUBY_ABI", env!("NERVIX_RUBY_ABI"))?;
     client.const_set("VERSION", env!("CARGO_PKG_VERSION"))?;

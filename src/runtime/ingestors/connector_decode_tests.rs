@@ -48,8 +48,14 @@ async fn next_error(errors: &mut broadcast::Receiver<RuntimeEvent>) -> String {
         .await
         .expect("the runtime reports the rejection")
         .expect("the event bus keeps its subscriber");
-    let RuntimeEvent::Error(message) = event;
-    message
+    let RuntimeEvent::Error(event) = event;
+    // A decode rejection is the codec's refusal, reported for the ingestor that received it.
+    let reported = event
+        .error
+        .assured("a decode rejection reports its class and ingestor");
+    assert_eq!(reported.class, MessageErrorClass::CODEC);
+    assert_eq!(reported.node.kind, ModelKind::Ingestor);
+    event.message
 }
 
 /// Asserts that `report` is the logged rejection of a payload the fixture's codec refused, and

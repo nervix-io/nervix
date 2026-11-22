@@ -67,6 +67,7 @@ using Options = std::unique_ptr<nx_connect_options,
                                 ReleaseHandle<nx_connect_options, nx_connect_options_free>>;
 using Cancel = std::unique_ptr<nx_cancel, ReleaseHandle<nx_cancel, nx_cancel_free>>;
 using Event = std::unique_ptr<nx_event, ReleaseHandle<nx_event, nx_event_release>>;
+using Notice = std::unique_ptr<nx_notice, ReleaseHandle<nx_notice, nx_notice_release>>;
 using Batch = std::unique_ptr<nx_batch, ReleaseHandle<nx_batch, nx_batch_release>>;
 using Producer = std::unique_ptr<nx_producer, ReleaseHandle<nx_producer, nx_producer_free>>;
 using Consumer = std::unique_ptr<nx_consumer, ReleaseHandle<nx_consumer, nx_consumer_free>>;
@@ -136,11 +137,55 @@ static void test_cpp_application_owns_endpoints_and_delivery_with_typed_deleters
     // ANCHOR_END: cpp_application
 }
 
+static void test_cpp_owned_notices_are_routed_by_kind_and_read_on_another_thread() {
+    Session session = suite_take<Session>(suite_connect(NULL, NULL));
+    suite_failing_junction(session.get(), "cpp_notice");
+    Producer producer = suite_take<Producer>(suite_producer(session.get(), "cpp_notice_in"));
+    suite_submit_failing(producer.get(), 2201);
+    // ANCHOR: cpp_notices
+    nx_cancel *deadline = suite_deadline(120000);
+    Notice found;
+    for (int attempt = 0; attempt < 64 && !found; ++attempt) {
+        nx_notice *raw = nullptr;
+        suite_check(nx_session_next_notice(session.get(), deadline, &raw));
+        Notice notice(raw); // Released when this iteration ends, unless it is kept.
+        const uint8_t *node = nullptr;
+        std::size_t node_len = 0;
+        if (nx_notice_kind_of(notice.get()) == NX_NOTICE_KIND_RUNTIME &&
+            nx_notice_error(notice.get(), nullptr, nullptr, nullptr, nullptr, &node, &node_len) &&
+            std::string(reinterpret_cast<const char *>(node), node_len) == "cpp_notice_scorer") {
+            found = std::move(notice);
+        }
+    }
+    REQUIRE(found != nullptr);
+    Notice held(nx_notice_retain(found.get()));
+    found.reset();
+    std::string error_class, node_kind, message;
+    std::thread reader([kept = std::move(held), &error_class, &node_kind, &message] {
+        const uint8_t *class_bytes = nullptr, *kind_bytes = nullptr, *text = nullptr;
+        std::size_t class_len = 0, kind_len = 0, text_len = 0;
+        if (nx_notice_error(kept.get(), &class_bytes, &class_len, &kind_bytes, &kind_len,
+                            nullptr, nullptr)) {
+            error_class.assign(reinterpret_cast<const char *>(class_bytes), class_len);
+            node_kind.assign(reinterpret_cast<const char *>(kind_bytes), kind_len);
+        }
+        nx_notice_message(kept.get(), &text, &text_len);
+        message.assign(reinterpret_cast<const char *>(text), text_len);
+    }); // The reader releases the last reference when it ends.
+    reader.join();
+    REQUIRE(error_class == "evaluation" && node_kind == "junction");
+    // ANCHOR_END: cpp_notices
+    std::string expected = std::string("junction 'cpp_notice_scorer' message error in domain '") +
+                           suite_env("NERVIX_PROBE_DOMAIN") + "'";
+    REQUIRE(message.find(expected) != std::string::npos);
+}
+
 static const struct suite_test suite_tests[] = {
     SUITE_CONTRACT_TESTS
     {"boundary", "test_cpp_unique_ptr_releases_on_an_exception", test_cpp_unique_ptr_releases_on_an_exception},
     {"cluster", "test_cpp_raii_keeps_a_retained_batch_across_a_thread", test_cpp_raii_keeps_a_retained_batch_across_a_thread},
     {"cluster", "test_cpp_application_owns_endpoints_and_delivery_with_typed_deleters", test_cpp_application_owns_endpoints_and_delivery_with_typed_deleters},
+    {"cluster", "test_cpp_owned_notices_are_routed_by_kind_and_read_on_another_thread", test_cpp_owned_notices_are_routed_by_kind_and_read_on_another_thread},
 };
 
 int main(int argc, char **argv) {

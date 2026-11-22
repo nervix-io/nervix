@@ -5,6 +5,7 @@
 //! - **Must not know.** Server internals or a copied host state machine.
 
 mod inspection;
+mod notices;
 mod server;
 
 use magnus::{RClass, prelude::*};
@@ -18,6 +19,7 @@ fn ruby_boundary_preserves_kinds_values_views_and_interruptible_waits() {
     let ruby = unsafe { magnus::embed::init() };
     crate::register(&ruby).assured("the native binding registers in a fresh interpreter");
     inspection::check(&ruby).assured("inspection views preserve their metadata and native owners");
+    notices::check(&ruby).assured("notices read their level, kind, text and reported error");
     let cases = [
         (FailureKind::InvalidArgument, "InvalidArgumentError"),
         (FailureKind::Connect, "ConnectError"),

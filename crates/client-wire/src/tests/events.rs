@@ -34,6 +34,7 @@ fn notices_round_trip_at_every_level_and_kind() {
                 level,
                 kind,
                 message: "node 'node-2' left".to_string(),
+                error: None,
             };
             let frame = notice.encode(&limits()).assured("a notice fits the limits");
             let ServerEvent::Notice(decoded) = decode_event(frame) else {
@@ -41,6 +42,30 @@ fn notices_round_trip_at_every_level_and_kind() {
             };
             assert_eq!(decoded, notice);
         }
+    }
+}
+
+#[test]
+fn a_runtime_notice_keeps_the_class_and_node_of_every_error_it_reports() {
+    for &class in crate::event::ALL_ERROR_CLASSES {
+        let notice = ServerNotice {
+            level: NoticeLevel::Error,
+            kind: NoticeKind::Runtime,
+            message: "junction 'scorer' message error in domain 'shop': division by zero"
+                .to_string(),
+            error: Some(nervix_models::ReportedError {
+                class,
+                node: nervix_models::NodeRef::new(
+                    nervix_models::ModelKind::Junction,
+                    nervix_models::ModelName::parse("scorer").assured("a valid node name"),
+                ),
+            }),
+        };
+        let frame = notice.encode(&limits()).assured("a notice fits the limits");
+        let ServerEvent::Notice(decoded) = decode_event(frame) else {
+            panic!("a notice decodes as a notice");
+        };
+        assert_eq!(decoded, notice);
     }
 }
 
@@ -217,6 +242,7 @@ fn unsolicited_messages_never_name_a_request() {
             level: NoticeLevel::Info,
             kind: NoticeKind::Membership,
             message: String::new(),
+            error: None,
         }
         .encode(&limits()),
         LeadershipObserved {
@@ -255,6 +281,7 @@ fn notice_frame(
             level,
             kind,
             message: Some(message),
+            error: None,
         },
     );
     let root = wire::ServerMessage::create(
