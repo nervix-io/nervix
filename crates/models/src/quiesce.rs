@@ -1036,9 +1036,12 @@ fn inferencer_change_aspects(
         &mut changes,
         &mut has_dynamic_change,
     );
+    // The working memory is an option of the session every branch loads its model into, so a
+    // change to it reloads those sessions exactly as a change of the model itself does.
     if base.resource != candidate.resource
         || base.resource_version != candidate.resource_version
         || base.file != candidate.file
+        || base.working_memory != candidate.working_memory
     {
         changes.push(ModelChangeAspect::InferencerBinding);
     }
@@ -2293,9 +2296,10 @@ mod catch_all_kind_tests {
         AckMode, ActivationAction, BranchSelection, CodecWireFormat, CorrelationTimeoutAction,
         CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCodec, CreateCorrelator,
         CreateInferencer, CreateParametrizer, CreateVhost, CreateWasmProcessor,
-        CreateWindowProcessor, DynamicModelUpdate, FlushPolicy, GeneralErrorPolicy, Literal, Model,
-        ModelChangeAspect, ModelKind, ModelName, NodeRef, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, QuiesceLevel, VhostTlsResource, WasmProcessorLimits, WindowBound,
+        CreateWindowProcessor, DynamicModelUpdate, FlushPolicy, GeneralErrorPolicy,
+        InferencerWorkingMemory, Literal, Model, ModelChangeAspect, ModelKind, ModelName, NodeRef,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, VhostTlsResource,
+        WasmProcessorLimits, WindowBound,
     };
 
     fn named<N>(raw: &str) -> N
@@ -2504,6 +2508,7 @@ mod catch_all_kind_tests {
             resource: named("model_bundle"),
             resource_version: 1,
             file: "models/score.onnx".to_string(),
+            working_memory: InferencerWorkingMemory::Released,
             inputs: Vec::new(),
             state: Vec::new(),
             output_schema: Vec::new(),
@@ -2514,8 +2519,18 @@ mod catch_all_kind_tests {
         let mut rebound = base.clone();
         rebound.file = "models/score_v2.onnx".to_string();
         assert_single_aspect(
-            Model::Inferencer(base),
+            Model::Inferencer(base.clone()),
             Model::Inferencer(rebound),
+            ModelChangeAspect::InferencerBinding,
+            QuiesceLevel::EntityPause,
+        );
+        // Every branch's session is built with the working memory, so changing it alone reloads
+        // the sessions as a new model would.
+        let mut retained = base.clone();
+        retained.working_memory = InferencerWorkingMemory::Retained;
+        assert_single_aspect(
+            Model::Inferencer(base),
+            Model::Inferencer(retained),
             ModelChangeAspect::InferencerBinding,
             QuiesceLevel::EntityPause,
         );

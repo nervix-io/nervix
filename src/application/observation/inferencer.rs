@@ -14,8 +14,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeName, CreateInferencer, DescribeInferencer, DomainName, DomainNodeRef,
-    DomainNodeUnitRef, InferencerExecutionMode, InferencerStateSummary, Model, ModelKind, NodeRef,
-    ScheduledNode, Unit,
+    DomainNodeUnitRef, InferencerExecutionMode, InferencerStateSummary, InferencerWorkingMemory,
+    Model, ModelKind, NodeRef, ScheduledNode, Unit,
 };
 use nervix_primitives::task::consume_budget;
 
@@ -201,6 +201,10 @@ impl InferencerDescription {
             InferencerExecutionMode::PerMessage => "per message",
             InferencerExecutionMode::Batched => "batched",
         };
+        let working_memory = match self.definition.working_memory {
+            InferencerWorkingMemory::Released => "released",
+            InferencerWorkingMemory::Retained => "retained",
+        };
         let mut lines = vec![
             format!("inferencer: {}", self.definition.name.as_str()),
             format!(
@@ -209,6 +213,7 @@ impl InferencerDescription {
                 self.definition.resource_version
             ),
             format!("file: {}", self.definition.file),
+            format!("working memory: {working_memory}"),
             format!("execution: {execution}"),
             format!("state bytes per branch: {}", self.bytes_per_branch),
             "definition:".to_owned(),

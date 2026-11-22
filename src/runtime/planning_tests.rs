@@ -70,6 +70,7 @@ fn inferencer_node(input_relays: Vec<RelayName>) -> BranchedProcessorSpec {
             resource: named("fraud_model"),
             resource_version: 1,
             file: "models/fraud.onnx".to_string(),
+            working_memory: nervix_models::InferencerWorkingMemory::Released,
             inputs: Vec::new(),
             state: None,
             output_schema: Vec::new(),
@@ -265,6 +266,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
             resource: named("score_model"),
             resource_version: 1,
             file: "models/score.onnx".to_string(),
+            working_memory: nervix_models::InferencerWorkingMemory::Released,
             inputs: vec![InferencerTensorMapping {
                 tensor: "features".to_string(),
                 schema: inferencer_tensor_schema(nonzero!(2u32)),
@@ -1123,6 +1125,7 @@ fn inferencer_input_mappings_compile_when_template_is_materialized() {
             resource: named("fraud_model"),
             resource_version: 1,
             file: "models/fraud.onnx".to_string(),
+            working_memory: nervix_models::InferencerWorkingMemory::Released,
             inputs: vec![InferencerTensorMapping {
                 tensor: "features".to_string(),
                 schema: inferencer_tensor_schema(nonzero!(2u32)),
@@ -1544,6 +1547,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
                     resource: named("fraud_model"),
                     resource_version: 3,
                     file: "models/fraud.onnx".to_string(),
+                    working_memory: nervix_models::InferencerWorkingMemory::Released,
                     inputs: vec![InferencerTensorMapping {
                         tensor: "features".to_string(),
                         schema: inferencer_tensor_schema(nonzero!(2u32)),
