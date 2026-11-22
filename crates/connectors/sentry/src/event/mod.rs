@@ -316,14 +316,15 @@ impl RecordEmitter for SentryEventEmitter {
         payload: Vec<u8>,
         occurred_at: Timestamp,
     ) -> Result<Vec<u8>, RaisedMessageError<RejectedErrorClass>> {
-        // The envelope is this connector's own encoding of the codec's bytes, so a payload it cannot
-        // wrap is a row that could not be encoded, never a refusal of Sentry's.
+        // An event Sentry's envelope contract can never carry (an event JSON it cannot read, an id
+        // or timestamp it does not accept, an event over its size limit) is refused for good before
+        // it is sent, as Sentry would refuse it.
         Self::encode_envelope(&payload, occurred_at, &self.platform).map_err(|error| {
             RaisedMessageError {
                 reference: uuid::Uuid::now_v7(),
-                class: RejectedErrorClass::Codec,
+                class: RejectedErrorClass::Refused,
                 message: format!("{error:#}"),
-                operation: MessageErrorOperation::Encode,
+                operation: MessageErrorOperation::Publish,
                 operation_index: None,
                 fields: Default::default(),
                 occurred_at,

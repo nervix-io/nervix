@@ -329,7 +329,7 @@ async fn preparation_halves_a_candidate_above_max_size_and_refuses_an_oversized_
     assert_eq!(refused.id, position(2));
     assert_eq!(
         refused.error.class,
-        nervix_models::RejectedErrorClass::Validation
+        nervix_models::RejectedErrorClass::Limit
     );
     assert_eq!(
         refused.error.operation,
