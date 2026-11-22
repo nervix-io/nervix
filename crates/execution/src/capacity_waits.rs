@@ -118,6 +118,9 @@ impl Drop for CapacityWait<'_> {
 // cancellation models, and a Shuttle build, whose check lives with the executor's other checks,
 // leave them out. Their held jobs block a worker thread, which Turmoil's single-threaded simulated
 // CPU strategy would never return to the test, so a Turmoil build leaves them out too.
-#[cfg(all(test, not(any(feature = "loom", feature = "shuttle", feature = "turmoil"))))]
+#[cfg(all(
+    test,
+    not(any(feature = "loom", feature = "shuttle", feature = "turmoil"))
+))]
 #[path = "capacity_waits_tests.rs"]
 mod tests;
