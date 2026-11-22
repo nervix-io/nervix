@@ -68,7 +68,7 @@ impl<'a> AcceptedWork<'a> {
         let place = self
             .executor
             .cpu_pool(class)
-            .prepare(QueueAdmission::WaitForPlace)
+            .prepare(QueueAdmission::WaitForPlace, self.executor.waits())
             .await?;
         Ok(AcceptedCpu { place, reservation })
     }

@@ -275,6 +275,7 @@ impl OpenWindowFixture {
         let window = decode_window_processor_snapshot(
             &published.payload,
             runtime.executor(),
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             WindowSnapshotSchemas {
                 input: &input,
                 arguments: &arguments,
@@ -480,6 +481,28 @@ impl RunningProcessor {
             .expect("the processor task stops")
             .expect("the processor task joins");
     }
+}
+
+/// Run one attempt of `restore` to its end and install what it built, as the processor task does
+/// when nothing it opens waits for capacity.
+async fn attempt_once(
+    restore: &mut PendingProcessorBranchRestore,
+    context: &ProcessorRuntimeContext,
+    template: &BranchInstanceTemplate,
+    instances: &mut ProcessorBranches,
+    last_persisted_lru_lsm: &mut u64,
+) -> error_stack::Result<(), ProcessorBranchTaskError> {
+    let mut attempt = restore.begin(context, template);
+    while let RestoreProgress::Waiting = attempt.run_until_waiting().await {
+        attempt.until_no_longer_waiting().await;
+    }
+    restore.finish(
+        attempt,
+        context,
+        template,
+        instances,
+        last_persisted_lru_lsm,
+    )
 }
 
 fn branch_lifetimes(lifecycle: &PersistedRuntimeStateEntry) -> Vec<(Option<BranchKey>, u64)> {
@@ -807,6 +830,164 @@ async fn a_failed_restore_holds_the_processor_until_a_later_attempt_installs_eve
     processor.stop().await;
 }
 
+/// A restore that finds the bulk CPU class full waits for a place there instead of being refused.
+/// While it waits, its processor still answers every command as one that has not restored its
+/// branches: it refuses to checkpoint them or to name them for an inspection. The first place that
+/// frees goes to the waiting restore, which installs every branch with the window it had open at
+/// once, without a later attempt.
+#[nervix_primitives::test]
+async fn a_restore_that_finds_the_bulk_class_full_waits_for_a_place_while_its_processor_answers() {
+    use nervix_models::StateInspectionBranchSelection as Selection;
+
+    let fixture = OpenWindowFixture::new();
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let executor = single_worker_executor();
+    let (runtime, domain) = fixture.runtime(executor.clone(), &directory);
+    let alpha = string_branch_key("tenant", "alpha");
+    let beta = string_branch_key("tenant", "beta");
+    fixture
+        .store_checkpoints(
+            &runtime,
+            &domain,
+            5,
+            &[
+                OpenBranch {
+                    key: alpha.clone(),
+                    incarnation: 3,
+                    latency: 10,
+                },
+                OpenBranch {
+                    key: beta.clone(),
+                    incarnation: 4,
+                    latency: 100,
+                },
+            ],
+        )
+        .await;
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Bulk).await;
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let processor = fixture.start(&runtime, &domain, &input, Vec::new());
+
+    let refused = processor
+        .checkpoint()
+        .await
+        .expect_err("a processor whose restore waits has no lifecycle to checkpoint");
+    assert!(
+        matches!(
+            refused.current_context(),
+            OwnershipHandoffError::BranchesUnrestored { kind, identifier }
+                if *kind == ModelKind::WindowProcessor && identifier == &fixture.processor
+        ),
+        "the checkpoint names the unrestored processor, found {refused:?}"
+    );
+    let inspection = processor
+        .inspected_branches(Selection::All)
+        .await
+        .expect_err("a processor whose restore waits names none of its branches");
+    assert!(
+        matches!(
+            inspection.current_context(),
+            BranchStateReadError::Unrestored
+        ),
+        "the selection is refused as unrestored, found {inspection:?}"
+    );
+    assert_eq!(
+        executor.snapshot().bulk_cpu.refused,
+        0,
+        "the restore waits for a place in the full bulk class rather than being refused"
+    );
+
+    filled.release().await;
+    let restored = processor
+        .checkpoint()
+        .await
+        .expect("the waiting restore takes the place that frees and installs every branch");
+    assert_eq!(
+        (restored.lsm, branch_lifetimes(&restored)),
+        (5, vec![(alpha.clone(), 3), (beta.clone(), 4)]),
+        "the restore resumes every branch under its lifetime"
+    );
+    assert_eq!(
+        fixture
+            .published_latencies(&runtime, &domain, &alpha, 3)
+            .await,
+        Some(vec![10]),
+        "branch alpha keeps the window it had open"
+    );
+    assert_eq!(
+        fixture
+            .published_latencies(&runtime, &domain, &beta, 4)
+            .await,
+        Some(vec![100]),
+        "branch beta keeps the window it had open"
+    );
+    assert_eq!(
+        executor.snapshot().bulk_cpu.refused,
+        0,
+        "no decode of the restore was ever refused"
+    );
+    processor.stop().await;
+}
+
+/// A processor stopped while its restore waits for a place in the full bulk class ends at once: the
+/// stop ends the wait, and the branches it never restored stay in its lifecycle checkpoint for the
+/// next task.
+#[nervix_primitives::test]
+async fn a_processor_stopped_while_its_restore_waits_for_a_place_ends_at_once() {
+    let fixture = OpenWindowFixture::new();
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let executor = single_worker_executor();
+    let (runtime, domain) = fixture.runtime(executor.clone(), &directory);
+    let alpha = string_branch_key("tenant", "alpha");
+    fixture
+        .store_checkpoints(
+            &runtime,
+            &domain,
+            5,
+            &[OpenBranch {
+                key: alpha.clone(),
+                incarnation: 3,
+                latency: 10,
+            }],
+        )
+        .await;
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Bulk).await;
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let waiting = fixture.start(&runtime, &domain, &input, Vec::new());
+    let refused = waiting
+        .checkpoint()
+        .await
+        .expect_err("the restore still waits for a place");
+    assert!(
+        matches!(
+            refused.current_context(),
+            OwnershipHandoffError::BranchesUnrestored { .. }
+        ),
+        "a processor whose restore waits answers as unrestored, found {refused:?}"
+    );
+
+    waiting.stop().await;
+    filled.release().await;
+    let successor = fixture.start(&runtime, &domain, &input, Vec::new());
+    let restored = successor
+        .checkpoint()
+        .await
+        .expect("the next task restores the branches the stopped one never installed");
+    assert_eq!(
+        (restored.lsm, branch_lifetimes(&restored)),
+        (5, vec![(alpha.clone(), 3)]),
+        "the lifecycle checkpoint still names the branch the stopped task never restored"
+    );
+    assert_eq!(
+        fixture
+            .published_latencies(&runtime, &domain, &alpha, 3)
+            .await,
+        Some(vec![10]),
+        "the next task keeps the window branch alpha had open"
+    );
+    successor.stop().await;
+}
+
 /// A processor whose restore is pending when its task is replaced hands the branches it has not
 /// restored to its successor: the handed-over ones with the input they still hold, and nothing in
 /// place of a lifecycle it never read, which its successor restores in its place.
@@ -914,15 +1095,15 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
         nervix_models::DataPlaneSettings::default(),
         nervix_connector::RetryBackoffSettings::default(),
     );
-    let unavailable = without_lifecycle
-        .attempt(
-            &context,
-            &fixture.template,
-            &mut instances,
-            &mut last_persisted_lru_lsm,
-        )
-        .await
-        .expect_err("handed-over branches need the lifecycle they belong to");
+    let unavailable = attempt_once(
+        &mut without_lifecycle,
+        &context,
+        &fixture.template,
+        &mut instances,
+        &mut last_persisted_lru_lsm,
+    )
+    .await
+    .expect_err("handed-over branches need the lifecycle they belong to");
     assert!(matches!(
         unavailable.current_context(),
         ProcessorBranchTaskError::HandedOffLifecycleUnavailable
@@ -950,15 +1131,15 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
         nervix_models::DataPlaneSettings::default(),
         nervix_connector::RetryBackoffSettings::default(),
     );
-    let after = after_lifecycle
-        .attempt(
-            &context,
-            &fixture.template,
-            &mut instances,
-            &mut last_persisted_lru_lsm,
-        )
-        .await
-        .expect_err("a branch cannot resume a lifetime its lifecycle has not reached");
+    let after = attempt_once(
+        &mut after_lifecycle,
+        &context,
+        &fixture.template,
+        &mut instances,
+        &mut last_persisted_lru_lsm,
+    )
+    .await
+    .expect_err("a branch cannot resume a lifetime its lifecycle has not reached");
     assert!(matches!(
         after.current_context(),
         ProcessorBranchTaskError::HandedOffLifetimeAfterLifecycle {
@@ -977,6 +1158,48 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
     assert!(
         instances.states().is_empty() && instances.version() == 0 && last_persisted_lru_lsm == 0,
         "a failed attempt installs nothing"
+    );
+}
+
+/// A processor whose lifecycle checkpoint names no branch, because every branch it had was removed,
+/// restores at once: the attempt has nothing to build or wait for, installs nothing, and takes the
+/// lifecycle's revision so that the task does not write the same lifecycle again.
+#[nervix_primitives::test]
+async fn a_lifecycle_that_names_no_branch_restores_at_once_and_installs_nothing() {
+    let fixture = OpenWindowFixture::new();
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let (runtime, domain) = fixture.runtime(Executor::default(), &directory);
+    fixture.store_checkpoints(&runtime, &domain, 4, &[]).await;
+    let context = ProcessorRuntimeContext::new(runtime.clone(), domain.clone());
+    let mut instances = ProcessorBranches::new();
+    let mut last_persisted_lru_lsm = 0;
+    let mut restore = PendingProcessorBranchRestore::new(
+        Vec::new(),
+        nervix_models::DataPlaneSettings::default(),
+        nervix_connector::RetryBackoffSettings::default(),
+    );
+
+    let mut attempt = restore.begin(&context, &fixture.template);
+    let progress = attempt.run_until_waiting().await;
+    assert!(
+        matches!(progress, RestoreProgress::Built),
+        "a lifecycle that names no branch has nothing to build"
+    );
+    restore
+        .finish(
+            attempt,
+            &context,
+            &fixture.template,
+            &mut instances,
+            &mut last_persisted_lru_lsm,
+        )
+        .expect("a lifecycle that names no branch restores");
+
+    assert!(instances.states().is_empty(), "no branch is installed");
+    assert_eq!(instances.version(), 4);
+    assert_eq!(
+        last_persisted_lru_lsm, 4,
+        "the task does not write the lifecycle it restored again"
     );
 }
 

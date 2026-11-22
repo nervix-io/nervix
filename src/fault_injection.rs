@@ -82,6 +82,7 @@ mod model_publication;
 mod orphaned_domain_pause;
 mod ownership_handoff_reads;
 mod pause;
+mod processor_branch_restore;
 mod processor_flush;
 mod relay_memory;
 mod relay_partition_fanout;
