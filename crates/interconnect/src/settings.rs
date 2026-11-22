@@ -186,6 +186,8 @@ impl Default for PeerReceiveSettings {
 }
 
 /// The largest flow-control window HTTP/2 can advertise, for one stream or a whole connection.
+///
+/// The public gRPC listener validates its windows against the same RFC bound.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -193,7 +195,7 @@ impl Default for PeerReceiveSettings {
         reason = "RFC 9113 caps every flow-control window at 2^31-1 octets"
     )
 )]
-const MAX_HTTP2_WINDOW_BYTES: u64 = 2_147_483_647;
+pub const MAX_HTTP2_WINDOW_BYTES: u64 = 2_147_483_647;
 
 /// Why a bulk receive window cannot be advertised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]

@@ -880,7 +880,7 @@ zeromq = "0.4"
 
 [patch.crates-io]
 # Keep native gRPC accept/channel machinery while supplying explicit TLS configuration.
-tonic = { git = "https://github.com/nervix-io/grpc-rust.git", rev = "90b5289e691815f26ec6a89fed89c8c370674aaa" }
+tonic = { git = "https://github.com/nervix-io/grpc-rust.git", rev = "8d9d11c4ee960fa56ae00fb3086e621eea199076" }
 # Capture a live immutable algorithm policy once per connection, including SDK reconnects.
 rustls = { git = "https://github.com/nervix-io/rustls.git", rev = "3a454c70e431a25b88cd117e8f7458fb74f7e0b3" }
 # The alpha.33 heartbeat worker stopped waiting after one heartbeat interval, discarding follower

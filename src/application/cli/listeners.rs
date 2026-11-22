@@ -26,6 +26,8 @@ pub struct ListenerArgs {
     pub max_connections: Option<u32>,
     #[arg(id = HeaderBytes::NAME, long = HeaderBytes::NAME, env = "NERVIX_LISTENER_HEADER_BYTES", help = "Local listener header bytes; omitted values use the declared default")]
     pub header_bytes: Option<HumanBytes>,
+    #[arg(id = MaxHeaders::NAME, long = MaxHeaders::NAME, env = "NERVIX_LISTENER_MAX_HEADERS", help = "Headers in one HTTP/1 request head; defaults to 100, or the three-byte header lines listener-header-bytes holds when fewer")]
+    pub max_headers: Option<u32>,
     #[arg(id = BufferBytes::NAME, long = BufferBytes::NAME, env = "NERVIX_LISTENER_BUFFER_BYTES", help = "Local listener buffer bytes; omitted values use the declared default")]
     pub buffer_bytes: Option<HumanBytes>,
     #[arg(id = HeaderTimeout::NAME, long = HeaderTimeout::NAME, env = "NERVIX_LISTENER_HEADER_TIMEOUT", help = "Local listener header timeout; omitted values use the declared default")]
@@ -50,6 +52,8 @@ pub struct ListenerArgs {
     pub websocket_message_bytes: Option<HumanBytes>,
     #[arg(id = WebsocketFrameBytes::NAME, long = WebsocketFrameBytes::NAME, env = "NERVIX_WEBSOCKET_FRAME_BYTES", help = "Local websocket frame bytes; omitted values use the declared default")]
     pub websocket_frame_bytes: Option<HumanBytes>,
+    #[arg(id = WebsocketWriteBufferBytes::NAME, long = WebsocketWriteBufferBytes::NAME, env = "NERVIX_WEBSOCKET_WRITE_BUFFER_BYTES", help = "Outgoing bytes an endpoint or console WebSocket collects before writing; defaults to 128KiB")]
+    pub websocket_write_buffer_bytes: Option<HumanBytes>,
     #[arg(id = GrpcConcurrency::NAME, long = GrpcConcurrency::NAME, env = "NERVIX_GRPC_CONCURRENCY", help = "Local grpc concurrency; omitted values use the declared default")]
     pub grpc_concurrency: Option<u32>,
     #[arg(id = GrpcHeaderBytes::NAME, long = GrpcHeaderBytes::NAME, env = "NERVIX_GRPC_HEADER_BYTES", help = "HTTP/2 header list byte capacity; defaults to 16KiB")]
@@ -58,6 +62,16 @@ pub struct ListenerArgs {
     pub grpc_request_timeout: Option<HumanDuration>,
     #[arg(id = GrpcMaxStreams::NAME, long = GrpcMaxStreams::NAME, env = "NERVIX_GRPC_MAX_STREAMS", help = "Local grpc max streams; omitted values use the declared default")]
     pub grpc_max_streams: Option<u32>,
+    #[arg(id = GrpcStreamWindowBytes::NAME, long = GrpcStreamWindowBytes::NAME, env = "NERVIX_GRPC_STREAM_WINDOW_BYTES", help = "HTTP/2 receive window of one gRPC stream; defaults to 1MiB")]
+    pub grpc_stream_window_bytes: Option<HumanBytes>,
+    #[arg(id = GrpcConnectionWindowBytes::NAME, long = GrpcConnectionWindowBytes::NAME, env = "NERVIX_GRPC_CONNECTION_WINDOW_BYTES", help = "HTTP/2 receive window of one gRPC connection, at least 65535 bytes; defaults to 1MiB")]
+    pub grpc_connection_window_bytes: Option<HumanBytes>,
+    #[arg(id = GrpcSendBufferBytes::NAME, long = GrpcSendBufferBytes::NAME, env = "NERVIX_GRPC_SEND_BUFFER_BYTES", help = "Response bytes one gRPC stream queues before it waits; defaults to 400KiB")]
+    pub grpc_send_buffer_bytes: Option<HumanBytes>,
+    #[arg(id = GrpcMaxPendingResetStreams::NAME, long = GrpcMaxPendingResetStreams::NAME, env = "NERVIX_GRPC_MAX_PENDING_RESET_STREAMS", help = "Client-reset gRPC streams that may wait unaccepted before the connection ends; defaults to 20")]
+    pub grpc_max_pending_reset_streams: Option<u32>,
+    #[arg(id = GrpcMaxErrorResetStreams::NAME, long = GrpcMaxErrorResetStreams::NAME, env = "NERVIX_GRPC_MAX_ERROR_RESET_STREAMS", help = "gRPC streams reset for a client's protocol errors before the connection ends; defaults to 1024")]
+    pub grpc_max_error_reset_streams: Option<u32>,
     #[arg(id = GrpcKeepaliveInterval::NAME, long = GrpcKeepaliveInterval::NAME, env = "NERVIX_GRPC_KEEPALIVE_INTERVAL", help = "Local grpc keepalive interval; omitted values use the declared default")]
     pub grpc_keepalive_interval: Option<HumanDuration>,
     #[arg(id = GrpcKeepaliveTimeout::NAME, long = GrpcKeepaliveTimeout::NAME, env = "NERVIX_GRPC_KEEPALIVE_TIMEOUT", help = "Local grpc keepalive timeout; omitted values use the declared default")]
@@ -74,6 +88,7 @@ impl ListenerArgs {
         ListenerSettings::resolve(ListenerOverrides {
             max_connections: self.max_connections,
             header_bytes: self.header_bytes.map(|v| v.0),
+            max_headers: self.max_headers,
             buffer_bytes: self.buffer_bytes.map(|v| v.0),
             header_timeout: self.header_timeout.map(|v| v.0),
             tls_timeout: self.tls_timeout.map(|v| v.0),
@@ -86,10 +101,16 @@ impl ListenerArgs {
             http_refusal_drain_timeout: self.http_refusal_drain_timeout.map(|v| v.0),
             websocket_message_bytes: self.websocket_message_bytes.map(|v| v.0),
             websocket_frame_bytes: self.websocket_frame_bytes.map(|v| v.0),
+            websocket_write_buffer_bytes: self.websocket_write_buffer_bytes.map(|v| v.0),
             grpc_header_bytes: self.grpc_header_bytes.map(|v| v.0),
             grpc_concurrency: self.grpc_concurrency,
             grpc_request_timeout: self.grpc_request_timeout.map(|v| v.0),
             grpc_max_streams: self.grpc_max_streams,
+            grpc_stream_window_bytes: self.grpc_stream_window_bytes.map(|v| v.0),
+            grpc_connection_window_bytes: self.grpc_connection_window_bytes.map(|v| v.0),
+            grpc_send_buffer_bytes: self.grpc_send_buffer_bytes.map(|v| v.0),
+            grpc_max_pending_reset_streams: self.grpc_max_pending_reset_streams,
+            grpc_max_error_reset_streams: self.grpc_max_error_reset_streams,
             grpc_keepalive_interval: self.grpc_keepalive_interval.map(|v| v.0),
             grpc_keepalive_timeout: self.grpc_keepalive_timeout.map(|v| v.0),
             tcp_keepalive_time: self.tcp_keepalive_time.map(|v| v.0),
@@ -101,6 +122,7 @@ impl ListenerArgs {
         Self {
             max_connections: Some(settings.max_connections()),
             header_bytes: Some(HumanBytes(settings.header_bytes())),
+            max_headers: Some(settings.max_headers()),
             buffer_bytes: Some(HumanBytes(settings.buffer_bytes())),
             header_timeout: Some(HumanDuration(settings.header_timeout())),
             tls_timeout: Some(HumanDuration(settings.tls_timeout())),
@@ -113,10 +135,16 @@ impl ListenerArgs {
             http_refusal_drain_timeout: Some(HumanDuration(settings.http_refusal_drain_timeout())),
             websocket_message_bytes: Some(HumanBytes(settings.websocket_message_bytes())),
             websocket_frame_bytes: Some(HumanBytes(settings.websocket_frame_bytes())),
+            websocket_write_buffer_bytes: Some(HumanBytes(settings.websocket_write_buffer_bytes())),
             grpc_header_bytes: Some(HumanBytes(settings.grpc_header_bytes())),
             grpc_concurrency: Some(settings.grpc_concurrency()),
             grpc_request_timeout: Some(HumanDuration(settings.grpc_request_timeout())),
             grpc_max_streams: Some(settings.grpc_max_streams()),
+            grpc_stream_window_bytes: Some(HumanBytes(settings.grpc_stream_window_bytes())),
+            grpc_connection_window_bytes: Some(HumanBytes(settings.grpc_connection_window_bytes())),
+            grpc_send_buffer_bytes: Some(HumanBytes(settings.grpc_send_buffer_bytes())),
+            grpc_max_pending_reset_streams: Some(settings.grpc_max_pending_reset_streams()),
+            grpc_max_error_reset_streams: Some(settings.grpc_max_error_reset_streams()),
             grpc_keepalive_interval: Some(HumanDuration(settings.grpc_keepalive_interval())),
             grpc_keepalive_timeout: Some(HumanDuration(settings.grpc_keepalive_timeout())),
             tcp_keepalive_time: Some(HumanDuration(settings.tcp_keepalive_time())),
@@ -127,6 +155,7 @@ impl ListenerArgs {
     pub(super) fn render(&self, command_line: &mut CommandLine) {
         command_line.optional(MaxConnections::NAME, self.max_connections);
         command_line.optional(HeaderBytes::NAME, self.header_bytes);
+        command_line.optional(MaxHeaders::NAME, self.max_headers);
         command_line.optional(BufferBytes::NAME, self.buffer_bytes);
         command_line.optional(HeaderTimeout::NAME, self.header_timeout);
         command_line.optional(TlsTimeout::NAME, self.tls_timeout);
@@ -142,10 +171,28 @@ impl ListenerArgs {
         );
         command_line.optional(WebsocketMessageBytes::NAME, self.websocket_message_bytes);
         command_line.optional(WebsocketFrameBytes::NAME, self.websocket_frame_bytes);
+        command_line.optional(
+            WebsocketWriteBufferBytes::NAME,
+            self.websocket_write_buffer_bytes,
+        );
         command_line.optional(GrpcHeaderBytes::NAME, self.grpc_header_bytes);
         command_line.optional(GrpcConcurrency::NAME, self.grpc_concurrency);
         command_line.optional(GrpcRequestTimeout::NAME, self.grpc_request_timeout);
         command_line.optional(GrpcMaxStreams::NAME, self.grpc_max_streams);
+        command_line.optional(GrpcStreamWindowBytes::NAME, self.grpc_stream_window_bytes);
+        command_line.optional(
+            GrpcConnectionWindowBytes::NAME,
+            self.grpc_connection_window_bytes,
+        );
+        command_line.optional(GrpcSendBufferBytes::NAME, self.grpc_send_buffer_bytes);
+        command_line.optional(
+            GrpcMaxPendingResetStreams::NAME,
+            self.grpc_max_pending_reset_streams,
+        );
+        command_line.optional(
+            GrpcMaxErrorResetStreams::NAME,
+            self.grpc_max_error_reset_streams,
+        );
         command_line.optional(GrpcKeepaliveInterval::NAME, self.grpc_keepalive_interval);
         command_line.optional(GrpcKeepaliveTimeout::NAME, self.grpc_keepalive_timeout);
         command_line.optional(TcpKeepaliveTime::NAME, self.tcp_keepalive_time);

@@ -242,6 +242,43 @@ Feature: Declared public listener bounds
       | 1            | observability |
       | 3            | observability |
 
+  Scenario Outline: Header lines beyond the declared count are refused on <cluster_size> nodes
+    Given node-1 starts with listener-max-headers = 8
+    And a <cluster_size> node nervix cluster is started
+    Then the <listener> listener on node "node-1" admits a request head with 8 headers
+    And the <listener> listener on node "node-1" refuses a request head with 9 headers with status 431
+
+    Examples:
+      | cluster_size | listener      |
+      | 1            | http          |
+      | 3            | http          |
+      | 1            | console       |
+      | 3            | console       |
+      | 1            | observability |
+      | 3            | observability |
+
+  Scenario Outline: The default header count admits 100 header lines on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    Then the http listener on node "node-1" admits a request head with 100 headers
+    And the http listener on node "node-1" refuses a request head with 101 headers with status 431
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A gRPC client sends no more than the declared <window> window ahead on <cluster_size> nodes
+    Given node-1 starts with <setting> = <declared>
+    And a <cluster_size> node nervix cluster is started
+    Then a gRPC client of node "node-1" may send <granted> bytes ahead on a new stream
+
+    Examples:
+      | cluster_size | window     | setting                      | declared | granted |
+      | 1            | stream     | grpc-stream-window-bytes     | 96KiB    | 98304   |
+      | 3            | stream     | grpc-stream-window-bytes     | 96KiB    | 98304   |
+      | 1            | connection | grpc-connection-window-bytes | 80KiB    | 81920   |
+      | 3            | connection | grpc-connection-window-bytes | 80KiB    | 81920   |
+
   Scenario Outline: A stalled gRPC TLS handshake ends at its declared deadline on <cluster_size> nodes
     Given client grpc transport is configured with mode "https"
     And node-1 starts with listener-tls-timeout = 500ms
@@ -257,11 +294,18 @@ Feature: Declared public listener bounds
     Given node-1 starts with listener-max-connections = 17
     And node-1 starts with listener-header-timeout = 2s
     And node-1 starts with listener-accept-retry-delay = 500ms
+    And node-1 starts with listener-max-headers = 64
     And node-1 starts with http-body-bytes = 1MiB
     And node-1 starts with http-body-copy-bytes = 32KiB
     And node-1 starts with http-refusal-drain-timeout = 750ms
+    And node-1 starts with websocket-write-buffer-bytes = 64KiB
     And node-1 starts with grpc-concurrency = 7
     And node-1 starts with grpc-max-streams = 9
+    And node-1 starts with grpc-stream-window-bytes = 2MiB
+    And node-1 starts with grpc-connection-window-bytes = 4MiB
+    And node-1 starts with grpc-send-buffer-bytes = 256KiB
+    And node-1 starts with grpc-max-pending-reset-streams = 30
+    And node-1 starts with grpc-max-error-reset-streams = 512
     And a <cluster_size> node nervix cluster is started
     Then node "node-<cluster_size>" eventually describes committed capabilities for node "node-1"
     When these Plexus commands are executed through the client on node "node-<cluster_size>"
@@ -299,6 +343,34 @@ Feature: Declared public listener bounds
     And the last command output contains
       """
       grpc_max_streams: 9
+      """
+    And the last command output contains
+      """
+      max_headers: 64
+      """
+    And the last command output contains
+      """
+      websocket_write_buffer_bytes: 65536
+      """
+    And the last command output contains
+      """
+      grpc_stream_window_bytes: 2097152
+      """
+    And the last command output contains
+      """
+      grpc_connection_window_bytes: 4194304
+      """
+    And the last command output contains
+      """
+      grpc_send_buffer_bytes: 262144
+      """
+    And the last command output contains
+      """
+      grpc_max_pending_reset_streams: 30
+      """
+    And the last command output contains
+      """
+      grpc_max_error_reset_streams: 512
       """
 
     Examples:
