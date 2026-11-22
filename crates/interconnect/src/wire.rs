@@ -14,7 +14,7 @@
     )
 )]
 
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -25,6 +25,7 @@ use nervix_execution::{
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
 };
+use nervix_primitives::time::Instant;
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -347,6 +348,83 @@ where
 {
     let buffer = encode_rkyv_buffer(executor, class, cpu, limit, value).await?;
     Ok(ChargedBytes::from_buffer(buffer))
+}
+
+/// What became of an answer [`encode_answer`] was asked to encode.
+pub(crate) enum AnswerEncoding {
+    /// The answer is encoded and ready to send.
+    Encoded(ChargedBytes),
+    /// The caller ended the exchange while the encoding waited for a place or for room. No answer
+    /// can reach it any more, and the encoding gave back its place in line and its charge.
+    Ended,
+}
+
+/// Serialize the answer to a request whose handler already ran, as [`encode_rkyv`] does.
+///
+/// The answer carries work the handler already did, so a full class holds the encoding back until
+/// a place or room frees rather than throwing that work away. `ended` resolves once the caller ends
+/// the exchange, by resetting its stream or closing its connection, and that ends the wait: the
+/// encoding is dropped with its place and its charge, and [`AnswerEncoding::Ended`] says nobody is
+/// left to answer. A failure `ended` reports instead is returned as it is.
+pub(crate) async fn encode_answer<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    limit: u64,
+    value: T,
+    ended: impl Future<Output = Result<(), Report<TransportError>>>,
+) -> Result<AnswerEncoding, Report<TransportError>>
+where
+    T: Send + 'static + for<'a, 'b> Serialize<MessageSerializer<'a, 'b>>,
+{
+    let encoding = encode_rkyv(executor, class, cpu, limit, value);
+    nervix_primitives::select! {
+        encoded = encoding => Ok(AnswerEncoding::Encoded(encoded?)),
+        ended = ended => {
+            ended?;
+            Ok(AnswerEncoding::Ended)
+        }
+    }
+}
+
+/// When the request whose answer [`decode_answer`] decodes stops waiting for it.
+pub(crate) struct AnswerDeadline<'a> {
+    /// The node that answered.
+    pub(crate) peer: &'a ClusterNodeName,
+    /// The request's own deadline.
+    pub(crate) at: Instant,
+    /// The whole time the request was given, which a timeout reports.
+    pub(crate) timeout: Duration,
+}
+
+/// Validate and deserialize the answer to a request this node sent, within `decoding`, the room it
+/// was read with (see [`decode_rkyv_within`]).
+///
+/// The answer carries work its peer already did, so a class whose queue is full holds the decoding
+/// back until a place frees rather than throwing that work away, but no longer than the request's
+/// own deadline. Once the deadline passes the decoding is dropped with its place and its charge,
+/// and the request fails with [`TransportError::RequestTimeout`], as it would had the answer
+/// arrived late.
+pub(crate) async fn decode_answer<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    bytes: ChargedBytes,
+    decoding: Reservation,
+    deadline: AnswerDeadline<'_>,
+) -> Result<Decoded<T>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    let decoding = decode_rkyv_within(executor, cpu, bytes, decoding);
+    match nervix_primitives::time::timeout_at(deadline.at, decoding).await {
+        Ok(decoded) => decoded,
+        Err(_) => Err(Report::new(TransportError::RequestTimeout {
+            peer: deadline.peer.clone(),
+            timeout: deadline.timeout,
+        })),
+    }
 }
 
 /// Serialize a nested typed-request value while retaining its charge beside the resulting Vec.

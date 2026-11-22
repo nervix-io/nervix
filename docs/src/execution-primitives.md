@@ -508,6 +508,9 @@ order. The caller's own limit bounds the wait (a statement's deadline, a request
 source's quiesce, shutdown), and dropping the future gives the place up. A wait ends in a refusal
 only once the executor admits no more work. VM execution still owns its class and charge decisions.
 
+[Traffic And Resource Isolation](./interconnect.md#traffic-and-resource-isolation) says, for each
+interconnect protocol, which charges its frames take and what ends their waits.
+
 An owner can acquire a charged CPU queue place before transferring mutable state into a job
 (`Executor::prepare_cpu`). Every inferencer does this before moving its branch's native session into the job that runs
 its model on the extension workers; the job hands the session back with its outcome. Dropping the

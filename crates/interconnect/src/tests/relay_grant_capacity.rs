@@ -300,3 +300,87 @@ async fn a_grant_request_larger_than_the_free_relay_room_waits_and_is_granted_on
     transport_a.shutdown().await;
     transport_b.shutdown().await;
 }
+
+/// A grant whose receiver's relay budget stays full for as long as its sender lets the receiver hold
+/// it, half the delivery's dispatch timeout, is answered with the capacity refusal the delivery is
+/// held back on, which both ends count, and the same delivery is granted once room returns.
+#[nervix_primitives::test]
+async fn a_grant_still_without_room_when_its_wait_ends_is_refused_for_capacity_and_granted_later() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_a,
+        node_b,
+        executor_b,
+        mut incoming_b,
+        ..
+    } = connected_transports().await;
+    let payload = RelayPayload {
+        // The receiver may hold this delivery's grant for 200 milliseconds.
+        ack_timing: nervix_models::RemoteAckTiming {
+            remote_ack_dispatch_timeout: Duration::from_millis(400),
+            ..nervix_models::RemoteAckTiming::default()
+        },
+        decoded_bytes: 0,
+        delivery: RelayDelivery {
+            channel_incarnation: [7; 16],
+            sequence: 0,
+        },
+        kind: RelayPayloadKind::Routed,
+        domain: DomainName::parse("test").expect("test domain should be valid"),
+        relay: RelayName::parse("relay").expect("test relay should be valid"),
+        unit: nervix_models::Unit::SINGLE,
+        key: nervix_models::RemoteBranchKey::Unbranched,
+        batch_ipc: Executor::default()
+            .try_charge_owned(MemoryClass::Relay, vec![1])
+            .expect("the test relay body should fit its budget"),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: Some(registration(1, &node_a)),
+    };
+    let relay_memory = executor_b.memory(MemoryClass::Relay);
+    let room = relay_memory
+        .capacity_bytes
+        .checked_sub(relay_memory.reserved_bytes)
+        .expect("a budget never reserves more than its capacity");
+    let occupied = executor_b
+        .try_reserve(MemoryClass::Relay, room)
+        .expect("an idle receiver's relay budget takes all of its room");
+    let refused = |snapshot: TransportSnapshot, direction: ConnectionDirection| {
+        snapshot.counters.relay_grant_refusals[direction.index()][RelayGrantRefusal::Memory.index()]
+    };
+
+    let error = transport_a
+        .send(&node_b, Envelope::RelayPayload(payload.clone()))
+        .await
+        .expect_err("a grant still without room when its wait ends is answered for capacity");
+    assert!(
+        matches!(
+            error.current_context(),
+            TransportError::RelayGrantRefused(RelayGrantRefusal::Memory)
+        ),
+        "a grant held past its wait is a capacity refusal, not {error:?}"
+    );
+    assert!(RelayGrantRefusal::Memory.is_capacity());
+    assert_eq!(
+        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
+        1
+    );
+    assert_eq!(
+        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
+        1
+    );
+
+    drop(occupied);
+    transport_a
+        .send(&node_b, Envelope::RelayPayload(payload))
+        .await
+        .expect("the same delivery is granted once the receiver has room");
+    let received = timeout(Duration::from_secs(2), incoming_b.recv())
+        .await
+        .expect("the granted relay should enter the application queue")
+        .expect("the application queue should remain open");
+    assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}

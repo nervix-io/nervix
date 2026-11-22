@@ -122,9 +122,10 @@ them, their watches fill the budget and the owner holds further deliveries back 
 rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
 fast acknowledgements return to the sending node, not by the budget's size, and an ingestor that sends
 there waits instead of failing. A grant reserves the largest decoded batch and the scratch room
-whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
-is refused for that room, and a sender whose own budget has no room to store the acknowledgements
-of the rows it sends, hold their delivery back and wait as well; see
+whatever the body's size, so the budget grants about three deliveries at once. A grant waits for
+that room for half its delivery's dispatch timeout and is then answered with a capacity refusal; a
+sender so refused, and a sender whose own budget has no room to store the acknowledgements of the
+rows it sends, hold their delivery back and wait as well; see
 [Held Deliveries](./interconnect.md#held-deliveries). The derived ceilings follow node memory; explicit settings retain the operator's exact bounds.
 Decoded materialized snapshots use the independent `state_read` pool; optional source retention
 uses `state_read_cache`. Each defaults to the relay pool's capacity and has its own override. Retaining a complete generation

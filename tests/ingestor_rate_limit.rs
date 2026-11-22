@@ -2,8 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The instant a rate-limit scenario records before its ingestor can admit a payload,
-//!   the arrival of each payload the scenario then receives, and the lower bounds an allowance
-//!   puts on those arrivals.
+//!   the arrival of each payload the scenario then receives, the lower bounds an allowance puts
+//!   on those arrivals, and the Kafka consumer group membership an ingestor keeps meanwhile.
 //! - **Depends on.** The scenario's active subscription and its docstring fragment sets.
 //! - **Must not know.** The limiter, its clock, or how a host holds its source back.
 //!
@@ -24,6 +24,19 @@ async fn kafka_group_keeps_its_member(world: &mut ScenarioWorld, group: String, 
         .assert_kafka_consumer_group_keeps_member(&group, duration)
         .await
         .assured("rate limiting keeps the same Kafka consumer group member stable");
+}
+
+#[then(
+    expr = "the stable member of Kafka consumer group {string} is saved as placeholder {string}"
+)]
+async fn save_kafka_group_member(world: &mut ScenarioWorld, group: String, placeholder: String) {
+    let group = expand_placeholders(world, &group);
+    let member = world
+        .cluster()
+        .kafka_consumer_group_stable_member(&group)
+        .await
+        .assured("the scenario's ingestor holds the group's only stable membership");
+    world.placeholders.insert(placeholder, member);
 }
 
 /// What a rate-limit scenario observed: when it recorded its start, if it bounds arrivals, and

@@ -56,7 +56,7 @@ use nervix_primitives::{
         mpsc, watch,
     },
     task::TaskTracker,
-    time::{Instant, sleep, sleep_until, timeout},
+    time::{Instant, sleep, sleep_until, timeout, timeout_at},
 };
 use strum::EnumCount as _;
 use tracing::{debug, warn};
@@ -82,8 +82,9 @@ use crate::{
     peer_resolver::PeerResolver,
     request::RequestAdmission,
     wire::{
-        ConnectionAccepted, ConnectionAnswer, ConnectionHello, RelayAdmissionRequest,
-        RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
+        AnswerDeadline, AnswerEncoding, ConnectionAccepted, ConnectionAnswer, ConnectionHello,
+        RelayAdmissionRequest, RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest,
+        RelayGrantResponse,
     },
 };
 
@@ -106,9 +107,9 @@ pub(crate) mod stream_slots;
 mod targets;
 
 use body::{
-    ReceivedBody, declared_length, read_body, read_body_into, read_body_to_decode,
-    read_error_response, send_body, send_decode_refusal, send_response, send_static_error,
-    until_reset,
+    ReceivedBody, declared_length, exchange_reset, read_body, read_body_into,
+    read_body_to_decode, read_error_response, send_body, send_decode_refusal, send_response,
+    send_static_error, until_reset,
 };
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
@@ -170,6 +171,16 @@ const ACK_PATH: &str = "/v1/ack";
     )
 )]
 const RELAY_GRANT_PATH: &str = "/v1/relay-grants";
+/// How long, in nanoseconds, a grant's receiver may hold it back for room before it answers the
+/// capacity refusal its sender holds the delivery back on.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "this header names a field of the current interconnect wire contract"
+    )
+)]
+const GRANT_WAIT_HEADER: &str = "x-nervix-grant-wait-nanos";
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -1734,6 +1745,10 @@ impl TransportState {
                 )
                 .await?;
             drop(binding_window);
+            // The answer carries the binding the accepting node already validated and registered,
+            // so a full class holds its decoding back rather than setting the connection up again.
+            // It was read with the room its decoding takes, and the setup deadline around this
+            // exchange bounds the wait.
             let answer = wire::decode_rkyv_within::<ConnectionAnswer>(
                 &self.executor,
                 CpuClass::Control,
@@ -1973,14 +1988,25 @@ impl TransportState {
                             &ack.outcome,
                         );
                     }
-                    let bytes = wire::encode_rkyv(
+                    // An ack carries the outcome of a delivery this node already resolved, which
+                    // nothing presents again if it is lost. A full class therefore holds the
+                    // encoding back, within the send's own deadline.
+                    let encoding = wire::encode_rkyv(
                         &self.executor,
                         class.memory_class(),
                         CpuClass::Data,
                         class.control_body_limit(&self.executor),
                         ack,
-                    )
-                    .await?;
+                    );
+                    let bytes = match timeout_at(deadline, encoding).await {
+                        Ok(bytes) => bytes?,
+                        Err(_) => {
+                            return Err(Report::new(TransportError::RequestTimeout {
+                                peer: node_id.clone(),
+                                timeout: timeout_duration,
+                            }));
+                        }
+                    };
                     lease
                         .request_raw(
                             self,
@@ -2226,7 +2252,7 @@ impl TransportState {
         &self,
         connection: &mut server::Connection<T, Bytes>,
         request: Request<RecvStream>,
-        respond: server::SendResponse<Bytes>,
+        mut respond: server::SendResponse<Bytes>,
         binding: InboundBinding,
     ) -> Result<BoundInboundConnection, Report<TransportError>>
     where
@@ -2305,14 +2331,27 @@ impl TransportState {
                 node_id: self.node_id.clone(),
                 prerequisites: local_prerequisites,
             });
-            let accepted = wire::encode_rkyv(
+            // The answer carries the binding this node already validated and registered, and
+            // losing it would make the dialing node set up its connection again from the TLS
+            // handshake. A full control queue therefore holds it back, and the dialing node bounds
+            // the wait: at its setup deadline it closes the connection, which ends this binding.
+            let accepted = wire::encode_answer(
                 &self.executor,
                 MemoryClass::Management,
                 CpuClass::Control,
                 self.executor.limits().management_event_bytes.as_u64(),
                 accepted,
+                exchange_reset(&mut respond),
             )
             .await?;
+            let accepted = match accepted {
+                AnswerEncoding::Encoded(accepted) => accepted,
+                AnswerEncoding::Ended => {
+                    return Err(Report::new(TransportError::Closed(NodeEndpoint::from(
+                        peer_addr,
+                    ))));
+                }
+            };
             let relay_owner =
                 self.bind_relay_owner(&hello.node_id, hello.process_epoch, binding_sequence)?;
             send_response(
@@ -2723,19 +2762,18 @@ impl TransportState {
             // ran, so a full class holds the answer back rather than throwing the work away, and
             // the caller's reset ends the wait.
             drop(payload_reservation);
-            let encoding = wire::encode_rkyv(
+            let encoding = wire::encode_answer(
                 &self.executor,
                 peer.class.memory_class(),
                 peer.class.cpu_class(),
                 peer.class.control_body_limit(&self.executor),
                 ControlEnvelope::Response(response),
-            );
-            let response = nervix_primitives::select! {
-                response = encoding => response?,
-                reset = poll_fn(|context| respond.poll_reset(context)) => {
-                    reset.map_err(TransportError::from)?;
-                    return Ok(());
-                }
+                exchange_reset(&mut respond),
+            )
+            .await?;
+            let response = match encoding {
+                AnswerEncoding::Encoded(response) => response,
+                AnswerEncoding::Ended => return Ok(()),
             };
             send_response(
                 respond,

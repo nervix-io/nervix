@@ -26,6 +26,7 @@
 use arrow_array::{
     ArrayRef, Int64Array, StringArray, UInt32Array, cast::AsArray as _, types::Int64Type,
 };
+use futures_util::FutureExt as _;
 use nervix_interconnect::ProcessorStateRunTransfer;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, FieldName, ModelKind, ModelName, NodeRef,
@@ -759,4 +760,182 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
             "{case} is a framing violation, found {error:?}"
         );
     }
+}
+
+/// An executor whose bulk class has one worker and one place in its wait queue.
+fn one_place_bulk_executor() -> Executor {
+    use std::num::NonZeroUsize;
+
+    use nervix_execution::{ExecutionConfig, WorkerCounts};
+
+    let workers = WorkerCounts::default();
+    Executor::new(ExecutionConfig {
+        workers: WorkerCounts {
+            bulk_cpu: NonZeroUsize::MIN,
+            pending_jobs: nervix_execution::PendingJobCounts {
+                bulk_cpu: NonZeroUsize::MIN,
+                ..workers.pending_jobs
+            },
+            ..workers
+        },
+        ..ExecutionConfig::default()
+    })
+    .assured("the test changes only the bulk class's worker and queue counts")
+}
+
+/// The bulk class of a [`one_place_bulk_executor`] held full: its worker runs a job that waits for
+/// the test, and its one place is taken by a job waiting behind it, so a job that refuses on a full
+/// class is refused and one that waits for a place waits until the hold is released.
+struct FullBulkClass {
+    release: nervix_primitives::sync::oneshot::Sender<()>,
+    occupying: nervix_primitives::task::JoinHandle<()>,
+    queued: nervix_primitives::task::JoinHandle<()>,
+}
+
+impl FullBulkClass {
+    async fn fill(executor: &Executor) -> Self {
+        let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+        let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
+        let charge = executor
+            .try_reserve(MemoryClass::Bulk, 1)
+            .assured("the untouched bulk class has room for one byte");
+        let occupier = executor.clone();
+        let occupying = nervix_primitives::task::spawn(async move {
+            occupier
+                .run_cpu(
+                    nervix_execution::CpuClass::Bulk,
+                    charge,
+                    move |_charge, _cancellation| {
+                        started
+                            .send(())
+                            .assured("the test awaits the occupying job");
+                        released
+                            .blocking_recv()
+                            .assured("the test releases the occupying job before it exits");
+                    },
+                )
+                .await
+                .assured("the occupying job runs");
+        });
+        has_started
+            .await
+            .assured("the occupying job reports once it holds the worker");
+        let charge = executor
+            .try_reserve(MemoryClass::Bulk, 1)
+            .assured("the bulk class has room for one more byte");
+        let queuer = executor.clone();
+        let queued = nervix_primitives::task::spawn(async move {
+            queuer
+                .run_cpu(
+                    nervix_execution::CpuClass::Bulk,
+                    charge,
+                    |_charge, _cancellation| (),
+                )
+                .await
+                .assured("the queued job runs once the worker frees");
+        });
+        while executor
+            .snapshot()
+            .cpu_class(nervix_execution::CpuClass::Bulk)
+            .pending
+            == 0
+        {
+            nervix_primitives::task::yield_now().await;
+        }
+        Self {
+            release,
+            occupying,
+            queued,
+        }
+    }
+
+    async fn release(self) {
+        self.release
+            .send(())
+            .assured("the occupying job waits for the test to release it");
+        self.occupying
+            .await
+            .assured("the occupying job's task is joined");
+        self.queued.await.assured("the queued job's task is joined");
+    }
+}
+
+/// A page is the owner's answer to a read it has already served, so an owner whose bulk class is
+/// full holds the encoding of the page's rows, their identity and the reply back instead of
+/// refusing the read, and frames the page once a place frees.
+#[nervix_primitives::test]
+async fn an_owner_frames_a_page_once_its_full_bulk_class_frees_instead_of_refusing_it() {
+    let executor = one_place_bulk_executor();
+    let full = FullBulkClass::fill(&executor).await;
+    let mut framing = std::pin::pin!(stream_processor_page(
+        &executor,
+        Ok((
+            returning_page(3, declared_fields(), None),
+            vec![ProcessorPageSection {
+                batch: Some(held_rows(&declared_fields(), &[1, 2, 3])),
+            }],
+        )),
+        u64::MAX,
+    ));
+    assert!(
+        framing.as_mut().now_or_never().is_none(),
+        "a full bulk class holds the page back"
+    );
+    full.release().await;
+    let framed = framing.await;
+    assert!(
+        framed.is_ok(),
+        "the page is framed once a place frees: {:?}",
+        framed.err()
+    );
+}
+
+/// A received page carries rows its owner already read, so a coordinator whose bulk class is full
+/// holds the decoding of its reply, the check of its body and the decoding of its rows back
+/// instead of refusing them, and presents the page once a place frees.
+#[nervix_primitives::test]
+async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_instead_of_refusing_it()
+ {
+    let owner = Executor::default();
+    let (identity, body) = owner_body(&owner, held_rows(&declared_fields(), &[1, 2, 3])).await;
+    let stream = sent_page(
+        &owner,
+        Ok(returning_page(3, declared_fields(), Some(identity))),
+        &[&body[..]],
+    )
+    .await;
+    let coordinator = one_place_bulk_executor();
+    let full = FullBulkClass::fill(&coordinator).await;
+    let request = read(10);
+    let expected = expected_sections();
+    let mut decoding = std::pin::pin!(ReceivedProcessorPage::decode(
+        &coordinator,
+        &stream,
+        descriptor_room(&coordinator, &stream),
+        &request,
+        &expected,
+    ));
+    assert!(
+        decoding.as_mut().now_or_never().is_none(),
+        "a full bulk class holds the received page back"
+    );
+    full.release().await;
+    let received = decoding
+        .await
+        .assured("the page is decoded once a place frees");
+    let Ok(page) = received else {
+        panic!("an owner that returned rows did not refuse the read");
+    };
+    let [section] = page.sections.as_slice() else {
+        panic!("a reorderer page carries its one held-row section");
+    };
+    let rows = section
+        .batch
+        .as_ref()
+        .assured("a section that returned rows carries them");
+    assert_eq!(
+        rows.column(1).as_primitive::<Int64Type>().values().to_vec(),
+        vec![1, 2, 3],
+        "the rows are the body's rows in the order the owner returned them"
+    );
 }

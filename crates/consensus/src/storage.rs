@@ -103,8 +103,6 @@ const KEYSPACE_SNAPSHOT: &str =
     "raft_parametrizer_endpoint_pause_domain_resource_user_labels_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
-/// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
-const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
 /// The budget one storage operation is charged against. Storage writes votes and metadata as
 /// management work, log entries and normalized state as commands, and snapshot sections as bulk
@@ -125,14 +123,11 @@ impl StorageCharge {
         }
     }
 
-    /// The working memory one operation of this kind reserves.
+    /// The working memory one operation of this kind reserves. A management operation reserves
+    /// the working set the executor validated its management budget against.
     fn working_bytes(self, executor: &Executor) -> io::Result<u64> {
         let bytes = match self {
-            Self::Management => executor
-                .limits()
-                .management_event_bytes
-                .as_u64()
-                .checked_mul(STORAGE_RESERVATION_MULTIPLIER),
+            Self::Management => executor.limits().management_storage_working_bytes(),
             Self::Bulk => executor.limits().snapshot_section_working_bytes(),
             Self::Commands => executor.limits().command_state_storage_working_bytes(),
         };

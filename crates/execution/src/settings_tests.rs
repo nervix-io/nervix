@@ -12,9 +12,13 @@
 
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
+use nervix_models::SettingDefinition as _;
 use ubyte::ByteUnit;
 
-use crate::{ExecutionConfigError, ExecutionOverrides, ExecutionSettings, Executor, MemoryClass};
+use crate::{
+    ExecutionConfigError, ExecutionOverrides, ExecutionSettings, Executor, ManagementMemory,
+    MemoryClass,
+};
 
 fn resolve(overrides: ExecutionOverrides, cpus: u64) -> ExecutionSettings {
     ExecutionSettings::resolve(
@@ -239,6 +243,68 @@ fn unknown_capacity_has_explicit_conservative_defaults_without_a_measured_claim(
     assert_eq!(config.workers.filesystem_storage.get(), 2);
     assert_eq!(config.budgets.total(), Some(ByteUnit::Mebibyte(2851)));
     assert_eq!(config.limits.relay_encoded_bytes, ByteUnit::Mebibyte(32));
+}
+
+/// An explicit management budget that holds one management event but not the working set a
+/// consensus vote or metadata write reserves is refused while settings resolve, before any store
+/// opens, naming the budget and the working set it cannot hold.
+#[test]
+fn an_explicit_management_budget_below_one_consensus_vote_is_refused() {
+    let error = ExecutionSettings::resolve(
+        ExecutionOverrides {
+            management_memory_bytes: Some(ByteUnit::Kibibyte(128)),
+            ..Default::default()
+        },
+        NonZeroU64::new(8),
+        NonZeroU64::new(ByteUnit::Gibibyte(1).as_u64()),
+    )
+    .expect_err("the consensus store could not write its vote");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::BudgetBelowOperation {
+            class: "management",
+            operation: "consensus vote or metadata write",
+            budget: ByteUnit::Kibibyte(128).as_u64(),
+            required: ByteUnit::Kibibyte(256).as_u64(),
+        }
+    );
+    assert_eq!(
+        error.current_context().to_string(),
+        "the management memory budget of 131072 bytes cannot hold its largest consensus vote or \
+         metadata write of 262144 bytes"
+    );
+    let floor = resolve(
+        ExecutionOverrides {
+            management_memory_bytes: Some(ByteUnit::Kibibyte(256)),
+            ..Default::default()
+        },
+        8,
+    );
+    assert_eq!(
+        *floor.management_memory_bytes.value(),
+        ByteUnit::Kibibyte(256)
+    );
+}
+
+/// A derived management budget never falls below one consensus vote's working set, so a node too
+/// small for its budgets is told its memory is short rather than that a budget it never set is.
+#[test]
+fn a_derived_management_budget_keeps_one_consensus_vote() {
+    let small = NonZeroU64::new(ByteUnit::Mebibyte(16).as_u64());
+    assert_eq!(
+        ManagementMemory::default_value(&small),
+        ByteUnit::Kibibyte(256)
+    );
+    let error =
+        ExecutionSettings::resolve(ExecutionOverrides::default(), NonZeroU64::new(8), small)
+            .expect_err("sixteen MiB cannot hold the derived budgets");
+    assert!(
+        matches!(
+            error.current_context(),
+            ExecutionConfigError::MemoryBudgetExceeded { .. }
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]

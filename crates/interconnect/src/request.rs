@@ -1239,7 +1239,8 @@ where
                 .await
                 .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))?;
             let frames = responses.into_stream().then(move |response| {
-                // The encoding starts here, so the answer keeps no borrow of the codec.
+                // The encoding starts here, so the answer keeps no borrow of the codec. It waits for
+                // a place on a full class, and the stream's reset ends that wait.
                 let encoding = response.map(|response| codec.encode(response));
                 async move {
                     let encoded = encoding?.await.map_err(StreamHandlerError::with_cause)?;
@@ -2257,8 +2258,13 @@ mod tests {
         const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
     }
 
+    /// A stream request whose class has no room to decode it now waits for room instead of being
+    /// refused, reaches its handler once room frees, and has given its own charge back by then.
     #[nervix_primitives::test]
-    async fn receive_decode_reports_memory_pressure_as_capacity_exhaustion() {
+    async fn a_stream_request_a_full_class_cannot_decode_now_waits_and_reaches_its_handler() {
+        use futures_util::FutureExt as _;
+        use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
         let executor = Executor::default();
         let payload = rkyv::to_bytes::<RkyvError>(&BulkDecodeRequest {
             payload: vec![7; 1024],
@@ -2273,43 +2279,59 @@ mod tests {
                     .capacity_bytes,
             )
             .assured("the fixture occupies the untouched bulk class");
-        let node = ClusterNodeName::parse("node-b").assured("the fixture node name is valid");
+        let reached = Arc::new(AtomicBool::new(false));
+        let reserved_in_handler = Arc::new(AtomicU64::new(u64::MAX));
         let handler = TypedStreamHandler::<BulkDecodeRequest, _> {
-            handler: Arc::new(|_context, _request| async {
-                Err(Report::new(StreamHandlerError::new(
-                    "a refused request reached its handler",
-                )))
+            handler: Arc::new({
+                let reached = Arc::clone(&reached);
+                let reserved_in_handler = Arc::clone(&reserved_in_handler);
+                let executor = executor.clone();
+                move |_context, _request| {
+                    reached.store(true, Ordering::Release);
+                    reserved_in_handler.store(
+                        executor
+                            .memory(nervix_execution::MemoryClass::Bulk)
+                            .reserved_bytes,
+                        Ordering::Release,
+                    );
+                    async {
+                        Err(Report::new(StreamHandlerError::new(
+                            "the test's handler ran",
+                        )))
+                    }
+                }
             }),
             request: PhantomData,
         };
-        let failure = match handler
-            .handle(
-                executor.clone(),
-                RequestContext {
-                    peer_node_id: node.clone(),
-                    peer_advertised_host: "node-b".to_owned(),
-                    peer_process_epoch: 1,
-                },
-                payload,
-            )
-            .await
-        {
-            Err(failure) => failure,
-            Ok(_) => panic!("the occupied class must refuse decoding"),
-        };
-        let StreamOpeningFailure::Request(failure) = failure else {
-            panic!("decode capacity must refuse the request before its operation runs");
-        };
-        let error = RequestError::RemoteRejected {
-            node,
-            request: BulkDecodeRequest::NAME,
-            failure,
-        };
+        let node = ClusterNodeName::parse("node-b").assured("the fixture node name is valid");
+        let mut handling = Box::pin(handler.handle(
+            executor.clone(),
+            RequestContext {
+                peer_node_id: node,
+                peer_advertised_host: "node-b".to_owned(),
+                peer_process_epoch: 1,
+            },
+            payload,
+        ));
         assert!(
-            error.is_capacity_exhaustion(),
-            "a decode that judged no bytes must report a retryable capacity refusal: {error}"
+            handling.as_mut().now_or_never().is_none(),
+            "a full class holds the request's decoding back instead of refusing it"
         );
+        assert!(!reached.load(Ordering::Acquire));
         drop(held);
+        let outcome = nervix_primitives::time::timeout(Duration::from_secs(30), handling)
+            .await
+            .assured("the request is decoded once its class has room");
+        assert!(outcome.is_err(), "the test's handler answers with its own error");
+        assert!(
+            reached.load(Ordering::Acquire),
+            "the request reaches its handler once its class has room"
+        );
+        assert_eq!(
+            reserved_in_handler.load(Ordering::Acquire),
+            0,
+            "the request's charge is given back before its handler runs"
+        );
         assert_eq!(
             executor
                 .memory(nervix_execution::MemoryClass::Bulk)

@@ -45,6 +45,9 @@ pub(crate) enum StatePageExchangeError {
 }
 
 /// The identity of `body`, computed on the bulk executor beside the body it names.
+///
+/// The body is a page the owner already read and encoded, so a full bulk queue holds the digest
+/// back rather than throwing the page away. The caller's reset of the page stream ends the wait.
 async fn identified_body(
     executor: &Executor,
     body: ChargedBytes,
@@ -174,6 +177,8 @@ pub(crate) async fn stream_materialized_page(
         }
         Err(reason) => (Err(reason), None),
     };
+    // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
+    // encoding back; the caller's reset of the page stream ends the wait.
     let (header, charge) = MaterializedStatePageReply::encode_rkyv(
         reply,
         executor.clone(),
@@ -218,6 +223,8 @@ pub(crate) async fn stream_processor_page(
                 };
                 let batch = RuntimeRecordBatch::from_record_batch(batch.schema(), batch)
                     .map_err(StreamHandlerError::with_cause)?;
+                // The section holds rows the owner already read, so a full bulk queue holds its
+                // encoding back; the caller's reset of the page stream ends the wait.
                 let body = batch
                     .encode_arrow_snapshot_section(executor)
                     .await
@@ -241,6 +248,8 @@ pub(crate) async fn stream_processor_page(
         }
         Err(reason) => (Err(reason), Vec::new()),
     };
+    // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
+    // encoding back; the caller's reset of the page stream ends the wait.
     let (header, charge) = ProcessorStatePageReply::encode_rkyv(
         reply,
         executor.clone(),
@@ -341,6 +350,10 @@ fn descriptor_end(
 
 /// Decodes the reply a page stream frames before `end`, within `room` the page was received with:
 /// the descriptor's copy and its decoded value wait for nothing behind the page.
+///
+/// The reply is the owner's answer to a read it already served, so a full bulk queue holds the
+/// decoding back rather than discarding that answer; the caller's own read deadline bounds the
+/// wait.
 async fn decode_reply<R: RkyvMessage>(
     executor: &Executor,
     bytes: &ChargedBytes,
@@ -360,6 +373,9 @@ async fn decode_reply<R: RkyvMessage>(
 
 /// Checks `body` against the digest its descriptor names on the bulk executor, before anything
 /// decodes it.
+///
+/// The body is a page the owner already read, so a full bulk queue holds the check back rather
+/// than discarding it; the caller's own read deadline bounds the wait.
 async fn verified_body(
     executor: &Executor,
     body: ChargedBytes,
@@ -594,6 +610,8 @@ impl ProcessorPageBodies<'_> {
         self.offset = end;
         let body = verified_body(executor, body, identity.clone()).await?;
         let schema = StdArc::new(SchemaField::arrow_schema(&transfer.fields));
+        // The section holds rows the owner already read, so a full bulk class holds its decoding
+        // back; the caller's own read deadline bounds the wait.
         let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(executor, schema, body)
             .await
             .change_context(StatePageExchangeError::Columns)?;

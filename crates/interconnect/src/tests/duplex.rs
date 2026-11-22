@@ -13,6 +13,7 @@
 )]
 
 use super::*;
+use crate::answer_admission_tests::{HeldCpuClass, eventually};
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
 struct CountingStream {
@@ -54,8 +55,10 @@ impl InterconnectDuplexRequest for BulkOpening {
         crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
 }
 
+/// A duplex opening its responder's class has no room for now waits for that room instead of being
+/// refused, and the stream opens once room frees.
 #[nervix_primitives::test]
-async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
+async fn a_duplex_opening_a_full_class_cannot_decode_now_waits_and_opens_once_room_frees() {
     let ConnectedTransports {
         transport_a,
         transport_b,
@@ -70,17 +73,25 @@ async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
         .assured("the fresh transport registers one bulk opening handler");
     let capacity = executor_b.memory(MemoryClass::Bulk).capacity_bytes;
     let held = executor_b
-        .try_reserve(MemoryClass::Bulk, capacity - 4096)
-        .assured("the fixture leaves the opening reader's initial allocation");
-    let refused = transport_a.open_duplex_stream(&node_b, BulkOpening).await;
+        .try_reserve(MemoryClass::Bulk, capacity)
+        .assured("the fixture holds the whole untouched bulk class");
+    let opener = transport_a.clone();
+    let opening = nervix_primitives::task::spawn(async move {
+        opener.open_duplex_stream(&node_b, BulkOpening).await
+    });
+    nervix_primitives::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !opening.is_finished(),
+        "a full class holds the opening's decoding back instead of refusing it"
+    );
     drop(held);
-    let recovered = transport_a.open_duplex_stream(&node_b, BulkOpening).await;
-    if let Ok((_sender, mut receiver)) = recovered {
+    let opened = opening.await.assured("the opening task is joined");
+    if let Ok((_sender, mut receiver)) = opened {
         assert!(
             receiver
                 .next()
                 .await
-                .assured("the recovered stream completes")
+                .assured("the opened stream completes")
                 .is_none()
         );
     } else {
@@ -88,16 +99,6 @@ async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
     }
     transport_a.shutdown().await;
     transport_b.shutdown().await;
-    match refused {
-        Err(error) => assert!(
-            matches!(
-                error.downcast_ref::<TransportError>(),
-                Some(TransportError::RemoteRejected { status: 503, .. })
-            ),
-            "opening decode pressure must be a service-unavailable response: {error:#}"
-        ),
-        Ok(_) => panic!("the opening reader leaves no room for its decoder"),
-    }
     assert_eq!(executor_b.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
@@ -532,6 +533,337 @@ async fn a_handler_read_abandoned_while_its_frame_decodes_leaves_the_frame_to_th
         (0..ABANDONED_WAIT_FRAMES).collect::<Vec<_>>(),
         "abandoning a handler's read must lose no frame and reorder none"
     );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// A stream whose handler answers each frame only once the test opens its gate, so a test can fill
+/// a class between a frame's decoding and its answer's encoding.
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct GatedStream;
+
+impl InterconnectDuplexRequest for GatedStream {
+    type Item = CountingItem;
+    type Response = CountingAnswer;
+
+    const NAME: &'static str = "test_gated_stream";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const SETUP_DEADLINE: crate::DuplexSetupDeadline =
+        crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
+}
+
+/// What a test holds of the one gated stream it opens: the value of each frame its handler
+/// decoded, and the gate that lets the handler answer the next one.
+struct Gate {
+    decoded: mpsc::Receiver<u64>,
+    answer: mpsc::Sender<()>,
+}
+
+/// Answer each frame with its own value once the test opens the gate.
+fn register_gated_handler(transport: &Transport) -> Gate {
+    let (decoded_sender, decoded) = mpsc::channel::<u64>(1);
+    let (answer, gate) = mpsc::channel::<()>(1);
+    let gate = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Some(gate)));
+    transport
+        .register_duplex_handler::<GatedStream, _, _>(move |_context, _opening, items| {
+            let decoded = decoded_sender.clone();
+            let gate = gate.lock().take();
+            async move {
+                let Some(gate) = gate else {
+                    return Err(Report::new(StreamHandlerError::new(
+                        "the test opens one gated stream".to_string(),
+                    )));
+                };
+                let stream = futures_util::stream::unfold(
+                    (items, decoded, gate),
+                    |(mut items, decoded, mut gate)| async move {
+                        let charged = match items.next().await {
+                            Ok(Some(charged)) => charged,
+                            Ok(None) => return None,
+                            Err(error) => return Some((Err(error), (items, decoded, gate))),
+                        };
+                        let value = charged.item.value;
+                        drop(charged);
+                        if decoded.send(value).await.is_err() {
+                            return None;
+                        }
+                        gate.recv().await?;
+                        Some((Ok(CountingAnswer { value }), (items, decoded, gate)))
+                    },
+                );
+                Ok(DuplexResponses::new(stream))
+            }
+        })
+        .assured("the fresh test transport has no gated stream handler");
+    Gate { decoded, answer }
+}
+
+/// Open a gated stream, submit one frame and wait until the responder has decoded it.
+async fn decoded_gated_frame(
+    transport: &Transport,
+    node: &ClusterNodeName,
+    gate: &mut Gate,
+) -> (DuplexSender<GatedStream>, DuplexReceiver<GatedStream>) {
+    let (mut sender, receiver) = transport
+        .open_duplex_stream(node, GatedStream)
+        .await
+        .expect("the gated stream opens");
+    sender
+        .send(CountingItem { value: 7 })
+        .await
+        .expect("the frame leaves the initiator");
+    let decoded = timeout(Duration::from_secs(10), gate.decoded.recv())
+        .await
+        .expect("the responder decodes the frame before the test deadline")
+        .expect("the gated handler reports the frame it decoded");
+    assert_eq!(decoded, 7);
+    (sender, receiver)
+}
+
+/// An answer carries work its responder already did, so a responder whose class is full holds the
+/// answer's encoding back, with its own charge, instead of refusing it and failing the stream. The
+/// answer arrives once the class frees.
+#[nervix_primitives::test]
+async fn an_answer_waits_for_a_place_on_its_responders_full_class_and_arrives_once_one_frees() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        executor_b,
+        ..
+    } = connected_transports().await;
+    let mut gate = register_gated_handler(&transport_b);
+    let (_sender, mut receiver) = decoded_gated_frame(&transport_a, &node_b, &mut gate).await;
+
+    let held = HeldCpuClass::hold(&executor_b, CpuClass::Control).await;
+    let reserved = executor_b.memory(MemoryClass::Commands).reserved_bytes;
+    gate.answer
+        .send(())
+        .await
+        .expect("the handler waits for its gate");
+    eventually(
+        &executor_b,
+        "the answer waiting with its charge",
+        |executor| {
+            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
+        },
+    )
+    .await;
+
+    held.release().await;
+    let answer = timeout(Duration::from_secs(10), receiver.next())
+        .await
+        .expect("the answer arrives before the test deadline")
+        .expect("the stream stays healthy while its answer waits")
+        .expect("the frame is answered");
+    assert_eq!(answer, CountingAnswer { value: 7 });
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// Once the initiator resets the stream no answer can reach it, so the reset ends an answer's wait
+/// for a place on its responder's full class: the waiting encoding is dropped with its charge, and
+/// the class refuses nothing.
+#[nervix_primitives::test]
+async fn an_initiators_reset_ends_an_answers_wait_for_a_place_on_its_responders_full_class() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        executor_b,
+        ..
+    } = connected_transports().await;
+    let mut gate = register_gated_handler(&transport_b);
+    let (sender, receiver) = decoded_gated_frame(&transport_a, &node_b, &mut gate).await;
+
+    let held = HeldCpuClass::hold(&executor_b, CpuClass::Control).await;
+    let reserved = executor_b.memory(MemoryClass::Commands).reserved_bytes;
+    gate.answer
+        .send(())
+        .await
+        .expect("the handler waits for its gate");
+    eventually(
+        &executor_b,
+        "the answer waiting with its charge",
+        |executor| {
+            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
+        },
+    )
+    .await;
+
+    drop(sender);
+    drop(receiver);
+    // The responder's frame reader handed its frames over with their bytes, so the reset returns
+    // the class to what it held before the answer, and no job waits for a place any more.
+    eventually(
+        &executor_b,
+        "the reset ending the answer's wait and returning its charge",
+        |executor| {
+            executor.memory(MemoryClass::Commands).reserved_bytes <= reserved
+                && executor.snapshot().cpu_class(CpuClass::Control).waiting == 0
+        },
+    )
+    .await;
+
+    held.release().await;
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// An answer that reaches an initiator whose class is full waits for a place to be decoded,
+/// holding its charge, instead of failing the stream, and is received once the class frees.
+/// Dropping the receiver instead ends that wait and returns the charge.
+#[nervix_primitives::test]
+async fn an_answer_waits_for_a_place_on_its_initiators_full_class() {
+    for abandon in [false, true] {
+        let ConnectedTransports {
+            transport_a,
+            transport_b,
+            node_b,
+            ..
+        } = connected_transports().await;
+        let executor_a = transport_a.inner.executor().clone();
+        let mut gate = register_gated_handler(&transport_b);
+        let (sender, mut receiver) = decoded_gated_frame(&transport_a, &node_b, &mut gate).await;
+        let held = HeldCpuClass::hold(&executor_a, CpuClass::Control).await;
+        let reserved = executor_a.memory(MemoryClass::Commands).reserved_bytes;
+        let receiving = nervix_primitives::task::spawn(async move {
+            let answer = receiver.next().await;
+            (answer, receiver)
+        });
+        gate.answer
+            .send(())
+            .await
+            .expect("the handler waits for its gate");
+        // The frame reader hands the answer over with its bytes, so the decoding waits for a place
+        // holding only its own charge.
+        eventually(
+            &executor_a,
+            "the answer's decoding waiting for a place",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting > 0,
+        )
+        .await;
+        if abandon {
+            receiving.abort();
+            drop(sender);
+            eventually(
+                &executor_a,
+                "the dropped receiver returning its decoding's charge",
+                |executor| {
+                    executor.memory(MemoryClass::Commands).reserved_bytes <= reserved
+                        && executor.snapshot().cpu_class(CpuClass::Control).waiting == 0
+                },
+            )
+            .await;
+            held.release().await;
+        } else {
+            held.release().await;
+            let (answer, _receiver) = timeout(Duration::from_secs(10), receiving)
+                .await
+                .expect("the answer is received before the test deadline")
+                .expect("the receiving task is joined");
+            let answer = answer
+                .expect("the stream stays healthy while its answer waits")
+                .expect("the frame is answered");
+            assert_eq!(answer, CountingAnswer { value: 7 });
+            drop(sender);
+        }
+        transport_a.shutdown().await;
+        transport_b.shutdown().await;
+    }
+}
+
+/// A frame a stream's initiator submits waits for a place on its responder's full class instead
+/// of being refused and failing the stream, as a consumer stream's heartbeats and settlements and
+/// an append stream's batches do, and it is answered once the class frees.
+#[nervix_primitives::test]
+async fn a_submitted_frame_waits_for_a_place_on_its_responders_full_class() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        executor_b,
+        ..
+    } = connected_transports().await;
+    register_counting_handler(&transport_b);
+    let (mut sender, mut receiver) = transport_a
+        .open_duplex_stream(&node_b, CountingStream { start: 0 })
+        .await
+        .expect("the counting stream opens");
+
+    let held = HeldCpuClass::hold(&executor_b, CpuClass::Control).await;
+    let reserved = executor_b.memory(MemoryClass::Commands).reserved_bytes;
+    sender
+        .send(CountingItem { value: 5 })
+        .await
+        .expect("the frame leaves the initiator");
+    eventually(
+        &executor_b,
+        "the frame's decoding waiting with its charge",
+        |executor| {
+            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
+        },
+    )
+    .await;
+
+    held.release().await;
+    let answer = timeout(Duration::from_secs(10), receiver.next())
+        .await
+        .expect("the answer arrives before the test deadline")
+        .expect("the stream stays healthy while its frame waits")
+        .expect("the frame is answered");
+    assert_eq!(answer, CountingAnswer { value: 5 });
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+/// The initiator holds a frame's encoding back on its own full class instead of failing the send,
+/// and the frame leaves and is answered once the class frees.
+#[nervix_primitives::test]
+async fn a_submitted_frame_waits_for_a_place_on_its_initiators_full_class() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    let executor_a = transport_a.inner.executor().clone();
+    register_counting_handler(&transport_b);
+    let (mut sender, mut receiver) = transport_a
+        .open_duplex_stream(&node_b, CountingStream { start: 0 })
+        .await
+        .expect("the counting stream opens");
+
+    let held = HeldCpuClass::hold(&executor_a, CpuClass::Control).await;
+    let reserved = executor_a.memory(MemoryClass::Commands).reserved_bytes;
+    let sending = nervix_primitives::task::spawn(async move {
+        let sent = sender.send(CountingItem { value: 6 }).await;
+        (sent, sender)
+    });
+    eventually(
+        &executor_a,
+        "the frame's encoding waiting with its charge",
+        |executor| {
+            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
+        },
+    )
+    .await;
+
+    held.release().await;
+    let (sent, _sender) = timeout(Duration::from_secs(10), sending)
+        .await
+        .expect("the frame leaves before the test deadline")
+        .expect("the sending task is joined");
+    sent.expect("the frame is encoded once the class frees");
+    let answer = timeout(Duration::from_secs(10), receiver.next())
+        .await
+        .expect("the answer arrives before the test deadline")
+        .expect("the stream stays healthy while its frame waits")
+        .expect("the frame is answered");
+    assert_eq!(answer, CountingAnswer { value: 6 });
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;

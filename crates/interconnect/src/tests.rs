@@ -83,7 +83,7 @@ pub(crate) fn test_tls() -> TlsConfigBundle {
     .expect("test TLS should load")
 }
 
-struct TestCertificateAuthority {
+pub(crate) struct TestCertificateAuthority {
     _directory: TempDir,
     certificate: rcgen::Certificate,
     key: KeyPair,
@@ -91,7 +91,7 @@ struct TestCertificateAuthority {
 }
 
 impl TestCertificateAuthority {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let directory = tempdir().expect("test certificate directory should be created");
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -114,7 +114,7 @@ impl TestCertificateAuthority {
         }
     }
 
-    fn issue(&self, cluster: &str, node: &ClusterNodeName) -> TlsConfigBundle {
+    pub(crate) fn issue(&self, cluster: &str, node: &ClusterNodeName) -> TlsConfigBundle {
         let mut params = CertificateParams::new(vec!["localhost".to_string()])
             .expect("test endpoint SAN should be valid");
         params.subject_alt_names.push(SanType::URI(
@@ -357,7 +357,7 @@ pub(crate) struct ConnectedTransports {
     /// The responder's budgets, so a test can observe what its handlers are holding charged.
     executor_b: Executor,
     _incoming_a: mpsc::Receiver<ReceivedEnvelope>,
-    incoming_b: mpsc::Receiver<ReceivedEnvelope>,
+    pub(crate) incoming_b: mpsc::Receiver<ReceivedEnvelope>,
 }
 
 impl ConnectedTransports {
@@ -721,7 +721,7 @@ mod coordination;
 mod relay_grant_capacity;
 mod relay_owners;
 mod relay_send_progress;
-mod resolver;
+pub(crate) mod resolver;
 mod stream_opening;
 
 use resolver::{localhost_identity, test_resolver};
@@ -1832,10 +1832,11 @@ async fn a_relay_grant_that_skips_its_channels_next_position_is_refused_out_of_o
     transport_b.shutdown().await;
 }
 
-/// A grant the receiver's relay budget has no room for is answered with a typed capacity refusal
-/// both ends count, and the same delivery is granted and received once the room returns.
+/// A grant the receiver's relay budget has no room for waits for that room instead of being refused
+/// for capacity, and the delivery is granted and received once the room returns. Neither end
+/// counts a capacity refusal.
 #[nervix_primitives::test]
-async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
+async fn a_grant_the_relay_budget_has_no_room_for_waits_and_is_granted_once_room_returns() {
     let ConnectedTransports {
         transport_a,
         transport_b,
@@ -1880,29 +1881,23 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
         snapshot.counters.relay_grant_refusals[direction.index()][RelayGrantRefusal::Memory.index()]
     };
 
-    let error = transport_a
-        .send(&node_b, Envelope::RelayPayload(payload.clone()))
-        .await
-        .expect_err("a receiver without room for the grant refuses it");
-    assert!(matches!(
-        error.current_context(),
-        TransportError::RelayGrantRefused(RelayGrantRefusal::Memory)
-    ));
-    assert!(RelayGrantRefusal::Memory.is_capacity());
-    assert_eq!(
-        refused(transport_b.snapshot(), ConnectionDirection::Inbound),
-        1
-    );
-    assert_eq!(
-        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
-        1
+    let sender = transport_a.clone();
+    let sending = nervix_primitives::task::spawn(async move {
+        sender
+            .send(&node_b, Envelope::RelayPayload(payload))
+            .await
+    });
+    nervix_primitives::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !sending.is_finished(),
+        "a receiver without room for the grant holds it back instead of refusing it"
     );
 
     drop(occupied);
-    transport_a
-        .send(&node_b, Envelope::RelayPayload(payload))
+    sending
         .await
-        .expect("the same delivery is granted once the receiver has room");
+        .expect("the sending task is joined")
+        .expect("the delivery is granted once the receiver has room");
     let received = timeout(Duration::from_secs(2), incoming_b.recv())
         .await
         .expect("the granted relay should enter the application queue")
@@ -1910,7 +1905,13 @@ async fn a_grant_refused_for_relay_memory_is_granted_once_room_returns() {
     assert!(matches!(received.envelope, Envelope::RelayPayload(_)));
     assert_eq!(
         refused(transport_b.snapshot(), ConnectionDirection::Inbound),
-        1
+        0,
+        "the receiver refused no grant for capacity"
+    );
+    assert_eq!(
+        refused(transport_a.snapshot(), ConnectionDirection::Outbound),
+        0,
+        "the sender was refused no grant for capacity"
     );
     transport_a.shutdown().await;
     transport_b.shutdown().await;

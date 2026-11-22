@@ -502,6 +502,24 @@ executes these production decoders with a queued budget reservation and an occup
 checks the independent input charge after the outer envelope ends, cancels the queued decode and
 requires a fresh complete decode with every charge returned. It makes no memory-ordering claim.
 
+An answer frame one node sends another waits for a place on its CPU class instead of being refused.
+`wire::encode_answer` races the encoding's wait against the end of the exchange it answers, and
+`wire::decode_answer` bounds the decoding by its request's deadline; a duplex responder races its
+answer stream against the initiator's reset, and a duplex receiver keeps its decoding until it is
+dropped. A duplex stream holds every frame after its opening back the same way, in both directions,
+for as long as the stream lives. Ending a wait drops the job, which returns its place in line and
+its charge, or cancels it from the worker FIFO if it already holds a place; a job already on its
+worker finishes its bounded work first and then gives back its worker and charge.
+The registered Shuttle check
+`wire::admission_tests::shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place`
+executes the production encoder on a bulk class of one worker and one place held full. While the
+class stays full, only the end of the exchange can end the wait, so an encoder that ignored it
+deadlocks the check. A freed place racing the next exchange's end then yields either the whole
+answer or the end, with nothing refused, and once the last job exits every job is off its worker and
+every charge returned. It makes no memory-ordering claim. Deloxide does not observe these
+asynchronous semaphore waits, and the queued cancellation they can cause goes through the existing
+worker FIFO owner.
+
 `RESUME` changes the domain to running at its archived lifecycle in the consensus effect that
 records complete publication and releases the installation gate. No atomic field or memory
 ordering in the capture epoch, assignment protocol or relay revision changed. Existing Loom

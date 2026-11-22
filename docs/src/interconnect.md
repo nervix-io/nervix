@@ -521,7 +521,8 @@ supported operations and their encoded shapes. It is one of the prerequisites ev
 so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of
 another shape fails as a malformed handshake before its record can be judged. There is no version
 negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
-cluster stop and start with all nodes on the same version.
+cluster stop and start with all nodes on the same version. The contract includes that every request
+and answer body declares its length, which its receiver charges before reading any of it.
 The contract includes `InstallClusterIdentity` and the complete validated identity record in Raft
 commands and snapshots. Its private key travels only over the authenticated interconnect. Public
 identity observation and backup source metadata use their separate public projections.
@@ -773,23 +774,23 @@ follower whose receive window is full can still produce the answer that releases
 validates the relationships among operation limits and these budgets, including the paired work
 that must fit for independent operations to keep making progress.
 
-A typed stream request admits its envelope without queueing while its nested payload remains
-charged; bounded writer growth also refuses immediately when the class has no room. The encoding
-job owns that payload and charge through cancellation, and returns the payload charge once the
-envelope is encoded, before waiting for a connection lease or response headers. Insufficient room
-for both allocations is a typed encoding admission failure, which releases both allocations
-rather than waiting while retaining the input. The request is not sent after such a refusal.
+No stage of a request waits for room while it holds a charge of the same class. A typed request's
+caller gives its payload's charge back before the envelope's encoding copies the payload, and the
+request's outbound admission bounds the payload meanwhile; an encoding whose output outgrows its
+charge gives back what it holds and waits for the larger charge, holding nothing.
 
-Receive-side rkyv decoding follows the same admission rule. A charged body never waits for a
-second reservation while keeping its input, and a nested request never waits while its outer
-envelope remains charged. Both refuse immediately when the class has no free room, including
-room assigned to an earlier queued reservation. A nested decoder gives its input an independent
-charge that travels into the CPU job; cancellation of the enclosing request cannot release that
-charge before the job releases its bytes. The decoded value retains its own reservation.
-Memory-budget and execution-queue refusals carry typed remote outcomes with their traffic class
-and requested bytes or queue count. Temporary admission refusals while opening byte and duplex streams
-answer HTTP 503; an operation exceeding the whole memory budget answers 413. Neither means that
-the input was malformed. The relay quota probe retains its distinct `NoRoom` outcome.
+Every request and answer body declares its length (`content-length`), and its receiver waits for
+the body and the room its decoding takes as one charge while it holds nothing of the class, then
+reads and decodes within that charge, which the decoded value keeps. A body without a declared
+length, or carrying more or fewer bytes than it declared, is malformed. A nested payload decodes the
+same way at its own stage: once the envelope that carried it has given its charge back, its copy and
+its decoded value are one charge, waited for while the decoder holds nothing. That charge travels
+into the CPU job, so cancellation of the enclosing request cannot release it before the job releases
+its bytes. A typed request's charge is given back before its handler runs, so a handler's own work
+never waits for room behind the request it serves; the connection's stream places bound the request
+meanwhile. A memory charge larger than its whole budget answers HTTP 413 while a byte or duplex
+stream opens, and a budget or pool closed because the node stops answers 503; neither means that
+the input was malformed. A full class answers nothing, because every opening waits for its room.
 
 Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
 and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
@@ -808,18 +809,75 @@ only the batch's body and decoded columns charged while its runtime takes the ba
 
 A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
 joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
-payload and envelope and later decoding the response. The request's own jobs are refused at once
-when the queue is full: the caller still holds the request, so it fails with
-`RequestError::Encode` and can be sent again, and the peer refuses a request it cannot decode now
-the same way. A refused job holds no memory charge, so a burst beyond the queue cannot hold the
-class's memory. The response's jobs wait for a place instead, because the response carries
-work the handler already did: the peer's encoding of the answer waits until the caller resets the
-stream, and the caller's decoding of it waits within the request's own deadline. A request that
-fails at one of its later stages fails with `RequestError::Transport`. An ack resolution, which
-carries the outcome of a delivery the peer already resolved, waits for a place on the control class
-the same way. Every other class keeps admitting independently. Handshakes, relay admission and
-grants, and the frames of byte and duplex streams keep the refusal: their opener holds its input and
-opens again.
+payload and envelope and later decoding the response. A full queue holds each of them back until a
+place frees, the request's own jobs as well as its answer's: the executor's pools are backpressure
+on the node's resources, never a reason to refuse a frame. The caller's reset and the request's own
+deadline end every wait, and a request that fails at one of its later stages fails with
+`RequestError::Transport`. Every other class keeps admitting independently.
+
+Every frame between nodes therefore waits for its place and its room, in both directions. What
+differs between protocols is what ends a wait: an answer waits until the exchange it answers ends,
+and its decoding until the request's own deadline. Each protocol's waits end as follows.
+
+| Protocol | What its frames wait for | What ends the wait |
+|---|---|---|
+| Typed request | The caller's encoding of the request, the peer's reading and decoding of it, the peer's encoding of the answer and the caller's reading and decoding of it | The caller's reset; the request's own deadline |
+| Connection handshake | The dialing node's hello and the accepting node's reading of it, then the accepting node's answer, accepted or refused, and the dialing node's reading of it | The dialing node's setup deadline, which closes the connection |
+| Relay admission status and cancellation | The sender's query, the receiver's reading of it, the receiver's status and the sender's reading of it | The sender's reset; the query's deadline |
+| Relay grant | The sender's grant request, the receiver's reading of it and the whole charge of the operation it grants, then the receiver's disposition and the sender's reading of it | The sender's reset; the wait the sender declared, after which the receiver answers a capacity refusal; the delivery's deadline |
+| Ack resolution | The sender's encoding of the ack and the registrar's reading of it | The send's deadline |
+| Duplex stream | The opening and every frame either side submits, encoded and decoded | The stream's reset or end; the leader's answer deadline on a Raft append stream, and either side's heartbeat silence limit on a client consumer stream or producer link |
+| Byte stream | The opening, encoded and decoded, every job of the answer once the handler has done its work, and the caller's reading of it | The caller's reset; the stream's progress timeout; the caller's own deadline |
+
+The reasons, protocol by protocol:
+
+- **Connection handshake.** The accepting node's answer carries a binding it has already validated
+  and registered, and losing it would make the
+  dialing node set its connection up again from the TLS handshake. A refusal is the accepting
+  node's verdict on the dialing node's prerequisites, which the dialing node reports and counts as
+  the reason its connection did not bind.
+- **Relay admission status and cancellation.** The status is the receiver's verdict on the attempt,
+  and a cancellation it answers is already applied. A terminal status whose answer never left stays answerable, so the query the sender
+  repeats finds the same status.
+- **Relay grant.** A grant the receiver has no relay memory for waits for that memory. Its request is
+  read and decoded under one charge, and once it is known the whole charge of the operation it
+  grants, the batch's body, its decoded columns, decode scratch and the metadata the grant keeps,
+  is waited for while the grant holds nothing of the class. The sender declares how long the
+  receiver may hold the grant (`x-nervix-grant-wait-nanos`): half the delivery's dispatch timeout,
+  the same half it waits between asks, and at most half of what its exchange has left. A grant
+  still without room, or without a worker to decode it, when that wait ends is answered with the
+  capacity refusal `RelayGrantRefusal::Memory`, which the delivery is held back on and asks again
+  with, so the exchange never outlasts the stall bound its sender gives it. An operation larger
+  than the whole relay budget, or a budget closed because the node stops, is refused with it too. A grant the receiver issued already holds its relay memory, so losing
+  its answer would leave the grant held until the sender reconciles the indeterminate attempt.
+- **Ack resolution.** An ack carries the outcome of a delivery its sender already resolved, which
+  nothing presents again.
+- **Duplex streams.** One codec encodes and decodes every frame, the opening included, and every
+  frame waits, in both directions. A frame reader gives back what it holds before it waits to grow,
+  and hands each frame over with its bytes out of its charge, so the frame's decoding never waits
+  for room behind the reader. A client consumer
+  stream's serving node sends heartbeats and a close besides its settlements, and a producer
+  link's serving node sends clearances, which answer the owning node's admission, besides
+  heartbeats, closes and detaches. A refused heartbeat or clearance would end the stream and every
+  consumer or producer on it, and a refused Raft batch would end the append stream and make the
+  leader send again entries the follower may already hold. A side that hears nothing within the
+  heartbeat silence limit ends its stream, so a class that stays full longer than that ends a
+  consumer stream or producer link as a lost peer would. The answers carry a durable append, a
+  delivery, an admission or a settlement. A Raft follower decodes one batch at a time into its
+  resident window and encodes its answers one at a time, after the batch each one answers has
+  given back its charge, so an append stream holds at most one waiting frame in each direction on
+  each node. A heartbeat or vote therefore waits
+  behind at most two short jobs per stream, far inside an election timeout of six heartbeat
+  intervals or more.
+- **Byte streams.** State inspection pages are the owner's answer to a read it has already served:
+  the encoding of their rows, the identity of each body and the reply wait, and so do the reply's
+  decoding, the body's identity check and the rows' decoding at the coordinator, which receives the
+  page together with the room its descriptor's decoding takes. Checkpoint, offset, captured-section, snapshot and resource-archive transfers
+  already wait for a place on every job of their answers.
+
+A one-way control frame, such as a state replication ack, a checkpoint announcement or a runtime
+error event, waits like every frame: the receiving node reads and decodes it under one charge, which
+stays with the frame until the application takes it.
 
 The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
 bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of
