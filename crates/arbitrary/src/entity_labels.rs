@@ -1,7 +1,8 @@
 //! Bounded complete metadata maps from the shared entropy cursor.
 //!
 //! Layer: test harness.
-//! - **Owns.** Valid exact keys, empty/Unicode values and complete map operands.
+//! - **Owns.** Valid exact keys, empty/Unicode values, complete map operands and edits that mix
+//!   set and removed keys.
 //! - **Depends on.** Vocabulary constructors and the existing deterministic generator.
 //! - **Must not know.** Registry policy, parsing, persistence or runtime execution.
 
@@ -12,7 +13,8 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AdministrativeLabelTarget, EntityLabelTarget, EntityLabels, LabelAssignment, LabelKey, NodeRef,
+    AdministrativeLabelTarget, EntityLabelMutation, EntityLabelTarget, EntityLabels,
+    LabelAssignment, LabelChange, LabelEdit, LabelKey, NodeRef,
 };
 
 use crate::Arbitrary;
@@ -34,18 +36,45 @@ impl Arbitrary<'_> {
         let count = usize::from(self.entropy.byte() % 8);
         let mut entries = Vec::with_capacity(count);
         for index in 0..count {
-            let key = LabelKey::try_from(format!("team/key-{index}"))
-                .assured("the bounded index is spelled with valid ASCII label characters");
-            let value = match self.entropy.byte() % 6 {
-                0 => String::new(),
-                1 => " 'quoted' \"value\" ".to_owned(),
-                2 => "Δ🙂\n\r\0".to_owned(),
-                3 => "$s$verbatim$s$".to_owned(),
-                4 => "Mixed Case / path".to_owned(),
-                _ => self.entropy.byte().to_string(),
-            };
+            let key = label_key(index);
+            let value = self.label_value();
             entries.push(LabelAssignment { key, value });
         }
         EntityLabels::try_from(entries).assured("each generated key has a distinct index")
     }
+
+    /// One edit that sets some keys, removes others or does both, including the empty edit.
+    pub fn entity_label_mutation(&mut self) -> EntityLabelMutation {
+        let count = usize::from(self.entropy.byte() % 8);
+        let mut entries = Vec::with_capacity(count);
+        for index in 0..count {
+            let key = label_key(index);
+            let change = if self.entropy.flag() {
+                LabelChange::Drop
+            } else {
+                LabelChange::Set(self.label_value())
+            };
+            entries.push(LabelEdit { key, change });
+        }
+        EntityLabelMutation::try_from(entries).assured("each generated key has a distinct index")
+    }
+
+    /// An exact value: empty, quoted, Unicode with control characters, dollar-quoted, mixed case
+    /// or numeric.
+    fn label_value(&mut self) -> String {
+        match self.entropy.byte() % 6 {
+            0 => String::new(),
+            1 => " 'quoted' \"value\" ".to_owned(),
+            2 => "Δ🙂\n\r\0".to_owned(),
+            3 => "$s$verbatim$s$".to_owned(),
+            4 => "Mixed Case / path".to_owned(),
+            _ => self.entropy.byte().to_string(),
+        }
+    }
+}
+
+/// The generated key at `index`, distinct for every index.
+fn label_key(index: usize) -> LabelKey {
+    LabelKey::try_from(format!("team/key-{index}"))
+        .assured("the bounded index is spelled with valid ASCII label characters")
 }

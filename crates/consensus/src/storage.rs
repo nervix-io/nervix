@@ -96,13 +96,13 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_logs";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_logs";
 const KEYSPACE_META: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_meta";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_state";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_snapshots";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 
@@ -231,7 +231,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 45,
+    ClusterState = 46,
 }
 
 #[derive(Debug)]

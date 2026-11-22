@@ -31,6 +31,34 @@ fn limits() -> EntityLabelLimits {
     EntityLabelLimits::from(&crate::ClusterParameterValues::default())
 }
 
+/// An edit setting each `Some` value and removing each `None` key.
+fn edit(entries: &[(&str, Option<&str>)]) -> EntityLabelMutation {
+    let mut edits = Vec::new();
+    for (key, value) in entries {
+        let change = match value {
+            Some(value) => LabelChange::Set((*value).to_owned()),
+            None => LabelChange::Drop,
+        };
+        edits.push(LabelEdit {
+            key: LabelKey::try_from((*key).to_owned()).assured("the fixture key is valid"),
+            change,
+        });
+    }
+    EntityLabelMutation::try_from(edits).assured("fixture keys are unique")
+}
+
+/// An edit setting every label of `set`.
+fn set_all(set: &EntityLabels) -> EntityLabelMutation {
+    let mut edits = Vec::new();
+    for (key, value) in set.iter() {
+        edits.push(LabelEdit {
+            key: key.clone(),
+            change: LabelChange::Set(value.to_owned()),
+        });
+    }
+    EntityLabelMutation::try_from(edits).assured("a label map has distinct keys")
+}
+
 #[test]
 fn resolved_branch_schemas_preserve_configuration_across_label_edits() {
     let mut schema = crate::CreateSchema {
@@ -117,7 +145,7 @@ fn a_merge_preserves_other_keys_and_exact_values_and_a_drop_is_idempotent() {
         ("empty", ""),
         ("team/path", " / Δ "),
     ]);
-    let update = EntityLabelMutation::Set(labels(&[("owner", "Platform"), ("region", "East")]));
+    let update = edit(&[("owner", Some("Platform")), ("region", Some("East"))]);
     let merged = original
         .updated(&update, &limits())
         .assured("the merged map fits");
@@ -130,12 +158,7 @@ fn a_merge_preserves_other_keys_and_exact_values_and_a_drop_is_idempotent() {
             ("region", "East")
         ])
     );
-    let keys = vec![
-        LabelKey::try_from("empty".to_owned()).assured("empty is a valid key"),
-        LabelKey::try_from("absent".to_owned()).assured("absent is a valid key"),
-    ];
-    let update =
-        EntityLabelMutation::Drop(EntityLabelKeys::try_from(keys).assured("the keys differ"));
+    let update = edit(&[("empty", None), ("absent", None)]);
     let dropped = merged
         .updated(&update, &limits())
         .assured("removing keys stays within bounds");
@@ -172,15 +195,11 @@ fn every_limit_counts_the_complete_result_in_utf8_bytes() {
         labels(&[("large", "one")]),
         labels(&[("key1", "three")]),
     ] {
-        assert!(
-            original
-                .updated(&EntityLabelMutation::Set(update), &policy)
-                .is_err()
-        );
+        assert!(original.updated(&set_all(&update), &policy).is_err());
         assert_eq!(original, labels(&[("key1", "one")]));
     }
     let valid = original
-        .updated(&EntityLabelMutation::Set(labels(&[("k2", "two")])), &policy)
+        .updated(&edit(&[("k2", Some("two"))]), &policy)
         .assured("the complete result is exactly twelve bytes");
     assert_eq!(valid, labels(&[("key1", "one"), ("k2", "two")]));
     let count_policy = EntityLabelLimits { count: 1, ..policy };
@@ -202,42 +221,83 @@ fn decoders_preserve_an_empty_value_and_refuse_invalid_keys_and_duplicate_operat
     );
     assert!(serde_json::from_str::<EntityLabels>(r#"{"Uppercase":"value"}"#).is_err());
     let key = LabelKey::try_from("owner".to_owned()).assured("owner is a valid key");
-    assert!(EntityLabelKeys::try_from(vec![key.clone(), key]).is_err());
+    let set = LabelEdit {
+        key: key.clone(),
+        change: LabelChange::Set("one".to_owned()),
+    };
+    let drop = LabelEdit {
+        key,
+        change: LabelChange::Drop,
+    };
+    assert!(EntityLabelMutation::try_from(vec![set, drop.clone()]).is_err());
+    assert!(EntityLabelMutation::try_from(vec![drop.clone(), drop]).is_err());
 }
 
 #[test]
-fn key_set_encodings_preserve_complete_sets_and_refuse_duplicate_operations() {
-    for source in [r#"[]"#, r#"["team/a","team/b"]"#] {
-        let original: EntityLabelKeys =
+fn one_edit_sets_and_removes_keys_and_is_checked_as_one_result() {
+    let policy = EntityLabelLimits {
+        count: 2,
+        ..limits()
+    };
+    let original = labels(&[("one", "1"), ("two", "2")]);
+    let swapped = original
+        .updated(
+            &edit(&[("three", Some("3")), ("two", None), ("absent", None)]),
+            &policy,
+        )
+        .assured("the result keeps two labels");
+    assert_eq!(swapped, labels(&[("one", "1"), ("three", "3")]));
+    assert!(
+        original
+            .updated(
+                &edit(&[("three", Some("3")), ("four", Some("4")), ("one", None)]),
+                &policy
+            )
+            .is_err()
+    );
+    assert_eq!(original, labels(&[("one", "1"), ("two", "2")]));
+    let unchanged = original
+        .updated(&EntityLabelMutation::default(), &policy)
+        .assured("an empty edit changes nothing");
+    assert_eq!(unchanged, original);
+}
+
+#[test]
+fn edit_encodings_preserve_every_change_and_refuse_repeated_or_invalid_keys() {
+    for source in [r#"{}"#, r#"{"team/a":{"set":""},"team/b":"drop"}"#] {
+        let original: EntityLabelMutation =
             serde_json::from_str(source).assured("the authored keys are distinct and valid");
-        let json = serde_json::to_string(&original).assured("the complete key set encodes");
+        let json = serde_json::to_string(&original).assured("the complete edit encodes");
         assert_eq!(json, source);
         let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&original)
-            .assured("the complete current key set archives");
+            .assured("the complete current edit archives");
         assert_eq!(
-            rkyv::from_bytes::<EntityLabelKeys, rkyv::rancor::Error>(&archive)
-                .assured("every current key restores exactly"),
+            rkyv::from_bytes::<EntityLabelMutation, rkyv::rancor::Error>(&archive)
+                .assured("every current change restores exactly"),
             original
         );
     }
-    assert!(serde_json::from_str::<EntityLabelKeys>(r#"["team/a","team/a"]"#).is_err());
-    assert!(serde_json::from_str::<EntityLabelKeys>(r#"["Team/a"]"#).is_err());
+    assert!(
+        serde_json::from_str::<EntityLabelMutation>(r#"{"team/a":"drop","team/a":"drop"}"#)
+            .is_err()
+    );
+    assert!(serde_json::from_str::<EntityLabelMutation>(r#"{"Team/a":"drop"}"#).is_err());
+    assert!(serde_json::from_str::<EntityLabelMutation>(r#"{"team/a":"keep"}"#).is_err());
 }
 
 #[test]
-fn current_archives_refuse_duplicate_and_unordered_keys_in_maps_and_key_sets() {
-    let keys: EntityLabelKeys = serde_json::from_str(r#"["team/a","team/b"]"#)
-        .assured("the two current keys are distinct and ordered");
-    let key_archive = rkyv::to_bytes::<rkyv::rancor::Error>(&keys)
-        .assured("the complete current key set archives");
-    let key_position = key_archive
+fn current_archives_refuse_duplicate_and_unordered_keys_in_maps_and_edits() {
+    let changes = edit(&[("team/a", Some("first")), ("team/b", None)]);
+    let edit_archive = rkyv::to_bytes::<rkyv::rancor::Error>(&changes)
+        .assured("the complete current edit archives");
+    let edit_position = edit_archive
         .windows(b"team/a".len())
         .position(|bytes| bytes == b"team/a")
         .assured("the archive contains the first current key's literal bytes");
     for replacement in *b"bc" {
-        let mut malformed = key_archive.clone();
-        malformed[key_position + b"team/".len()] = replacement;
-        assert!(rkyv::from_bytes::<EntityLabelKeys, rkyv::rancor::Error>(&malformed).is_err());
+        let mut malformed = edit_archive.clone();
+        malformed[edit_position + b"team/".len()] = replacement;
+        assert!(rkyv::from_bytes::<EntityLabelMutation, rkyv::rancor::Error>(&malformed).is_err());
     }
 
     let original = labels(&[("team/a", "first"), ("team/b", "second")]);
@@ -289,6 +349,34 @@ fn bolero_label_maps_preserve_every_key_and_exact_value() {
                 .assured("the complete map restores"),
             original
         );
+
+        // The same keys as one edit: every other one removed, the rest set to its value.
+        let mut edits = Vec::new();
+        for (index, (key, value)) in original.iter().enumerate() {
+            let change = if input[index + 32] % 2 == 0 {
+                LabelChange::Drop
+            } else {
+                LabelChange::Set(value.to_owned())
+            };
+            edits.push(LabelEdit {
+                key: key.clone(),
+                change,
+            });
+        }
+        let changes = EntityLabelMutation::try_from(edits).assured("the map's keys are unique");
+        let json = serde_json::to_vec(&changes).assured("a typed edit encodes");
+        assert_eq!(
+            serde_json::from_slice::<EntityLabelMutation>(&json)
+                .assured("the complete edit decodes"),
+            changes
+        );
+        let archive = rkyv::to_bytes::<rkyv::rancor::Error>(&changes)
+            .assured("a bounded current edit archives");
+        assert_eq!(
+            rkyv::from_bytes::<EntityLabelMutation, rkyv::rancor::Error>(&archive)
+                .assured("the complete edit restores"),
+            changes
+        );
     });
 }
 
@@ -298,18 +386,31 @@ fn bolero_label_mutations_match_an_independent_map_after_every_operation() {
         let mut actual = EntityLabels::default();
         let mut expected = BTreeMap::<String, String>::new();
         for operation in input.as_chunks::<4>().0 {
-            let key = format!("key-{}", operation[0] % 4);
-            let mutation = if operation[1] % 2 == 0 {
-                let value = format!("Δ {} / {}", operation[2], operation[3]);
-                expected.insert(key.clone(), value.clone());
-                EntityLabelMutation::Set(labels(&[(&key, &value)]))
-            } else {
-                expected.remove(&key);
-                let keys = vec![LabelKey::try_from(key).assured("the generated key is valid")];
-                EntityLabelMutation::Drop(
-                    EntityLabelKeys::try_from(keys).assured("one key is unique"),
-                )
-            };
+            // One edit names up to two of the four keys, each set or removed.
+            let first = usize::from(operation[0] % 4);
+            let second = (first + 1 + usize::from(operation[1] % 3)) % 4;
+            let mut edits = Vec::new();
+            let mut names = vec![first];
+            if operation[1] % 2 == 0 {
+                names.push(second);
+            }
+            for (index, name) in names.into_iter().enumerate() {
+                let key = format!("key-{name}");
+                let change = if (operation[2] >> index) % 2 == 0 {
+                    let value = format!("Δ {} / {}", operation[3], index);
+                    expected.insert(key.clone(), value.clone());
+                    LabelChange::Set(value)
+                } else {
+                    expected.remove(&key);
+                    LabelChange::Drop
+                };
+                edits.push(LabelEdit {
+                    key: LabelKey::try_from(key).assured("the generated key is valid"),
+                    change,
+                });
+            }
+            let mutation =
+                EntityLabelMutation::try_from(edits).assured("one edit names distinct keys");
             actual = actual
                 .updated(&mutation, &limits())
                 .assured("four small keys fit the default limits");
@@ -342,6 +443,30 @@ fn bolero_label_decoders_reject_invalid_current_keys_and_duplicate_assignments()
         assert!(serde_json::from_str::<EntityLabels>(&duplicate).is_err());
         let invalid = format!("{{\"Team/path\":{encoded}}}");
         assert!(serde_json::from_str::<EntityLabels>(&invalid).is_err());
+
+        // An edit's decoders refuse the same keys, and a key both set and removed.
+        let set_and_drop =
+            format!("{{\"team/path\":{{\"set\":{encoded}}},\"team/path\":\"drop\"}}");
+        assert!(serde_json::from_str::<EntityLabelMutation>(&set_and_drop).is_err());
+        let invalid_edit = format!("{{\"Team/path\":{{\"set\":{encoded}}}}}");
+        assert!(serde_json::from_str::<EntityLabelMutation>(&invalid_edit).is_err());
+        let changes = edit(&[("team/path", Some(&value))]);
+        let edit_archive = rkyv::to_bytes::<rkyv::rancor::Error>(&changes)
+            .assured("the current complete edit archives");
+        let mut malformed_edit = edit_archive.clone();
+        let edit_key = malformed_edit
+            .windows(b"team/path".len())
+            .position(|bytes| bytes == b"team/path")
+            .assured("the archive contains its current literal key bytes");
+        malformed_edit[edit_key] = b'T';
+        assert!(
+            rkyv::from_bytes::<EntityLabelMutation, rkyv::rancor::Error>(&malformed_edit).is_err()
+        );
+        assert_eq!(
+            rkyv::from_bytes::<EntityLabelMutation, rkyv::rancor::Error>(&edit_archive)
+                .assured("validation did not change the complete valid edit archive"),
+            changes
+        );
         assert_eq!(
             rkyv::from_bytes::<EntityLabels, rkyv::rancor::Error>(&archive)
                 .assured("validation did not change the complete valid archive"),

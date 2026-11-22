@@ -22072,6 +22072,24 @@ async fn when_selector_is_clicked(world: &mut ScenarioWorld, selector: String) {
         .expect("selector must be clickable");
 }
 
+#[when(expr = "selector {string} is set to option {string}")]
+async fn when_selector_is_set_to_option(
+    world: &mut ScenarioWorld,
+    selector: String,
+    value: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector actions");
+    let selector = expand_placeholders(world, &selector);
+    let value = expand_placeholders(world, &value);
+    page.locator(&selector)
+        .select_option(value.as_str(), None)
+        .await
+        .expect("selector must be a select element offering the option");
+}
+
 #[when(expr = "selector {string} is clicked by script")]
 async fn when_selector_is_clicked_by_script(world: &mut ScenarioWorld, selector: String) {
     let page = world
