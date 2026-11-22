@@ -1989,7 +1989,7 @@ mod tests {
         for ty in [list, nested] {
             let mut argument = add_one_model();
             argument.arguments[0].ty = ty;
-            let refusal = UdfExecutor::compile_sync([argument], None)
+            let refusal = UdfExecutor::compile_sync([argument], default_limits(), None)
                 .err()
                 .assured("no column bridge reads a DURATION argument");
             assert!(
@@ -2003,7 +2003,7 @@ mod tests {
         }
         let mut result = add_one_model();
         result.returns.ty = ParseAsType::Duration;
-        let refusal = UdfExecutor::compile_sync([result], None)
+        let refusal = UdfExecutor::compile_sync([result], default_limits(), None)
             .err()
             .assured("no column bridge writes a DURATION result");
         assert!(

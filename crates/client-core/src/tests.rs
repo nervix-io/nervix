@@ -2889,6 +2889,7 @@ async fn the_configured_notice_bounds_each_drop_the_held_notices_and_leave_a_gap
         level: NoticeLevel::Warning,
         kind: NoticeKind::Runtime,
         message: message.to_string(),
+        error: None,
     };
     // Each notice below is charged 100 bytes: two fit the record bound well within the byte bound.
     let charge = 100;
