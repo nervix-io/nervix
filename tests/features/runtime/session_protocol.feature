@@ -268,7 +268,13 @@ Feature: Session protocol
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "lapsed_leader"
-    Given the leader refuses the <phase> of execution reference "lapsed-lease-{{test_id}}" as a leader whose lease lapsed
+    # A leader resumes an applying execution on its own, and after a lapsed lease or a leadership
+    # move on a loaded machine that resumption could meet a refused finalization before the
+    # request does. Held on every node, it leaves the refusal to the request.
+    Given command reconciliation of execution reference "lapsed-lease-{{test_id}}" pauses on node "node-1"
+    And command reconciliation of execution reference "lapsed-lease-{{test_id}}" pauses on node "node-2"
+    And command reconciliation of execution reference "lapsed-lease-{{test_id}}" pauses on node "node-3"
+    And the leader refuses the <phase> of execution reference "lapsed-lease-{{test_id}}" as a leader whose lease lapsed
     When this Plexus command request with execution reference "lapsed-lease-{{test_id}}" begins executing in the background on the leader node
       """
       CREATE SCHEMA unconfirmed_record (
@@ -309,7 +315,12 @@ Feature: Session protocol
       """
     Then the current leader node is saved as placeholder "admitting_leader"
     And a node other than placeholder "admitting_leader" is saved as placeholder "lapsed_leader"
-    Given the leader refuses the finalization of execution reference "finalization-after-move-{{test_id}}" as a leader whose lease lapsed
+    # As above, the leader's own resumption of the applying execution is held on every node, so
+    # the refused finalization reaches the request.
+    Given command reconciliation of execution reference "finalization-after-move-{{test_id}}" pauses on node "node-1"
+    And command reconciliation of execution reference "finalization-after-move-{{test_id}}" pauses on node "node-2"
+    And command reconciliation of execution reference "finalization-after-move-{{test_id}}" pauses on node "node-3"
+    And the leader refuses the finalization of execution reference "finalization-after-move-{{test_id}}" as a leader whose lease lapsed
     And leadership moves from node "{{admitting_leader}}" to node "{{lapsed_leader}}" before its next admission proposal
     When this Plexus command request with execution reference "finalization-after-move-{{test_id}}" begins executing in the background on the leader node
       """
