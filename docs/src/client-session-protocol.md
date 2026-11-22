@@ -2389,7 +2389,7 @@ grace-period cut log from that launch and checks that admission completed within
 deadline. [Integration Test Lifecycle](./integration-test-lifecycle.md#scenario-driven-stops)
 owns the harness observations and their diagnostic scope.
 
-**Forced ending.** A repeated signal, an expired shutdown deadline, `SIGKILL`, or a crash ends the
+**Forced ending.** A repeated signal, `SIGKILL`, or a crash ends the
 connection without warning. A command whose reply was not received may or may not have been
 admitted, and the client cannot tell which from the connection. It repeats the command under the
 same execution reference on whichever node now leads. If the command was admitted, the new leader

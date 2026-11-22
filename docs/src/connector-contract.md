@@ -2715,8 +2715,8 @@ emitter holds at once, a record a retry holds included, and retries inline with 
 the destination takes it, the stop deadline passes or the task shuts down; once the domain begins
 stopping, it hands the records to its retry schedule instead. The stopping execution
 gives every emitter its deadline before
-it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
-shutdown deadline when the node is stopping. A task whose relay interaction ends without a stop or
+it signals the shutdown: the domain drain timeout from that moment, whether the domain or the node
+stops. A task whose relay interaction ends without a stop or
 a teardown drains its buffer and finishes the emitter by the stop deadline it holds; a task that holds
 none, because its execution was dropped without stopping, leaves the emitter unfinished. Teardown can cancel a publish before it reports its
 records: their acknowledgements end unresolved, so an acknowledged ingestor delivers them again, and

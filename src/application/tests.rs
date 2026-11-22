@@ -34,10 +34,6 @@ fn args_default_to_the_application_shutdown_timeouts() {
     let args = test_args(&[]);
 
     assert_eq!(
-        args.settings.shutdown.drain_timeout.0,
-        shutdown::DEFAULT_DRAIN_TIMEOUT
-    );
-    assert_eq!(
         args.settings.shutdown.shutdown_timeout.0,
         shutdown::DEFAULT_SHUTDOWN_TIMEOUT
     );
@@ -301,7 +297,7 @@ fn parse_and_text_encoding_helpers_roundtrip() {
 }
 
 /// Every option the node reads as a duration.
-const DURATION_OPTIONS: [&str; 12] = [
+const DURATION_OPTIONS: [&str; 11] = [
     "--node-unavailability-timeout",
     "--gossip-interval",
     "--clock-skew-tolerance",
@@ -312,7 +308,6 @@ const DURATION_OPTIONS: [&str; 12] = [
     "--state-snapshot-interval",
     "--memory-pressure-check-interval",
     "--memory-pressure-resume-jitter",
-    "--drain-timeout",
     "--shutdown-timeout",
 ];
 

@@ -1524,13 +1524,8 @@ mod tests {
         .assured("canceling the coordinator releases both exact overlapping holds");
 
         service.inner.drain_support_shutdown.cancel();
-        let shutdown = crate::application::ShutdownCoordinator::default();
-        shutdown.request_stop();
-        let deadline = shutdown
-            .request()
-            .verified("the stop request above was accepted")
-            .deadline();
-        service.inner.service_tasks.shut_down(deadline).await;
+        service.inner.service_tasks.stop();
+        service.inner.service_tasks.wait_stopped().await;
         std::fs::remove_dir_all(path).assured("the test database is removed after cleanup");
     }
 

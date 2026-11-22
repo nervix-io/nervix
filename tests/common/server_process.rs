@@ -157,8 +157,6 @@ pub(crate) enum ServerProcessOption {
     Dns(DnsConfiguration),
     /// Enable the node's own exporter with a distinct service identity for each process.
     TraceExport { endpoint: String, service: String },
-    /// `--drain-timeout`.
-    DrainTimeout(Duration),
     /// The first bootstrap's `--domain-drain-timeout` seed.
     DomainDrainTimeout(Duration),
     /// The first bootstrap's `--entity-gate-deadline` seed.
@@ -215,11 +213,6 @@ impl ServerProcessOption {
                     .arg(endpoint)
                     .arg("--otel-service-name")
                     .arg(format!("{service}-{node_id}"));
-            }
-            Self::DrainTimeout(timeout) => {
-                command
-                    .arg("--drain-timeout")
-                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::DomainDrainTimeout(timeout) => {
                 command

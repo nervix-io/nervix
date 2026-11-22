@@ -99,7 +99,8 @@ jq '.[0].State.StartedAt = "2026-09-27T00:01:00Z"' \
     "${inspection_before}" >"${inspection_started}"
 printf '%s\n' \
     'shutdown admission phase finished outcome=Completed' \
-    'shutdown drain-support phase finished outcome=Completed' \
+    'shutdown save phase finished outcome=Completed' \
+    'shutdown move phase finished outcome=Moved' \
     'shutdown terminal-teardown phase finished outcome=Completed' \
     >"${shutdown_log}"
 
@@ -127,9 +128,9 @@ expect_restart_failure 'ineffective stop' stopped "${test_run_id}" "${test_proje
 jq '.[0].State.ExitCode = 137' "${inspection_stopped}" >"${tmp_dir}/forced.json"
 expect_restart_failure 'forced SIGKILL' stopped "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${inspection_before}" "${tmp_dir}/forced.json" "${shutdown_log}"
-printf '%s\n' 'shutdown terminal-teardown phase finished outcome=Forced' \
+printf '%s\n' 'shutdown move phase finished outcome=Disrupted' \
     >>"${shutdown_log}"
-expect_restart_failure 'forced phase' stopped "${test_run_id}" "${test_project}" nervix-1 \
+expect_restart_failure 'disrupted moves' stopped "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${inspection_before}" "${inspection_stopped}" "${shutdown_log}"
 jq '.[0].Mounts[0].Name = "other-volume"' \
     "${inspection_started}" >"${tmp_dir}/wrong-volume.json"
@@ -147,21 +148,26 @@ expect_drain_failure() {
 }
 printf '%s\n' \
     'INFO nervix_server::application::scheduling: drained local node before graceful shutdown node_id=node-2 leader=node-1' \
-    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Completed' \
+    'INFO nervix_server::application::shutdown: shutdown move phase finished outcome=Moved' \
     >"${tmp_dir}/completed-drain.log"
 "${drain_verifier}" nervix-2 "${tmp_dir}/completed-drain.log"
 printf '%s\n' \
-    'WARN nervix_server::application::scheduling: the leader did not answer the graceful shutdown drain of the local node node_id=node-2 leader=node-1' \
-    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Abandoned' \
+    'WARN nervix_server::application::scheduling: failed to drain local node before graceful shutdown node_id=node-2 leader=node-1' \
+    'INFO nervix_server::application::shutdown: shutdown move phase finished outcome=Disrupted' \
     >"${tmp_dir}/abandoned-drain.log"
-expect_drain_failure 'abandoned drain' "${tmp_dir}/abandoned-drain.log"
-grep -Fq 'the leader did not answer the graceful shutdown drain' "${tmp_dir}/drain-failure.txt" \
-    || fail 'an abandoned drain verdict did not name the drain record'
+expect_drain_failure 'disrupted moves' "${tmp_dir}/abandoned-drain.log"
+grep -Fq 'failed to drain local node before graceful shutdown' "${tmp_dir}/drain-failure.txt" \
+    || fail 'a disrupted move verdict did not name the drain record'
+printf '%s\n' \
+    'INFO nervix_server::application::scheduling: no other node can take this node'"'"'s units, so they stay saved here and a restart restores them node_id=node-2' \
+    'INFO nervix_server::application::shutdown: shutdown move phase finished outcome=NowhereToMove' \
+    >"${tmp_dir}/nowhere-drain.log"
+expect_drain_failure 'nowhere to move' "${tmp_dir}/nowhere-drain.log"
 printf '%s\n' 'INFO nervix_server::application::shutdown: shutdown admission phase finished outcome=Completed' \
     >"${tmp_dir}/missing-drain.log"
-expect_drain_failure 'missing drain phase' "${tmp_dir}/missing-drain.log"
+expect_drain_failure 'missing move phase' "${tmp_dir}/missing-drain.log"
 cat "${tmp_dir}/completed-drain.log" "${tmp_dir}/completed-drain.log" >"${tmp_dir}/two-drains.log"
-expect_drain_failure 'two drain phases' "${tmp_dir}/two-drains.log"
+expect_drain_failure 'two move phases' "${tmp_dir}/two-drains.log"
 
 crash_verifier="${chaos_dir}/verify-crash-evidence.sh"
 inspection_killed="${tmp_dir}/killed.json"

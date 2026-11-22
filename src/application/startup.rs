@@ -163,9 +163,7 @@ impl ApplicationStartup {
     }
 
     pub(in crate::application) async fn terminate(self) {
-        self.runtime
-            .shutdown(self.runtime.domain_drain_timeout())
-            .await;
+        self.runtime.shutdown().await;
         if let Some(consensus) = &self.consensus {
             Self::stop_consensus(consensus, &self.fault_injection).await;
         }

@@ -88,7 +88,7 @@ docker run --detach \
   --hostname nervix-1 \
   --network nervix \
   --restart unless-stopped \
-  --stop-timeout 60 \
+  --stop-timeout 720 \
   --volume nervix-node-1-data:/var/lib/nervix \
   --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
   --volume "$PWD/tls/node-1.pem:/etc/nervix/interconnect/node.pem:ro" \
@@ -132,7 +132,7 @@ docker run --detach \
   --hostname nervix-2 \
   --network nervix \
   --restart unless-stopped \
-  --stop-timeout 60 \
+  --stop-timeout 720 \
   --volume nervix-node-2-data:/var/lib/nervix \
   --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
   --volume "$PWD/tls/node-2.pem:/etc/nervix/interconnect/node.pem:ro" \
@@ -162,7 +162,7 @@ docker run --detach \
   --hostname nervix-3 \
   --network nervix \
   --restart unless-stopped \
-  --stop-timeout 60 \
+  --stop-timeout 720 \
   --volume nervix-node-3-data:/var/lib/nervix \
   --volume "$PWD/tls/ca.pem:/etc/nervix/interconnect/ca.pem:ro" \
   --volume "$PWD/tls/node-3.pem:/etc/nervix/interconnect/node.pem:ro" \
@@ -213,11 +213,11 @@ from that file and `/etc/hosts`, read once at startup; [Name Resolution](name-re
 describes the options that point it at other files or name servers, and what it does not support.
 
 `docker stop` sends each node `SIGTERM`, which starts graceful shutdown, and kills a container only
-if its node is still running when the stop timeout ends. A node ends its own shutdown within its
-shutdown timeout, 50 seconds by default, which covers the 30-second default drain timeout and the
-services that stop after it. The `--stop-timeout 60` above keeps Docker waiting longer than that,
-so a node that cannot finish shutting down exits with status `1` on its own rather than being
-killed; with Docker's default of ten seconds, a node could be killed partway through its drain.
+if its node is still running when the stop timeout ends. A stopping node saves what it holds, moves
+its units to the other nodes within its shutdown timeout, ten minutes by default, and tears down.
+The `--stop-timeout 720` above keeps Docker waiting for the shutdown timeout and two more minutes
+for the save and the teardown, so Docker does not kill a node partway through a normal shutdown;
+with Docker's default of ten seconds, a node could be killed partway through its save.
 [Shutdown And Recovery](shutdown.md#deployment-grace-periods) explains what a node loses when its
 grace period ends first.
 Stop the nodes, then remove the containers and private network:
@@ -240,7 +240,7 @@ Save the following as `docker-compose.yml`:
 x-nervix-common: &nervix-common
   image: ${NERVIX_IMAGE:-ghcr.io/nervix-io/nervix:debian-latest}
   restart: unless-stopped
-  stop_grace_period: 60s
+  stop_grace_period: 720s
   environment: &nervix-environment
     NERVIX_ADDR: 0.0.0.0:47391
     NERVIX_WEB_CONSOLE_LISTEN_ADDR: 0.0.0.0:47420
@@ -355,6 +355,8 @@ Use the same host ports in the table above. Stop the cluster while preserving it
 docker compose down
 ```
 
-`docker compose down` sends each node `SIGTERM` and waits up to the file's `stop_grace_period` of 60
-seconds, longer than each node's 50-second shutdown timeout, for graceful shutdown to finish before
-it kills a container. To permanently delete all three nodes' persisted state, add `--volumes`.
+`docker compose down` sends each node `SIGTERM` and waits up to the file's `stop_grace_period` of 720
+seconds, each node's ten-minute shutdown timeout and two more minutes for its save and teardown,
+for graceful shutdown to finish before it kills a container. When every node stops at once, no node
+can take another's units, so each saves what it holds and stops without waiting for its shutdown
+timeout. To permanently delete all three nodes' persisted state, add `--volumes`.

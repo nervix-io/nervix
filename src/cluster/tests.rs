@@ -887,3 +887,24 @@ async fn cluster_state_watcher_observes_a_health_target_change_after_wait_prepar
         }
     }
 }
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_terminating_advertisement_is_held_only_until_its_propagation_has_passed() {
+    let propagation = Duration::from_secs(1);
+    let advertisement = TerminatingAdvertisement {
+        advertised_at: Instant::now(),
+    };
+    assert_eq!(
+        advertisement.propagation_remaining(propagation),
+        Some(propagation)
+    );
+
+    nervix_primitives::time::advance(Duration::from_millis(400)).await;
+    assert_eq!(
+        advertisement.propagation_remaining(propagation),
+        Some(Duration::from_millis(600))
+    );
+
+    nervix_primitives::time::advance(Duration::from_millis(600)).await;
+    assert_eq!(advertisement.propagation_remaining(propagation), None);
+}

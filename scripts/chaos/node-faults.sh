@@ -185,10 +185,10 @@ node_fault_kill_restart() {
     failure_category=product
 }
 
-# Stops HOST with Pumba and a 60-second grace after the BEFORE hook and requires a completed
+# Stops HOST with Pumba and a 720-second grace after the BEFORE hook and requires a completed
 # shutdown. When REPLACEMENTS_LIVE says every other node was a live replacement, the stopped node
-# must also have handed its work over through the leader; a drain it did not complete leaves its work
-# to fail over as after a crash, which keeps the run meaningful, so it is a finding.
+# must also have moved every unit to another node through the leader; a unit it did not move stays
+# saved on it and stops until it restarts, a cluster disruption, so it is a finding.
 node_fault_stop_inject() {
     local case_dir="$1"
     local host="$2"
@@ -203,17 +203,17 @@ node_fault_stop_inject() {
         "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/selected.json"
     container_name="$(jq -r '.[0].Name | ltrimstr("/")' "${case_dir}/selected.json")"
     node_fault_dry_run "${case_dir}/pumba-dry-run.txt" "${container_id}" node 'stopping container' \
-        stop --time 60 --limit 1 "${container_name}"
+        stop --time 720 --limit 1 "${container_name}"
     record_node_volumes "${case_dir}/volumes-before.json"
     node_fault_begin "${before_hook}"
     jq -n --arg image "${pumba_image_id}" --arg target "${container_name}" --arg id "${container_id}" \
         --arg run_id "${run_id}" --arg since "${node_fault_since}" --argjson seconds "${seconds}" \
-        '{pumba_image_id:$image,command:["pumba","--label","io.nervix.chaos.run="+$run_id,"--label","io.nervix.chaos.role=node","stop","--time","60","--limit","1",$target],target:$target,container_id:$id,fault_since:$since,grace_seconds:60,outage_seconds:$seconds}' \
+        '{pumba_image_id:$image,command:["pumba","--label","io.nervix.chaos.run="+$run_id,"--label","io.nervix.chaos.role=node","stop","--time","720","--limit","1",$target],target:$target,container_id:$id,fault_since:$since,grace_seconds:720,outage_seconds:$seconds}' \
         >"${case_dir}/fault-command.json"
     recovery_node_stopped "${container_id}"
     local stop_started_ms
     stop_started_ms="$(epoch_ms)"
-    node_fault_pumba 75 "${case_dir}/pumba.txt" stop --time 60 --limit 1 "${container_name}"
+    node_fault_pumba 735 "${case_dir}/pumba.txt" stop --time 720 --limit 1 "${container_name}"
     node_fault_stop_ms="$(( $(epoch_ms) - stop_started_ms ))"
     inspect_target "${container_id}" "${case_dir}/stopped.json"
     run_bounded 20 docker logs --since "${node_fault_since}" "${container_id}" \
@@ -222,13 +222,13 @@ node_fault_stop_inject() {
     "${script_dir}/verify-restart-evidence.sh" stopped "${run_id}" "${project_name}" \
         "${host}" "${image_id}" "${case_dir}/selected.json" "${case_dir}/stopped.json" \
         "${case_dir}/shutdown.log"
-    grep -E 'shutdown (admission|drain-support|terminal-teardown) phase finished' \
+    grep -E 'shutdown (admission|save|move|terminal-teardown) phase finished' \
         "${case_dir}/shutdown.log" >"${case_dir}/phase-outcomes.txt" || true
     failure_category=product
     if [[ "${replacements_live}" == true ]] && ! "${script_dir}/verify-drain-evidence.sh" "${host}" \
         "${case_dir}/shutdown.log" 2>"${case_dir}/drain-verdict.txt"; then
         recovery_finding "${case_dir}" \
-            "${host} did not complete its graceful drain while live replacement nodes existed: $(head -n 1 "${case_dir}/drain-verdict.txt")"
+            "${host} did not move all of its units while live replacement nodes existed: $(head -n 1 "${case_dir}/drain-verdict.txt")"
     fi
 }
 
@@ -341,9 +341,9 @@ node_fault_kill() {
         --expect kill:9 --expect die:137 --expect start)
 }
 
-# Stops HOST gracefully with a 60-second grace, requires a completed shutdown, runs DURING while it
+# Stops HOST gracefully with a 720-second grace, requires a completed shutdown, runs DURING while it
 # is stopped, holds the outage for SECONDS and starts the same container again. Every other node is
-# a settled live voter when the stop begins, so on more than one node the stop must drain.
+# a settled live voter when the stop begins, so on more than one node the stop must move every unit.
 node_fault_stop() {
     local case_dir="$1"
     local host="$2"

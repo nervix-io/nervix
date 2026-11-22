@@ -1,22 +1,21 @@
-//! Observing and completing the work a node has already admitted, in place.
+//! Observing the work a node has already admitted, and closing its intake.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** The admitted-work view shared by shutdown and backup, the intake boundary a
-//!   terminating node closes, the force-flush generations that release its buffered work while
-//!   downstream relays and emitters stay alive, and the proof of a completed local drain.
+//! - **Owns.** The admitted-work view that planned handoffs and backups drain by, the draining
+//!   step they ask of a node, and the intake boundary a stopping node closes.
 //! - **Depends on.** Ingestor quiesce controls, generator activity, relay boundary fan-outs, node
 //!   quiesce counters, emitter publishing state, in-flight acknowledgement roots and the domain
 //!   force-flush coordinator.
-//! - **Must not know.** Ownership migration, consensus, cordons, or why the node is terminating.
+//! - **Must not know.** Ownership migration, consensus, cordons, or why the node drains.
 //!
-//! Broadcasting the terminal shutdown watch cannot drain a graph. Every receiver takes a finite cut
-//! of its own input, so an upstream task can still publish after a downstream task took its cut.
-//! This drain never relies on a cut. It closes intake, requests force-flush generations while any
-//! admitted work is visible anywhere in a domain, and declares the domain quiescent only when a
-//! generation requested with nothing visible completes with nothing visible still. That confirming
-//! generation catches work an upstream flush published after a downstream participant finished its
-//! own generation.
+//! Broadcasting a shutdown watch cannot drain a graph. Every receiver takes a finite cut of its
+//! own input, so an upstream task can still publish after a downstream task took its cut. A drain
+//! never relies on a cut: its coordinator requests force-flush generations while any admitted work
+//! is visible anywhere in a domain, and declares the domain quiescent only when a generation
+//! requested with nothing visible completes with nothing visible still. That confirming generation
+//! catches work an upstream flush published after a downstream participant finished its own
+//! generation.
 //!
 //! Work keeps moving between the counts a drain reads, and no single order of reads follows every
 //! move: a batch a node takes from a relay is counted by the node before the relay lets it go, while
@@ -24,10 +23,8 @@
 //! therefore reads each relay's admission sequence before and after everything else, and a relay
 //! that admitted a batch in between shows as work still moving rather than as nothing visible.
 //!
-//! Messages parked on `REQUIRED WAIT` do not hold the drain open, exactly as in a planned handoff:
-//! their dependency is absent, and every generation re-evaluates them against the state that is
-//! present. Terminal teardown negatively acknowledges whatever still waits, so a source with
-//! external acknowledgements redelivers it.
+//! Messages parked on `REQUIRED WAIT` do not hold a drain open: their dependency is absent, and
+//! every generation re-evaluates them against the state that is present.
 
 #![cfg_attr(
     nervix_lint,
@@ -49,18 +46,9 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum LocalIntake {
     Open,
-    /// The node is terminating. Ingestors stop polling and admitting, generators stop producing,
-    /// and work already admitted runs to completion. Intake never reopens.
+    /// The node is stopping. Ingestors stop polling and admitting, and generators stop producing.
+    /// Intake never reopens.
     Closed,
-}
-
-/// How a local drain ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LocalGraphDrainOutcome {
-    /// Every local domain completed the work it had admitted.
-    Quiescent,
-    /// The drain timeout elapsed while at least one domain still held admitted work.
-    Abandoned,
 }
 
 /// What one domain still holds on this node while it drains in place.
@@ -87,7 +75,7 @@ pub(crate) struct LocalDomainDrainStatus {
 }
 
 impl LocalDomainDrainStatus {
-    /// A status showing nothing, which the tests of the drain's decisions start from.
+    /// A status showing nothing, which the tests of what a drain waits for start from.
     #[cfg(test)]
     fn new(domain: DomainName) -> Self {
         Self {
@@ -123,37 +111,6 @@ impl LocalDomainDrainStatus {
             || self.node_work_items != 0
             || self.buffered_emitter_messages != 0
             || self.publishing_emitters != 0
-    }
-
-    /// Reports a domain the drain timeout left behind. A domain that still showed admitted work
-    /// names that work. One that showed none ran out of time only for the flush that confirms
-    /// nothing is still moving, which is what a timeout too short for a single flush looks like.
-    fn report_timeout(&self, timeout: Duration) {
-        if self.holds_admitted_work() {
-            warn!(
-                domain = self.domain.as_str(),
-                admitting_ingestors = self.admitting_ingestors,
-                active_generators = self.active_generators,
-                outstanding_acks = self.outstanding_acks,
-                admitting_relays = self.admitting_relays,
-                buffered_relay_batches = self.buffered_relay_batches,
-                node_work_items = self.node_work_items,
-                buffered_emitter_messages = self.buffered_emitter_messages,
-                publishing_emitters = self.publishing_emitters,
-                required_waits = self.required_waits,
-                force_flush_obligations = self.force_flush_obligations,
-                timeout = ?timeout,
-                "local graph drain timed out with admitted work outstanding"
-            );
-            return;
-        }
-        warn!(
-            domain = self.domain.as_str(),
-            required_waits = self.required_waits,
-            force_flush_obligations = self.force_flush_obligations,
-            timeout = ?timeout,
-            "local graph drain timed out before confirming that no admitted work is still moving"
-        );
     }
 
     /// Observes what `domain` holds, reading `sources` in the one order that keeps moving work
@@ -231,106 +188,7 @@ impl LocalNodeWork {
     }
 }
 
-/// Where one domain's local drain stands between two observations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalDomainDrainProgress {
-    /// Admitted work was visible at the last observation.
-    Draining,
-    /// Nothing was visible, and a generation was requested to prove nothing is still moving.
-    Confirming,
-    /// A confirming generation completed with nothing visible.
-    Quiescent,
-}
-
-/// What the drain does for one domain after observing it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalDomainDrainStep {
-    /// Keep releasing work, requesting a generation unless one is already in flight.
-    FlushIfIdle,
-    /// Request the generation that confirms nothing is still moving.
-    Confirm,
-    /// Wait for the confirming generation to complete.
-    AwaitConfirmation,
-    /// The domain holds no admitted work.
-    Done,
-}
-
-impl LocalDomainDrainProgress {
-    fn advance(&mut self, status: &LocalDomainDrainStatus) -> LocalDomainDrainStep {
-        if status.holds_admitted_work() {
-            *self = Self::Draining;
-            return LocalDomainDrainStep::FlushIfIdle;
-        }
-        match self {
-            Self::Draining => {
-                *self = Self::Confirming;
-                LocalDomainDrainStep::Confirm
-            }
-            Self::Confirming => {
-                if status.force_flush_obligations != 0 {
-                    return LocalDomainDrainStep::AwaitConfirmation;
-                }
-                *self = Self::Quiescent;
-                LocalDomainDrainStep::Done
-            }
-            Self::Quiescent => LocalDomainDrainStep::Done,
-        }
-    }
-}
-
 impl Runtime {
-    /// Closes this node's intake and completes the work its graphs already admitted, while
-    /// downstream relays, emitters and acknowledgement paths stay alive. Returns once every local
-    /// domain is quiescent, or once `timeout` has elapsed with admitted work still outstanding.
-    pub(crate) async fn drain_local_graphs(&self, timeout: Duration) -> LocalGraphDrainOutcome {
-        let started = Instant::now();
-        self.close_local_intake();
-        let mut domains = BTreeMap::new();
-        for execution in self.inner.executions.iter() {
-            domains.insert(execution.key().clone(), LocalDomainDrainProgress::Draining);
-        }
-        info!(
-            domains = domains.len(),
-            "closed local intake; draining local graphs in place"
-        );
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let mut outstanding = Vec::new();
-            for (domain, progress) in &mut domains {
-                let status = self.local_domain_drain_status(domain);
-                match progress.advance(&status) {
-                    LocalDomainDrainStep::FlushIfIdle => {
-                        self.force_flush_domain_if_idle(domain);
-                        outstanding.push(status);
-                    }
-                    LocalDomainDrainStep::Confirm => {
-                        self.force_flush_domain(domain);
-                        outstanding.push(status);
-                    }
-                    LocalDomainDrainStep::AwaitConfirmation => outstanding.push(status),
-                    LocalDomainDrainStep::Done => {}
-                }
-            }
-            if outstanding.is_empty() {
-                info!(
-                    elapsed = ?started.elapsed(),
-                    "local graphs completed their admitted work"
-                );
-                return LocalGraphDrainOutcome::Quiescent;
-            }
-            let remaining = timeout
-                .checked_sub(started.elapsed())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                for status in &outstanding {
-                    status.report_timeout(timeout);
-                }
-                return LocalGraphDrainOutcome::Abandoned;
-            }
-            sleep(remaining.min((timeout / 1500).max(Duration::from_nanos(1)))).await;
-        }
-    }
-
     /// Stops every ingestor on this node admitting new work and tells generators to stop
     /// producing. An ingestor prepared after this call starts with its intake already stopped.
     pub(crate) fn close_local_intake(&self) {
@@ -530,43 +388,6 @@ mod tests {
         assert!(status.holds_admitted_work());
     }
 
-    #[test]
-    fn a_domain_is_quiescent_only_after_a_confirming_generation_completes() {
-        let mut progress = LocalDomainDrainProgress::Draining;
-        let mut status = quiescent_status();
-
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::Confirm);
-        status.force_flush_obligations = 1;
-        assert_eq!(
-            progress.advance(&status),
-            LocalDomainDrainStep::AwaitConfirmation
-        );
-        status.force_flush_obligations = 0;
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::Done);
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::Done);
-    }
-
-    #[test]
-    fn upstream_publication_after_a_downstream_cut_restarts_the_confirmation() {
-        let mut progress = LocalDomainDrainProgress::Draining;
-        let mut status = quiescent_status();
-        status.node_work_items = 1;
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::FlushIfIdle);
-
-        // The downstream participant completed its generation with nothing to release, so every
-        // count read zero before the upstream flush of that same generation landed in its relay.
-        status.node_work_items = 0;
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::Confirm);
-        status.buffered_relay_batches = 1;
-        status.force_flush_obligations = 1;
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::FlushIfIdle);
-
-        status.buffered_relay_batches = 0;
-        status.force_flush_obligations = 0;
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::Confirm);
-        assert_eq!(progress.advance(&status), LocalDomainDrainStep::Done);
-    }
-
     /// A remote drain coordinator confirms a quiet domain with a generation of its own. A draining
     /// step that also requested one from a node holding no admitted work would make a participant
     /// that took that generation re-read a parked message's dependency for it, and then again for
@@ -626,8 +447,8 @@ mod tests {
         assert!(completion.complete());
     }
 
-    #[nervix_primitives::test]
-    async fn closing_local_intake_stops_every_registered_ingestor_admitting() {
+    #[test]
+    fn closing_local_intake_stops_every_registered_ingestor_admitting() {
         let runtime = Runtime::default();
         let domain = domain("default");
         let ingestor = named::<IngestorName>("source");
@@ -641,10 +462,8 @@ mod tests {
             control.clone(),
         );
 
-        assert_eq!(
-            runtime.drain_local_graphs(Duration::ZERO).await,
-            LocalGraphDrainOutcome::Quiescent
-        );
+        runtime.close_local_intake();
+
         assert!(runtime.local_intake_is_closed());
         assert_eq!(control.cause(), Some(IngestorQuiesceCause::Shutdown));
     }

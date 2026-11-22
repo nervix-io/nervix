@@ -295,6 +295,5 @@ impl crate::SettingDefinition for MaxPeers {
 )]
 pub struct ShutdownCapabilities {
     pub shutdown_timeout: Duration,
-    pub drain_timeout: Duration,
     pub task_grace_period: Duration,
 }

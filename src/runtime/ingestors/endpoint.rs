@@ -545,7 +545,7 @@ pub(super) mod tests {
                 "request routing must borrow the prepared routes without cloning the intake"
             );
         }
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     #[cfg(feature = "benchmarks")]
@@ -600,7 +600,7 @@ pub(super) mod tests {
                     / 10_000
             );
         }
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     /// A body its codec refuses is accepted and consumed as a decode rejection, which the
@@ -661,7 +661,7 @@ pub(super) mod tests {
             "the rejection renders the codec's whole chain: {rejection}"
         );
         assert_eq!(described.decode_rejections_total, 1);
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     /// The header values of a request that are not UTF-8 count on the counter the route's bound
@@ -690,7 +690,7 @@ pub(super) mod tests {
         assert_eq!(dropped.get(), 2);
         route.count_dropped_header_values(1);
         assert_eq!(dropped.get(), 3);
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     #[nervix_primitives::test]
@@ -722,7 +722,7 @@ pub(super) mod tests {
             format!("{report:#}"),
             "ingestor 'event_ingestor' in domain 'default' is already running"
         );
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     #[nervix_primitives::test]
@@ -910,7 +910,7 @@ pub(super) mod tests {
                 ..Counted::default()
             }
         );
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     /// A `MODE NO ACK` ingestor counts every request once under the outcome it reached: one it
@@ -1015,7 +1015,7 @@ pub(super) mod tests {
             "{lines:?}"
         );
         quiesce.release(IngestorQuiesceCause::EntityHold);
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     /// An ingestor whose quiesce refuses the requests of a route it shares with an available
@@ -1128,7 +1128,7 @@ pub(super) mod tests {
         assert_eq!(open_quiesce.counters().rejected_total, 1);
         held_quiesce.release(IngestorQuiesceCause::EntityHold);
         open_quiesce.release(IngestorQuiesceCause::EntityHold);
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     /// A `MODE ACK` ingestor counts a request refused for a full response window as busy, one the
@@ -1300,7 +1300,7 @@ pub(super) mod tests {
             }
         );
         quiesce.release(IngestorQuiesceCause::EntityHold);
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     /// A body its codec refuses as it drains after resume leaves the buffer as a decode rejection.
@@ -1360,7 +1360,7 @@ pub(super) mod tests {
             IngestorQuiesceCounters::default(),
             "the rejected body leaves the buffer"
         );
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     /// A body `BUFFER` retained was already answered 202, so when the extension workers cannot
@@ -1484,6 +1484,6 @@ pub(super) mod tests {
         );
         assert_eq!(quiesce.counters().buffered_records, 0);
         assert_eq!(quiesce.counters().buffered_bytes, 0);
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 }

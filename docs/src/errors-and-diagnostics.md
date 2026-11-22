@@ -2549,8 +2549,12 @@ source inventories, foreign partition ownership and repeated metric identities b
 target state; a failed preparation cannot publish a partial layout.
 
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
-its only subject is the authenticated sender: completed or failed, each with the leader's report for
-the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
+its only subject is the authenticated sender: completed, unmoved with the typed reason the units it
+left did not move, or failed, each with the leader's report for the sender's log, or not the leader,
+which sends the sender to the leader it observes next. The unmoved reason is gathered from typed
+contexts unit by unit; a destination's terminating refusal reaches the leader as the typed
+`OwnershipHandoffFailure::DestinationTerminating` wire outcome, which the leader's preparation keeps
+beneath its gate failure rather than formatting into its reason. A node
 that receives the request without leading changes nothing. An unconfirmed leader lease also
 answers not the leader, but its interrupted-drain log names the term and says the same leader may
 still lead. The stopping node waits 25 ms and observes the leader again, so it can retry that same

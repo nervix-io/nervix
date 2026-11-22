@@ -247,7 +247,8 @@ mod tests {
     };
     use nervix_recovery::NoReceiver as _;
     use nervix_server::application::{
-        AppError, ShutdownCoordinator, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
+        AppError, ShutdownCoordinator, ShutdownMoveOutcome, ShutdownOutcome, ShutdownPhase,
+        ShutdownPhaseOutcome,
     };
     use nervix_test_environment::{ContainerTeardownError, TeardownFailures};
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
@@ -4072,7 +4073,7 @@ mod tests {
             [
                 StandInTeardownNode::new("node-1", StandInEnding::StopsWhenAsked, &log)
                     .stopping_in(NodeStopProgress {
-                        phase: ShutdownPhase::DrainSupport,
+                        phase: ShutdownPhase::Moving,
                         deadline: ProductShutdownDeadline::Ahead(Duration::from_secs(200)),
                     }),
                 StandInTeardownNode::new("node-2", StandInEnding::OutlastsCleanup, &log)
@@ -4095,7 +4096,7 @@ mod tests {
         assert_eq!(
             read.to_string(),
             "node \"node-2\" was still stopping at the cleanup deadline, in shutdown phase \
-             TerminalTeardown, past its own shutdown deadline, and keeps its storage and ports \
+             TerminalTeardown, past its own shutdown timeout, and keeps its storage and ports \
              until it ends"
         );
         // A node whose shutdown cannot be read is still named as stopping.
@@ -4110,11 +4111,11 @@ mod tests {
         );
     }
 
-    /// The test nodes' shutdown timeout, which a stopping node's deadline is read against.
+    /// The test nodes' shutdown timeout, which a stopping node's moves are read against.
     const STAND_IN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(240);
 
     #[nervix_primitives::test(start_paused = true)]
-    async fn a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_deadline() {
+    async fn a_stopping_node_is_read_with_its_shutdown_phase_and_its_own_shutdown_timeout() {
         let shutdown = ShutdownCoordinator::new(
             STAND_IN_SHUTDOWN_TIMEOUT,
             nervix_server::application::ShutdownSettings::default().task_grace_period(),
@@ -4125,14 +4126,15 @@ mod tests {
             serving,
             NodeStopProgress {
                 phase: ShutdownPhase::Serving,
-                deadline: ProductShutdownDeadline::NotRequested,
+                deadline: ProductShutdownDeadline::NotStarted,
             }
         );
         assert_eq!(
             serving.to_string(),
-            "in shutdown phase Serving, with no stop request accepted"
+            "in shutdown phase Serving, before its shutdown timeout began"
         );
 
+        // A stop request starts no timer: only the moves after the save have one.
         shutdown.request_stop();
         nervix_primitives::time::advance(Duration::from_secs(90)).await;
         let stopping = NodeStopProgress::observe(&shutdown);
@@ -4140,25 +4142,12 @@ mod tests {
             stopping,
             NodeStopProgress {
                 phase: ShutdownPhase::StopRequested,
-                deadline: ProductShutdownDeadline::Ahead(Duration::from_secs(150)),
+                deadline: ProductShutdownDeadline::NotStarted,
             }
         );
         assert_eq!(
             stopping.to_string(),
-            "in shutdown phase StopRequested, 150s before its own shutdown deadline"
-        );
-
-        // An in-process node has no deadline supervision, so it is read past its deadline for as
-        // long as it goes on stopping.
-        nervix_primitives::time::advance(Duration::from_secs(150)).await;
-        let overdue = NodeStopProgress::observe(&shutdown);
-        assert_eq!(overdue.phase, ShutdownPhase::StopRequested);
-        assert_eq!(overdue.deadline, ProductShutdownDeadline::Passed);
-        nervix_primitives::time::advance(Duration::from_secs(60)).await;
-        assert_eq!(NodeStopProgress::observe(&shutdown), overdue);
-        assert_eq!(
-            overdue.to_string(),
-            "in shutdown phase StopRequested, past its own shutdown deadline"
+            "in shutdown phase StopRequested, before its shutdown timeout began"
         );
     }
 
@@ -4172,7 +4161,8 @@ mod tests {
                 task: Arc::new(NodeTaskTerminalOutcome::CleanApplicationExit),
                 shutdown: Some(ShutdownOutcome {
                     stop_admission: ShutdownPhaseOutcome::Completed,
-                    drain_support: ShutdownPhaseOutcome::Abandoned,
+                    save: ShutdownPhaseOutcome::Completed,
+                    moves: ShutdownMoveOutcome::Disrupted,
                     terminal_teardown: ShutdownPhaseOutcome::Completed,
                 }),
             },
@@ -4180,8 +4170,8 @@ mod tests {
         assert_eq!(
             ended.to_string(),
             "node 'node-2' stop: ended 480ms after its stop request, inside its 300s watchdog: \
-             clean application exit; shutdown phases: stop admission Completed, drain support \
-             Abandoned, terminal teardown Completed"
+             clean application exit; shutdown phases: stop admission Completed, save Completed, \
+             moves Disrupted, terminal teardown Completed"
         );
 
         let unreported = NodeStopRecord {
@@ -4249,13 +4239,14 @@ mod tests {
             watchdog: Duration::from_secs(300),
             ending: NodeStopEnding::StillStopping(NodeStopProgress {
                 phase: ShutdownPhase::Serving,
-                deadline: ProductShutdownDeadline::NotRequested,
+                deadline: ProductShutdownDeadline::NotStarted,
             }),
         };
         assert_eq!(
             unasked_and_running.to_string(),
             "node 'node-1' stop: still running without a stop request from the harness, at the \
-             end of its 300s watchdog, in shutdown phase Serving, with no stop request accepted"
+             end of its 300s watchdog, in shutdown phase Serving, before its shutdown timeout \
+             began"
         );
     }
 

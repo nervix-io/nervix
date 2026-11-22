@@ -10,7 +10,6 @@ Feature: Emitter batch lifecycle
   Scenario: The final node drains a partial batch and confirms its source before shutdown
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
     And a 1 node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """

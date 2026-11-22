@@ -4,7 +4,7 @@ Feature: Graceful shutdown
   @shutdown_leader_change @deloxide_stress
   Scenario: A stopping follower resumes its remaining ownership moves after the leader changes
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -28,7 +28,7 @@ Feature: Graceful shutdown
     Then node "node-3" eventually reports leader "node-1"
     When the ownership handoff preparation pause for domain "{{domain}}" is released
     And node "node-2" is stopped
-    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-2" reports its moves "Moved"
     And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -43,7 +43,7 @@ Feature: Graceful shutdown
   @shutdown_handoff_bystander
   Scenario: A stopping owner hands its work over while the leader cannot reach a node that runs none of it
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When leadership is transferred to node "node-1"
@@ -64,7 +64,7 @@ Feature: Graceful shutdown
     Then node "node-1" eventually reports status containing "kind=junction name=bystander_route owner=node-3"
     Given the ownership handoff gate engagement requests node "node-1" sends to node "node-2" are lost
     When node "node-3" is gracefully stopped
-    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-3" reports its moves "Moved"
     And the link from node "node-1" to node "node-2" lost no ownership handoff gate engagement request
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -78,7 +78,7 @@ Feature: Graceful shutdown
   @shutdown_handoff_bystander_preparation
   Scenario: A stopping owner hands its work over within its drain budget while a bystander's runtime preparation is held
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When leadership is transferred to node "node-1"
@@ -103,7 +103,7 @@ Feature: Graceful shutdown
     And node "node-1" eventually reports status containing "kind=junction name=bystander_echo owner=node-3"
     When runtime preparation on node "node-2" is paused
     And node "node-3" is gracefully stopped
-    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-3" reports its moves "Moved"
     And node "node-2" reaches its runtime preparation pause
     When runtime preparation on node "node-2" is released
     And these Plexus commands are executed through the client on node "node-1"
@@ -143,7 +143,7 @@ Feature: Graceful shutdown
   Scenario: A stopping Kafka ingestor closes intake while its attached emitter hands over
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_handoff_in_{{test_id}}" exists with 1 partitions
@@ -199,7 +199,7 @@ Feature: Graceful shutdown
     When emitter "handoff_output" leaves stall mode
     And the ownership handoff flush pause for domain "{{domain}}" is released
     And node "node-1" is stopped
-    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-1" reports its moves "Moved"
     And within "30s" the observed broker receives payloads
       """
       {"event_id":1}
@@ -227,7 +227,7 @@ Feature: Graceful shutdown
   Scenario: A stopping ingestor flushes its admitted route before freezing ownership state
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_flush_in_{{test_id}}" exists with 1 partitions
@@ -276,7 +276,7 @@ Feature: Graceful shutdown
     When ingestor "flush_ingestor" leaves the route poll pause
     And the ownership handoff flush pause for domain "{{domain}}" is released
     And node "node-1" is stopped
-    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-1" reports its moves "Moved"
     And within "30s" the observed broker receives payloads
       """
       {"event_id":1}
@@ -287,7 +287,7 @@ Feature: Graceful shutdown
   @shutdown_cordon_release @deloxide_stress
   Scenario Outline: A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -308,7 +308,7 @@ Feature: Graceful shutdown
     Then node "node-1" eventually reports status containing "kind=junction name=cordon_route owner=node-2"
     When the leader takes "2s" to release the shutdown drain cordon of node "node-2"
     And node "node-2" is gracefully stopped
-    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-2" reports its moves "Moved"
     And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
     When node "node-2" is started
     Then node "node-2" eventually reports status containing "raft.cordoned_nodes: (none)"
@@ -320,7 +320,7 @@ Feature: Graceful shutdown
 
   Scenario: A follower started without the default user's password hands its work to another node before it stops
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And only the bootstrap node is given the default user's password
@@ -392,7 +392,7 @@ Feature: Graceful shutdown
       {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
       """
     When node "node-2" is gracefully stopped
-    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-2" reports its moves "Moved"
     When these Plexus commands are executed on the active session
       """
       SHOW CLUSTER STATUS;
@@ -422,7 +422,7 @@ Feature: Graceful shutdown
 
   Scenario: Placement excludes a terminating process and admits its next incarnation
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -469,7 +469,7 @@ Feature: Graceful shutdown
 
   Scenario: A delayed remote acknowledgement completes while its source owner drains
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
@@ -540,7 +540,7 @@ Feature: Graceful shutdown
 
   Scenario: A single node publishes work held by long cadences before it stops
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And a 1 node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -598,14 +598,52 @@ Feature: Graceful shutdown
     When node "node-1" is started
     Then node "node-1" eventually observes a stable leader
 
-  # The drain ends once the NO ACK emitter delivered its records to its producer, which lingers for
-  # two minutes. Terminal teardown finishes the emitter within the shutdown deadline, so the producer
-  # sends the records it still holds before the node stops.
+  # The consumer reads the batch and answers nothing, and its session ends when the node closes
+  # admission, so no consumer is left to take the batch. Only a consumer that attaches could move
+  # it, so the save holds it as work that cannot move on and cuts it instead of waiting for it.
+  Scenario: A single node whose client emitter's consumer leaves as it stops saves what it holds and stops
+    Given graceful shutdown drain is enabled
+    And a 1 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA incoming (id STRING, amount I64);
+      CREATE SCHEMA outgoing (id STRING, cents I64);
+      CREATE RELAY orders SCHEMA incoming UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA incoming
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+        INHERIT id SET cents = input.amount * 100
+        BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And client "app" is connected to node "node-1"
+    When client "app" opens producer "input" on ingestor "orders_in" expecting fields "id STRING, amount I64"
+    And client "app" opens consumer "output" on emitter "app_output" expecting fields "id STRING, cents I64"
+    And producer "input" submits batch "before the stop" with rows
+      | id  | amount |
+      | one | 7      |
+    And consumer "output" reads output batch "unanswered"
+    And node "node-1" is stopped while timing shutdown
+    Then the last cluster operation completes within "30s"
+    And the last shutdown of node "node-1" reports its moves "NowhereToMove"
+
+  # The save rests once the NO ACK emitter delivered its records to its producer, which lingers for
+  # two minutes. Stopping the domain's execution finishes the emitter within the domain drain timeout,
+  # so the producer sends the records it still holds before the node stops.
   @shutdown_emitter_finish @deloxide_stress
   Scenario: A single node sends the records its NO ACK Kafka emitter's producer holds before it stops
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And a 1 node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -678,7 +716,7 @@ Feature: Graceful shutdown
   Scenario: The last schedulable node completes interleaved branch work and commits its source offsets
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_orders_{{test_id}}" exists with 1 partitions
@@ -772,7 +810,9 @@ Feature: Graceful shutdown
   Scenario: A node that stops in place keeps draining until its transport confirms the source offsets
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "40s"
+    And shutdown timeout is configured as "40s"
+    And schema change drain timeout is configured as "40s"
+    And entity gate deadline is configured as "40s"
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_confirm_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "shutdown_confirm_out_{{test_id}}" is observed
@@ -813,14 +853,16 @@ Feature: Graceful shutdown
       {"event_id":1}
       """
     When node "node-1" is gracefully stopped
-    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-1" reports its moves "NowhereToMove"
     And within "10s" Kafka consumer group "shutdown_confirm_group_{{test_id}}" next offset for topic "shutdown_confirm_in_{{test_id}}" partition 0 is "at least 1"
 
   @shutdown_source_confirmation_handoff @deloxide_stress
   Scenario: A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "40s"
+    And shutdown timeout is configured as "40s"
+    And schema change drain timeout is configured as "40s"
+    And entity gate deadline is configured as "40s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_confirm_handoff_in_{{test_id}}" exists with 1 partitions
@@ -867,14 +909,16 @@ Feature: Graceful shutdown
       {"event_id":1}
       """
     When node "node-1" is gracefully stopped
-    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-1" reports its moves "Moved"
     And within "10s" Kafka consumer group "shutdown_confirm_handoff_group_{{test_id}}" next offset for topic "shutdown_confirm_handoff_in_{{test_id}}" partition 0 is "at least 1"
     And the observed broker does not receive a payload within "10s"
 
   @shutdown_kafka_refused_commit @deloxide_stress
   Scenario Outline: A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "40s"
+    And shutdown timeout is configured as "40s"
+    And schema change drain timeout is configured as "40s"
+    And entity gate deadline is configured as "40s"
     And the production sticky scheduler is configured
     And a mock Kafka broker serves topic "refused_stop_in_{{test_id}}"
     And the mock Kafka broker also serves topic "refused_stop_out_{{test_id}}"
@@ -944,7 +988,7 @@ Feature: Graceful shutdown
 
   Scenario: A node whose only uncordoned peer is terminating completes its admitted work in place
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
@@ -1015,10 +1059,95 @@ Feature: Graceful shutdown
     And node "node-1" is stopped
     And node "node-2" is stopped
 
+  # A stopping node can still be saving when the leader resumes a move into it: here the move
+  # was prepared before node-1 began stopping and held there, and node-1's save waits for the
+  # input its junction accepted. Node-1 refuses to confirm the move because it is terminating, so
+  # the unit stays saved on node-2, and node-1's save still ends once that input moves on.
+  Scenario: A node still saving when a held move into it resumes ends its save and stops cleanly
+    Given graceful shutdown drain is enabled
+    And shutdown timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA eligible_event ( sequence I64, tenant STRING );
+      CREATE WIRE JSON SCHEMA eligible_event_wire MODE STRICT ( sequence integer, tenant string );
+      CREATE WIRE JSON CODEC eligible_event_codec
+        FROM WIRE SCHEMA eligible_event_wire
+        TO SCHEMA eligible_event;
+      CREATE RELAY eligible_ingested SCHEMA eligible_event UNBRANCHED;
+      CREATE RELAY eligible_routed SCHEMA eligible_event UNBRANCHED;
+      CREATE RELAY handoff_input SCHEMA eligible_event UNBRANCHED;
+      CREATE RELAY handoff_output SCHEMA eligible_event UNBRANCHED;
+      CREATE VHOST edge eligible-shutdown-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT eligible_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR eligible_ingestor
+        FROM eligible_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
+        TO eligible_ingested
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION eligible_route FROM eligible_ingested UNBRANCHED
+        TO eligible_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      CREATE JUNCTION handoff_route FROM handoff_input UNBRANCHED
+        TO handoff_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE ZEROMQ CLIENT eligible_sink CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE ZEROMQ PUSH EMITTER eligible_output FROM eligible_routed
+        TO eligible_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING eligible_event_codec
+        INHERIT ALL
+        FLUSH EACH 1h MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      RELOCATE JUNCTION handoff_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=handoff_route owner=node-2"
+    When leadership is transferred to node "node-3"
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    And processor "junction" "eligible_route" pauses around its accepted input's first poll
+    When node "node-2" begins stopping
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    And node "node-1" eventually reports status containing "terminating: true"
+    When http payload is posted to node "node-1" with host "eligible-shutdown-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1,"tenant":"alpha"}
+      """
+    When node "node-1" begins stopping
+    Then processor "junction" "eligible_route" has accepted its paused input
+    And node "node-1" is still saving or moving its units after "2s"
+    When the ownership handoff preparation pause for domain "{{domain}}" is released
+    And node "node-2" is stopped
+    Then node "node-1" is still saving or moving its units after "1s"
+    And node "node-3" eventually reports status containing "kind=junction name=handoff_route owner=node-2"
+    When processor "junction" "eligible_route" first polls its paused input
+    And processor "junction" "eligible_route" resumes its paused input
+    Then within "20s" the observed broker receives payloads
+      """
+      {"sequence":1,"tenant":"alpha"}
+      """
+    When node "node-1" is stopped
+    Then node "node-1" reports that its last shutdown finished cleanly
+    And node "node-2" reports that its last shutdown finished cleanly
+
   Scenario: Every node terminating at once completes its admitted work and commits its source offsets
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_everyone_{{test_id}}" exists with 1 partitions
@@ -1096,7 +1225,7 @@ Feature: Graceful shutdown
   Scenario: A leader stopping with peers it has not seen terminate keeps its ingestor when the chosen peer refuses it
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" eventually reports leader "node-1"
@@ -1257,7 +1386,6 @@ Feature: Graceful shutdown
   Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And shutdown timeout is configured as "20s"
-    And drain timeout is configured as "20s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with 40 relays is created
@@ -1265,7 +1393,7 @@ Feature: Graceful shutdown
     Then within "180s" the materialized generators report round 1, 512 KiB, 40 relays and 2 tenants
     When the materialized summary subscription "summary_subscription" is closed
     And all nodes are stopped
-    Then every node reports that its last shutdown finished before its deadline
+    Then every node reports that its last shutdown did not disrupt the cluster
 
     Examples:
       | cluster_size | replica_count |
@@ -1274,7 +1402,7 @@ Feature: Graceful shutdown
 
   Scenario: A generator releases its buffered output and stops producing when its node drains
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And a 1 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
     And the leader node is configured with these Plexus commands
@@ -1352,7 +1480,7 @@ Feature: Graceful shutdown
   Scenario: A pending REQUIRED WAIT message does not hold a graceful shutdown drain open
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_waiting_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
@@ -1440,10 +1568,11 @@ Feature: Graceful shutdown
       """
     And within "30s" Kafka consumer group "nervix_cucumber_shutdown_waiting_{{test_id}}" next offset for topic "shutdown_waiting_{{test_id}}" partition 0 is "at least 1"
 
-  Scenario: A drain that reaches its timeout leaves Kafka offsets uncommitted for redelivery after restart
+  Scenario: A save that cuts a record its emitter cannot deliver leaves Kafka offsets uncommitted for redelivery after restart
     Given Kafka is running
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "3s"
+    And schema change drain timeout is configured as "3s"
+    And entity gate deadline is configured as "3s"
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_stalled_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
@@ -1508,9 +1637,8 @@ Feature: Graceful shutdown
       """
     And within "30s" Kafka consumer group "nervix_cucumber_shutdown_stalled_{{test_id}}" next offset for topic "shutdown_stalled_{{test_id}}" partition 0 is "at least 1"
 
-  Scenario: Graceful shutdown drain timeout bounds full cluster termination
+  Scenario: Every node stopping at once saves its branched work and ends promptly
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "1ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -1570,10 +1698,8 @@ Feature: Graceful shutdown
     When all nodes are gracefully stopped
     Then the last cluster operation completes within "5s"
 
-  Scenario: A transaction commit stuck at its shutdown deadline is cancelled and completed after restart
+  Scenario: A transaction commit still running when its node turns off is cancelled and completed after restart
     Given graceful shutdown drain is enabled
-    And shutdown timeout is configured as "5s"
-    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus commands
@@ -1594,17 +1720,14 @@ Feature: Graceful shutdown
       """
     Then the transaction commit pause on node "node-1" after 1 statement is reached
     When node "node-1" is stopped while timing shutdown
-    Then the last cluster operation takes at least "5s"
-    And the last cluster operation completes within "60s"
-    And node "node-1" reports that its last shutdown passed its deadline
+    Then the last cluster operation completes within "60s"
+    And node "node-1" reports that its last shutdown finished cleanly
     When the transaction commit pause on node "node-1" after 1 statement is released
     And node "node-1" is started
     Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
 
   Scenario: A command still waiting for admission is cancelled without an effect when its node stops
     Given graceful shutdown drain is enabled
-    And shutdown timeout is configured as "5s"
-    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus commands
@@ -1619,7 +1742,7 @@ Feature: Graceful shutdown
     Then the command admission pause on node "node-1" is reached
     When node "node-1" is stopped while timing shutdown
     Then the last cluster operation completes within "60s"
-    And node "node-1" reports that its last shutdown finished before its deadline
+    And node "node-1" reports that its last shutdown finished cleanly
     And the background command request ends without an answer
     When the command admission pause on node "node-1" is released
     And node "node-1" is started

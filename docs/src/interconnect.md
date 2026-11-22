@@ -356,7 +356,8 @@ recovery preparation, confirmation, activation, or reconciliation answers with a
 text is its complete failure chain rather than only the outermost failure, so the coordinator
 reports, for example, a destination WASM guest's classified restore failure with its stage, branch,
 module, and saved state revision. A destination whose own process incarnation has advertised that
-it is terminating refuses a planned-handoff preparation before it validates the request, with
+it is terminating refuses a planned-handoff preparation, and the destination confirmation of a move
+it prepared before it began terminating, before it validates the request, with
 `destination node '<node_id>' is terminating`: the coordinator plans from its gossip view, which can
 still list a stopping peer as eligible, while the destination's own advertisement is authoritative.
 Discard is exact and idempotent over the coordination
@@ -421,13 +422,15 @@ the node holds no report for that stop because it restarted or never ran the dom
 
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
-the sender, carries its remaining drain budget, and moves its scheduled work through planned
+the sender, carries what remains of its shutdown timeout, and moves its scheduled work through planned
 ownership handoffs, and release, which clears the cordon that drain set. The leader acts for
 the node the authenticated connection belongs
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
-and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
-with the leader's account of the action for the stopping node's log, or not the leader, which leaves
-the sender to ask the leader it observes next. A node that does not lead when the request arrives
+and uncordon only itself, and no user credential takes part. The answer is completed; unmoved, with
+the typed reason the units the drain left did not move (nowhere to move, when no other node could
+take any of them, or could have moved); or failed. Each carries the leader's account of the action
+for the stopping node's log. The answer can also be not the leader, which leaves the sender to ask
+the leader it observes next; a leader that is itself turning off answers so too. A node that does not lead when the request arrives
 changes nothing. A leader that loses leadership before completing a drain also answers not the
 leader, logs its interrupted report, and preserves any moves already committed. The next leader
 plans the remaining moves from the current schedule, within the sender's remaining budget. A
@@ -435,8 +438,9 @@ leader that loses its leadership while it writes a release also answers not the 
 clearing a cordon again through the next leader is harmless. The leader runs the action in a service
 task of its own,
 so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
-abandons the request first. For a drain that deadline is what remains of the sender's drain
-timeout; the leader also uses the budget carried by the drain action to bound each unit's gate,
+abandons the request first. Each request waits at most the commands pool's transfer deadline, and the
+sender asks again of the leader it observes next when a request goes unanswered; what remains of the
+sender's shutdown timeout bounds every drain request it sends. The leader also uses the budget carried by the drain action to bound each unit's gate,
 state preparation, and activation waits, leaving a window for later units and the sender's in-place
 drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
@@ -2456,19 +2460,19 @@ An outbound connection set up from the replaced credentials checks the published
 is established: one that checks after the publication is refused, and one that checked before it is
 held by a slot the retirement then ends, so replaced credentials never outlive their replacement.
 
-Application shutdown has three ordered phases. A server process issues the stop request that
-starts them when it receives its first `SIGINT` or `SIGTERM`, and one shutdown deadline measured
-from that request bounds all three. The stop request first marks the local process incarnation as
+Application shutdown has four ordered phases. A server process issues the stop request that
+starts them when it receives its first `SIGINT` or `SIGTERM`, and the shutdown timeout bounds the
+moves of the node's units, counted from the end of its save. The stop request first marks the local process incarnation as
 terminating and then closes admission on its public gRPC, connector, observability, and console
 listeners, closing the client connections they had accepted; a gRPC connection closes once its
 calls have ended, its sessions after delivering their endings, and is cut if it is still open two
 seconds later. Its interconnect listener and
-registered handlers remain available on that live node throughout the drain-support phase. They
+registered handlers remain available on that live node throughout the save and the moves. They
 continue carrying queued and active relay payloads, admission and record acknowledgements,
 runtime-state replication and checkpoints, ownership-handoff coordination, domain-clock progress,
-and the schedule revisions that activate committed ownership. Drain support first moves scheduled
-work to a live replacement node when one exists and then completes the work the node already
-admitted in place, so these consumers remain available until the node's own graphs are quiescent.
+and the schedule revisions that activate committed ownership. The save brings the work the node
+already admitted to rest and writes its final checkpoints, and the moves hand the node's units to a
+live replacement node when one exists, so these consumers remain available until both have ended.
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
@@ -2477,18 +2481,17 @@ handoff does not complete until its replication acknowledgement and committed ac
 observed. These owners keep admitted work visible while the supporting interconnect consumers are
 still running.
 
-Only after drain support completes or reports abandonment does terminal teardown call transport
-shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation waiters,
+Only once the moves have ended does terminal teardown call transport shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation waiters,
 and retires every pool connection the node opened: each stops leasing and closes once its leased
 streams return. Connections that peers opened to the node close at once, together with the handlers
 still serving their streams, so a peer's request the node has not answered fails instead of
-completing. Whatever remains after ten seconds is then closed. Connection setup, including the name
-resolution it performs, and incomplete TLS handshakes remain inside this bound. A repeated `SIGINT`
-or `SIGTERM`, or the shutdown deadline passing, ends the process without running the rest of its
-shutdown, so its peers observe its connections ending exactly as they do when the process crashes.
+completing. Whatever remains after the transport's request timeout is then closed. Connection
+setup, including the name resolution it performs, and incomplete TLS handshakes remain inside this
+bound. A repeated `SIGINT` or `SIGTERM` ends the process without running the rest of its shutdown,
+so its peers observe its connections ending exactly as they do when the process crashes.
 
-See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the deadline and exit
-statuses, and what each ending preserves.
+See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the shutdown timeout
+and exit statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 

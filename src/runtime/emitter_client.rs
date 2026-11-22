@@ -102,6 +102,7 @@ impl ClientConsumerConnector {
                 .inner
                 .metrics
                 .client_emitter_series(&context.domain, &context.emitter),
+            context.clock.clone(),
         ));
         let replaced = context
             .runtime
@@ -342,6 +343,14 @@ impl EmitterConnector for ClientConsumerConnector {
                 Ok(ClientEmitterResult::Rejected(reason)) => {
                     outcome.reject(RejectedEmitterMember::external(id, occurred_at, reason));
                 }
+                Ok(ClientEmitterResult::Unconsumed) => outcome.fail(
+                    Report::new(EmitterWriteError::Publish {
+                        connector: "client",
+                    })
+                    .attach_printable(
+                        "no consumer was attached to take the delivery while its domain stopped",
+                    ),
+                ),
                 Err(refusal) => outcome.fail(
                     Report::new(EmitterWriteError::Publish {
                         connector: "client",

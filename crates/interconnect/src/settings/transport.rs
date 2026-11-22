@@ -520,16 +520,11 @@ impl TransportSettings {
         }
     }
 
-    pub fn options(
-        &self,
-        peer_receive: Option<super::PeerReceiveSettings>,
-        drain_timeout: Option<Duration>,
-    ) -> TransportOptions {
+    /// The transport's options. Its drain at shutdown waits for the requests still in flight for
+    /// at most the request timeout, the bound each of those requests already has.
+    pub fn options(&self, peer_receive: Option<super::PeerReceiveSettings>) -> TransportOptions {
         let request_timeout = *self.request_timeout.value();
-        let shutdown_drain_timeout = match drain_timeout {
-            Some(bound) => bound.min(request_timeout),
-            None => request_timeout,
-        };
+        let shutdown_drain_timeout = request_timeout;
         TransportOptions {
             accept_retry_delay: Setting::<crate::AcceptRetryDelay>::resolve(None, &())
                 .assured("the declared accept-retry default is positive and clock-representable"),
@@ -608,7 +603,7 @@ mod tests {
             ..Default::default()
         })
         .assured("ten peers fit every capacity");
-        let options = settings.options(None, None);
+        let options = settings.options(None);
         assert_eq!(options.max_connections, 120);
         assert_eq!(options.request_quota, 20);
         assert_eq!(options.append_request_quota, 20);
@@ -620,7 +615,7 @@ mod tests {
             ..Default::default()
         })
         .assured("a four-request reserve fits the incoming queue");
-        assert_eq!(explicit.options(None, None).append_request_quota, 4);
+        assert_eq!(explicit.options(None).append_request_quota, 4);
         assert_eq!(explicit.values().request_quota, Some(4));
     }
 

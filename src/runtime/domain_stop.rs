@@ -73,7 +73,9 @@ impl StopLedgerProgress {
     }
 }
 
-/// How this node tears a stopped domain down: the ending of the stop that just ended it.
+/// How this node tears a domain's execution down: the generation it ends, and whether it ends it
+/// as an enforced stop does. A stopped domain's teardown ends as the stop that ended it did, and a
+/// stopping node's save ends every domain as a completed stop does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) struct StopTeardown {
     pub(in crate::runtime) start_version: u64,
@@ -233,7 +235,10 @@ impl Runtime {
     /// Force-flush obligations are read first, so an obligation seen complete makes everything its
     /// participant did for the flush visible to the reads that follow. The relays' admission
     /// sequences are read next and once more at the end, as the local drain reads them.
-    fn observe_stopping_domain(&self, domain: &DomainName) -> StopDrainStatus {
+    pub(in crate::runtime) fn observe_stopping_domain(
+        &self,
+        domain: &DomainName,
+    ) -> StopDrainStatus {
         let mut flush_obligations = 0_usize;
         for counters in self.inner.node_quiesce_counters.iter() {
             if &counters.key().entity.domain == domain {
@@ -444,10 +449,26 @@ impl Runtime {
         }
     }
 
-    /// Records what the teardown of `domain` is about to cut: every entry of the domain's view as
-    /// the teardown begins, as `teardown` reports it, and every payload an ingestor's quiesce
-    /// buffer still retains.
+    /// Records what the teardown of `domain` is about to cut, until the stop's owner collects it.
     pub(in crate::runtime) fn record_stop_cuts(&self, domain: &DomainName, teardown: StopTeardown) {
+        let cuts = self.teardown_cuts(domain, teardown);
+        self.inner.stop_ledgers.insert(
+            domain.clone(),
+            StopLedgerEntry {
+                start_version: teardown.start_version,
+                progress: StopLedgerProgress::Recorded(cuts),
+            },
+        );
+    }
+
+    /// What the teardown of `domain` is about to cut: every entry of the domain's view as the
+    /// teardown begins, as `teardown` reports it, and every payload an ingestor's quiesce buffer
+    /// still retains.
+    pub(in crate::runtime) fn teardown_cuts(
+        &self,
+        domain: &DomainName,
+        teardown: StopTeardown,
+    ) -> Vec<StopCut> {
         let view = self.observe_stopping_domain(domain);
         let mut cuts = Vec::new();
         for entry in &view.entries {
@@ -469,13 +490,7 @@ impl Runtime {
                 });
             }
         }
-        self.inner.stop_ledgers.insert(
-            domain.clone(),
-            StopLedgerEntry {
-                start_version: teardown.start_version,
-                progress: StopLedgerProgress::Recorded(cuts),
-            },
-        );
+        cuts
     }
 
     /// Records that the teardown of `domain` for the stop `teardown` serves ended: every task

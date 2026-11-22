@@ -534,6 +534,9 @@ impl Runtime {
             }
         }
 
+        // Domains that began or stopped stopping, whose client emitters look at their clocks again
+        // once the loop has released every domain entry.
+        let mut stopping_changed = std::collections::BTreeSet::new();
         for (domain, state) in domains {
             let authority = authorities
                 .get(domain)
@@ -541,6 +544,11 @@ impl Runtime {
                 .unwrap_or_else(DomainClockAuthority::initial);
             let mut entry = self.inner.domains.entry(domain.clone()).or_insert_with(|| {
                 let clock = DomainClockLifecycle::new(domain.clone());
+                // A saving node marks every clock it already holds once. A clock it creates
+                // afterwards reads the mark here, while its entry is not yet visible to that pass.
+                if *self.inner.node_save.borrow() == NodeSave::Saving {
+                    clock.mark_node_saving();
+                }
                 clock.synchronize(state, &authority);
                 RuntimeDomainState {
                     config: state.config.clone(),
@@ -559,6 +567,10 @@ impl Runtime {
                 continue;
             }
             let generation_changed = entry.start_version != state.start_version;
+            let was_stopping = entry.status == nervix_models::DomainStatus::Stopping;
+            if was_stopping != (state.status == nervix_models::DomainStatus::Stopping) {
+                stopping_changed.insert(domain.clone());
+            }
             entry.config = state.config.clone();
             entry.status = state.status.clone();
             entry.start_version = state.start_version;
@@ -573,6 +585,13 @@ impl Runtime {
             }
             if generation_changed {
                 self.forget_stop_ledger(domain, state.start_version);
+            }
+        }
+        if !stopping_changed.is_empty() {
+            for endpoint in self.inner.client_emitters.iter() {
+                if stopping_changed.contains(&endpoint.key().domain) {
+                    endpoint.observe_domain_lifecycle();
+                }
             }
         }
         self.inner.domain_status_changed.send_modify(|version| {

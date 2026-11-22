@@ -421,17 +421,8 @@ impl<'bytes> GeneratedSettings<'bytes> {
 
     fn shutdown(&mut self) -> ShutdownSettings {
         let shutdown_timeout = self.duration();
-        // A drain this long is far longer than any node takes, and never longer than the
-        // shutdown.
-        let longest_drain = u64::try_from(shutdown_timeout.as_nanos()).unwrap_or(u64::MAX);
-        let drain_timeout = Duration::from_nanos(self.entropy.boundary_biased(0..=longest_drain));
         let task_grace_period = self.duration();
-        ShutdownSettings::resolve(
-            Some(shutdown_timeout),
-            Some(drain_timeout),
-            Some(task_grace_period),
-        )
-        .assured("the drain never exceeds the shutdown")
+        ShutdownSettings::resolve(Some(shutdown_timeout), Some(task_grace_period))
     }
 
     fn cluster_duration(&mut self) -> Duration {

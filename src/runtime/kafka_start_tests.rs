@@ -285,7 +285,7 @@ async fn regroup_reinstalls_prepared_offsets_on_a_unit_that_keeps_its_owner() {
             .placement_tasks
             .contains_key(&retired_unit)
     );
-    runtime.shutdown(Duration::from_secs(5)).await;
+    runtime.shutdown().await;
 }
 
 #[nervix_primitives::test]
@@ -309,7 +309,7 @@ async fn a_single_unit_selects_and_persists_its_canonical_start_directly() {
         assert_eq!(persisted.applied_start_generation(), Some(7));
         assert_eq!(persisted.next_offset("events", 0), Some(4));
     }
-    fixture.runtime.shutdown(Duration::from_secs(5)).await;
+    fixture.runtime.shutdown().await;
 }
 
 #[nervix_primitives::test]
@@ -411,5 +411,5 @@ async fn a_late_unit_adopts_the_canonical_cut_after_a_plain_resume() {
     assert_eq!(fixture.persisted(2).next_offset("events", 2), Some(9));
     assert_eq!(fixture.persisted(2).applied_start_generation(), Some(7));
     assert_eq!(fixture.states[1].read().next_offset("events", 1), Some(41));
-    fixture.runtime.shutdown(Duration::from_secs(5)).await;
+    fixture.runtime.shutdown().await;
 }

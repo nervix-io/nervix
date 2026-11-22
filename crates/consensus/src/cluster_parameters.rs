@@ -217,7 +217,7 @@ mod tests {
             .node_records
             .insert(current.clone(), committed_capability(record.clone()));
         record.identity = nervix_models::ClusterNodeIdentity::new(departed.clone(), incarnation);
-        record.capabilities.shutdown.drain_timeout = Duration::from_secs(1);
+        record.capabilities.shutdown.shutdown_timeout = Duration::from_secs(1);
         state
             .node_records
             .insert(departed.clone(), committed_capability(record));

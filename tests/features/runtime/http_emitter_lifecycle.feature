@@ -459,7 +459,7 @@ Feature: HTTP REQUEST emitter lifecycle
       | 3            |
 
   @http_emitter_shutdown_recovery
-  Scenario Outline: A shutdown deadline leaves unresolved HTTP work for Kafka redelivery after restart
+  Scenario Outline: A save that cuts unresolved HTTP work leaves it for Kafka redelivery after restart
     Given Kafka is running
     And HTTP receiver "api" is running
     And HTTP receiver "api" answers with
@@ -469,7 +469,6 @@ Feature: HTTP REQUEST emitter lifecycle
       """
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "3s"
     And the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -496,12 +495,12 @@ Feature: HTTP REQUEST emitter lifecycle
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api_client CONFIG {
-        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 3000
       };
       CREATE HTTP REQUEST EMITTER published FROM outgoing
         ATTACHED
         TO api_client METHOD 'POST' PATH concat('/events/', input.id)
-          MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
+          MODE ACK RETRY POLICY BACKOFF 1s MAX 1s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -514,7 +513,9 @@ Feature: HTTP REQUEST emitter lifecycle
     And HTTP receiver "api" request 2 repeats request 1
     When node "node-1" is gracefully stopped
     Then the last cluster operation completes within "20s"
-    # The forced ending closes the retried request's connection rather than leaving it open.
+    # The save waits for the held request only until the client's timeout ends it and closes its
+    # connection; the request's retry is held work, which the save cuts and reports. The retry is
+    # due a second after the timeout, long after the save has cut it, so it is never sent.
     And HTTP receiver "api" eventually sees the client abandon at least 1 unfinished response
     And within "2s" Kafka consumer group "http_recovery_group_{{test_id}}" next offset for topic "http_recovery_{{test_id}}" partition 0 is "below 1"
     When node "node-1" is started
@@ -529,11 +530,10 @@ Feature: HTTP REQUEST emitter lifecycle
       | 3            | CORDON NODE node-2; CORDON NODE node-3; |
 
   @http_emitter_shutdown_flush
-  Scenario Outline: Graceful shutdown force-flushes an HTTP REQUEST emitter inside the drain deadline
+  Scenario Outline: Graceful shutdown force-flushes an HTTP REQUEST emitter as its node saves
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And graceful shutdown drain is enabled
-    And drain timeout is configured as "20s"
     And the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

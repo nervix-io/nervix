@@ -76,6 +76,7 @@ pub use kafka_start::{KafkaStartAction, KafkaStartRequest, KafkaStartResponse};
 pub use listener::{AcceptRetryDelay, AcceptRetryDelayError, is_connection_accept_failure};
 pub use node_drain::{
     StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
+    StoppingNodeUnmoved,
 };
 pub use observation::{
     ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, RequestOutcome,
@@ -188,7 +189,7 @@ pub struct TransportOptions {
 
 impl Default for TransportOptions {
     fn default() -> Self {
-        TransportSettings::default().options(None, None)
+        TransportSettings::default().options(None)
     }
 }
 
@@ -656,6 +657,10 @@ pub struct ForcedOwnershipRecoveryPreparation {
 pub enum OwnershipHandoffFailure {
     #[error("{reason}")]
     Rejected { reason: String },
+    /// The destination refused to become a new placement destination because its own process
+    /// incarnation advertised that it is terminating, whatever its coordinator's view still shows.
+    #[error("destination node '{node}' is terminating")]
+    DestinationTerminating { node: ClusterNodeName },
 }
 
 impl OwnershipHandoffFailure {

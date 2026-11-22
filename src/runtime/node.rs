@@ -91,6 +91,9 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Whether this node still admits new work. A terminating node closes it once, and ingestors
     /// and generators observe the change.
     pub(in crate::runtime) local_intake: watch::Sender<LocalIntake>,
+    /// Whether this node still serves, or saves what it holds to stop. A stopping node marks it
+    /// once, and every domain clock the node holds, or creates afterwards, reads as stopping.
+    pub(in crate::runtime) node_save: watch::Sender<NodeSave>,
     pub(in crate::runtime) in_flight_by_domain:
         DashMap<DomainName, Arc<AckRootTracker>, RandomState>,
     pub(in crate::runtime) in_flight_by_ingestor:

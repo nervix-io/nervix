@@ -1506,7 +1506,7 @@ impl SessionServiceImpl {
                                 ))
                                 .await;
                             }
-                            return command_error(error.to_string());
+                            return command_error(format!("{error:#}"));
                         }
                     };
             }

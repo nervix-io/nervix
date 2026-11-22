@@ -123,6 +123,25 @@ pub struct ClusterHandle {
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// When a process incarnation advertised that it is terminating.
+#[derive(Debug, Clone, Copy)]
+pub struct TerminatingAdvertisement {
+    advertised_at: Instant,
+}
+
+impl TerminatingAdvertisement {
+    /// How much of `propagation` is still to pass since the advertisement, or `None` once it has
+    /// passed.
+    fn propagation_remaining(&self, propagation: Duration) -> Option<Duration> {
+        let heard_by = self.advertised_at.checked_add(propagation)?;
+        let remaining = heard_by.checked_duration_since(Instant::now())?;
+        if remaining.is_zero() {
+            return None;
+        }
+        Some(remaining)
+    }
+}
+
 fn subscription_interests_from_live_nodes(
     nodes: &BTreeMap<ChitchatId, NodeState>,
 ) -> SubscriptionInterestIndex {
@@ -1620,7 +1639,8 @@ impl ClusterHandle {
         gossip.live_node_ids().into_iter().collect()
     }
 
-    pub async fn mark_local_terminating(&self) {
+    /// Advertises that this process incarnation is terminating, and returns when it did.
+    pub async fn mark_local_terminating(&self) -> TerminatingAdvertisement {
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
         let local_id = chitchat.self_chitchat_id().clone();
@@ -1630,6 +1650,43 @@ impl ClusterHandle {
             incarnation = local_id.generation_id,
             "advertised terminating process incarnation"
         );
+        TerminatingAdvertisement {
+            advertised_at: Instant::now(),
+        }
+    }
+
+    /// Keeps this node gossiping until `propagation` has passed since `advertisement`, so its
+    /// peers hear that it is terminating before it leaves. A node that leaves sooner looks to its
+    /// peers like a live peer whose gossip lapsed, eligible for new placements, until their health
+    /// interval for it ends. It waits nothing once that much time has passed, and nothing when no
+    /// live peer remains to hear it.
+    pub async fn let_terminating_advertisement_propagate(
+        &self,
+        advertisement: TerminatingAdvertisement,
+        propagation: Duration,
+    ) {
+        let Some(remaining) = advertisement.propagation_remaining(propagation) else {
+            return;
+        };
+        if !self.has_live_peer().await {
+            return;
+        }
+        debug!(
+            remaining = ?remaining,
+            "keeping gossip running until peers hear that this node is terminating"
+        );
+        nervix_primitives::time::sleep(remaining).await;
+    }
+
+    /// Whether gossip lists a live node besides this one.
+    async fn has_live_peer(&self) -> bool {
+        let chitchat_handle = self.chitchat.clone();
+        let chitchat = chitchat_handle.lock().await;
+        let local_node_id = chitchat.self_chitchat_id().node_id.clone();
+        let live_nodes = current_live_nodes(&chitchat);
+        live_nodes
+            .keys()
+            .any(|node_id| node_id.as_str() != local_node_id)
     }
 
     /// Whether this process incarnation has advertised that it is terminating. It reads the

@@ -178,12 +178,12 @@ Feature: Session protocol
       | 1            |
       | 3            |
 
-  # The command holds the session's ordered lane until the shutdown deadline ends it, so the call
-  # ends before that only if the session lets go of its client as soon as it has said why it ends.
+  # The command holds the session's ordered lane until its node, turning off, ends the service work
+  # it runs, so the call ends at once only if the session lets go of its client as soon as it has
+  # said why it ends.
   @session_shutdown_ending @deloxide_stress
   Scenario Outline: A native session whose admitted command still runs is told its node is shutting down before its call ends
     Given shutdown timeout is configured as "5s"
-    And drain timeout is configured as "5s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus commands
