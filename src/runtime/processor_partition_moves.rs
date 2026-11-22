@@ -859,14 +859,14 @@ impl ClaimedBranchInstall {
     pub(super) fn begin(
         &self,
         context: &ProcessorRuntimeContext,
-        template: &BranchInstanceTemplate,
+        template: &Arc<BranchInstanceTemplate>,
     ) -> CapacityAttempt<ClaimedBranchBuild> {
         let waits = CapacityWaits::new();
         let opening = RetainedStateOpening::ReportingWaits(
             context.runtime_handle.executor().reporting_waits_to(&waits),
         );
         let context = context.clone();
-        let template = Arc::new(template.clone());
+        let template = Arc::clone(template);
         let key = self.key.clone();
         let incarnation = self.incarnation;
         CapacityAttempt::start(waits, async move {

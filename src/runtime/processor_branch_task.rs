@@ -320,7 +320,7 @@ pub(in crate::runtime) fn spawn_processor_node_runtime_with_handoffs(
 )]
 pub(super) async fn run_processor_node_runtime(
     context: ProcessorRuntimeContext,
-    mut template: BranchInstanceTemplate,
+    template: BranchInstanceTemplate,
     inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
     shutdown_rx: watch::Receiver<bool>,
     channels: ProcessorNodeChannels,
@@ -335,6 +335,9 @@ pub(super) async fn run_processor_node_runtime(
         runtime_handle,
         domain,
     } = context;
+    // A claimed branch whose build waits for capacity goes on on a task of its own, which shares
+    // the template rather than copying it.
+    let mut template = Arc::new(template);
     let processor = template.owner.node.identifier.clone();
     let domain_clock = match nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
@@ -817,7 +820,7 @@ pub(super) async fn run_processor_node_runtime(
                     // its partition, so a claim still in flight finds no state: the input it
                     // parked begins its key here, in arrival order. A claimant still in the
                     // transition elsewhere is told this unit is not ready until it retires too.
-                    template.partition_transition = None;
+                    Arc::make_mut(&mut template).partition_transition = None;
                     // Without claims the supervisor keeps no sender of its own commands, so they
                     // close with its handle as any supervisor's do.
                     claim_reports = None;
