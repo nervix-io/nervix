@@ -328,4 +328,42 @@ mod tests {
         let applied = admission.applied_schedule.lock().await;
         assert_eq!(applied.as_ref().map(|(revision, _)| *revision), Some(2));
     }
+
+    /// A section runs in a task of its own, where a panic would end only that task. The caller
+    /// that waits for it panics with the section's own payload, as it did when the section ran
+    /// inline, and the section gives the turn back as it unwinds, so the next one can begin.
+    #[nervix_primitives::test]
+    async fn a_section_that_panics_panics_its_caller_and_gives_the_turn_back() {
+        let admission = RuntimeAdmission::new(
+            nervix_models::ClusterNodeIdentity::new(
+                ClusterNodeName::parse("node-1").assured("the fixture node name is valid"),
+                nervix_models::ClusterNodeIncarnation::new(1),
+            ),
+            Duration::from_millis(500),
+        );
+        let shutdown = CancellationToken::new();
+        let Some(turn) = admission.begin_installation(&shutdown).await else {
+            panic!("the turn is free and the shutdown is not cancelled, so the turn begins");
+        };
+
+        let caller = nervix_primitives::task::spawn(turn.run(async {
+            std::panic::panic_any("the section's own panic");
+        }));
+        let Err(ended) = caller.await else {
+            panic!("the caller returned although the section it waited for panicked");
+        };
+        let payload = ended.try_into_panic().assured(
+            "nothing aborts the caller's task and the runtime outlives it, so it ended by \
+             panicking",
+        );
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"the section's own panic"),
+            "the caller panics with the section's payload"
+        );
+        assert!(
+            admission.installation.try_lock().is_ok(),
+            "the section gave the turn back as it unwound"
+        );
+    }
 }
