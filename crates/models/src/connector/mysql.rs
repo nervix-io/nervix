@@ -106,6 +106,8 @@ pub enum MySqlValueEncoding {
     Bytes,
     #[strum(serialize = "RFC 3339 timestamp bytes")]
     TimestampBytes,
+    #[strum(serialize = "rejected: no MySQL column holds a DURATION losslessly")]
+    Rejected,
     #[strum(
         serialize = "recursive JSON text; bytes use padded base64 and non-finite floats use null"
     )]
@@ -114,6 +116,7 @@ pub enum MySqlValueEncoding {
 
 impl MySqlValueEncoding {
     /// Every current Plexus scalar or collection has an explicit binding; nullability is separate.
+    /// A `DURATION`, alone or as the element of a list at any depth, is declared rejected.
     pub fn for_type(ty: &ParseAsType) -> Self {
         match ty {
             ParseAsType::Bool => Self::BooleanInteger,
@@ -129,7 +132,14 @@ impl MySqlValueEncoding {
             ParseAsType::String => Self::Utf8Bytes,
             ParseAsType::Bytes => Self::Bytes,
             ParseAsType::Datetime => Self::TimestampBytes,
-            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Self::JsonText,
+            ParseAsType::Duration => Self::Rejected,
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
+                if ty.holds_duration() {
+                    Self::Rejected
+                } else {
+                    Self::JsonText
+                }
+            }
         }
     }
 }
@@ -350,6 +360,8 @@ fn table_path(text: &str) -> Result<(), super::external_name::ExternalNameError>
     nervix::layer(harness, reason = "tests the declared MySQL client contract")
 )]
 mod tests {
+    use meticulous::OptionExt as _;
+
     use super::*;
     use crate::{ClientConfigEntry, ClientConfigSchemaError};
 
@@ -429,6 +441,60 @@ mod tests {
             assert!(
                 matches!(report.current_context(), ClientConfigSchemaError::InvalidValue { key, .. } if key == "timeout_ms")
             );
+        }
+    }
+
+    #[test]
+    fn every_plexus_type_has_its_declared_binding_and_a_duration_at_any_depth_is_rejected() {
+        let length = std::num::NonZeroU32::new(2).assured("two is positive");
+        for (ty, encoding) in [
+            (ParseAsType::Bool, MySqlValueEncoding::BooleanInteger),
+            (ParseAsType::U8, MySqlValueEncoding::SignedInteger),
+            (ParseAsType::I8, MySqlValueEncoding::SignedInteger),
+            (ParseAsType::U16, MySqlValueEncoding::SignedInteger),
+            (ParseAsType::I16, MySqlValueEncoding::SignedInteger),
+            (ParseAsType::U32, MySqlValueEncoding::SignedInteger),
+            (ParseAsType::I32, MySqlValueEncoding::SignedInteger),
+            (ParseAsType::I64, MySqlValueEncoding::SignedInteger),
+            (ParseAsType::U64, MySqlValueEncoding::UnsignedInteger),
+            (ParseAsType::F32, MySqlValueEncoding::Double),
+            (ParseAsType::F64, MySqlValueEncoding::Double),
+            (ParseAsType::String, MySqlValueEncoding::Utf8Bytes),
+            (ParseAsType::Bytes, MySqlValueEncoding::Bytes),
+            (ParseAsType::Datetime, MySqlValueEncoding::TimestampBytes),
+            (
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::I64),
+                },
+                MySqlValueEncoding::JsonText,
+            ),
+            (
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::Vec {
+                        element: Box::new(ParseAsType::String),
+                    }),
+                    len: length,
+                },
+                MySqlValueEncoding::JsonText,
+            ),
+            (ParseAsType::Duration, MySqlValueEncoding::Rejected),
+            (
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Duration),
+                },
+                MySqlValueEncoding::Rejected,
+            ),
+            (
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::Vec {
+                        element: Box::new(ParseAsType::Duration),
+                    }),
+                    len: length,
+                },
+                MySqlValueEncoding::Rejected,
+            ),
+        ] {
+            assert_eq!(MySqlValueEncoding::for_type(&ty), encoding, "{ty}");
         }
     }
 }

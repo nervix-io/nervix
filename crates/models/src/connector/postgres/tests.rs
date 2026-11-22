@@ -146,6 +146,22 @@ fn every_plexus_type_has_its_declared_text_binding() {
             },
             PostgresValueEncoding::JsonText,
         ),
+        (ParseAsType::Duration, PostgresValueEncoding::Rejected),
+        (
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Duration),
+            },
+            PostgresValueEncoding::Rejected,
+        ),
+        (
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Duration),
+                }),
+                len: length,
+            },
+            PostgresValueEncoding::Rejected,
+        ),
     ] {
         assert_eq!(PostgresValueEncoding::for_type(&ty), encoding, "{ty}");
     }

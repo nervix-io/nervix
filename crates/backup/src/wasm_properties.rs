@@ -59,13 +59,14 @@ impl Descriptors<'_> {
                     .try_into()
                     .assured("four bytes of an eight-byte array"),
             )),
-            _ => StateValue::F64Bits(u64::from_le_bytes(bytes)),
+            12 => StateValue::F64Bits(u64::from_le_bytes(bytes)),
+            _ => StateValue::Duration(i64::from_le_bytes(bytes)),
         }
     }
 
     pub(super) fn descriptor(&mut self, branched: bool) -> WasmStateDescriptor {
         let mut fields = Vec::new();
-        for kind in 0..13 {
+        for kind in 0..14 {
             let scalar = self.scalar(kind);
             let value = if self.0.entropy().flag() {
                 StateValue::Vec(vec![StateValue::Array(vec![scalar.clone(), scalar])])

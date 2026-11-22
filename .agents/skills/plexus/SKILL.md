@@ -595,6 +595,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   - literals are `I64` and `F64`, so a narrower operand's literal is cast (`input.count > 5 AS U32`),
     a float is one word (`2.5`, never `2 .5`), and there is no exponent, `DATETIME`, or `BYTES`
     literal;
+  - a `DURATION` literal is one or more parts, each a number with its unit `ns`, `us`, `ms`, `s`,
+    `m`, `h` or `d` written right after it (`30s`, `1h 30m`); months, years, weeks and spellings
+    such as `min` are refused, and a duration converts to and from no other type;
   - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
     `(-128) AS I8`;
   - a field, call, or `SET`/`INHERIT` target named like a reserved word (`end`, `from`, `in`, `all`,

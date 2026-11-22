@@ -3,7 +3,8 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BuiltinFunctionName, FieldName, JsonPath, ParametrizerName, ParseAsType, RelayName, UdfName,
+    BuiltinFunctionName, DurationValue, FieldName, JsonPath, ParametrizerName, ParseAsType,
+    RelayName, UdfName,
 };
 
 /// An executable Plexus expression with parser-only spans removed.
@@ -428,6 +429,8 @@ pub enum Literal {
     F64(Float64Literal),
     Bool(bool),
     String(String),
+    /// A duration literal such as `30s` or `1h 30m`, as the value its parts add up to.
+    Duration(DurationValue),
     Null,
 }
 

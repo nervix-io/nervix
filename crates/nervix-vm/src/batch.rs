@@ -1,8 +1,9 @@
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
-    Int32Array, Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DurationNanosecondArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, RecordBatch, RecordBatchOptions,
+    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    new_null_array,
 };
 use arrow_buffer::BooleanBuffer;
 use arrow_schema::{DataType, Schema, TimeUnit};
@@ -13,7 +14,7 @@ use nervix_primitives::sync::StdArc;
 use crate::{RowErrors, RuntimeError};
 
 macro_rules! declare_typed_arrays {
-    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, [$($data_type:tt)+];)+) => {
         #[derive(Debug, Clone, PartialEq)]
         pub enum TypedArray {
             $($Variant($Array),)+
@@ -38,7 +39,7 @@ macro_rules! declare_typed_arrays {
 
             pub fn data_type(&self) -> DataType {
                 match self {
-                    $(Self::$Variant(_) => $data_type,)+
+                    $(Self::$Variant(_) => $($data_type)+,)+
                     Self::Datetime(_) => {
                         DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
                     }
@@ -104,7 +105,7 @@ macro_rules! declare_typed_arrays {
 
             pub fn try_from_array_ref(array: ArrayRef) -> error_stack::Result<Self, RuntimeError> {
                 let converted = match array.data_type() {
-                    $($data_type => array
+                    $($($data_type)+ => array
                         .as_any()
                         .downcast_ref::<$Array>()
                         .map(|array| Self::$Variant(array.clone())),)+
@@ -145,7 +146,7 @@ macro_rules! declare_typed_arrays {
 with_typed_registers!(declare_typed_arrays);
 
 macro_rules! declare_typed_array_conversions {
-    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, [$($data_type:tt)+];)+) => {
         $(
             impl From<$Array> for TypedArray {
                 fn from(array: $Array) -> Self {

@@ -25,7 +25,7 @@ use crate::{IngestorMetadataDeclaration, IngestorMetadataField, ParseAsType, Sch
 
 impl ParseAsType {
     /// The Arrow data type a value of this type is represented as. A datetime is nanoseconds in
-    /// UTC, and a list element is never null.
+    /// UTC, a duration a signed count of nanoseconds, and a list element is never null.
     pub fn arrow_data_type(&self) -> DataType {
         match self {
             Self::U8 => DataType::UInt8,
@@ -40,6 +40,7 @@ impl ParseAsType {
             Self::String => DataType::Utf8,
             Self::Bytes => DataType::Binary,
             Self::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+            Self::Duration => DataType::Duration(TimeUnit::Nanosecond),
             Self::F32 => DataType::Float32,
             Self::F64 => DataType::Float64,
             Self::Array { element, len } => DataType::FixedSizeList(

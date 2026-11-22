@@ -37,11 +37,14 @@ use crate::{
 /// The header's `nx_type` of a FIXED_LIST level.
 const FIXED_LIST: i32 = 15;
 
-/// The header's `nx_type` of a LIST level, the last type it declares.
+/// The header's `nx_type` of a LIST level.
 const LIST: i32 = 16;
 
+/// The header's `nx_type` of a DURATION level, the last type it declares.
+const DURATION: i32 = 17;
+
 /// The first integer past the types the header declares.
-const PAST_LAST_TYPE: i32 = LIST + 1;
+const PAST_LAST_TYPE: i32 = DURATION + 1;
 
 /// The most lists the header lets one field nest.
 const MAX_LISTS: usize = 32;
@@ -87,6 +90,7 @@ fn header_type(ty: &ParseAsType) -> i32 {
         ParseAsType::String => 12,
         ParseAsType::Bytes => 13,
         ParseAsType::Datetime => 14,
+        ParseAsType::Duration => DURATION,
         ParseAsType::Array { .. } => FIXED_LIST,
         ParseAsType::Vec { .. } => LIST,
     }
@@ -508,7 +512,8 @@ fn unknown_type(entropy: &mut Entropy<'_>) -> i32 {
     match entropy.byte() % 4 {
         0 => entropy.pick([0, PAST_LAST_TYPE, -1, i32::MIN, i32::MAX]),
         1 => {
-            let low_byte = entropy.between(1..=16);
+            let last_type = u64::from(DURATION.unsigned_abs());
+            let low_byte = entropy.between(1..=last_type);
             let high_bytes = entropy.between(1..=0x7f_ffff);
             let shifted = high_bytes
                 .checked_mul(256)

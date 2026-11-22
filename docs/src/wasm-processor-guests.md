@@ -191,6 +191,10 @@ ProcessorType { kind: Array, element: ProcessorType, array_len: u32 }
 ProcessorType { kind: Vec, element: ProcessorType }
 ```
 
+The guest protocol has no `DURATION` type yet. `CREATE WASM PROCESSOR` refuses a processor whose
+input or output relay schema holds a `DURATION` field, alone or as a list element, with an error
+naming the field: `WASM processor 'p' in domain 'd' cannot pass DURATION field 'wait' to its guest`.
+
 `Datetime` values are Arrow `Timestamp(Nanosecond)` values at the wire boundary.
 `Bytes` values are Arrow `Binary` arrays and retain arbitrary octets without UTF-8 conversion.
 Treat nanosecond integers as a boundary format and convert them to your guest's
@@ -255,7 +259,7 @@ IPC stream containing one schema and one uncompressed record batch. The stream
 ends with the end-of-stream marker, or where its record batch message ends. Its
 schema may declare only the Arrow types Nervix carries: integers of 8 to 64
 bits, 32- and 64-bit floats, booleans, UTF-8 text, binary, nanosecond
-timestamps, and lists and fixed-size lists of those, none dictionary-encoded.
+timestamps and durations, and lists and fixed-size lists of those, none dictionary-encoded.
 Every message must open with Arrow's continuation marker, `0xFFFFFFFF`, and
 declare metadata and body lengths that lie inside the stream. Its record batch
 must declare exactly the field nodes and buffers those fields take, every

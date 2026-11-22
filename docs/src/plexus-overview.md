@@ -49,7 +49,7 @@ Core create statements:
 
 The `<json_type>` in a declared JSON wire schema is one of `string`, `number`, `integer`, `boolean`,
 or `array`. `DATETIME` uses `string` with an `RFC3339` codec rule, and `BYTES` uses `string` with a
-`BASE64` codec rule.
+`BASE64` codec rule. No wire type binds a `DURATION`, so a codec whose schema holds one is refused.
 
 The `<avro_type>` in a declared AVRO wire schema is one of `boolean`, `int`, `long`, `float`,
 `double`, `string`, `bytes`, or `array<avro_type>`, which names its item type at every depth. A JSON
@@ -620,7 +620,7 @@ Expression types match the full Nervix internal schema type set:
 
 - integers: `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - floating point: `F32`, `F64`
-- other scalars: `BOOL`, `STRING`, `BYTES`, `DATETIME`
+- other scalars: `BOOL`, `STRING`, `BYTES`, `DATETIME`, `DURATION`
 - lists: `ARRAY<...>` and `VEC<...>`
 
 `AS` and `TRY_CAST(expr AS TYPE)` convert between scalar types and accept long and short spellings,

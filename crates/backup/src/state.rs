@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-const STATE_RECORD_VERSION: u16 = 5;
+const STATE_RECORD_VERSION: u16 = 6;
 
 /// One branch's committed WASM guest save. The raw blob is a separate section at the descriptor's
 /// corresponding guest-blob path.
@@ -302,6 +302,7 @@ impl StateValue {
             RemoteRuntimeValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeValue::String(v) => Self::String(v),
             RemoteRuntimeValue::Datetime(v) => Self::Datetime(v),
+            RemoteRuntimeValue::Duration(v) => Self::Duration(v),
             RemoteRuntimeValue::F32(v) => Self::F32Bits(v.to_bits()),
             RemoteRuntimeValue::F64(v) => Self::F64Bits(v.to_bits()),
             RemoteRuntimeValue::Array(v) => {
@@ -326,6 +327,7 @@ impl StateValue {
             RemoteRuntimeElementValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeElementValue::String(v) => Self::String(v),
             RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(v),
+            RemoteRuntimeElementValue::Duration(v) => Self::Duration(v),
             RemoteRuntimeElementValue::F32(v) => Self::F32Bits(v.to_bits()),
             RemoteRuntimeElementValue::F64(v) => Self::F64Bits(v.to_bits()),
             RemoteRuntimeElementValue::Array(v) => {
@@ -350,6 +352,7 @@ impl StateValue {
             Self::Bool(v) => RemoteRuntimeValue::Bool(v),
             Self::String(v) => RemoteRuntimeValue::String(v),
             Self::Datetime(v) => RemoteRuntimeValue::Datetime(v),
+            Self::Duration(v) => RemoteRuntimeValue::Duration(v),
             Self::F32Bits(v) => RemoteRuntimeValue::F32(f32::from_bits(v)),
             Self::F64Bits(v) => RemoteRuntimeValue::F64(f64::from_bits(v)),
             Self::Array(v) => {
@@ -374,6 +377,7 @@ impl StateValue {
             Self::Bool(v) => RemoteRuntimeElementValue::Bool(v),
             Self::String(v) => RemoteRuntimeElementValue::String(v),
             Self::Datetime(v) => RemoteRuntimeElementValue::Datetime(v),
+            Self::Duration(v) => RemoteRuntimeElementValue::Duration(v),
             Self::F32Bits(v) => RemoteRuntimeElementValue::F32(f32::from_bits(v)),
             Self::F64Bits(v) => RemoteRuntimeElementValue::F64(f64::from_bits(v)),
             Self::Array(v) => RemoteRuntimeElementValue::Array(

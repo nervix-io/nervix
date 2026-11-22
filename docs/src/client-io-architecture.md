@@ -306,7 +306,7 @@ admission to make a mismatched stream fit.
 
 The output is likewise one canonical stream of the announced output schema. The client checks its
 row count against the delivery's member count. DATETIME uses the existing Unix-nanosecond Arrow
-representation; strings, bytes and lists retain their exact representations and typed nulls.
+representation and DURATION its signed-nanosecond `Duration(Nanosecond)` representation; strings, bytes and lists retain their exact representations and typed nulls.
 Read the [schema mapping](./schemas-and-codecs.md) and
 [manual rules P-3 and E-3](./client-implementation-manual.md#producers) before writing IPC with
 another language's Arrow tools. The generic wire crate carries opaque IPC bytes and does not

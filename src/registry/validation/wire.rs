@@ -252,6 +252,7 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
     schema: &CreateSchema,
     encoding_rules: &[CodecEncodingRule],
 ) -> Result<(), Report<RegistryError>> {
+    ensure_codec_carries_no_duration(domain, identifier, schema)?;
     let field_encodings = if let ResolvedCodecWireFormat::Syslog = wire_format {
         if !encoding_rules.is_empty() {
             return Err(Report::new(RegistryError::InvalidModel {
@@ -315,6 +316,25 @@ pub(in crate::registry) fn ensure_codec_schema_compatibility(
             }
         }
     }
+}
+
+/// Refuses a codec of any family whose internal schema holds a `DURATION`, alone or as the element
+/// of a list, naming the first such field: no codec reads or writes one.
+fn ensure_codec_carries_no_duration(
+    domain: &DomainName,
+    codec: &ModelName,
+    schema: &CreateSchema,
+) -> Result<(), Report<RegistryError>> {
+    for field in &schema.fields {
+        if field.ty.holds_duration() {
+            return Err(Report::new(RegistryError::CodecDurationField {
+                domain: domain.clone(),
+                codec: codec.clone(),
+                field: field.name.clone(),
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_codec_jaq_programs(
@@ -873,6 +893,70 @@ mod tests {
             assert!(
                 matches!(error.current_context(), RegistryError::InvalidCodecJaq { direction: actual, .. } if *actual == direction)
             );
+        }
+    }
+
+    #[test]
+    fn every_codec_family_refuses_a_duration_field_before_anything_else() {
+        let domain = DomainName::parse("example").assured("example is a valid domain");
+        let identifier =
+            ModelName::parse("timed_codec").assured("timed_codec is a valid model name");
+        let transformations = CodecJaqTransformations {
+            on_ingestion: Some(".".to_string()),
+            ..CodecJaqTransformations::default()
+        };
+        for ty in [
+            ParseAsType::Duration,
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Duration),
+            },
+        ] {
+            let schema = CreateSchema {
+                labels: Default::default(),
+                name: named("timed"),
+                fields: vec![
+                    SchemaField {
+                        name: named("id"),
+                        ty: ParseAsType::String,
+                        optional: false,
+                        sensitive: false,
+                    },
+                    SchemaField {
+                        name: named("wait"),
+                        ty: ty.clone(),
+                        optional: false,
+                        sensitive: false,
+                    },
+                ],
+            };
+            for format in [
+                ResolvedCodecWireFormat::JaqNative {
+                    format: nervix_models::CodecJaqFormat::Json,
+                    transformations: &transformations,
+                },
+                ResolvedCodecWireFormat::Syslog,
+            ] {
+                let error =
+                    ensure_codec_schema_compatibility(&domain, &identifier, format, &schema, &[])
+                        .err()
+                        .verified("no codec carries a DURATION");
+                assert_eq!(
+                    error.current_context(),
+                    &RegistryError::CodecDurationField {
+                        domain: domain.clone(),
+                        codec: identifier.clone(),
+                        field: named("wait"),
+                    },
+                    "{ty}"
+                );
+                assert!(
+                    error.to_string().starts_with(
+                        "codec 'timed_codec' in domain 'example' cannot carry DURATION field \
+                         'wait'"
+                    ),
+                    "{error}"
+                );
+            }
         }
     }
 
