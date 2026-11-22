@@ -29,10 +29,11 @@ use std::{borrow::Borrow, hash::Hash};
 
 use ahash::{HashSet, HashSetExt};
 use arrow_array::{
-    Array, ArrowPrimitiveType, BooleanArray, DurationNanosecondArray, Float32Array, Float64Array,
-    PrimitiveArray, StringArray, TimestampNanosecondArray,
+    Array, ArrowPrimitiveType, BooleanArray, Float32Array, Float64Array, PrimitiveArray,
+    StringArray,
     types::{
-        Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        DurationNanosecondType, Int8Type, Int16Type, Int32Type, Int64Type, TimestampNanosecondType,
+        UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
 use arrow_buffer::BooleanBuffer;
@@ -177,14 +178,16 @@ impl MembershipSet {
             });
         }
         let elements = match operand {
-            RegisterType::UInt8 => Elements::UInt8(primitive_members::<UInt8Type>(elements)?),
-            RegisterType::Int8 => Elements::Int8(primitive_members::<Int8Type>(elements)?),
-            RegisterType::UInt16 => Elements::UInt16(primitive_members::<UInt16Type>(elements)?),
-            RegisterType::Int16 => Elements::Int16(primitive_members::<Int16Type>(elements)?),
-            RegisterType::UInt32 => Elements::UInt32(primitive_members::<UInt32Type>(elements)?),
-            RegisterType::Int32 => Elements::Int32(primitive_members::<Int32Type>(elements)?),
-            RegisterType::UInt64 => Elements::UInt64(primitive_members::<UInt64Type>(elements)?),
-            RegisterType::Int64 => Elements::Int64(primitive_members::<Int64Type>(elements)?),
+            RegisterType::UInt8
+            | RegisterType::Int8
+            | RegisterType::UInt16
+            | RegisterType::Int16
+            | RegisterType::UInt32
+            | RegisterType::Int32
+            | RegisterType::UInt64
+            | RegisterType::Int64
+            | RegisterType::Datetime
+            | RegisterType::Duration => Elements::native(operand, elements)?,
             RegisterType::Float32 => {
                 let values = element_values(elements, |array: &Float32Array| array.value(0))?;
                 Elements::Float32(Members::collect(values.into_iter().filter_map(f32_member)))
@@ -202,18 +205,7 @@ impl MembershipSet {
                     element_values(elements, |array: &StringArray| Box::from(array.value(0)))?;
                 Elements::Utf8(Members::keyed(values))
             }
-            RegisterType::Binary => return None,
-            RegisterType::Datetime => {
-                let values =
-                    element_values(elements, |array: &TimestampNanosecondArray| array.value(0))?;
-                Elements::Datetime(Members::collect(values))
-            }
-            RegisterType::Duration => {
-                let values =
-                    element_values(elements, |array: &DurationNanosecondArray| array.value(0))?;
-                Elements::Duration(Members::collect(values))
-            }
-            RegisterType::Generic => return None,
+            RegisterType::Binary | RegisterType::Generic => return None,
         };
         Some(Self {
             elements: StdArc::new(elements),
@@ -288,6 +280,37 @@ impl MembershipSet {
             }
             _ => None,
         }
+    }
+}
+
+impl Elements {
+    /// The members of a set whose operand is an integer, a datetime or a duration, each element
+    /// kept as its native integer value. `None` when an element is not a non-null value of the
+    /// operand's type, and for an operand of any other type, whose set prepares its own members.
+    fn native(operand: RegisterType, elements: &[TypedArray]) -> Option<Self> {
+        let elements = match operand {
+            RegisterType::UInt8 => Self::UInt8(primitive_members::<UInt8Type>(elements)?),
+            RegisterType::Int8 => Self::Int8(primitive_members::<Int8Type>(elements)?),
+            RegisterType::UInt16 => Self::UInt16(primitive_members::<UInt16Type>(elements)?),
+            RegisterType::Int16 => Self::Int16(primitive_members::<Int16Type>(elements)?),
+            RegisterType::UInt32 => Self::UInt32(primitive_members::<UInt32Type>(elements)?),
+            RegisterType::Int32 => Self::Int32(primitive_members::<Int32Type>(elements)?),
+            RegisterType::UInt64 => Self::UInt64(primitive_members::<UInt64Type>(elements)?),
+            RegisterType::Int64 => Self::Int64(primitive_members::<Int64Type>(elements)?),
+            RegisterType::Datetime => {
+                Self::Datetime(primitive_members::<TimestampNanosecondType>(elements)?)
+            }
+            RegisterType::Duration => {
+                Self::Duration(primitive_members::<DurationNanosecondType>(elements)?)
+            }
+            RegisterType::Float32
+            | RegisterType::Float64
+            | RegisterType::Boolean
+            | RegisterType::Utf8
+            | RegisterType::Binary
+            | RegisterType::Generic => return None,
+        };
+        Some(elements)
     }
 }
 
