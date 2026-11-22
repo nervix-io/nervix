@@ -349,6 +349,8 @@ name = "nervix-server"
 checks = [
   "entity_labels::tests::shuttle_entity_label_reads_hold_one_map_revision_and_committed_policy",
   "entity_labels::tests::shuttle_entity_label_reads_remain_coherent_across_drop_and_recreation",
+  "entity_labels::tests::shuttle_two_user_label_edits_each_apply_once_and_a_late_replay_keeps_the_later_edit",
+  "entity_labels::tests::shuttle_a_model_label_edit_planned_before_a_drop_never_reaches_the_recreated_model",
   "planning_parameter_fence_tests::shuttle_partition_observation_and_instance_assignment_publish_one_epoch",
   "restore::tests::shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers",
   "domain_pause_recovery::tests::shuttle_checks::shuttle_transaction_adoption_and_reconcile_fence_delayed_recovery",
