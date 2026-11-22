@@ -1,7 +1,9 @@
-//! Cluster parameter duration definitions and their positive bounds.
+//! Cluster parameter duration definitions, their positive bounds and the application-probe deadline
+//! derived from member unavailability.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Cluster parameter duration definitions and their positive bounds.
+//! - **Owns.** Cluster parameter duration definitions and their positive bounds, and the
+//!   application-probe deadline derived from member unavailability.
 //! - **Depends on.** Setting classes, semantic values and typed validation reports.
 //! - **Must not know.** Parsing, consensus, command-line options or running services.
 
@@ -10,13 +12,13 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::time::Duration;
+use std::{convert::Infallible, time::Duration};
 
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{ClusterParameterError, ClusterParameterKey};
+use super::{ClusterParameterError, ClusterParameterKey, ClusterParameterValues};
 use crate::{ClusterParameters, SettingDefinition};
 
 /// How long an unobserved member remains available.
@@ -37,6 +39,24 @@ impl SettingDefinition for NodeUnavailabilityTimeout {
 
     fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
         ClusterParameterKey::NodeUnavailabilityTimeout.validate_duration(*value)
+    }
+}
+
+/// One tenth of the unavailability budget for an application health answer.
+pub struct ProbeTimeout;
+impl SettingDefinition for ProbeTimeout {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ClusterParameterValues;
+    type Error = Infallible;
+    const NAME: &'static str = "interconnect-probe-timeout";
+    const DERIVATION: Option<&'static str> =
+        Some("node-unavailability-timeout / 10, at least one timer nanosecond");
+    fn default_value(context: &ClusterParameterValues) -> Duration {
+        (context.node_unavailability_timeout() / 10).max(Duration::from_nanos(1))
+    }
+    fn validate(_: &Duration, _: &ClusterParameterValues) -> Result<(), Report<Infallible>> {
+        Ok(())
     }
 }
 
