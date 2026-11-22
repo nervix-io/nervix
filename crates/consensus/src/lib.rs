@@ -11625,19 +11625,7 @@ mod tests {
         );
         let report = crate::transaction_report::test_report_archive("tx-1", &domain_id, 1);
         let mut decision = crate::transaction::test_commit_plan("tx-1", 1);
-        decision.steps[0].kind = nervix_models::TransactionCommitStepKind::Models {
-            transitions: Vec::new(),
-            schedule: Some(Box::new(after.clone())),
-            no_op_operations: Vec::new(),
-            model_gate: nervix_models::TransactionEntityGatePlan {
-                targets: nervix_models::EntityGateTargets::default(),
-                relays: Vec::new(),
-            },
-            ownership_gate: nervix_models::TransactionEntityGatePlan {
-                targets: nervix_models::EntityGateTargets::default(),
-                relays: Vec::new(),
-            },
-        };
+        decision.steps[0].kind = crate::transaction::test_schedule_step(after);
         let plan = crate::transaction_plan::test_admission_plan(state, &domain_id, decision);
         let mut step_impact = plan.decision().steps[0].impact.clone();
         *step_impact.actual_mut() = nervix_models::ActualExecutionStepImpact::applying();

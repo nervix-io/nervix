@@ -2570,8 +2570,7 @@ async fn reclaimed_command_retry_fence_survives_snapshot_installation() -> TestR
 #[nervix_primitives::test]
 async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_position() -> TestResult {
     use nervix_models::{
-        DomainSchedule, DropModel, ModelKind, ModelName, Statement, Timestamp,
-        TransactionCommitStepKind, TransactionEntityGatePlan, UserName,
+        DomainSchedule, DropModel, ModelKind, ModelName, Statement, Timestamp, UserName,
     };
 
     use crate::{
@@ -2646,19 +2645,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             )
             .await?;
         let mut commit_plan = crate::transaction::test_commit_plan("transaction", 1);
-        commit_plan.steps[0].kind = TransactionCommitStepKind::Models {
-            transitions: Vec::new(),
-            schedule: Some(Box::new(schedule.clone())),
-            no_op_operations: Vec::new(),
-            model_gate: TransactionEntityGatePlan {
-                targets: nervix_models::EntityGateTargets::default(),
-                relays: Vec::new(),
-            },
-            ownership_gate: TransactionEntityGatePlan {
-                targets: nervix_models::EntityGateTargets::default(),
-                relays: Vec::new(),
-            },
-        };
+        commit_plan.steps[0].kind = crate::transaction::test_schedule_step(&schedule);
         let preview = commit_plan.preview.clone();
         let planned_step = commit_plan.steps[0].clone();
         let commit_plan = crate::transaction_plan::test_admission_plan(

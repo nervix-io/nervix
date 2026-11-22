@@ -289,6 +289,23 @@ pub(crate) fn test_commit_plan(
     }
 }
 
+/// A model step that publishes `schedule` and gates nothing, for a test transaction whose one
+/// step changes its domain's schedule.
+#[cfg(test)]
+pub(crate) fn test_schedule_step(schedule: &DomainSchedule) -> TransactionCommitStepKind {
+    let no_gate = || TransactionEntityGatePlan {
+        targets: nervix_models::EntityGateTargets::default(),
+        relays: Vec::new(),
+    };
+    TransactionCommitStepKind::Models {
+        transitions: Vec::new(),
+        schedule: Some(Box::new(schedule.clone())),
+        no_op_operations: Vec::new(),
+        model_gate: no_gate(),
+        ownership_gate: no_gate(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionCommitAdvance {
     pub id: String,
