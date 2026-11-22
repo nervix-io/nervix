@@ -24,7 +24,7 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount_cents I64, card STRING SENSITIVE
       );
       CREATE SCHEMA region_key (region STRING);
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders_by_region SCHEMA order_record BRANCHED BY by_region;
       CREATE RELAY orders_deduped SCHEMA order_record BRANCHED BY by_region;
       CREATE CLIENT PRODUCER INGESTOR orders_in
@@ -308,7 +308,7 @@ Feature: Client ingestors
       CREATE HTTP ENDPOINT ingress ON edge PATH '/orders';
       CREATE HTTP ENDPOINT INGESTOR orders_http
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING order_codec
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT sink_api CONFIG {
@@ -534,7 +534,7 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE SCHEMA region_key (region STRING);
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
       CREATE CLIENT PRODUCER INGESTOR orders_in
         FROM SCHEMA order_in
@@ -671,7 +671,7 @@ Feature: Client ingestors
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
       CREATE SCHEMA region_key (region STRING);
-      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
       CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
       CREATE CLIENT PRODUCER INGESTOR orders_in
         FROM SCHEMA order_in

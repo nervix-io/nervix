@@ -21,14 +21,14 @@ Feature: Bounded window sketches
       );
       CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
-      CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 4 EVICT LRU;
+      CREATE PARAMETRIZER sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 4 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sketch_codec
         TO sketch_inputs
         INHERIT ALL
         BRANCHED BY sketch_branch
@@ -91,14 +91,14 @@ Feature: Bounded window sketches
       CREATE WIRE JSON SCHEMA sketch_wire MODE STRICT (tenant string, value integer);
       CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
-      CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketches-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sketch_codec
         TO sketch_inputs INHERIT ALL BRANCHED BY sketch_branch
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -168,14 +168,14 @@ Feature: Bounded window sketches
       CREATE WIRE JSON SCHEMA sketch_wire MODE STRICT (tenant string, value integer);
       CREATE WIRE JSON CODEC sketch_codec FROM WIRE SCHEMA sketch_wire TO SCHEMA sketch_input;
       CREATE SCHEMA sketch_branch_schema (tenant STRING);
-      CREATE BRANCH sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
+      CREATE PARAMETRIZER sketch_branch SCHEMA sketch_branch_schema TTL 5m MAX INSTANCES 1 EVICT LRU;
       CREATE RELAY sketch_inputs SCHEMA sketch_input BRANCHED BY sketch_branch;
       CREATE RELAY sketch_outputs SCHEMA sketch_output BRANCHED BY sketch_branch;
       CREATE VHOST edge sketch-failover-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sketches';
       CREATE HTTP ENDPOINT INGESTOR sketch_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sketch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sketch_codec
         TO sketch_inputs INHERIT ALL BRANCHED BY sketch_branch
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

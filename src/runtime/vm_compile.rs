@@ -252,6 +252,12 @@ impl CompiledProgramWithMaterializedInterest {
     /// The error a side error of this program raises: an expression that could not be computed, as
     /// any class type that holds the `REJECTED` group, so an emitter's record rejection keeps it in
     /// that group by its type.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the class type, a total conversion of the REJECTED group"
+        )
+    )]
     pub(super) fn structured_side_error<Class: From<RejectedErrorClass>>(
         &self,
         execution_now: Timestamp,

@@ -19,7 +19,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE VHOST edge envelope-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{rabbitmq_addr}}' };
@@ -130,7 +130,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE VHOST edge persistent-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{envelope_broker_addr}}' };
@@ -205,7 +205,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE VHOST edge time-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{rabbitmq_addr}}' };

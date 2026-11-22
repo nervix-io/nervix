@@ -757,7 +757,7 @@ fn restored_state_schema(node: Option<&ScheduledNode>, unit: Unit) -> Option<Sch
     // A branch's partitions place an archived key's state in the unit the restored count gives the
     // key, whichever unit archived it, so such state is restored even from a unit the restored
     // schedule no longer holds.
-    if node.units.contains_key(&unit) || node.partition_branch().is_some() {
+    if node.units.contains_key(&unit) || node.partition_parametrizer().is_some() {
         return Some(node.schema_fingerprint);
     }
     None
@@ -928,17 +928,18 @@ mod backup_state_warning_tests {
 
         use meticulous::{OptionExt as _, ResultExt as _};
         use nervix_models::{
-            BranchName, CreateRelay, CreateSchema, Model, RelayBranching, RelayName,
+            CreateRelay, CreateSchema, Model, ParametrizerName, RelayBranching, RelayName,
             ResolvedBranching, SchemaName,
         };
 
-        let branch = BranchName::parse("by_tenant").assured("the test branch name is valid");
+        let parametrizer =
+            ParametrizerName::parse("by_tenant").assured("the test branch name is valid");
         let relay = CreateRelay {
             labels: Default::default(),
             name: RelayName::parse("events").assured("the test relay name is valid"),
             schema: SchemaName::parse("event").assured("the test schema name is valid"),
             buffer: NonZeroUsize::MIN,
-            branching: RelayBranching::branched_by(branch.clone()),
+            branching: RelayBranching::branched_by(parametrizer.clone()),
             materialized_state: None,
         };
         let node = ScheduledNode::new(Model::Relay(relay), SchemaFingerprint::from_digest([3; 32]));
@@ -950,10 +951,14 @@ mod backup_state_warning_tests {
             name: SchemaName::parse("tenant_key").assured("the test schema name is valid"),
             fields: Vec::new(),
         };
-        let count = nervix_models::ResolvedBranchPartitions::Direct(
+        let count = nervix_models::ResolvedParametrizerPartitions::Direct(
             NonZeroU16::new(count).assured("the test partition count is positive"),
         );
-        node.with_resolved_branching(Some(ResolvedBranching::branched(branch, key_schema, count)))
+        node.with_resolved_branching(Some(ResolvedBranching::branched(
+            parametrizer,
+            key_schema,
+            count,
+        )))
     }
 
     #[test]

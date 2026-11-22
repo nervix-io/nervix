@@ -22,7 +22,7 @@ CREATE SCHEMA chaos_branch_key (
   branch_name STRING
 );
 
-CREATE BRANCH chaos_branch SCHEMA chaos_branch_key TTL 5m MAX INSTANCES 16 EVICT LRU;
+CREATE PARAMETRIZER chaos_branch SCHEMA chaos_branch_key TTL 5m MAX INSTANCES 16 EVICT LRU;
 
 CREATE RELAY chaos_records SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;
 

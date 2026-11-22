@@ -80,25 +80,32 @@ impl ReplicatedInferencerState {
         .change_context(RuntimePersistenceError::InferencerSnapshot)?;
         let plan = plan.clone();
         let revision = initial.lsm;
+        // Restoring a branch's model state answers no waiting caller, so a full queue holds the
+        // restore back rather than failing the domain's start.
         let value = executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                let snapshot =
-                    Snapshot::decode(initial.payload, limit.min(snapshot_bytes), cancellation)
+            .run_cpu_with(
+                CpuClass::Bulk,
+                QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| {
+                    let snapshot =
+                        Snapshot::decode(initial.payload, limit.min(snapshot_bytes), cancellation)
+                            .change_context(RuntimePersistenceError::InferencerSnapshot)?;
+                    if snapshot.revision != revision {
+                        return Err(Report::new(RuntimePersistenceError::InferencerSnapshot));
+                    }
+                    let Some(branch) = snapshot.branch else {
+                        return Ok(None);
+                    };
+                    let generation = NativeGeneration::restore(branch.tensors, &plan, cancellation)
                         .change_context(RuntimePersistenceError::InferencerSnapshot)?;
-                if snapshot.revision != revision {
-                    return Err(Report::new(RuntimePersistenceError::InferencerSnapshot));
-                }
-                let Some(branch) = snapshot.branch else {
-                    return Ok(None);
-                };
-                let generation = NativeGeneration::restore(branch.tensors, &plan, cancellation)
-                    .change_context(RuntimePersistenceError::InferencerSnapshot)?;
-                Ok::<_, Report<RuntimePersistenceError>>(Some(InferencerGeneration {
-                    incarnation: branch.incarnation,
-                    generation: Arc::new(generation),
-                    snapshot_bytes,
-                }))
-            })
+                    Ok::<_, Report<RuntimePersistenceError>>(Some(InferencerGeneration {
+                        incarnation: branch.incarnation,
+                        generation: Arc::new(generation),
+                        snapshot_bytes,
+                    }))
+                },
+            )
             .await
             .change_context(RuntimePersistenceError::StorageExecution)??;
         Ok(Self::from_generations(
@@ -115,15 +122,16 @@ impl ReplicatedInferencerState {
         let Some(published) = self.generations.load_after(after_lsm) else {
             return Ok(None);
         };
-        let (snapshot, _charge) =
-            Self::snapshot_of(published, executor, QueueAdmission::RefuseWhenFull).await?;
+        let (snapshot, _charge) = Self::snapshot_of(published, executor).await?;
         Ok(Some(snapshot))
     }
 
+    /// Captures `published` on the bulk workers. A capture feeds a peer's state sync for recovery
+    /// or replication, or the branch's own checkpoint, and answers no request a caller could send
+    /// again, so a full queue holds it back rather than failing it.
     async fn snapshot_of(
         published: nervix_primitives::sync::StdArc<Generation<Option<InferencerGeneration>>>,
         executor: &Executor,
-        admission: QueueAdmission,
     ) -> Result<(PersistedRuntimeStateEntry, Reservation), Report<RuntimePersistenceError>> {
         let bytes = match &published.value {
             Some(value) => value.snapshot_bytes,
@@ -141,7 +149,7 @@ impl ReplicatedInferencerState {
         executor
             .run_cpu_with(
                 CpuClass::Bulk,
-                admission,
+                QueueAdmission::WaitForPlace,
                 reservation,
                 move |charge, cancellation| {
                     let branch = if let Some(value) = &published.value {
@@ -188,13 +196,9 @@ impl BranchSnapshotCodec for InferencerSnapshotCodec {
         let Some(published) = state.generations.load_after(Some(after_lsm)) else {
             return Ok(None);
         };
-        let (snapshot, charge) = ReplicatedInferencerState::snapshot_of(
-            published,
-            executor,
-            QueueAdmission::WaitForPlace,
-        )
-        .await
-        .change_context(RuntimeStateOperationError::Persistence)?;
+        let (snapshot, charge) = ReplicatedInferencerState::snapshot_of(published, executor)
+            .await
+            .change_context(RuntimeStateOperationError::Persistence)?;
         let revision = snapshot.lsm;
         let written = store
             .persist_owned_snapshot(&state.placement, snapshot, charge)

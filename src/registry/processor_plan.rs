@@ -17,10 +17,10 @@ use std::num::NonZeroU64;
 use ahash::{HashMap, HashSet};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckMode, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
-    CreateBranch, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerExecutionMode,
+    AckMode, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+    CreateParametrizer, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerExecutionMode,
     InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, Model, ModelKind,
-    ModelName, NodeRef, ProcessorInputWhere, ProcessorInputs,
+    ModelName, NodeRef, ParametrizerName, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutput as ModelProcessorOutput, ProcessorOutputs as ModelProcessorOutputs, RelayName,
     ResolvedBranching, ResourceName, ScheduledNodes, SchemaFingerprint, WindowBound,
 };
@@ -29,7 +29,7 @@ use nervix_primitives::sync::Arc;
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BranchedProcessorNodeSpec {
     pub(crate) spec: BranchedProcessorSpec,
-    pub(crate) branch: Option<BranchName>,
+    pub(crate) parametrizer: Option<ParametrizerName>,
     pub(crate) branch_ttl: Option<String>,
     pub(crate) branch_max_instances: Option<NonZeroU64>,
     pub(crate) binding: ProcessorPlanBinding,
@@ -277,14 +277,14 @@ impl BranchedProcessorSpec {
 /// Every branch one set of validated Models declares, keyed by its name.
 fn branch_declarations<'a>(
     models: impl Iterator<Item = &'a Model>,
-) -> HashMap<BranchName, CreateBranch> {
-    let mut branches = HashMap::default();
+) -> HashMap<ParametrizerName, CreateParametrizer> {
+    let mut parametrizers = HashMap::default();
     for model in models {
-        if let Model::Branch(branch) = model {
-            branches.insert(branch.name.clone(), branch.clone());
+        if let Model::Parametrizer(parametrizer) = model {
+            parametrizers.insert(parametrizer.name.clone(), parametrizer.clone());
         }
     }
-    branches
+    parametrizers
 }
 
 fn internal_processor_error_policies(general: GeneralErrorPolicy) -> ErrorPolicies {
@@ -344,18 +344,18 @@ fn processor_input_collect_policies(
 }
 
 struct BranchPolicy {
-    branch: Option<BranchName>,
+    parametrizer: Option<ParametrizerName>,
     ttl: Option<String>,
     max_instances: Option<NonZeroU64>,
 }
 
 fn branch_policy(
-    branch_ref: Option<&BranchName>,
-    branches: &HashMap<BranchName, CreateBranch>,
+    parametrizer_ref: Option<&ParametrizerName>,
+    branches: &HashMap<ParametrizerName, CreateParametrizer>,
 ) -> BranchPolicy {
-    let Some(branch_ref) = branch_ref else {
+    let Some(branch_ref) = parametrizer_ref else {
         return BranchPolicy {
-            branch: None,
+            parametrizer: None,
             ttl: None,
             max_instances: None,
         };
@@ -364,7 +364,7 @@ fn branch_policy(
         "the registry resolved every branch reference before the schedule reached planning",
     );
     BranchPolicy {
-        branch: Some(branch_ref.clone()),
+        parametrizer: Some(branch_ref.clone()),
         ttl: Some(branch.ttl.clone()),
         max_instances: branch
             .eviction
@@ -376,12 +376,12 @@ fn branch_policy(
 fn processor_node_spec(
     spec: BranchedProcessorSpec,
     branched_by: &nervix_models::BranchSelection,
-    branches: &HashMap<BranchName, CreateBranch>,
+    branches: &HashMap<ParametrizerName, CreateParametrizer>,
 ) -> BranchedProcessorNodeSpec {
-    let policy = branch_policy(branched_by.branch(), branches);
+    let policy = branch_policy(branched_by.parametrizer(), branches);
     BranchedProcessorNodeSpec {
         spec,
-        branch: policy.branch,
+        parametrizer: policy.parametrizer,
         branch_ttl: policy.ttl,
         branch_max_instances: policy.max_instances,
         binding: ProcessorPlanBinding::default(),
@@ -639,7 +639,7 @@ pub(crate) fn branched_node_specs_from_models(
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        BranchEviction, BranchSelection, CreateJunction, CreateSchema, ParseAsType,
+        BranchSelection, CreateJunction, CreateSchema, ParametrizerEviction, ParseAsType,
         ProcessorOutput, ProcessorOutputs, ScheduledNode, SchemaField,
     };
 
@@ -654,7 +654,7 @@ mod tests {
     }
 
     fn scheduled_junction(schema_byte: u8, input: &str, branch_ttl: &str) -> ScheduledNodes {
-        let branch_name = named::<BranchName>("by_tenant");
+        let parametrizer_name = named::<ParametrizerName>("by_tenant");
         let branch_schema = CreateSchema {
             labels: Default::default(),
             name: named("tenant_key"),
@@ -665,14 +665,14 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let branch = ScheduledNode::new(
-            Model::Branch(CreateBranch {
+        let parametrizer = ScheduledNode::new(
+            Model::Parametrizer(CreateParametrizer {
                 labels: Default::default(),
-                name: branch_name.clone(),
+                name: parametrizer_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: branch_ttl.to_string(),
-                partitions: nervix_models::BranchPartitions::ONE,
-                eviction: Some(BranchEviction::Lru {
+                partitions: nervix_models::ParametrizerPartitions::ONE,
+                eviction: Some(ParametrizerEviction::Lru {
                     max_instances: NonZeroU64::new(8)
                         .assured("the fixture's branch capacity is a nonzero literal"),
                 }),
@@ -694,7 +694,7 @@ mod tests {
                         FlushPolicy::Immediate,
                     ),
                 ]),
-                branched_by: BranchSelection::branched_by(branch_name.clone()),
+                branched_by: BranchSelection::branched_by(parametrizer_name.clone()),
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),
@@ -702,11 +702,11 @@ mod tests {
             SchemaFingerprint::from_digest([schema_byte; 32]),
         )
         .with_resolved_branching(Some(ResolvedBranching::branched(
-            branch_name,
+            parametrizer_name,
             branch_schema,
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         )));
-        [branch, junction]
+        [parametrizer, junction]
             .into_iter()
             .map(|node| (node.identity(), node))
             .collect()
@@ -733,7 +733,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![named("primary_events"), named("audit_events")]
         );
-        assert_eq!(plan.branch.as_ref(), Some(&named("by_tenant")));
+        assert_eq!(plan.parametrizer.as_ref(), Some(&named("by_tenant")));
         assert_eq!(plan.branch_ttl.as_deref(), Some("5m"));
         assert_eq!(plan.branch_max_instances, NonZeroU64::new(8));
         assert_eq!(

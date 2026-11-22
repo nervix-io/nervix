@@ -128,6 +128,29 @@ fn license_text(page: &StateInspectionPage) -> Result<String, Report<WireDecodeE
                         };
                         writeln!(output, "quota {condition}: {usage} of {limit}")
                             .assured("writing to a String succeeds");
+                    } else if section.name == "capabilities" {
+                        let condition = display_cell(row.get(0))?;
+                        let state = match (row.get(1), row.get(2)) {
+                            (Some(CellView::String("enabled")), Some(CellView::Null)) => {
+                                "enabled".to_string()
+                            }
+                            (Some(CellView::String("disabled")), Some(CellView::Null)) => {
+                                "disabled".to_string()
+                            }
+                            (
+                                Some(CellView::String("permitted")),
+                                deadline @ Some(CellView::Datetime(_)),
+                            ) => format!("permitted until {}", display_cell(deadline)?),
+                            _ => {
+                                return Err(Report::new(WireDecodeError::InvalidValue {
+                                    field: "StateInspection.capabilities",
+                                    kind: "an enabled, disabled or deadline-bound permitted \
+                                           capability",
+                                }));
+                            }
+                        };
+                        writeln!(output, "capability {condition}: {state}")
+                            .assured("writing to a String succeeds");
                     } else {
                         for (index, field) in section.schema.fields.iter().enumerate() {
                             if field.name.as_str() == "cluster_key_generation" {
@@ -233,7 +256,7 @@ impl Serialize for SchemaJson<'_> {
         let mut output = serializer.serialize_map(Some(2))?;
         output.serialize_entry("fields", &self.0.fields)?;
         let branch = self.0.branch.as_ref().map(|branch| BranchJson {
-            name: branch.branch(),
+            name: branch.parametrizer(),
             fields: branch.fields(),
         });
         output.serialize_entry("branch", &branch)?;
@@ -243,7 +266,7 @@ impl Serialize for SchemaJson<'_> {
 
 #[derive(Serialize)]
 struct BranchJson<'a> {
-    name: &'a nervix_models::BranchName,
+    name: &'a nervix_models::ParametrizerName,
     fields: &'a [nervix_models::SchemaField],
 }
 

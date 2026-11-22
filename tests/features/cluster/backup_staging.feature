@@ -24,7 +24,7 @@ Feature: Restore staging reclamation and storage accounting
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
       CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {

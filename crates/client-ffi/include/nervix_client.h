@@ -593,7 +593,8 @@ void nx_node_inspection_json(const nx_node_inspection *inspection, const uint8_t
 void nx_node_inspection_free(nx_node_inspection *inspection);
 void nx_entity_labels_free(nx_entity_labels *labels);
 /* All returned byte spans borrow labels, and retain exact UTF-8 including empty values. */
-void nx_entity_labels_domain(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
+/* Returns false for a cluster-wide user. */
+bool nx_entity_labels_domain(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
 void nx_entity_labels_entity_kind(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
 void nx_entity_labels_entity_name(const nx_entity_labels *labels, const uint8_t **data, size_t *len);
 nx_entity_label_view_kind nx_entity_labels_view(const nx_entity_labels *labels);
@@ -668,9 +669,9 @@ nx_error *nx_schema_field_levels(const nx_schema *schema, int32_t part, size_t i
    NX_ERROR_INVALID_ARGUMENT. */
 nx_error *nx_schema_field_level(const nx_schema *schema, int32_t part, size_t index, size_t level,
                                 nx_type *type, uint32_t *length);
-/* Whether the relay is branched, and the branch's name when it is. An endpoint's schema is never
-   branched. */
-bool nx_schema_branch(const nx_schema *schema, const uint8_t **name, size_t *name_len);
+/* Whether the relay is branched, and its parametrizer's name when it is. An endpoint's schema is
+   never branched. */
+bool nx_schema_parametrizer(const nx_schema *schema, const uint8_t **name, size_t *name_len);
 void nx_schema_free(nx_schema *schema);
 
 /* ---- Events ------------------------------------------------------------------------------- */

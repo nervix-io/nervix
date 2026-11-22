@@ -596,7 +596,8 @@ mod tests {
              MAX SIZE 64MiB ON OVERFLOW DROP OLDEST",
             "PROMETHEUS QUERY INGESTOR i FROM c QUERY 'up' EVERY 1s MODE NO ACK ON QUIESCE SUSPEND",
             "HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s",
-            "HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE BUFFER MAX SIZE 64MiB",
+            "HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE BUFFER MAX SIZE 64MiB RESPOND \
+             IMMEDIATE",
         ];
 
         for source in sources {
@@ -829,11 +830,11 @@ mod tests {
     fn parses_alter_ingestor_full_operations_and_expression_commas() {
         let parsed = parse_alter_ingestor(
             "ALTER HTTP ENDPOINT INGESTOR event_source SET FROM ingress_b MODE NO ACK ON QUIESCE \
-             BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP NOW, SET FILTER \
-             WHERE concat(input.kind, ',') != '', REPLACE ROUTE TO events INHERIT ALL UNBRANCHED \
-             FLUSH IMMEDIATE ON MESSAGE ERROR SEND TO errors SET class = concat(error.class, \
-             ',bad'), ADD ROUTE TO audit INHERIT ALL UNBRANCHED FLUSH EACH 10ms MAX BATCH SIZE \
-             1MiB ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
+             BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE, SET DECODE USING event_codec_v2, SET \
+             TIMESTAMP NOW, SET FILTER WHERE concat(input.kind, ',') != '', REPLACE ROUTE TO \
+             events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR SEND TO errors SET \
+             class = concat(error.class, ',bad'), ADD ROUTE TO audit INHERIT ALL UNBRANCHED FLUSH \
+             EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
         )
         .expect("ALTER INGESTOR should parse all operations");
 
@@ -906,7 +907,7 @@ mod tests {
         let input = r#"
             CREATE HTTP ENDPOINT INGESTOR route_ingestor
                 FROM input_endpoint MODE NO ACK
-                ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_codec
+                ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING input_codec
                 TO accepted UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR IGNORE
                 TO rejected UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
                 ON GENERAL ERROR IGNORE;
@@ -964,7 +965,7 @@ mod tests {
             parsed.output_routes.routes[0]
                 .branch
                 .as_ref()
-                .and_then(nervix_models::OutputBranch::branch)
+                .and_then(nervix_models::OutputBranch::parametrizer)
                 .map(|branch| branch.as_str()),
             Some("notification_params")
         );
@@ -1013,7 +1014,7 @@ mod tests {
             CREATE HTTP ENDPOINT INGESTOR http_notifications
                 FROM http_notifications_endpoint
                 MODE NO ACK
-                ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+                ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
                 TO notifications UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG
                 ON GENERAL ERROR LOG;
@@ -1033,7 +1034,7 @@ mod tests {
         let input = r#"
             CREATE HTTP ENDPOINT INGESTOR i
               FROM ep MODE NO ACK
-              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
+              ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1045,7 +1046,7 @@ mod tests {
             parsed.output_routes.routes[0]
                 .branch
                 .as_ref()
-                .and_then(nervix_models::OutputBranch::branch)
+                .and_then(nervix_models::OutputBranch::parametrizer)
                 .map(|branch| branch.as_str()),
             Some("u_branch")
         );
@@ -1064,7 +1065,7 @@ mod tests {
     fn rejects_bare_by() {
         let input = r#"
             CREATE HTTP ENDPOINT INGESTOR i
-              FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
+              FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch
               TO s BY u_branch
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1078,7 +1079,7 @@ mod tests {
     fn rejects_unbranched_with_ttl() {
         let input = r#"
             CREATE HTTP ENDPOINT INGESTOR i
-              FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
+              FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch
               TO s UNBRANCHED TTL 5m
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1344,14 +1345,14 @@ mod tests {
     #[test]
     fn suggests_set_after_branched_by() {
         let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX \
-                     SIZE 1MiB DECODE USING sch TO s BRANCHED BY u_branch ";
+                     SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch TO s BRANCHED BY u_branch ";
         crate::conformance_support::assert_offers_exactly(input, &["SET"]);
     }
 
     #[test]
     fn suggests_flush_on_output_without_transport_leakage() {
         let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX \
-                     SIZE 1MiB DECODE USING sch TO s UNBRANCHED FL";
+                     SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch TO s UNBRANCHED FL";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"FLUSH EACH".to_string()));
         assert!(!suggestions.contains(&"TIMESTAMP".to_string()));
@@ -1528,7 +1529,7 @@ mod tests {
         let input = r#"
             CREATE HTTP ENDPOINT INGESTOR i
               FROM ep MODE NO ACK
-              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
+              ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch
               TO s BRANCHED BY u_branch SET u = message.u
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1550,7 +1551,7 @@ mod tests {
             CREATE HTTP ENDPOINT INGESTOR i
               FROM ep MODE NO ACK
               COLLECT FOR 1s
-              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
+              ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch
               TO s UNBRANCHED
               FLUSH IMMEDIATE ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1570,7 +1571,7 @@ mod tests {
     #[test]
     fn suggests_branched_by_as_compound_keyword() {
         let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX \
-                     SIZE 1MiB DECODE USING sch TO s ";
+                     SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch TO s ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
         assert!(suggestions.contains(&"UNBRANCHED".to_string()));
@@ -1581,7 +1582,7 @@ mod tests {
     fn rejects_unbranched_with_values_block() {
         let input = r#"
             CREATE HTTP ENDPOINT INGESTOR i
-              FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sch
+              FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch
               TO s UNBRANCHED VALUES {}
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -1594,7 +1595,7 @@ mod tests {
     #[test]
     fn output_context_suggests_construction_and_branch_not_values() {
         let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX \
-                     SIZE 1MiB DECODE USING sch TO s ";
+                     SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch TO s ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"SET".to_string()));
         assert!(suggestions.contains(&"BRANCHED BY".to_string()));
@@ -1605,7 +1606,7 @@ mod tests {
     #[test]
     fn suggests_to_keyword() {
         let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX \
-                     SIZE 1MiB DECODE USING sch ";
+                     SIZE 1MiB RESPOND IMMEDIATE DECODE USING sch ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"TO".to_string()));
         assert!(!suggestions.contains(&"RELAY".to_string()));
@@ -1613,8 +1614,8 @@ mod tests {
 
     #[test]
     fn suggests_decode_using_as_compound_keyword() {
-        let input =
-            "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB ";
+        let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX \
+                     SIZE 1MiB RESPOND IMMEDIATE ";
         let suggestions = suggest_create_ingestor(input, input.len());
         assert!(suggestions.contains(&"DECODE USING".to_string()));
     }
@@ -2245,7 +2246,7 @@ mod tests {
         let input = r#"
             CREATE HTTP ENDPOINT INGESTOR http_notifications
               FROM http_notifications_endpoint MODE NO ACK
-              ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+              ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
               TO notifications BRANCHED BY user_id_branch SET user_id = message.user_id
               FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
               ON GENERAL ERROR LOG;
@@ -2262,6 +2263,7 @@ mod tests {
                 mode: EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
                     max_size: "1MiB".to_string(),
+                    response: nervix_models::EndpointPauseResponse::Immediate,
                 },
             }))
         );

@@ -287,11 +287,8 @@ pub(crate) fn register(module: RModule) -> Result<(), Error> {
     CellState::register(module)?;
     FieldType::register(module)?;
     Part::register(module)?;
-    ClockEventKind::register(module)?;
-    ClockState::register(module)?;
-    ClockEndReason::register(module)?;
-    NoticeLevel::register(module)?;
-    NoticeKind::register(module)?;
+    register_clocks(module)?;
+    register_notices(module)?;
     EndpointState::register(module)?;
     OpenRefusal::register(module)?;
     ReopenReason::register(module)?;
@@ -308,6 +305,21 @@ pub(crate) fn register(module: RModule) -> Result<(), Error> {
     let tls = module.define_module("Tls")?;
     tls.const_set("PREFERRED", 1)?;
     tls.const_set("REQUIRED", 2)?;
+    Ok(())
+}
+
+/// The values a domain clock event reports.
+fn register_clocks(module: RModule) -> Result<(), Error> {
+    ClockEventKind::register(module)?;
+    ClockState::register(module)?;
+    ClockEndReason::register(module)?;
+    Ok(())
+}
+
+/// The values a server notice reports.
+fn register_notices(module: RModule) -> Result<(), Error> {
+    NoticeLevel::register(module)?;
+    NoticeKind::register(module)?;
     Ok(())
 }
 

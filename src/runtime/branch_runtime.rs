@@ -1411,7 +1411,7 @@ impl BranchExecutionRuntime {
                     "the concrete branch creation transition registers its one metric identity",
                     runtime_handle.observe_branch_instance_created(
                         domain,
-                        template.branch.as_ref(),
+                        template.parametrizer.as_ref(),
                         &key,
                     )
                 );
@@ -1646,7 +1646,7 @@ impl BranchExecutionRuntime {
             shutdown,
             task: nervix_primitives::sync::blocking::Mutex::new(None),
         });
-        runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
+        runtime_handle.register_branch_lifecycle_metrics(&domain, template.parametrizer.as_ref());
 
         #[cfg_attr(
             nervix_lint,
@@ -2011,7 +2011,7 @@ impl BranchExecutionRuntime {
                     &runtime_handle,
                     &domain,
                     &ingestor,
-                    template.branch.as_ref(),
+                    template.parametrizer.as_ref(),
                     &mut instances,
                 )
             )
@@ -2157,7 +2157,7 @@ pub(super) async fn expire_branch_instance_instances(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                template.branch.as_ref(),
+                template.parametrizer.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Ttl),
             )
@@ -2208,7 +2208,7 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                template.branch.as_ref(),
+                template.parametrizer.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Lru),
             )
@@ -2240,11 +2240,11 @@ pub(super) async fn shutdown_all_branch_instance_instances(
     runtime: &Runtime,
     domain: &DomainName,
     ingestor: &IngestorName,
-    branch: Option<&BranchName>,
+    parametrizer: Option<&ParametrizerName>,
     instances: &mut EntrypointBranches,
 ) {
     for (key, state) in instances.drain() {
-        runtime.observe_branch_instance_removed(domain, branch, &key, None);
+        runtime.observe_branch_instance_removed(domain, parametrizer, &key, None);
         drop(state);
         debug!(
             domain = domain.as_str(),
@@ -2312,7 +2312,11 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     }
     for branch in restored {
         let lifetime = branch.lifetime;
-        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &lifetime.key);
+        runtime.observe_branch_instance_created(
+            domain,
+            template.parametrizer.as_ref(),
+            &lifetime.key,
+        );
         instances.insert_restored(
             lifetime.key,
             lifetime.last_ingestion,

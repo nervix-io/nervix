@@ -183,9 +183,9 @@ impl Runtime {
     pub(super) fn register_branch_lifecycle_metrics(
         &self,
         domain: &DomainName,
-        branch: Option<&BranchName>,
+        parametrizer: Option<&ParametrizerName>,
     ) {
-        if let Some(branch) = branch {
+        if let Some(branch) = parametrizer {
             let dispatcher = self.inner.remote_dispatcher.load();
             self.inner.metrics.register_branch(
                 domain,
@@ -205,10 +205,10 @@ impl Runtime {
     pub(super) fn observe_branch_instance_created(
         &self,
         domain: &DomainName,
-        branch: Option<&BranchName>,
+        parametrizer: Option<&ParametrizerName>,
         key: &Option<BranchKey>,
     ) {
-        if let Some(branch) = branch {
+        if let Some(branch) = parametrizer {
             let dispatcher = self.inner.remote_dispatcher.load();
             self.inner.metrics.observe_branch_instance_created(
                 domain,
@@ -229,11 +229,11 @@ impl Runtime {
     pub(super) fn observe_branch_instance_removed(
         &self,
         domain: &DomainName,
-        branch: Option<&BranchName>,
+        parametrizer: Option<&ParametrizerName>,
         key: &Option<BranchKey>,
         reason: Option<BranchEvictionReason>,
     ) {
-        let Some(branch) = branch else {
+        let Some(branch) = parametrizer else {
             return;
         };
         let dispatcher = self.inner.remote_dispatcher.load();
@@ -507,8 +507,8 @@ impl Runtime {
     ) -> Vec<WasmCheckpointInspection> {
         let processor = processor.into();
         let mut checkpoints = Vec::new();
-        self.visit_wasm_processor_checkpoints(domain, &processor, |_, checkpoint| {
-            checkpoints.push(checkpoint)
+        self.visit_wasm_processor_checkpoints(domain, &processor, |_, state| {
+            checkpoints.push(state.inspection())
         });
         checkpoints.sort_by_key(|checkpoint| checkpoint.branch);
         checkpoints
@@ -520,8 +520,8 @@ impl Runtime {
         processor: &ModelName,
     ) -> std::collections::BTreeMap<Unit, Vec<WasmCheckpointInspection>> {
         let mut units = std::collections::BTreeMap::<Unit, Vec<WasmCheckpointInspection>>::new();
-        self.visit_wasm_processor_checkpoints(domain, processor, |unit, checkpoint| {
-            units.entry(unit).or_default().push(checkpoint);
+        self.visit_wasm_processor_checkpoints(domain, processor, |unit, state| {
+            units.entry(unit).or_default().push(state.inspection());
         });
         for checkpoints in units.values_mut() {
             checkpoints.sort_by_key(|checkpoint| checkpoint.branch);
@@ -529,11 +529,13 @@ impl Runtime {
         units
     }
 
-    fn visit_wasm_processor_checkpoints(
+    /// Visits the replicated state of every current-lifetime checkpoint of `processor`'s branches
+    /// whose unit executes on this node, with the unit its placement names.
+    pub(super) fn visit_wasm_processor_checkpoints(
         &self,
         domain: &DomainName,
         processor: &ModelName,
-        mut visit: impl FnMut(Unit, WasmCheckpointInspection),
+        mut visit: impl FnMut(Unit, &ReplicatedWasmProcessorState),
     ) {
         let Some(execution) = self.inner.executions.get(domain) else {
             return;
@@ -565,7 +567,7 @@ impl Runtime {
             if generations.of_branch(branch.as_ref()) != state.generation() {
                 continue;
             }
-            visit(placement.unit, state.inspection());
+            visit(placement.unit, &state);
         }
     }
 

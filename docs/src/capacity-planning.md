@@ -84,15 +84,16 @@ share of admission; it is not guaranteed an idle thread. Apart from the classes,
 waits rather than computes uses the pool: a Kafka producer's final drain and partition
 inspection, which wait on the broker, and the one read of the resolver configuration at startup.
 Each class defaults to 64 pending jobs per worker, capped at 1,024; an explicit per-class queue
-can override this bound. A job beyond its queue is refused, and
-the work that submitted it reports the refusal as its own failure. The one exception is work the
-node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
-place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced ingestor handed over, and of a payload a NATS SUBJECT, ZeroMQ or Syslog ingestor read without
-an acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
-Holding one of those ingestor loops pushes back into its transport, so a node whose
-extension workers stay full delays polls and lets those transports buffer or drop at their own
-bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
+can override this bound. A full queue never costs data: only a request whose caller still holds
+its input and waits on the answer, such as an HTTP endpoint body, a statement or an inspection, is
+refused, and its caller answers that the node is busy. Every other job waits for a place: the
+unfolding of every payload an ingestor handed over, acknowledged or not, of a poll a paced ingestor
+handed over and of a payload a quiesce buffer retained, an Iceberg commit's read of the staged rows
+its emitter already accepted, relay and subscription deliveries, the answer of an interconnect
+request whose handler already ran, checkpoints, consensus storage and lifecycle steps. Holding an
+ingestor loop pushes back into its transport, so a node whose extension workers stay full delays
+polls and reads, and lets each transport keep what it holds within its own bounds; see
+[When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
 Transient memory ceilings derive from the node's known memory. Management gets 1/128, commands
 and bulk each 1/32, relay 1/16, bulk receive windows 1/64, credentials 1/256, and restore metadata

@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    BranchPartitions, ClusterNodeName, EmitterEntity, EmitterEntityKind, MqttEmitterEntity,
-    NodeUnitRef, ProcessorInputs, RetryPolicy, SingleEmitterReason,
+    ClusterNodeName, EmitterEntity, EmitterEntityKind, MqttEmitterEntity, NodeUnitRef,
+    ParametrizerPartitions, ProcessorInputs, RetryPolicy, SingleEmitterReason,
 };
 use nonzero_ext::nonzero;
 
@@ -45,10 +45,10 @@ fn relay_ref(relay: &str) -> NodeRef {
 /// A branch of `partitions` partitions on relay `relay`, with the relay branched by it.
 fn partitioned_relay(relay: &str, partitions: u16) -> [Model; 2] {
     let mut branch = branch_for_relay(relay, "row");
-    let Model::Branch(declaration) = &mut branch else {
+    let Model::Parametrizer(declaration) = &mut branch else {
         unreachable!("the fixture declares a branch")
     };
-    declaration.partitions = BranchPartitions::Direct(
+    declaration.partitions = ParametrizerPartitions::Direct(
         std::num::NonZeroU16::new(partitions).assured("the fixture counts are nonzero"),
     );
     [branch, relay_branched_by_relay_branch(relay, "row")]
@@ -282,7 +282,7 @@ fn per_partition_groups_bind_each_instance_to_its_partition_of_every_input() {
         emitter.emitter_units,
         Some(EmitterUnits::PerPartition {
             count: Some(nonzero!(4u16)),
-            branch: branch_name_for_relay("events"),
+            parametrizer: parametrizer_name_for_relay("events"),
             relays: vec![named("events"), named("more_events")],
         })
     );

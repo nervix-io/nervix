@@ -41,7 +41,7 @@ Feature: Typed JSON extraction
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_event_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_event_batch_codec
         TO raw_events
           INHERIT ALL
           UNBRANCHED
@@ -137,7 +137,7 @@ Feature: Typed JSON extraction
       CREATE HTTP ENDPOINT document_ingress ON edge PATH '/documents';
       CREATE HTTP ENDPOINT INGESTOR document_ingestor
         FROM document_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_document_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING raw_document_batch_codec
         TO raw_documents
           INHERIT ALL
           UNBRANCHED
@@ -238,7 +238,7 @@ Feature: Typed JSON extraction
       CREATE HTTP ENDPOINT routed_ingress ON edge PATH '/routed-documents';
       CREATE HTTP ENDPOINT INGESTOR routed_document_ingestor
         FROM routed_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_document_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routed_document_batch_codec
         TO routed_documents
           INHERIT ALL
           UNBRANCHED

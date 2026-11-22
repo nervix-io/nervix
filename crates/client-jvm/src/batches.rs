@@ -101,14 +101,14 @@ fn schema_fields<'local>(
     marshal::fields(env, value!(handle).schema()?, marshal::part(part)?)
 }
 
-native!(schema_branch(handle: long) -> JString);
+native!(schema_parametrizer(handle: long) -> JString);
 
-fn schema_branch<'local>(
+fn schema_parametrizer<'local>(
     env: &mut jni::Env<'local>,
     _class: jni::objects::JClass<'local>,
     handle: jlong,
 ) -> Result<jni::objects::JString<'local>, crate::error::Error> {
-    marshal::string(env, value!(handle).schema()?.branch())
+    marshal::string(env, value!(handle).schema()?.parametrizer())
 }
 
 native!(builder_new(schema: long, rows: int) -> long);
@@ -382,7 +382,7 @@ pub(crate) const METHODS: &[jni::NativeMethod] = &[
     fields_element::METHOD,
     fields_schema::METHOD,
     schema_fields::METHOD,
-    schema_branch::METHOD,
+    schema_parametrizer::METHOD,
     builder_new::METHOD,
     builder_states::METHOD,
     builder_offsets::METHOD,

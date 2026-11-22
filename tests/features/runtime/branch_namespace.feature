@@ -36,7 +36,7 @@ Feature: Branch namespace
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_mqtt_notifications;
       CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_mqtt_notifications;
 
@@ -173,10 +173,10 @@ Feature: Branch namespace
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
 
-      CREATE IF NOT EXISTS BRANCH by_copy_notifications SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_copy_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY copied_notifications SCHEMA notification BRANCHED BY by_copy_notifications;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
@@ -185,7 +185,7 @@ Feature: Branch namespace
         ON edge
         PATH '/ingest'; CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

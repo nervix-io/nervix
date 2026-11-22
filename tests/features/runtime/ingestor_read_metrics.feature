@@ -156,66 +156,6 @@ Feature: Ingestor read interactions
       | 1            |
       | 3            |
 
-  Scenario Outline: Acknowledged unfolding refusals are counted before replay on <cluster_size> nodes
-    Given Kafka is running
-    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these Plexus commands
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      """
-    And Kafka topic "read_refusal_{{test_id}}" exists with 1 partitions
-    When these Plexus commands are executed
-      """
-      CREATE SCHEMA event ( user_id I64 );
-      CREATE JAQ JSON CODEC event_codec TO SCHEMA event
-        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
-      CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE KAFKA TOPIC INGESTOR measured
-        FROM broker TOPIC 'read_refusal_{{test_id}}'
-        OFFSET BY CONSUMER GROUP 'read_refusal_{{test_id}}' START AT EARLIEST
-        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
-        ON QUIESCE SUSPEND DECODE USING event_codec
-        TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE SUBSCRIPTION events_subscription TO events;
-      """
-    And extension execution is saturated on every node
-    And Kafka message is published to topic "read_refusal_{{test_id}}"
-      """
-      {"user_id":42}
-      """
-    And these Plexus commands are executed
-      """
-      START;
-      """
-    Then within "30s" the active session observes a server error containing
-      """
-      the node's bounded execution did not unfold the payload
-      """
-    When these Plexus commands are executed
-      """
-      DESCRIBE INGESTOR measured;
-      """
-    Then the last command output owner is saved as placeholder "read_owner"
-    And node "{{read_owner}}" observability metric "nervix_ingestor_unfolding_refused_total" with labels eventually reaches at least 1
-      """
-      ingestor="measured"
-      connector="KAFKA"
-      entity="TOPIC"
-      """
-    When extension execution is released on every node
-    Then within "30s" the relay subscription receives a payload
-      """
-      "user_id":42
-      """
-
-    Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
-
   Scenario Outline: Endpoint unfolding refusals count only the request refused on <cluster_size> nodes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

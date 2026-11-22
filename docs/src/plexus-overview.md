@@ -126,13 +126,13 @@ Core alter statements:
 ```plexus,ignore
   REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION;
 
-ALTER BRANCH <name>
+ALTER PARAMETRIZER <name>
   SET PARTITIONS <n>;
 
 ALTER RELAY <name>
   SET CAPACITY <n> |
   SET SCHEMA <schema> |
-  SET BRANCHED BY <branch> |
+  SET BRANCHED BY <parametrizer> |
   SET UNBRANCHED |
   SET MATERIALIZED STATE LAST BY TIMESTAMP |
   DROP MATERIALIZED STATE
@@ -148,7 +148,7 @@ ALTER JUNCTION <name>
   SET FILTER WHERE <expr> |
   DROP FILTER WHERE |
   SET ATTACHED | SET DETACHED |
-  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  SET BRANCHED BY <parametrizer> | SET UNBRANCHED |
   ADD|DROP|ALTER MATERIALIZED STATE ... |
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
@@ -160,7 +160,7 @@ ALTER DEDUPLICATOR <name>
   SET|DROP COLLECT ... |
   SET|DROP FILTER WHERE ... |
   SET ATTACHED | SET DETACHED |
-  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  SET BRANCHED BY <parametrizer> | SET UNBRANCHED |
   ADD|DROP|ALTER MATERIALIZED STATE ... |
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
@@ -172,7 +172,7 @@ ALTER REORDERER <name>
   SET|DROP COLLECT ... |
   SET|DROP FILTER WHERE ... |
   SET ATTACHED | SET DETACHED |
-  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  SET BRANCHED BY <parametrizer> | SET UNBRANCHED |
   ADD|DROP|ALTER MATERIALIZED STATE ... |
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
@@ -223,13 +223,13 @@ ALTER REINGESTOR <name>
   SET|DROP FILTER WHERE ... |
   SET ATTACHED | SET DETACHED |
   ADD|DROP|ALTER MATERIALIZED STATE ... |
-  ADD|DROP|REPLACE ROUTE TO <relay> <construction> BRANCHED BY <branch>|UNBRANCHED ...
+  ADD|DROP|REPLACE ROUTE TO <relay> <construction> BRANCHED BY <parametrizer>|UNBRANCHED ...
   [, ...];
 
 ALTER GENERATOR <name>
   SET MATERIALIZED STATE <relay> |
   SET EACH <duration> |
-  SET BRANCHED BY <branch> | SET UNBRANCHED |
+  SET BRANCHED BY <parametrizer> | SET UNBRANCHED |
   ADD|DROP|REPLACE ROUTE ...
   [, ...];
 
@@ -264,7 +264,7 @@ Operations in one `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`, `ALTER 
 connector and entity, such as `ALTER KAFKA TOPIC INGESTOR` or `ALTER OTEL METRICS EMITTER`, and
 preserves that pair. Its replacement body uses the same entity's grammar. See
 [Streams And State](relay.md#altering-relays) for relay operations and
-[Relay Partitions](relay.md#changing-the-partition-count) for `ALTER BRANCH ... SET PARTITIONS`,
+[Relay Partitions](relay.md#changing-the-partition-count) for `ALTER PARAMETRIZER ... SET PARTITIONS`,
 which moves each key's state to its new partition on a running domain,
 [Processors](processors.md) for the full processor operation shapes, and
 [Emitters](emitters.md#altering-emitters) and
@@ -305,6 +305,11 @@ Completion offers each composed head as one item. Inspection and addressing use 
 kind: `DESCRIBE INGESTOR`, `SHOW CREATE EMITTER` and `DROP CLIENT`. An ingestor body whose entity
 holds its source back may write repeatable `RATE LIMIT <count> [OF <measure>] PER <duration> BURST
 <count>` clauses between its `MODE` and `ON QUIESCE`; see [Rate Limits](./ingestors.md#rate-limits).
+
+An endpoint ingestor's pause buffer writes when to respond after its size, using
+`RESPOND IMMEDIATE` or `RESPOND AFTER RESUME` where its delivery mode supports that choice.
+The same form follows `SET QUIESCE` in an alteration. See
+[Quiesce Modes](./ingestors.md#quiesce-modes).
 
 `CREATE DOMAIN <name>` is the short spelling for `CREATE UNPACED DOMAIN <name>`.
 
@@ -448,7 +453,7 @@ independently for each source relay and concrete branch, then executes the node 
 expires or the optional size boundary is reached. Correlators configure the clause independently
 after each `LEFT FROM` and `RIGHT FROM` relay list. Emitters place it after their complete
 `FROM <relay> [WHERE ...] [, ...]` list. All emitter inputs declare the same payload schema, but
-they may belong to differently named branches; collection remains independent for each source
+they may belong to different parametrizers; collection remains independent for each source
 relay and concrete branch. Generators do not read a `FROM` relay and therefore have no input
 collection clause. The duration is measured on the domain clock and starts when the source and
 branch collector changes from empty to non-empty. A paced domain's `TIME RATE` scales that wait.
@@ -651,12 +656,12 @@ General expression rules:
 Example:
 
 ```plexus
-CREATE BRANCH by_tenant
+CREATE PARAMETRIZER by_tenant
   SCHEMA tenant_branch TTL 5m;
 
 CREATE HTTP ENDPOINT INGESTOR notifications_in
   FROM ingress MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications
     INHERIT ALL EXCEPT raw
@@ -911,7 +916,7 @@ Show commands:
 
 ```plexus,ignore
 SHOW CREATE <kind> <name>;
-SHOW CREATE BRANCH by_tenant;
+SHOW CREATE PARAMETRIZER by_tenant;
 SHOW PLACEMENTS;
 SHOW RELAY <name> MATERIALIZED STATE;
 SHOW REORDERER <name> STATE;
@@ -942,7 +947,8 @@ a selected domain. `REFRESH LICENSE;` requests a current signed decision.
 `ROTATE LICENSE CLUSTER KEY;` replaces the signing key while preserving identity and deadlines.
 `RELEASE LICENSE;` commits release locally, with background service confirmation and retained
 grant deadlines. These statements are cluster scoped and run outside domain transactions.
-`DESCRIBE LICENSE` reports the cluster's effective licensing policy and committed quota usage.
+`DESCRIBE LICENSE` reports the cluster's effective licensing policy, committed quota usage and the
+state of every capability.
 It takes no name and works on every node without a selected domain. The embedded free policy
 ships with unlimited node and domain quotas. See
 [Cluster Licensing](node-settings.md#cluster-licensing) for its fields and admission contract.

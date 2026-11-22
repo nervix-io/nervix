@@ -24,7 +24,7 @@ use nervix_client_wire::{
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, WireEncodeError,
 };
 use nervix_models::{
-    BranchName, CreateSchema, DomainName, FieldName, RelayName, SchemaField, SchemaRef,
+    CreateSchema, DomainName, FieldName, ParametrizerName, RelayName, SchemaField, SchemaRef,
 };
 
 pub use crate::client_row::SubscriptionRowEncodingError;
@@ -36,7 +36,7 @@ use crate::{
 
 /// The declared branch schema needed to describe concrete branch keys to a client.
 pub struct SubscriptionBranchSchema<'a> {
-    pub name: &'a BranchName,
+    pub name: &'a ParametrizerName,
     pub schema: SchemaRef<'a>,
     pub fields: &'a [FieldName],
 }
@@ -83,7 +83,7 @@ fn subscription_row_branch(
         let Some(field) = schema_fields.get(name) else {
             return Err(Report::new(
                 SubscriptionRowEncodingError::MissingBranchSchemaField {
-                    branch: branch.name.clone(),
+                    parametrizer: branch.name.clone(),
                     field: name.clone(),
                 },
             ));
@@ -94,7 +94,7 @@ fn subscription_row_branch(
         Ok(branch) => Ok(branch),
         Err(error) => Err(
             error.change_context(SubscriptionRowEncodingError::EmptyBranchFields {
-                branch: branch.name.clone(),
+                parametrizer: branch.name.clone(),
             }),
         ),
     }
@@ -820,7 +820,7 @@ mod tests {
         SubscriptionHandle, SubscriptionType,
     };
     use nervix_models::{
-        BranchName, CreateSchema, DomainName, FieldName, ParseAsType, RelayName, SchemaField,
+        CreateSchema, DomainName, FieldName, ParametrizerName, ParseAsType, RelayName, SchemaField,
         Timestamp,
     };
     use nervix_primitives::sync::StdArc;
@@ -1151,7 +1151,7 @@ mod tests {
             false,
             false,
         ));
-        let branch_name: BranchName = named("by_tenant");
+        let parametrizer_name: ParametrizerName = named("by_tenant");
         let branch_fields: Vec<FieldName> = ["tenant", "shard", "credential", "zone"]
             .into_iter()
             .map(named)
@@ -1159,7 +1159,7 @@ mod tests {
         let schema = subscription_row_schema(
             &payload,
             Some(SubscriptionBranchSchema {
-                name: &branch_name,
+                name: &parametrizer_name,
                 schema: branch.definition(),
                 fields: &branch_fields,
             }),
@@ -1238,7 +1238,7 @@ mod tests {
     fn opening_metadata_precedes_exact_arrow_rows_for_one_generation() {
         let payload = payload_schema();
         let branch = branch_schema();
-        let branch_name: BranchName = named("by_tenant");
+        let parametrizer_name: ParametrizerName = named("by_tenant");
         let branch_fields: Vec<FieldName> = ["tenant", "shard", "credential"]
             .into_iter()
             .map(named)
@@ -1246,7 +1246,7 @@ mod tests {
         let schema = subscription_row_schema(
             &payload,
             Some(SubscriptionBranchSchema {
-                name: &branch_name,
+                name: &parametrizer_name,
                 schema: branch.definition(),
                 fields: &branch_fields,
             }),
@@ -1561,12 +1561,12 @@ mod tests {
             name: named("tenant_key"),
             fields: vec![field("tenant", ParseAsType::String, false, false)],
         };
-        let branch_name: BranchName = named("by_tenant");
+        let parametrizer_name: ParametrizerName = named("by_tenant");
         let branch_fields = vec![named("tenant")];
         let wire_schema = subscription_row_schema(
             &payload,
             Some(SubscriptionBranchSchema {
-                name: &branch_name,
+                name: &parametrizer_name,
                 schema: branch.definition(),
                 fields: &branch_fields,
             }),

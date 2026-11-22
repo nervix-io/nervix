@@ -42,11 +42,11 @@ pub(super) fn ProcessorNodeBranch(
             <button type="button" data-branch="named"
                 class:active=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_))
                 disabled=pending
-                on:click=move |_| { draft.update(|state| state.choose_branched()); signals.edit(); }>"Named branch"</button>
+                on:click=move |_| { draft.update(|state| state.choose_branched()); signals.edit(); }>"Parametrizer"</button>
         </fieldset>
         <Show when=move || matches!(draft.get().branching, NodeBranchDraft::Branched(_)) fallback=|| ()>
-            <ChoiceGroup class_name="create-processor-branch" label=label
-                control=ChoiceControl::ProcessorBranch signals=signals request_tx=request_tx
+            <ChoiceGroup class_name="create-processor-parametrizer" label="Parametrizer"
+                control=ChoiceControl::ProcessorParametrizer signals=signals request_tx=request_tx
                 session_generation=session_generation show_detail=true />
         </Show>
     }

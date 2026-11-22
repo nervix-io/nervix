@@ -23,7 +23,7 @@ Feature: Redis command pool minimum
       CREATE HTTP ENDPOINT metrics_endpoint ON edge PATH '/metrics';
       CREATE HTTP ENDPOINT INGESTOR http_metrics
         FROM metrics_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
         TO metrics INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

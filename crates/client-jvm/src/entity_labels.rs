@@ -43,7 +43,14 @@ macro_rules! label_string {
         }
     };
 }
-label_string!(entity_labels_domain, domain);
+native!(entity_labels_domain(handle: long) -> JString);
+fn entity_labels_domain<'local>(
+    env: &mut Env<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> Result<JString<'local>, Error> {
+    marshal::string(env, value!(handle).entity_labels()?.domain())
+}
 label_string!(entity_labels_entity_kind, entity_kind);
 label_string!(entity_labels_entity_name, entity_name);
 

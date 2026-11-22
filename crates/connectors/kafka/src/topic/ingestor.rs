@@ -291,8 +291,8 @@ impl KafkaTopicIngestorOffsetMode {
 pub struct KafkaGroupPartitionRead {
     partitions: nervix_models::ExternalPartitionSet,
     pending: Option<KafkaOffsetPosition>,
-    /// While this reader supports allowance holds, remembers the partitions whose native
-    /// pause belongs to topology. An allowance returning must not reopen those partitions.
+    /// While this reader can be held, remembers the partitions whose native pause belongs to
+    /// topology. A hold ending must not reopen those partitions.
     paused_for_topology: Option<BTreeSet<i32>>,
 }
 
@@ -446,8 +446,6 @@ pub struct KafkaTopicIngestorPlan {
     pub config: Vec<ClientConfigEntry>,
     pub topic: KafkaTopicName,
     pub offset_mode: KafkaTopicIngestorOffsetMode,
-    /// The host can deliberately hold reads back while the driver remains active.
-    pub maintain_rate_limit_holds: bool,
 }
 
 #[derive(Debug, Error)]
@@ -457,9 +455,9 @@ pub enum KafkaTopicIngestorError {
          committed", connector = ConnectorKind::Kafka
     )]
     PausePartition { topic: String, partition: i32 },
-    #[error("failed to pause {connector} topic '{topic}' for an ingestor read allowance", connector = ConnectorKind::Kafka)]
+    #[error("failed to pause {connector} topic '{topic}' while the host holds the ingestor's reads", connector = ConnectorKind::Kafka)]
     PauseForAllowance { topic: String },
-    #[error("failed to resume {connector} topic '{topic}' once the ingestor read allowance returned", connector = ConnectorKind::Kafka)]
+    #[error("failed to resume {connector} topic '{topic}' once the host stopped holding the ingestor's reads", connector = ConnectorKind::Kafka)]
     ResumeAfterAllowance { topic: String },
     #[error("failed to store a {connector} group's next unread offset", connector = ConnectorKind::Kafka)]
     StoreGroupOffset,
@@ -822,11 +820,12 @@ impl IngestorConnector for KafkaTopicIngestor {
         let consumer = KafkaConsumerHandle::create(&config, plan.executor.clone())
             .change_context(IngestorError::Open { connector: KAFKA })?;
         let mut offset_mode = plan.offset_mode.clone();
+        // A consumer-group member services its group whenever the host holds its reads back: for
+        // its read allowance, and while a payload it read waits for the node's extension workers.
         let allowance_hold = if let KafkaTopicIngestorOffsetMode::ConsumerGroup {
             committed_partitions,
             ..
         } = &mut offset_mode
-            && plan.maintain_rate_limit_holds
         {
             if let Some(partitions) = committed_partitions {
                 partitions.paused_for_topology = Some(BTreeSet::new());

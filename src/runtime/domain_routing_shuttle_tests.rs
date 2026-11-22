@@ -49,7 +49,7 @@ fn plan(processor: &str, input: &str) -> StdArc<PublishedProcessorPlan> {
                     output_routes: BranchedProcessorOutputsSpec { routes: Vec::new() },
                 },
             },
-            branch: None,
+            parametrizer: None,
             branch_ttl: None,
             branch_max_instances: None,
             binding: Default::default(),

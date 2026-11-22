@@ -41,7 +41,7 @@ use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{LookupShare, OperationBudget};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation,
 };
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, NodeEndpoint, RemoteAckOutcome, RemoteAckRegistration,
@@ -2541,10 +2541,13 @@ impl TransportState {
                 request.into_body(),
             )
             .await?;
-            let decoded = wire::decode_rkyv::<nervix_models::RemoteAckResolution>(
+            // An ack carries the outcome of a delivery the peer already resolved, so a full control
+            // queue holds it back rather than losing that outcome.
+            let decoded = wire::decode_rkyv_with::<nervix_models::RemoteAckResolution>(
                 &self.executor,
                 MemoryClass::Management,
                 CpuClass::Control,
+                QueueAdmission::WaitForPlace,
                 bytes,
             )
             .await?;
@@ -2699,14 +2702,25 @@ impl TransportState {
                 }
             };
             let (response, _payload_reservation) = response.into_parts();
-            let response = wire::encode_rkyv(
+            // The handler already ran, so a full queue holds its answer back rather than throwing
+            // the work away. The request still decoded under a refusing admission above, so a
+            // burst beyond the class is refused before it takes any charge. The caller's reset
+            // ends the wait.
+            let encoding = wire::encode_rkyv_with(
                 &self.executor,
                 peer.class.memory_class(),
                 peer.class.cpu_class(),
                 peer.class.control_body_limit(&self.executor),
+                QueueAdmission::WaitForPlace,
                 ControlEnvelope::Response(response),
-            )
-            .await?;
+            );
+            let response = nervix_primitives::select! {
+                response = encoding => response?,
+                reset = poll_fn(|context| respond.poll_reset(context)) => {
+                    reset.map_err(TransportError::from)?;
+                    return Ok(());
+                }
+            };
             send_response(
                 respond,
                 StatusCode::OK,

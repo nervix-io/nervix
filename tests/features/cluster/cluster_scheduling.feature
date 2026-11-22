@@ -52,7 +52,7 @@ Feature: Cluster scheduling
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA event_branch ( id I64 );
-      CREATE BRANCH by_event SCHEMA event_branch TTL 5m;
+      CREATE PARAMETRIZER by_event SCHEMA event_branch TTL 5m;
       CREATE RELAY stage_0 SCHEMA event BRANCHED BY by_event;
       CREATE RELAY stage_1 SCHEMA event BRANCHED BY by_event;
       CREATE RELAY stage_2 SCHEMA event BRANCHED BY by_event;
@@ -68,7 +68,7 @@ Feature: Cluster scheduling
       CREATE RELAY stage_12 SCHEMA event BRANCHED BY by_event;
       CREATE VHOST edge random-scheduler-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT event_endpoint ON edge PATH '/events';
-      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR hop_1 FROM stage_0 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_1 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_2 FROM stage_1 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_2 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_3 FROM stage_2 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_3 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -195,7 +195,7 @@ Feature: Cluster scheduling
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
 
@@ -258,7 +258,7 @@ Feature: Cluster scheduling
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -266,7 +266,7 @@ Feature: Cluster scheduling
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -325,7 +325,7 @@ Feature: Cluster scheduling
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_source_logs SCHEMA id_branch TTL 5m;
 
       CREATE RELAY incoming_logs SCHEMA notification BRANCHED BY by_source_logs;
 
@@ -427,7 +427,7 @@ Feature: Cluster scheduling
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_source_logs SCHEMA id_branch TTL 5m;
 
       CREATE RELAY incoming_logs SCHEMA notification BRANCHED BY by_source_logs;
 
@@ -553,7 +553,7 @@ Feature: Cluster scheduling
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -561,7 +561,7 @@ Feature: Cluster scheduling
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -626,7 +626,7 @@ Feature: Cluster scheduling
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
@@ -692,7 +692,7 @@ Feature: Cluster scheduling
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
@@ -854,7 +854,7 @@ Feature: Cluster scheduling
 
       CREATE IF NOT EXISTS SCHEMA id_branch ( id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_source_logs SCHEMA id_branch TTL 5m;
 
       CREATE RELAY incoming_logs SCHEMA notification BRANCHED BY by_source_logs;
 

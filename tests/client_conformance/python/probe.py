@@ -1152,12 +1152,12 @@ def run_inspection(session, report):
     license_outcome = execute(session, "DESCRIBE LICENSE;")
     license = license_outcome.state_inspection
     assert license is not None and license.domain is None and license.entity_name is None
-    assert license.entity_kind == "LICENSE" and license.counts.rows == 3 and license.counts.branches == 0
+    assert license.entity_kind == "LICENSE" and license.counts.rows == 4 and license.counts.branches == 0
     assert len(license.units) == 1
-    assert [part.name for part in license.units[0].sections] == ["summary", "quotas", "transitions"]
-    transitions = license.units[0].sections[2]
+    assert [part.name for part in license.units[0].sections] == ["summary", "quotas", "capabilities", "transitions"]
+    transitions = license.units[0].sections[3]
     assert transitions.frames == [] and transitions.omitted_rows == 0
-    report("INSPECTION license rows=3")
+    report("INSPECTION license rows=4")
     outcome = execute(session, "SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;")
     inspection = outcome.state_inspection
     assert inspection is not None
@@ -1182,13 +1182,13 @@ def run_inspection(session, report):
     assert len(unit.origin_fingerprint) == 32 and unit.origin_stage == nx.InspectionStage.LIVE
     section = unit.sections[0]
     schema = section.schema
-    assert schema.branch == "by_tenant" and schema.key_fields[0].sensitive
+    assert schema.parametrizer == "by_tenant" and schema.key_fields[0].sensitive
     assert [field.name for field in schema.fields[:3]] == ["tenant", "secret", "sequence"]
     assert schema.fields[0].sensitive and schema.fields[1].sensitive
     assert schema.fields[2].type == nx.FieldType.I64
     assert section.omitted_rows == 1 and section.watermark_low != section.watermark_high
     frame = section.frames[0]
-    assert frame.row_count == 1 and frame.schema.branch == schema.branch
+    assert frame.row_count == 1 and frame.schema.parametrizer == schema.parametrizer
     view = frame.frame
     expected = bytes(view)
     assert view.readonly and expected
@@ -1250,8 +1250,8 @@ def main():
     fields, key_fields = described(schema.fields), described(schema.key_fields)
     for field in fields:
         report(field_line("FIELD", field))
-    if schema.branch is not None:
-        report(f"BRANCH {schema.branch}")
+    if schema.parametrizer is not None:
+        report(f"PARAMETRIZER {schema.parametrizer}")
     for field in key_fields:
         report(field_line("KEY", field))
     report("SUBSCRIBED")

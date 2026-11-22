@@ -120,8 +120,8 @@ pub use producer::{
     nx_producer_state, nx_producer_submit, nx_producer_submit_ipc, nx_session_open_ingestor,
 };
 pub use schema::{
-    nx_schema_branch, nx_schema_field, nx_schema_field_count, nx_schema_field_level,
-    nx_schema_field_levels, nx_schema_free,
+    nx_schema_field, nx_schema_field_count, nx_schema_field_level, nx_schema_field_levels,
+    nx_schema_free, nx_schema_parametrizer,
 };
 pub use session::{
     nx_execution_free, nx_execution_reference, nx_session_connect, nx_session_domain_clock,

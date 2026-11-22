@@ -247,7 +247,8 @@ fn transaction_operation_text(operation: &TransactionOperation) -> String {
         | TransactionOperation::StopDomain { domain } => {
             format!("{action} domain={}", domain.as_str())
         }
-        TransactionOperation::CreateResource { resource, .. } => {
+        TransactionOperation::CreateResource { resource, .. }
+        | TransactionOperation::EditResourceLabels { resource, .. } => {
             format!("{action} resource={}", resource.as_str())
         }
         TransactionOperation::RebindResource {
@@ -471,11 +472,15 @@ fn branches_text(branches: &ConcreteBranchCoverage) -> String {
     let kind = branches.as_ref();
     match branches {
         ConcreteBranchCoverage::All | ConcreteBranchCoverage::Unbranched => kind.to_string(),
-        ConcreteBranchCoverage::AllOfBranch { branch } => {
-            format!("{kind} branch={}", branch.as_str())
+        ConcreteBranchCoverage::AllOfParametrizer { parametrizer } => {
+            format!("{kind} parametrizer={}", parametrizer.as_str())
         }
-        ConcreteBranchCoverage::Selected { branch, keys } => {
-            format!("{kind} branch={} keys={}", branch.as_str(), keys.len())
+        ConcreteBranchCoverage::Selected { parametrizer, keys } => {
+            format!(
+                "{kind} parametrizer={} keys={}",
+                parametrizer.as_str(),
+                keys.len()
+            )
         }
     }
 }

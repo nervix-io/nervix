@@ -32,7 +32,7 @@ Feature: Conditional expressions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING calculation_codec
         TO calculations
         INHERIT ALL
         UNBRANCHED
@@ -103,7 +103,7 @@ Feature: Conditional expressions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/conditional-window';
       CREATE HTTP ENDPOINT INGESTOR conditional_sample_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_sample_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING conditional_sample_codec
         TO conditional_samples
         INHERIT ALL
         UNBRANCHED
@@ -182,7 +182,7 @@ Feature: Conditional expressions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/conditional-forms';
       CREATE HTTP ENDPOINT INGESTOR conditional_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING conditional_input_codec
         TO conditional_inputs
         INHERIT ALL
         UNBRANCHED
@@ -276,7 +276,7 @@ Feature: Conditional expressions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/routed-texts';
       CREATE HTTP ENDPOINT INGESTOR routed_text_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_text_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routed_text_codec
         TO routed_texts
           INHERIT ALL
           UNBRANCHED
@@ -401,7 +401,7 @@ Feature: Conditional expressions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/support-requests';
       CREATE HTTP ENDPOINT INGESTOR support_request_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING support_request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING support_request_codec
         TO support_requests
           INHERIT ALL
           UNBRANCHED
@@ -473,7 +473,7 @@ Feature: Conditional expressions
       CREATE HTTP ENDPOINT ingress ON edge PATH '/notes';
       CREATE HTTP ENDPOINT INGESTOR note_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tagged_note_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING tagged_note_codec
         TO routed_notes
           SET id = input.id,
               kind = input.kind,

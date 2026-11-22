@@ -1,12 +1,13 @@
-//! Kafka consumer-group control during an ingestor's read allowance hold.
+//! Kafka consumer-group control while the host holds an ingestor's reads back: during its read
+//! allowance hold, and while a payload it read waits for the node's extension workers.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** The native fetch pauses taken during an allowance hold and polling the same
-//!   consumer's group events while its partitions are paused.
+//! - **Owns.** The native fetch pauses taken during a hold and polling the same consumer's group
+//!   events while its partitions are paused.
 //! - **Depends on.** The connector contract, Kafka control execution, the primitive boundary,
 //!   and rust-rdkafka's stream and partition assignment APIs.
-//! - **Must not know.** How the host calculates its allowance, graph acknowledgements, relays,
-//!   or schedules.
+//! - **Must not know.** Why the host holds the reads, how it calculates its allowance, graph
+//!   acknowledgements, relays, or schedules.
 
 #![cfg_attr(
     nervix_lint,
@@ -112,7 +113,7 @@ impl Wake for GroupPollWake {
 
 #[async_trait]
 impl IngestorReadHold for KafkaTopicIngestor {
-    async fn maintain(&mut self, until: Instant) -> Report<IngestorError> {
+    async fn maintain(&mut self, until: Option<Instant>) -> Report<IngestorError> {
         match self.service_held_group(until).await {
             Err(error) => error.change_context(IngestorError::Read { connector: KAFKA }),
             Ok(never) => match never {},
@@ -121,21 +122,28 @@ impl IngestorReadHold for KafkaTopicIngestor {
 }
 
 impl KafkaTopicIngestor {
+    /// Services the held consumer's group until the host stops polling. A hold with a deadline
+    /// needs no service it would end before, and a hold without one, a payload waiting for the
+    /// node's extension workers, is serviced for as long as it lasts.
     async fn service_held_group(
         &mut self,
-        until: Instant,
+        until: Option<Instant>,
     ) -> Result<Infallible, Report<KafkaTopicIngestorError>> {
         let hold = self
             .allowance_hold
             .as_mut()
             .verified("only a consumer with allowance maintenance offers the hook");
         if let Some(next_service) = hold.next_service {
-            if next_service >= until {
+            if let Some(until) = until
+                && next_service >= until
+            {
                 return pending().await;
             }
             sleep_until(next_service).await;
         }
-        if Instant::now() >= until {
+        if let Some(until) = until
+            && Instant::now() >= until
+        {
             return pending().await;
         }
         hold.paused.get_or_insert_with(BTreeSet::new);
@@ -166,7 +174,9 @@ impl KafkaTopicIngestor {
 
         loop {
             nervix_primitives::task::consume_budget().await;
-            if Instant::now() >= until {
+            if let Some(until) = until
+                && Instant::now() >= until
+            {
                 return pending().await;
             }
             hold.paused

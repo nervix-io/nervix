@@ -10,7 +10,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_generator_event (tenant STRING, amount I64);
       CREATE SCHEMA visual_generator_total (tenant STRING, total I64);
       CREATE SCHEMA visual_generator_key (tenant STRING);
-      CREATE BRANCH visual_generator_tenant SCHEMA visual_generator_key TTL 5m;
+      CREATE PARAMETRIZER visual_generator_tenant SCHEMA visual_generator_key TTL 5m;
       CREATE JAQ JSON CODEC visual_generator_codec TO SCHEMA visual_generator_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY visual_generator_state SCHEMA visual_generator_event BRANCHED BY visual_generator_tenant
@@ -22,7 +22,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE VHOST visual_generator_host generator-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_generator_endpoint ON visual_generator_host PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR visual_generator_ingestor FROM visual_generator_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_generator_codec TIMESTAMP NOW
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_generator_codec TIMESTAMP NOW
         TO visual_generator_state INHERIT ALL BRANCHED BY visual_generator_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -37,9 +37,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-processor-mode" does not exist
     And selector ".create-processor-filter" does not exist
     When selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_generator_tenant"
-    Then selector ".create-processor-branch [data-value='visual_generator_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_generator_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_generator_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_generator_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_generator_tenant']" is clicked
     # Only a materialized relay on exactly the generator's branch can feed it.
     And selector ".create-generator-relay .create-choice-search" is filled with "visual_generator_"
     Then selector ".create-generator-relay [data-value='visual_generator_state']" exists
@@ -124,7 +124,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_infer_feature (tenant STRING, vector <vector_type>);
       CREATE SCHEMA visual_infer_score (tenant STRING, score <score_type>);
       CREATE SCHEMA visual_infer_key (tenant STRING);
-      CREATE BRANCH visual_infer_tenant SCHEMA visual_infer_key TTL 5m;
+      CREATE PARAMETRIZER visual_infer_tenant SCHEMA visual_infer_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_infer_wire MODE STRICT (tenant string, vector array);
       CREATE WIRE JSON CODEC visual_infer_codec FROM WIRE SCHEMA visual_infer_wire TO SCHEMA visual_infer_feature;
       CREATE RELAY visual_infer_features SCHEMA visual_infer_feature BRANCHED BY visual_infer_tenant;
@@ -132,7 +132,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE VHOST visual_infer_host infer-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_infer_endpoint ON visual_infer_host PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR visual_infer_ingestor FROM visual_infer_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_infer_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_infer_codec
         TO visual_infer_features INHERIT ALL BRANCHED BY visual_infer_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -143,9 +143,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-menu [data-create-kind='inferencer']" is clicked
     And selector ".create-name" is filled with "visual_infer_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_infer_tenant"
-    Then selector ".create-processor-branch [data-value='visual_infer_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_infer_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_infer_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_infer_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_infer_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_infer_features"
     Then selector ".create-processor-input [data-value='visual_infer_features']" exists
     When selector ".create-processor-input [data-value='visual_infer_features']" is clicked
@@ -246,7 +246,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_wasm_event (value I32, tenant STRING);
       CREATE SCHEMA visual_wasm_tagged (value I32, tenant STRING, bucket STRING);
       CREATE SCHEMA visual_wasm_key (tenant STRING);
-      CREATE BRANCH visual_wasm_tenant SCHEMA visual_wasm_key TTL 5m;
+      CREATE PARAMETRIZER visual_wasm_tenant SCHEMA visual_wasm_key TTL 5m;
       CREATE WIRE JSON SCHEMA visual_wasm_wire MODE STRICT (value integer, tenant string);
       CREATE WIRE JSON CODEC visual_wasm_codec FROM WIRE SCHEMA visual_wasm_wire TO SCHEMA visual_wasm_event;
       CREATE RELAY visual_wasm_events SCHEMA visual_wasm_event BRANCHED BY visual_wasm_tenant;
@@ -254,7 +254,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE VHOST visual_wasm_host wasm-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT visual_wasm_endpoint ON visual_wasm_host PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR visual_wasm_ingestor FROM visual_wasm_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_wasm_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING visual_wasm_codec
         TO visual_wasm_events INHERIT ALL BRANCHED BY visual_wasm_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -265,9 +265,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-menu [data-create-kind='wasm-processor']" is clicked
     And selector ".create-name" is filled with "visual_wasm_stage"
     And selector ".create-processor-branching [data-branch='named']" is clicked
-    And selector ".create-processor-branch .create-choice-search" is filled with "visual_wasm_tenant"
-    Then selector ".create-processor-branch [data-value='visual_wasm_tenant']" exists
-    When selector ".create-processor-branch [data-value='visual_wasm_tenant']" is clicked
+    And selector ".create-processor-parametrizer .create-choice-search" is filled with "visual_wasm_tenant"
+    Then selector ".create-processor-parametrizer [data-value='visual_wasm_tenant']" exists
+    When selector ".create-processor-parametrizer [data-value='visual_wasm_tenant']" is clicked
     And selector ".create-processor-input .create-choice-search" is filled with "visual_wasm_events"
     Then selector ".create-processor-input [data-value='visual_wasm_events']" exists
     When selector ".create-processor-input [data-value='visual_wasm_events']" is clicked
@@ -380,7 +380,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-menu [data-create-kind='generator']" is clicked
     And selector ".create-name" is filled with "visual_check_generator"
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "UNBRANCHED or a named branch"
+    Then selector ".create-validation" contains "UNBRANCHED or a parametrizer"
     When selector ".create-processor-branching [data-branch='unbranched']" is clicked
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "materialized relay"
@@ -441,7 +441,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
       CREATE SCHEMA visual_tx_event (tenant STRING, amount I64);
       CREATE SCHEMA visual_tx_total (total I64);
       CREATE SCHEMA visual_tx_key (tenant STRING);
-      CREATE BRANCH visual_tx_tenant SCHEMA visual_tx_key TTL 5m;
+      CREATE PARAMETRIZER visual_tx_tenant SCHEMA visual_tx_key TTL 5m;
       CREATE RELAY visual_tx_plain SCHEMA visual_tx_event UNBRANCHED;
       CREATE RELAY visual_tx_branched_state SCHEMA visual_tx_event BRANCHED BY visual_tx_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;

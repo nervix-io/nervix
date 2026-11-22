@@ -211,7 +211,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       CREATE SCHEMA physical_wait_tenant (
         tenant STRING
       );
-      CREATE BRANCH physical_wait_by_tenant SCHEMA physical_wait_tenant TTL 1h;
+      CREATE PARAMETRIZER physical_wait_by_tenant SCHEMA physical_wait_tenant TTL 1h;
       CREATE RELAY physical_wait_preferences
         SCHEMA physical_wait_preference BRANCHED BY physical_wait_by_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -228,7 +228,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         PATH '/input';
       CREATE HTTP ENDPOINT INGESTOR physical_wait_state_ingestor
         FROM physical_wait_state_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_preference_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING physical_wait_preference_codec
         TIMESTAMP NOW
         TO physical_wait_preferences
           INHERIT ALL
@@ -239,7 +239,7 @@ Feature: Physical infrastructure deadlines under domain pacing
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR physical_wait_input_ingestor
         FROM physical_wait_input_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING physical_wait_notification_codec
         TIMESTAMP NOW
         TO physical_wait_pending
           INHERIT ALL

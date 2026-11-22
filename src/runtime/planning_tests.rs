@@ -1055,7 +1055,7 @@ fn processor_instance_materialization_requires_an_input_relay() {
                 output_routes: BranchedProcessorOutputsSpec { routes: Vec::new() },
             },
         },
-        branch: None,
+        parametrizer: None,
         branch_ttl: None,
         branch_max_instances: None,
         binding: Default::default(),
@@ -1349,7 +1349,10 @@ fn branched_node_specs_capture_downstream_processing_tree() {
         .expect("input collection policy must be planned for its source relay");
     assert_eq!(collect_policy.collect_for, "25ms");
     assert_eq!(collect_policy.max_batch_size.as_deref(), Some("2MiB"));
-    assert_eq!(dedup_orders.branch.as_ref(), Some(&named("by_orders")));
+    assert_eq!(
+        dedup_orders.parametrizer.as_ref(),
+        Some(&named("by_orders"))
+    );
     assert_eq!(dedup_orders.branch_ttl.as_deref(), Some("5m"));
     assert_eq!(dedup_orders.branch_max_instances, None);
     let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
@@ -1680,7 +1683,7 @@ fn branched_node_specs_capture_the_processor_behind_a_reingestor() {
         vec![named("tenant_orders")]
     );
     assert_eq!(
-        specs.processors[0].branch.as_ref(),
+        specs.processors[0].parametrizer.as_ref(),
         Some(&named("by_tenant_orders"))
     );
     assert_eq!(specs.processors[0].branch_ttl.as_deref(), Some("5m"));
@@ -2169,7 +2172,7 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(specs.processors[0].branch_ttl, None);
-    assert_eq!(specs.processors[0].branch, None);
+    assert_eq!(specs.processors[0].parametrizer, None);
     assert_eq!(specs.processors[0].branch_max_instances, None);
 }
 

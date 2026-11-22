@@ -76,7 +76,7 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          first_latency I64 OPTIONAL, last_latency I64 OPTIONAL, smallest I64 OPTIONAL, largest \
          I64 OPTIONAL, latency_p0 F64 OPTIONAL, note_bytes I64 OPTIONAL );
          CREATE SCHEMA tenant_key ( tenant STRING );
-         CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+         CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 30m;
          CREATE RELAY payments SCHEMA payment BRANCHED BY by_tenant;
          CREATE RELAY unique_keys SCHEMA key_summary BRANCHED BY by_tenant;
          CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
@@ -89,9 +89,9 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
          INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE \
          ERROR LOG ON GENERAL ERROR LOG;
          CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK ON QUIESCE \
-         BUFFER MAX SIZE 2MiB DECODE USING metric_codec TO metrics INHERIT ALL BRANCHED BY \
-         by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
-         ERROR LOG;
+         BUFFER MAX SIZE 2MiB RESPOND IMMEDIATE DECODE USING metric_codec TO metrics INHERIT ALL \
+         BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+         ON GENERAL ERROR LOG;
          CREATE DEDUPLICATOR unique_key_filter FROM payments DEDUPLICATE ON input.transaction_id, \
          input.amount MAX TIME 30m BRANCHED BY by_tenant TO unique_keys SET tenant = \
          input.tenant, amount = input.amount, key_bytes = octet_length(input.transaction_id) \

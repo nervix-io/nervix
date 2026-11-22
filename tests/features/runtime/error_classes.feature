@@ -38,7 +38,7 @@ Feature: Error classes, the producing node and the outside system's code
         FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY ratios SCHEMA reading BRANCHED BY by_tenant;
       CREATE RELAY scoring_errors SCHEMA scoring_error BRANCHED BY by_tenant;

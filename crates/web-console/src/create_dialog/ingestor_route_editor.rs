@@ -341,11 +341,11 @@ fn IngestorRouteBranchEditor(
                 disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.choose_route_unbranched()); signals.edit(); }>"UNBRANCHED"</button>
             <button type="button" data-branch="named"
                 class:active=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. }))
-                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.choose_route_branched()); signals.edit(); }>"Named branch"</button>
+                disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.choose_route_branched()); signals.edit(); }>"Parametrizer"</button>
         </fieldset>
         <Show when=move || signals.ingestor.get().active_route().is_some_and(|route| matches!(route.branch, RouteBranchDraft::Branched { .. })) fallback=|| ()>
-            <ChoiceGroup class_name="create-ingestor-branch" label="Named branch"
-                control=ChoiceControl::IngestRouteBranch signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
+            <ChoiceGroup class_name="create-ingestor-parametrizer" label="Parametrizer"
+                control=ChoiceControl::IngestRouteParametrizer signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />
             <div class="create-ingestor-branch-assignments">
                 <ChoiceGroup class_name="create-ingestor-branch-fields" label="Add branch key assignment"
                     control=ChoiceControl::IngestBranchField signals=signals request_tx=request_tx session_generation=session_generation show_detail=true />

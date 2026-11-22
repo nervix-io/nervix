@@ -37,7 +37,7 @@ Feature: Wire schema list fields
       CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_source
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING measurement_codec
         TO measurements INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT avro_lists CONFIG {
@@ -107,7 +107,7 @@ Feature: Wire schema list fields
       CREATE HTTP ENDPOINT ingress ON edge PATH '/captures';
       CREATE HTTP ENDPOINT INGESTOR capture_source
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING capture_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING capture_codec
         TO captures INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT json_lists CONFIG {
@@ -163,7 +163,7 @@ Feature: Wire schema list fields
       CREATE HTTP ENDPOINT ingress ON edge PATH '/captures';
       CREATE HTTP ENDPOINT INGESTOR capture_source
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING capture_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING capture_codec
         TO captures INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT cbor_lists CONFIG {

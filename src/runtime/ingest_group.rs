@@ -56,8 +56,6 @@ pub(in crate::runtime) enum IngestMetadataOperation {
 pub(in crate::runtime) enum IngestGroupAdmittedOperation {
     #[strum(serialize = "prepare a branch input")]
     PrepareBranchInput,
-    #[strum(serialize = "unfold an ingested payload")]
-    UnfoldPayload,
 }
 
 /// Why one ingested payload did not decode into its group's builder.
@@ -87,16 +85,6 @@ impl PayloadDecodeFailure {
 #[derive(Debug, Error)]
 #[error("the node's bounded execution did not unfold the payload")]
 pub(in crate::runtime) struct UnfoldingNotAdmitted;
-
-impl UnfoldingNotAdmitted {
-    /// The failure of the ingest group whose payload's unfolding the node refused, with the
-    /// executor's refusal beneath it.
-    pub(super) fn group_error(refusal: Report<Self>) -> Report<IngestGroupError> {
-        refusal.change_context(IngestGroupError::Execution {
-            operation: IngestGroupAdmittedOperation::UnfoldPayload,
-        })
-    }
-}
 
 /// One payload of a batch an ingestor hands its host, and the entry that stays with it whatever its
 /// codec decides, such as the payload's metadata row.
@@ -2395,14 +2383,16 @@ impl Runtime {
             .await
     }
 
-    /// Decodes every one of `payloads` into `collector`'s open group, their unfoldings admitted as
-    /// `admission` says, and divides their entries by whether the codec refused the payload.
+    /// Decodes every one of `payloads` into `collector`'s open group, and divides their entries by
+    /// whether the codec refused the payload.
     ///
-    /// A payload its codec refuses leaves the group exactly as it was while the payloads around it
-    /// still decode, because the refusal is the codec's judgement of that payload alone and would
-    /// repeat. A payload the node could not unfold now was judged by nothing, so the batch is
-    /// delivered together or not at all: that refusal takes the payloads decoded before it back
-    /// out of the group, and its caller presents the batch again or refuses it whole. A caller that
+    /// Each unfolding waits for a place on the node's extension workers rather than being refused,
+    /// because nothing can present a payload a source handed over again. A payload its codec
+    /// refuses leaves the group exactly as it was while the payloads around it still decode,
+    /// because the refusal is the codec's judgement of that payload alone and would repeat. An
+    /// unfolding the node no longer admits at all, once its executor stops, was judged by nothing,
+    /// so the batch is delivered together or not at all: that refusal takes the payloads decoded
+    /// before it back out of the group, and its caller ends its intake as stopped. A caller that
     /// drops this future before it completes discards what it decoded itself.
     #[cfg_attr(
         nervix_lint,
@@ -2413,7 +2403,6 @@ impl Runtime {
     pub(in crate::runtime) async fn decode_raw_ingest_payload<'p, T>(
         &self,
         collector: &mut IngestRouteCollector,
-        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payloads: impl IntoIterator<Item = BatchPayload<'p, T>>,
     ) -> Result<SplitPayloads<T>, Report<UnfoldingNotAdmitted>> {
@@ -2425,7 +2414,7 @@ impl Runtime {
             let outcome = collector
                 .decode_payload(
                     self.executor(),
-                    admission,
+                    QueueAdmission::WaitForPlace,
                     codec,
                     payload,
                     usize::try_from(self.cluster_parameters().payload_unfold_limit())

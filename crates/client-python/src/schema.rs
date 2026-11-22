@@ -1,7 +1,7 @@
 //! The schema a subscription's rows, or an endpoint's batches, follow, and the fields a host
 //! expects an endpoint to have.
 //!
-//! - **Owns.** Reading a schema's fields, the levels of each field's type and its branch, and
+//! - **Owns.** Reading a schema's fields, the levels of each field's type and its parametrizer, and
 //!   describing the fields a host expects one type level at a time.
 //! - **Depends on.** The host session runtime's schema, field types and field descriptions.
 //! - **Must not know.** Where a schema came from or what the server compares fields with.
@@ -151,10 +151,10 @@ impl Schema {
         self.part(Part::BranchKey)
     }
 
-    /// The name of the branch the rows belong to, or `None` for an unbranched relay.
+    /// The name of the parametrizer the rows' branch belongs to, or `None` for an unbranched relay.
     #[getter]
-    fn branch(&self) -> Option<&str> {
-        self.schema.branch()
+    fn parametrizer(&self) -> Option<&str> {
+        self.schema.parametrizer()
     }
 }
 

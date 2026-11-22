@@ -111,7 +111,7 @@ The function evaluates `<key_expr>`, looks up that key in the named hash map, an
 Example enrichment:
 
 ```plexus
-CREATE BRANCH by_zip
+CREATE PARAMETRIZER by_zip
   SCHEMA zip_branch TTL 5m;
 
 CREATE DEDUPLICATOR enrich_zip

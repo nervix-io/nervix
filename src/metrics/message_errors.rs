@@ -30,10 +30,8 @@ pub(super) const MESSAGE_ERRORS_TOTAL: &str = "nervix_message_errors_total";
 const MESSAGE_ERRORS_HELP: &str = "Total errors a graph node handled, by the error's class and \
                                    the operation that failed, whatever its route's or node's \
                                    policy did with them.";
-const CLASSES: usize = MessageErrorClass::ALL.len();
 /// The family's labels, sorted by name as the registry renders the labels of every family.
 const LABEL_NAMES: [&str; 5] = ["class", "domain", "node", "node_kind", "operation"];
-const OPERATIONS: usize = MessageErrorOperation::ALL.len();
 
 /// The node a group of counters belongs to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -170,7 +168,7 @@ impl NodeMessageErrors {
 struct NodeErrorCells {
     metrics: Arc<MessageErrorMetrics>,
     key: NodeErrorsKey,
-    cells: [[AtomicU64; OPERATIONS]; CLASSES],
+    cells: [[AtomicU64; MessageErrorOperation::ALL.len()]; MessageErrorClass::ALL.len()],
 }
 
 impl NodeErrorCells {

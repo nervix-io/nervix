@@ -164,7 +164,7 @@ Feature: HTTP client ingestion
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
       CREATE SCHEMA user_id_branch (user_id I64);
-      CREATE BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
       CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = '{{mock_http_dns_addr}}/http/{{test_id}}',
@@ -215,7 +215,7 @@ Feature: HTTP client ingestion
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE HTTP CLIENT http_main
         CONFIG {
@@ -268,7 +268,7 @@ Feature: HTTP client ingestion
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE HTTP CLIENT http_main
         CONFIG {

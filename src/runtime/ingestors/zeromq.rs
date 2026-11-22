@@ -45,9 +45,6 @@ impl ZeroMqPullIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
             flush_each_intake: false,
-            // Unread messages stay in the socket's kernel buffers while the loop waits, and then
-            // the pushing peers' sends wait: nothing is dropped and memory stays bounded.
-            unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
         }
         .open::<ZeroMqPullIngestor>(runtime, ingestor)

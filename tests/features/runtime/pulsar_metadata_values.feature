@@ -80,7 +80,7 @@ Feature: Pulsar transport metadata values
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY events SCHEMA timed BRANCHED BY by_tenant;
       CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
       CREATE PULSAR CLIENT source CONFIG { 'addr' = '{{pulsar_addr}}' };

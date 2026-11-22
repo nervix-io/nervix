@@ -194,25 +194,64 @@ fn emitter_error_classification_is_explicit_for_every_context() {
 fn every_emitter_failure_names_the_class_of_the_rows_it_ends() {
     let relay: RelayName = "orders".parse().expect("a valid relay name");
     let classified = [
-        (EmitterRuntimeError::ConnectorNotInitialized, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::ResumeConnector, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::ConnectorWaiting, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::PublishBatch, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::PublishStalled, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::InvalidConnectorConfig, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::InitializeConnector, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::CloseConnector, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::FaultInjected, MessageErrorClass::REFUSED),
+        (
+            EmitterRuntimeError::ConnectorNotInitialized,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::ResumeConnector,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::ConnectorWaiting,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::PublishBatch,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::PublishStalled,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::InvalidConnectorConfig,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::InitializeConnector,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::CloseConnector,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::FaultInjected,
+            MessageErrorClass::REFUSED,
+        ),
         (EmitterRuntimeError::FinalFlush, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::FinishTransport, MessageErrorClass::REFUSED),
-        (EmitterRuntimeError::ShutdownWhileStalled, MessageErrorClass::INTERRUPTED),
-        (EmitterRuntimeError::StopDeadlineElapsed, MessageErrorClass::INTERRUPTED),
+        (
+            EmitterRuntimeError::FinishTransport,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::ShutdownWhileStalled,
+            MessageErrorClass::INTERRUPTED,
+        ),
+        (
+            EmitterRuntimeError::StopDeadlineElapsed,
+            MessageErrorClass::INTERRUPTED,
+        ),
         (EmitterRuntimeError::EncodeBatch, MessageErrorClass::CODEC),
         (
             EmitterRuntimeError::SourceFilter { relay },
             MessageErrorClass::EVALUATION,
         ),
-        (EmitterRuntimeError::EncodingRefused, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::EncodingRefused,
+            MessageErrorClass::INTERNAL,
+        ),
         (
             EmitterRuntimeError::UnansweredEmitterRecords {
                 unanswered: 1,
@@ -220,7 +259,10 @@ fn every_emitter_failure_names_the_class_of_the_rows_it_ends() {
             },
             MessageErrorClass::INTERNAL,
         ),
-        (EmitterRuntimeError::FlushPolicyNotInitialized, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::FlushPolicyNotInitialized,
+            MessageErrorClass::INTERNAL,
+        ),
         (
             EmitterRuntimeError::HeaderCountMismatch {
                 header_count: 1,
@@ -253,7 +295,10 @@ fn every_emitter_failure_names_the_class_of_the_rows_it_ends() {
             EmitterRuntimeError::MissingHttpRequest { row: 0 },
             MessageErrorClass::INTERNAL,
         ),
-        (EmitterRuntimeError::SelectOrderingGroups, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::SelectOrderingGroups,
+            MessageErrorClass::INTERNAL,
+        ),
         (
             EmitterRuntimeError::DeliveryRowOutOfBounds {
                 row: 2,
@@ -304,9 +349,18 @@ fn every_emitter_failure_names_the_class_of_the_rows_it_ends() {
             },
             MessageErrorClass::INTERNAL,
         ),
-        (EmitterRuntimeError::FlushTiming, MessageErrorClass::INTERNAL),
-        (EmitterRuntimeError::RetryTiming, MessageErrorClass::INTERNAL),
-        (EmitterRuntimeError::BuildPublishBatch, MessageErrorClass::INTERNAL),
+        (
+            EmitterRuntimeError::FlushTiming,
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::RetryTiming,
+            MessageErrorClass::INTERNAL,
+        ),
+        (
+            EmitterRuntimeError::BuildPublishBatch,
+            MessageErrorClass::INTERNAL,
+        ),
         (
             EmitterRuntimeError::SplitFailedBatch {
                 publish_failure: "refused".to_owned(),

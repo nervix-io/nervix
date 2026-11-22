@@ -8,9 +8,9 @@ group. See [Streams, Branch Keys, And Branches](relay.md#streams-branch-keys-and
 This step partitions orders per customer and deduplicates them inside each customer's branch, so
 one customer's duplicates can never suppress another customer's orders.
 
-## Declare The Branch
+## Declare The Parametrizer
 
-A branch names its key schema and a TTL. When a branch instance goes idle for the TTL, its
+A parametrizer names its key schema and a TTL. When a branch instance goes idle for the TTL, its
 branch-local relay and processor state is dropped as a whole ([TTL](relay.md#ttl)). In an unpaced
 domain the TTL uses wall clock time.
 
@@ -21,7 +21,7 @@ CREATE SCHEMA customer_branch (
   customer STRING
 );
 
-CREATE BRANCH by_customer SCHEMA customer_branch TTL 5m;
+CREATE PARAMETRIZER by_customer SCHEMA customer_branch TTL 5m;
 
 CREATE RELAY orders_by_customer SCHEMA order_record BRANCHED BY by_customer;
 

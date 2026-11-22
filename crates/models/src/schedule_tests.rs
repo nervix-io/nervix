@@ -106,10 +106,10 @@ fn bolero_scheduled_units_round_trip_through_current_storage_shape() {
 }
 
 /// A branch's partition count of one to sixteen partitions, the boundaries included.
-fn generated_partitions(arbitrary: &mut Arbitrary<'_>) -> crate::ResolvedBranchPartitions {
+fn generated_partitions(arbitrary: &mut Arbitrary<'_>) -> crate::ResolvedParametrizerPartitions {
     let count = arbitrary.entropy().boundary_biased(1..=16);
     let count = u16::try_from(count).assured("a count of at most sixteen fits u16");
-    crate::ResolvedBranchPartitions::Direct(
+    crate::ResolvedParametrizerPartitions::Direct(
         std::num::NonZeroU16::new(count).assured("the generated count is at least one"),
     )
 }
@@ -118,7 +118,7 @@ fn generated_partitions(arbitrary: &mut Arbitrary<'_>) -> crate::ResolvedBranchP
 /// from another count.
 fn generated_partition_epochs(
     arbitrary: &mut Arbitrary<'_>,
-) -> std::collections::BTreeMap<crate::BranchName, crate::BranchPartitionEpoch> {
+) -> std::collections::BTreeMap<crate::ParametrizerName, crate::ParametrizerPartitionEpoch> {
     let mut epochs = std::collections::BTreeMap::new();
     for name in ["by_tenant", "by_region"] {
         if !arbitrary.entropy().flag() {
@@ -137,8 +137,8 @@ fn generated_partition_epochs(
             None
         };
         epochs.insert(
-            named::<crate::BranchName>(name),
-            crate::BranchPartitionEpoch {
+            named::<crate::ParametrizerName>(name),
+            crate::ParametrizerPartitionEpoch {
                 number,
                 partitions,
                 transition,
@@ -322,6 +322,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                     mode: EndpointIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
+                        response: crate::EndpointPauseResponse::Immediate,
                     },
                 })),
                 codec: named("codec"),

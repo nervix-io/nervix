@@ -375,15 +375,20 @@ impl Runtime {
             .change_context_lazy(not_completed)?;
         let descriptor_id = id.clone();
         let compiled = executor
-            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(RuntimeResourceError::ProtobufTask {
-                        resource: descriptor_id.identifier.clone(),
-                        version: descriptor_id.version,
-                    })?;
-                compile_config.compile_descriptor_set(&store, &descriptor_id)
-            })
+            .run_cpu_with(
+                CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                reservation,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(RuntimeResourceError::ProtobufTask {
+                            resource: descriptor_id.identifier.clone(),
+                            version: descriptor_id.version,
+                        })?;
+                    compile_config.compile_descriptor_set(&store, &descriptor_id)
+                },
+            )
             .await
             .change_context_lazy(not_completed)?;
         let file_descriptor_set = compiled?;

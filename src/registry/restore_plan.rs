@@ -27,18 +27,19 @@ use std::{
     num::NonZeroU64,
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
 use nervix_backup::{
     ArchiveDescription, ArchiveScope, DescribedDomain, DescribedResourceVersion, DescribedSection,
     ResourceVersionState, UsersRecord,
 };
-use nervix_consensus::{RestoredResource, UserCredentials};
+use nervix_consensus::{RestoredResource, UserRecord};
 use nervix_models::{
-    BackupResources, DomainConfig, DomainName, DomainState, DomainStatus, ExistingUserPolicy,
-    Model, ModelIndex, ModelName, RequestedResourceVersion, ResourceId, ResourceName,
-    ResourceVersion, Restore, RestoreLifecycle, RestoreScope, RestoreStep, RestoredUsers, UserName,
+    BackupResources, DomainConfig, DomainName, DomainState, DomainStatus, EntityLabelLimits,
+    EntityLabelOwner, ExistingUserPolicy, Model, ModelIndex, ModelName, RequestedResourceVersion,
+    ResourceCatalogKey, ResourceId, ResourceName, ResourceVersion, Restore, RestoreLifecycle,
+    RestoreScope, RestoreStep, RestoredUsers, UserName,
 };
 use thiserror::Error;
 
@@ -48,6 +49,8 @@ use crate::registry::BranchStateSchemas;
 /// archive holds secrets and password hashes, and a refusal names only where the problem is.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RestorePlanError {
+    #[error("labels for {owner} are invalid under the receiving cluster's limits")]
+    LabelLimits { owner: EntityLabelOwner },
     #[error(
         "RESTORE CLUSTER needs a cluster archive, and this archive holds only domain '{domain}'; \
          restore it with RESTORE DOMAIN"
@@ -155,6 +158,7 @@ pub(crate) struct ExistingState<'state> {
     /// The steps earlier attempts of the same restore recorded as applied. Empty for a restore not
     /// yet admitted.
     pub(crate) recorded: &'state BTreeSet<RestoreStep>,
+    pub(crate) label_limits: EntityLabelLimits,
 }
 
 impl ExistingState<'_> {
@@ -176,7 +180,7 @@ pub(crate) struct RestorePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlannedUsers {
     /// Every archived user, with the password hash the archive holds, in name order.
-    pub(crate) users: Vec<UserCredentials>,
+    pub(crate) users: Vec<UserRecord>,
     pub(crate) policy: ExistingUserPolicy,
     /// What importing them does to the users the plan was made against.
     pub(crate) outcome: RestoredUsers,
@@ -254,6 +258,9 @@ impl RestorePlan {
                 description.manifest.resources,
                 restore.lifecycle,
             )?;
+            if !existing.is_recorded(&created) {
+                planned.validate_labels(&existing.label_limits)?;
+            }
             domains.insert(target, planned);
         }
         Ok(Self { users, domains })
@@ -336,9 +343,19 @@ fn plan_users(
             "each count is at most the number of archived users, and a list holds fewer than u64 \
              counts",
         );
-        users.push(UserCredentials {
+        if !recorded && !(exists && policy == ExistingUserPolicy::Skip) {
+            user.labels
+                .validate(&existing.label_limits)
+                .change_context_lazy(|| RestorePlanError::LabelLimits {
+                    owner: EntityLabelOwner::User {
+                        name: user.name.clone(),
+                    },
+                })?;
+        }
+        users.push(UserRecord {
             name: user.name.clone(),
             password_credential: user.password_credential.clone(),
+            labels: user.labels.clone(),
         });
     }
     Ok(PlannedUsers {
@@ -365,6 +382,7 @@ fn plan_domain(
         resources.push(RestoredResource {
             resource: declared.resource.clone(),
             next_version: declared.next_version,
+            labels: declared.labels.clone(),
         });
     }
     let mut versions = Vec::new();
@@ -431,6 +449,7 @@ fn plan_domain(
     let state = DomainState {
         id: target.clone(),
         config: DomainConfig { pace: record.pace },
+        labels: record.labels.clone(),
         status: DomainStatus::Stopped,
         start_version: record.start_version,
         last_start: record.start_point.clone(),
@@ -463,6 +482,32 @@ fn plan_domain(
             .as_ref()
             .map(|record| record.snapshot.clone()),
     })
+}
+
+impl PlannedDomain {
+    fn validate_labels(
+        &self,
+        limits: &EntityLabelLimits,
+    ) -> error_stack::Result<(), RestorePlanError> {
+        self.state.labels.validate(limits).change_context_lazy(|| {
+            RestorePlanError::LabelLimits {
+                owner: EntityLabelOwner::Domain {
+                    name: self.target.clone(),
+                },
+            }
+        })?;
+        for resource in &self.resources {
+            resource.labels.validate(limits).change_context_lazy(|| {
+                RestorePlanError::LabelLimits {
+                    owner: EntityLabelOwner::Resource(ResourceCatalogKey::new(
+                        &self.target,
+                        &resource.resource,
+                    )),
+                }
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// Plans one completed version: its catalog metadata under the target domain, and where its bytes
@@ -677,6 +722,7 @@ mod tests {
                 cut: nervix_models::BackupCut::ConfigurationOnly,
             },
             record: DomainRecord {
+                labels: nervix_models::EntityLabels::default(),
                 domain: domain(name),
                 pace: DomainPace::Unpaced,
                 status: DomainStatus::Running,
@@ -685,6 +731,7 @@ mod tests {
                 clock: None,
                 logical_frontier: None,
                 resources: vec![DeclaredResource {
+                    labels: nervix_models::EntityLabels::default(),
                     resource: resource("table"),
                     next_version: version(4),
                 }],
@@ -704,8 +751,15 @@ mod tests {
     fn archive(scope: ArchiveScope, domains: Vec<DescribedDomain>) -> ArchiveDescription {
         let users = match scope {
             ArchiveScope::Cluster => Some(UsersRecord {
+                label_policy: nervix_models::EntityLabelPolicy {
+                    revision: std::num::NonZeroU64::MIN,
+                    limits: nervix_models::EntityLabelLimits::from(
+                        &nervix_models::ClusterParameterValues::default(),
+                    ),
+                },
                 users: vec![
                     UserRecord {
+                        labels: nervix_models::EntityLabels::default(),
                         name: user("alice"),
                         password_credential: nervix_models::PasswordCredential::from_parts(
                             210000, [123; 16], [123; 64],
@@ -713,6 +767,7 @@ mod tests {
                         .assured("the fixed credential has a bounded iteration count"),
                     },
                     UserRecord {
+                        labels: nervix_models::EntityLabels::default(),
                         name: user("bob"),
                         password_credential: nervix_models::PasswordCredential::from_parts(
                             210000, [170; 16], [170; 64],
@@ -802,6 +857,9 @@ mod tests {
                 users: &self.users,
                 domains: &self.domains,
                 recorded: &self.recorded,
+                label_limits: nervix_models::EntityLabelLimits::from(
+                    &nervix_models::ClusterParameterValues::default(),
+                ),
             }
         }
     }
@@ -965,6 +1023,7 @@ mod tests {
         assert_eq!(
             prod.resources,
             [RestoredResource {
+                labels: nervix_models::EntityLabels::default(),
                 resource: resource("table"),
                 next_version: version(4),
             }]

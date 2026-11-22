@@ -37,7 +37,7 @@ Feature: Processor output routing
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routed_event_codec
         TO source_events
         INHERIT ALL
         UNBRANCHED
@@ -111,7 +111,7 @@ Feature: Processor output routing
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routed_event_codec
         TO incoming_events
         INHERIT ALL
         UNBRANCHED
@@ -197,7 +197,7 @@ Feature: Processor output routing
 
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         FILTER WHERE input.active
         TO error_events
           INHERIT id
@@ -273,7 +273,7 @@ Feature: Processor output routing
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_event_codec
         TO projected_events
         INHERIT ALL
         SET amount = 1, amount = amount + 1
@@ -359,7 +359,7 @@ Feature: Processor output routing
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_logs_a SCHEMA id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_logs_a SCHEMA id_branch TTL 5m;
         CREATE RELAY incoming_logs_a SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY incoming_logs_b SCHEMA notification BRANCHED BY by_source_logs_a;
         CREATE RELAY errors_ss SCHEMA notification BRANCHED BY by_source_logs_a;
@@ -374,7 +374,7 @@ Feature: Processor output routing
         PATH '/route-b';
         CREATE HTTP ENDPOINT INGESTOR ingestor_logs_a
         FROM ingress_a MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_logs_a
         INHERIT ALL
         BRANCHED BY by_source_logs_a
@@ -384,7 +384,7 @@ Feature: Processor output routing
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR ingestor_logs_b
         FROM ingress_b MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_logs_b
         INHERIT ALL
         BRANCHED BY by_source_logs_a
@@ -488,7 +488,7 @@ Feature: Processor output routing
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
         CREATE IF NOT EXISTS SCHEMA tenant_user_id_branch ( tenant STRING, user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_http_notifications;
         CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-output-route-{{test_id}}.example.com;
@@ -497,7 +497,7 @@ Feature: Processor output routing
         PATH '/output-route';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
           INHERIT ALL
           BRANCHED BY by_http_notifications
@@ -580,7 +580,7 @@ Feature: Processor output routing
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification_in;
         CREATE IF NOT EXISTS SCHEMA id_branch ( id STRING );
-        CREATE IF NOT EXISTS BRANCH by_source_logs SCHEMA id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_source_logs SCHEMA id_branch TTL 5m;
         CREATE RELAY incoming_logs SCHEMA notification_in BRANCHED BY by_source_logs;
         CREATE RELAY errors_ss SCHEMA notification_out BRANCHED BY by_source_logs;
         CREATE RELAY warnings_ss SCHEMA notification_out BRANCHED BY by_source_logs;
@@ -591,7 +591,7 @@ Feature: Processor output routing
         PATH '/project-output';
         CREATE HTTP ENDPOINT INGESTOR ingestor_logs
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_logs
           INHERIT ALL
           BRANCHED BY by_source_logs
@@ -702,7 +702,7 @@ Feature: Processor output routing
         FROM WIRE SCHEMA preference_wire
         TO SCHEMA preference;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_branch_state SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_branch_state SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_preferences
         SCHEMA preference BRANCHED BY by_branch_state
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -714,7 +714,7 @@ Feature: Processor output routing
         CREATE HTTP ENDPOINT ingress ON edge PATH '/branch-input';
         CREATE HTTP ENDPOINT INGESTOR preference_ingestor
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING preference_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING preference_codec
         TO tenant_preferences
         INHERIT ALL
         BRANCHED BY by_branch_state
@@ -724,7 +724,7 @@ Feature: Processor output routing
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR notification_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming
         INHERIT ALL
         BRANCHED BY by_branch_state

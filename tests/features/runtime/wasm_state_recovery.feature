@@ -24,14 +24,14 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
         BRANCHED BY by_limited_tenant
@@ -123,14 +123,14 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
         BRANCHED BY by_limited_tenant
@@ -221,14 +221,14 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE WIRE JSON SCHEMA limited_input_wire MODE STRICT ( tenant string, message string );
       CREATE WIRE JSON CODEC limited_input_codec FROM WIRE SCHEMA limited_input_wire TO SCHEMA limited_input_event;
       CREATE SCHEMA limited_branch_key ( tenant STRING );
-      CREATE BRANCH by_limited_tenant SCHEMA limited_branch_key TTL 5m;
+      CREATE PARAMETRIZER by_limited_tenant SCHEMA limited_branch_key TTL 5m;
       CREATE RELAY limited_input_events SCHEMA limited_input_event BRANCHED BY by_limited_tenant;
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR limited_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
         BRANCHED BY by_limited_tenant

@@ -31,7 +31,7 @@ Feature: Branched session subscriptions
         tenant STRING SENSITIVE
       );
 
-      CREATE BRANCH by_sensitive_tenant
+      CREATE PARAMETRIZER by_sensitive_tenant
         SCHEMA sensitive_tenant_branch TTL 5m;
 
       CREATE RELAY public_notifications
@@ -45,7 +45,7 @@ Feature: Branched session subscriptions
 
       CREATE HTTP ENDPOINT INGESTOR sensitive_branch_ingestor
         FROM sensitive_branch_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING incoming_notification_codec
         TO public_notifications
           SET tenant = message.tenant,
               user_id = message.user_id
@@ -96,7 +96,7 @@ Feature: Branched session subscriptions
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
@@ -167,7 +167,7 @@ Feature: Branched session subscriptions
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
         CREATE RELAY notifications
         SCHEMA notification
         BRANCHED BY by_mqtt_notifications

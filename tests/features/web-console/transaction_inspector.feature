@@ -322,8 +322,8 @@ Feature: Web console transaction inspector
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA branch_event (value I64);
       CREATE SCHEMA branch_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA branch_key TTL 5m;
-      CREATE BRANCH by_user SCHEMA branch_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA branch_key TTL 5m;
+      CREATE PARAMETRIZER by_user SCHEMA branch_key TTL 5m;
       CREATE RELAY a_tenant SCHEMA branch_event BRANCHED BY by_tenant;
       CREATE RELAY b_user SCHEMA branch_event BRANCHED BY by_user;
       CREATE RELAY c_tenant SCHEMA branch_event BRANCHED BY by_tenant;

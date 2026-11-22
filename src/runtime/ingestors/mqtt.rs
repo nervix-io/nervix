@@ -100,11 +100,6 @@ impl MqttTopicIngestorStartPlan {
             acknowledgement: self.mode.acknowledgement(),
             buffered_intake: true,
             flush_each_intake: self.mode.is_ack(),
-            // The connection reads a bounded number of publishes ahead of the loop and then stops
-            // reading, which stops its keep-alive too, so a held loop would let the broker close
-            // the connection once one and a half keep-alive intervals pass without a packet from
-            // it, and lose what was published until the ingestor reconnects.
-            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: client_mounts
                 .get(
                     usize::try_from(ingestor.instance_index())

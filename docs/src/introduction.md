@@ -37,14 +37,14 @@ HTTP.
 The connections between nodes are expressed through `RELAY`s.
 
 Input data often mixes tenants, users, devices, accounts, or other business groups in the same
-external feed. Nervix uses explicit `CREATE BRANCH` declarations to process those groups
-independently. A branch names the key schema, such as `CREATE BRANCH by_tenant_user SCHEMA
+external feed. Nervix uses explicit `CREATE PARAMETRIZER` declarations to process those groups
+independently. A parametrizer names the key schema, such as `CREATE PARAMETRIZER by_tenant_user SCHEMA
 tenant_user_branch TTL 5m`; ingestor and reingestor routes construct concrete keys with `BRANCHED
 BY by_tenant_user SET ...`.
 
 `RELAY`s are scheduled runtime nodes between producers and consumers. Each has one owner that holds
 its buffer, concrete branch presence, fan-out, and metrics. Relays are declared as `BRANCHED BY
-<branch>` or `UNBRANCHED`; only ingestors and reingestors carry the key mapping that constructs
+<parametrizer>` or `UNBRANCHED`; only ingestors and reingestors carry the key mapping that constructs
 concrete branch identities. Processing state remains isolated by that identity, while one relay
 owner coordinates its cluster-wide buffering and delivery. An emitter drains records out of the
 graph. A reingestor can compute a new group and start downstream branches under that grouping.

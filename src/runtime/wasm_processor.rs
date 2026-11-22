@@ -255,6 +255,47 @@ impl WasmBranchModule {
         })
     }
 
+    /// Reports a failure of a state inspection's scratch render of this instance during
+    /// `operation`, before or after the guest ran it. `revision` is the committed revision the
+    /// render restores, when it restores one.
+    pub(super) fn render_failure<C: error_stack::Context>(
+        &self,
+        failure: Report<C>,
+        operation: nervix_wasm::WasmGuestOperation,
+        revision: Option<u64>,
+    ) -> Report<WasmInstanceError> {
+        failure.change_context(WasmInstanceError::Lifecycle {
+            module: self.clone(),
+            stage: WasmLifecycleStage::Guest(operation),
+            export: operation.entry_export(),
+            revision,
+        })
+    }
+
+    /// The branch configuration every guest instance of this branch is initialized with, live or a
+    /// state inspection's scratch instance. A guest refuses saved state taken under another
+    /// configuration, so every instance takes it from here.
+    pub(super) fn branch_init(
+        &self,
+        input_relay: &RelayName,
+        input_schema: &CompiledSchema,
+        output_schemas: &[(RelayName, Arc<CompiledSchema>)],
+    ) -> WasmBranchInit {
+        WasmBranchInit {
+            domain_name: self.resource.domain.as_str().to_string(),
+            domain_type: "runtime".to_string(),
+            branch_key: self
+                .branch
+                .as_ref()
+                .map(|key| key.as_str().as_bytes().to_vec()),
+            input_schema: input_schema.wasm_processor_schema(input_relay.as_str().to_string()),
+            output_schemas: output_schemas
+                .iter()
+                .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
+                .collect(),
+        }
+    }
+
     /// Reports output the guest emitted that failed validation.
     pub(super) fn emission_failure<C: error_stack::Context>(
         &self,
@@ -809,26 +850,13 @@ pub(super) async fn ensure_wasm_processor_instance(
     };
 
     if instance.is_none() {
-        let init = WasmBranchInit {
-            domain_name: branch.domain.as_str().to_string(),
-            domain_type: "runtime".to_string(),
-            branch_key: branch
-                .key
-                .as_ref()
-                .map(|key| key.as_str().as_bytes().to_vec()),
-            input_schema: input_schema
-                .wasm_processor_schema(guest_input_relay.as_str().to_string()),
-            output_schemas: output_schemas
-                .iter()
-                .map(|(relay, schema)| schema.wasm_processor_schema(relay.as_str().to_string()))
-                .collect(),
-        };
         let module = WasmBranchModule {
             processor: processor.clone(),
             branch: branch.key.clone(),
             resource: ResourceId::new(branch.domain.clone(), resource.clone(), resource_version),
             file: file.to_string(),
         };
+        let init = module.branch_init(guest_input_relay, input_schema, output_schemas);
         let saved = replicated_state.restore_guest_state();
         let instantiation = compiled_module
             .instantiate_branch(module, limits, init, execution_now, saved.restorable())

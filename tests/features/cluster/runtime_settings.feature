@@ -20,7 +20,7 @@ Feature: Declared data-plane runtime settings
       CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA event_key (id I64);
-      CREATE BRANCH by_id SCHEMA event_key TTL 1h;
+      CREATE PARAMETRIZER by_id SCHEMA event_key TTL 1h;
       CREATE RELAY events SCHEMA event BRANCHED BY by_id
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge runtime-materialized-{{test_id}}.example.com;
@@ -239,7 +239,7 @@ Feature: Declared data-plane runtime settings
       CREATE WIRE JSON CODEC lost_ack_codec
         FROM WIRE SCHEMA lost_ack_wire TO SCHEMA lost_ack_event;
       CREATE SCHEMA lost_ack_key ( branch_name STRING );
-      CREATE BRANCH lost_ack_branch SCHEMA lost_ack_key TTL 5m;
+      CREATE PARAMETRIZER lost_ack_branch SCHEMA lost_ack_key TTL 5m;
       CREATE RELAY lost_ack_records SCHEMA lost_ack_event BRANCHED BY lost_ack_branch;
       CREATE KAFKA CLIENT lost_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'

@@ -18,9 +18,9 @@ use std::{
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    BranchName, BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
+    BranchSelection, CreateIngestor, DomainName, IngestorEntity, IngestorEntityKind,
     IngestorInstances, IngestorInstancingCapability, KafkaIngestor, KafkaOffsetMode, ModelIndex,
-    ModelName, RelayName, Unit,
+    ModelName, ParametrizerName, RelayName, Unit,
 };
 use thiserror::Error;
 
@@ -59,7 +59,7 @@ pub(in crate::registry) enum IngestorUnits {
     PerTransportPartition {
         count: Option<NonZeroU16>,
         relays: Vec<RelayName>,
-        branches: Vec<BranchName>,
+        parametrizers: Vec<ParametrizerName>,
     },
 }
 
@@ -107,9 +107,13 @@ impl IngestorUnits {
         let identifier = ModelName::from(&ingestor.name);
         let mut structure = None;
         let mut relays = BTreeSet::new();
-        let mut branches = BTreeSet::new();
+        let mut parametrizers = BTreeSet::new();
         for route in ingestor.output_routes.outputs() {
-            let Some(branch) = route.branch.as_ref().and_then(|branch| branch.branch()) else {
+            let Some(parametrizer) = route
+                .branch
+                .as_ref()
+                .and_then(|branching| branching.parametrizer())
+            else {
                 continue;
             };
             let resolved = resolved_branch_selection(
@@ -117,11 +121,11 @@ impl IngestorUnits {
                 &identifier,
                 models,
                 &BranchSelection::BranchedBy {
-                    branch: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                 },
             )?;
             let fields = resolved.fields().to_vec();
-            let declaration = branch_model(domain, &identifier, models, branch)?.partitions;
+            let declaration = branch_model(domain, &identifier, models, parametrizer)?.partitions;
             if let Some((expected_fields, expected_declaration, _)) = &structure {
                 if *expected_fields != fields || *expected_declaration != declaration {
                     return Err(refusal(IngestorInstancingError::DifferentStructure {
@@ -135,7 +139,7 @@ impl IngestorUnits {
                     resolved.partitions().map(|value| value.count()),
                 ));
             }
-            branches.insert(branch.clone());
+            parametrizers.insert(parametrizer.clone());
             relays.insert(route.relay.clone());
         }
         let Some((_, _, count)) = structure else {
@@ -144,7 +148,7 @@ impl IngestorUnits {
         Ok(Self::PerTransportPartition {
             count,
             relays: relays.into_iter().collect(),
-            branches: branches.into_iter().collect(),
+            parametrizers: parametrizers.into_iter().collect(),
         })
     }
 
@@ -159,15 +163,17 @@ impl IngestorUnits {
         restored: Option<NonZeroU16>,
     ) -> Result<(), Report<RegistryError>> {
         let Self::PerTransportPartition {
-            count, branches, ..
+            count,
+            parametrizers,
+            ..
         } = self
         else {
             return Ok(());
         };
         let mut observed = None;
         let mut complete = true;
-        for branch in branches {
-            let Some(layout) = topology.branches.get(branch) else {
+        for parametrizer in parametrizers {
+            let Some(layout) = topology.parametrizers.get(parametrizer) else {
                 complete = false;
                 break;
             };
