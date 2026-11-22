@@ -949,9 +949,11 @@ impl TransportState {
         let metadata_bytes = metadata_memory.bytes();
         drop(metadata_memory);
         let watermark_charge = RelayChannelWatermarks::watermark_charge();
-        let delivery_bytes = operation_bytes.checked_add(watermark_charge).ok_or_else(|| {
-            TransportError::RelayGrant("relay operation limits overflow".to_string())
-        })?;
+        let delivery_bytes = operation_bytes
+            .checked_add(watermark_charge)
+            .ok_or_else(|| {
+                TransportError::RelayGrant("relay operation limits overflow".to_string())
+            })?;
         let whole = delivery_bytes.checked_add(metadata_bytes).ok_or_else(|| {
             TransportError::RelayGrant("relay operation limits overflow".to_string())
         })?;
