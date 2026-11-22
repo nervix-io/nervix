@@ -1643,6 +1643,8 @@ pub enum TlsConfigError {
 }
 
 #[cfg(test)]
+mod answer_admission_tests;
+#[cfg(test)]
 mod tests;
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]

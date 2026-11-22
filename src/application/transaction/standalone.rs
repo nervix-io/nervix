@@ -479,6 +479,13 @@ impl SessionServiceImpl {
         command: &StandaloneCommand<'_>,
         admitted: ReplicatedTransaction,
     ) -> Result<ReplicatedTransaction, Box<CommandResult>> {
+        // A START of a stopped domain first places every unit its node rules constrain, and waits,
+        // holding the command's mutation lease, while some unit has no node they admit.
+        if let TransactionState::Open(_) = &admitted.state
+            && let Err(error) = self.place_units_for_start(&admitted).await
+        {
+            return Err(Box::new(self.start_placement_refusal(error).await));
+        }
         let mut current = admitted;
         loop {
             nervix_primitives::task::consume_budget().await;

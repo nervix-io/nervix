@@ -99,6 +99,8 @@ domain's execution is built rather than when the statement is applied, and a sub
 Only true matches a node. A null result skips the node, and an evaluation error skips it and
 reports the diagnostic with the node's name. The selector reads committed values and uses
 deterministic builtins. Read [Selecting Nodes](placement.md#selecting-nodes) for how to run it.
+A node rule's `REQUIRE NODES WHERE` and `PREFER NODES WHERE` read the same scope, compiled when the
+rule is admitted; see [Node Rules](placement.md#node-rules).
 
 | Field | Plexus type | Value |
 | --- | --- | --- |

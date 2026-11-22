@@ -329,7 +329,7 @@ fn a_tls_rebinding_refreshes_the_https_listener_without_pausing_a_running_domain
                             std::slice::from_ref(&node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+                            &crate::registry::uniform_records(std::slice::from_ref(&node)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -414,7 +414,7 @@ fn a_wasm_rebinding_reports_a_guest_state_reset_over_every_concrete_branch() {
                             std::slice::from_ref(&node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+                            &crate::registry::uniform_records(std::slice::from_ref(&node)),
                         )
                         .assured("the fixture topology resolves")
                 }),

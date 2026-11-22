@@ -754,6 +754,9 @@ struct ScenarioWorld {
     playwright: Option<Playwright>,
     dependencies: TestDependencies,
     background_plexus: Option<AbortOnDropHandle<Result<String, String>>>,
+    /// Background Plexus executions a scenario names, so that several statements can wait at
+    /// once, such as a STOP and a change that both wait for one node.
+    named_background_plexus: BTreeMap<String, AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
         Option<AbortOnDropHandle<std::io::Result<nervix_client_wire::CommandOutcome>>>,
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
@@ -13642,6 +13645,54 @@ async fn when_runtime_installation_is_released(world: &mut ScenarioWorld, node_i
         .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Holds the background reconciliation of a node before its next attempt once the committed state
+/// holds `domain` stopped, as a node slow to apply the end of a stop would. Every other application
+/// on that node, such as the one a request handler runs for another node, still applies the
+/// committed state.
+#[given(
+    expr = "the background reconciliation of node {string} holds once domain {string} is stopped"
+)]
+fn given_background_reconciliation_holds_once_domain_is_stopped(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    domain: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    world
+        .fault_injection
+        .hold_background_reconciliation_once_stopped(
+            crate::common::cluster::node_name(&node_id),
+            domain,
+        );
+}
+
+#[then(expr = "the background reconciliation of node {string} reaches its hold")]
+async fn then_background_reconciliation_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_background_reconciliation_hold(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("the background reconciliation did not reach its hold");
+}
+
+#[when(expr = "the background reconciliation of node {string} is released")]
+fn when_background_reconciliation_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_background_reconciliation_hold(&crate::common::cluster::node_name(&node_id));
+}
+
 /// Holds the next runtime installation every node begins. A held installation keeps its node's
 /// installation sequence, so no later installation on that node proceeds until it is released.
 #[when("runtime installation on every node is paused")]
@@ -18335,7 +18386,35 @@ async fn when_these_plexus_commands_begin_executing_in_the_background(
         "a background Plexus execution is already active"
     );
     let commands = expand_placeholders(world, docstring(step));
-    let statements = plexus_statements(&commands);
+    let execution = begin_background_plexus_on_leader(world, &commands).await;
+    world.background_plexus = Some(execution);
+}
+
+/// Begins one of several background executions a scenario keeps waiting at once, each in its own
+/// session on the leader and the active domain, under the name the later steps address it by.
+#[when(expr = "these Plexus commands begin executing in the background as {string}")]
+async fn when_these_plexus_commands_begin_executing_in_the_background_as(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let name = expand_placeholders(world, &name);
+    assert!(
+        !world.named_background_plexus.contains_key(&name),
+        "background Plexus execution '{name}' is already active"
+    );
+    let commands = expand_placeholders(world, docstring(step));
+    let execution = begin_background_plexus_on_leader(world, &commands).await;
+    world.named_background_plexus.insert(name, execution);
+}
+
+/// Runs `commands` one after another in a session of their own on the current leader and the
+/// active domain, in a task the scenario owns.
+async fn begin_background_plexus_on_leader(
+    world: &mut ScenarioWorld,
+    commands: &str,
+) -> AbortOnDropHandle<Result<String, String>> {
+    let statements = plexus_statements(commands);
     let leader = current_leader_node(world).await;
     let mut session = world
         .cluster()
@@ -18343,18 +18422,60 @@ async fn when_these_plexus_commands_begin_executing_in_the_background(
         .await
         .expect("failed to open background Plexus session");
     let routes = world.cluster().leader_routes();
-    world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        async move {
-            let mut last_output = String::new();
-            for command in statements {
-                nervix_primitives::task::consume_budget().await;
-                last_output = run_command_on_held_session(&routes, &mut session, &command)
-                    .await?
-                    .output()?;
-            }
-            Ok(last_output)
-        },
-    )));
+    AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+        let mut last_output = String::new();
+        for command in statements {
+            nervix_primitives::task::consume_budget().await;
+            last_output = run_command_on_held_session(&routes, &mut session, &command)
+                .await?
+                .output()?;
+        }
+        Ok(last_output)
+    }))
+}
+
+/// The named background execution must not finish within `duration`, as
+/// [`then_the_background_plexus_execution_is_still_running_after`] requires of the unnamed one.
+#[then(expr = "background Plexus execution {string} is still running after {string}")]
+async fn then_named_background_plexus_execution_is_still_running_after(
+    world: &mut ScenarioWorld,
+    name: String,
+    duration: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let window = parse_duration_text(&duration).expect("the step's window is a valid duration");
+    let task = world
+        .named_background_plexus
+        .get_mut(&name)
+        .unwrap_or_else(|| panic!("background Plexus execution '{name}' must be active"));
+    if let Ok(outcome) = nervix_primitives::time::timeout(window, task).await {
+        panic!(
+            "background Plexus execution '{name}' finished within {duration} while it was meant \
+             to keep waiting: {outcome:?}"
+        );
+    }
+}
+
+#[then(expr = "within {string} background Plexus execution {string} reaches a successful outcome")]
+async fn then_within_named_background_plexus_execution_reaches_a_successful_outcome(
+    world: &mut ScenarioWorld,
+    within: String,
+    name: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let bound = parse_duration_text(&within).expect("the step's bound is a valid duration");
+    let task = world
+        .named_background_plexus
+        .remove(&name)
+        .unwrap_or_else(|| panic!("background Plexus execution '{name}' must be active"));
+    let output = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("background Plexus execution '{name}' did not finish within {within}")
+        })
+        .assured("the background Plexus task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background Plexus execution '{name}' failed: {error}"));
+    world.last_command_output = Some(output);
 }
 
 fn command_probe(world: &ScenarioWorld, reference: &str) -> Option<CommandProbe> {
@@ -27020,6 +27141,32 @@ fn scheduled_node_placement_from_status<'a>(
     })
 }
 
+/// Every whitespace-separated field of the first `SHOW CLUSTER STATUS` schedule line naming the
+/// unit of `kind` `name` in `domain`.
+fn scheduled_node_status_fields<'a>(
+    status: &'a str,
+    domain: &str,
+    kind: &str,
+    name: &str,
+) -> Option<Vec<&'a str>> {
+    let domain_field = format!("domain={domain}");
+    let kind_field = format!("kind={kind}");
+    let name_field = format!("name={name}");
+    for line in status.lines().map(str::trim) {
+        let Some(line) = line.strip_prefix("- ") else {
+            continue;
+        };
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.contains(&domain_field.as_str())
+            && fields.contains(&kind_field.as_str())
+            && fields.contains(&name_field.as_str())
+        {
+            return Some(fields);
+        }
+    }
+    None
+}
+
 fn scheduled_placements_for_domain(status: &str, domain: &str) -> Vec<SavedHealthyPlacement> {
     let mut placements = Vec::new();
     for line in status.lines() {
@@ -28251,6 +28398,96 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
     }
 }
 
+/// Waits until the named cluster node owns the scheduled unit, for a scenario that knows which
+/// node a rule admits.
+#[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} owner \
+            {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_owner(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    expected: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let expected = expand_placeholders(world, &expected);
+    let placement = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} owner to equal '{expected}'. last \
+             output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|(owner, _)| owner == expected)
+                {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        placement.pause(Duration::from_millis(100)).await;
+    }
+}
+
+/// Waits until the scheduled unit's `SHOW CLUSTER STATUS` line carries one exact field, such as
+/// the `violates=` or `waiting_for=` report of a node rule.
+#[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} with \
+            {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    field: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let field = expand_placeholders(world, &field);
+    let observation = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !observation.has_passed(),
+            "timed out waiting for scheduled {kind} {name} to report '{field}'. last output: \
+             {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, observation).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                let reported = scheduled_node_status_fields(&output, &world.domain, &kind, &name)
+                    .is_some_and(|fields| fields.contains(&field.as_str()));
+                if reported {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        observation.pause(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(
     expr = "within {string} node {string} eventually reports scheduled {string} {string} replicas \
             without placeholder {string}"
@@ -28358,6 +28595,28 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
     world
         .wait_for_observability_metric_value(&node_id, &metric_name, expected_value, None, step)
         .await;
+}
+
+#[then(expr = "node {string} observability metric {string} with labels is eventually absent")]
+async fn then_node_observability_metric_with_labels_is_eventually_absent(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    metric_name: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let metric_name = expand_placeholders(world, &metric_name);
+    let label_fragments = docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| expand_placeholders(world, line))
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .wait_for_observability_metric_absent(&node_id, &metric_name, &label_fragments, None)
+        .await
+        .expect("observability endpoint kept reporting the removed metric");
 }
 
 #[then(expr = "cluster observability metric {string} with labels eventually totals {int}")]
