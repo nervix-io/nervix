@@ -502,6 +502,24 @@ executes these production decoders with a queued budget reservation and an occup
 checks the independent input charge after the outer envelope ends, cancels the queued decode and
 requires a fresh complete decode with every charge returned. It makes no memory-ordering claim.
 
+An answer frame one node sends another waits for a place on its CPU class instead of being refused.
+`wire::encode_answer` races the encoding's wait against the end of the exchange it answers, and
+`wire::decode_answer` bounds the decoding by its request's deadline; a duplex responder races its
+answer stream against the initiator's reset, and a duplex receiver keeps its decoding until it is
+dropped. A duplex stream holds every frame after its opening back the same way, in both directions,
+for as long as the stream lives. Ending a wait drops the job, which returns its place in line and
+its charge, or cancels it from the worker FIFO if it already holds a place; a job already on its
+worker finishes its bounded work first and then gives back its worker and charge.
+The registered Shuttle check
+`wire::admission_tests::shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place`
+executes the production encoder on a bulk class of one worker and one place held full. While the
+class stays full, only the end of the exchange can end the wait, so an encoder that ignored it
+deadlocks the check. A freed place racing the next exchange's end then yields either the whole
+answer or the end, with nothing refused, and once the last job exits every job is off its worker and
+every charge returned. It makes no memory-ordering claim. Deloxide does not observe these
+asynchronous semaphore waits, and the queued cancellation they can cause goes through the existing
+worker FIFO owner.
+
 `RESUME` changes the domain to running at its archived lifecycle in the consensus effect that
 records complete publication and releases the installation gate. No atomic field or memory
 ordering in the capture epoch, assignment protocol or relay revision changed. Existing Loom
@@ -913,7 +931,8 @@ connector storage class. Each job keeps its consumer and reservation until the n
 exits. An asynchronous semaphore gives each consumer one control-operation turn; the admitted
 closure retains that turn until it exits, so cancelling an assignment cannot let a following
 assignment, seek or unsubscribe overtake its native mutation. The same client deadline bounds
-waiting for this turn and for the node's worker. Cancellation checks between partitions stop
+waiting for this turn, for a place in the class's queue, where a full queue holds the job back
+rather than refusing it, and for the node's worker. Cancellation checks between partitions stop
 further work, while a native call already running retains its worker. Consumer-group commit
 ownership is separate: it is installed before awaiting its
 answer and survives cancellation of that await; another commit first consumes that exact answer.
@@ -1082,13 +1101,14 @@ last publication when the branch stops, even when its task is already gone. A wi
 its resident or quota-owned segmented write; the deduplicator keeps its resident key checkpoint.
 Neither a snapshot nor a replica takes the live branch state from its task.
 
-A stateful inferencer publishes the native tensor generation after each admitted batch. The
-publication retains the immutable native tensors; encoding extracts their shapes and exact float
+A stateful inferencer publishes the native tensor generation after each admitted batch that
+advanced its state. The publication retains the immutable native tensors; encoding extracts their shapes and exact float
 bits on the bounded CPU workers. It neither copies tensors per output route nor routes them
 through Arrow. Capturing a generation retains that exact value while later model invocations
 advance the branch. The final write uses the same carrier, and eviction publishes an empty
 generation before its exact replication route retires. Restoration validates the snapshot frame,
-model identity and branch incarnation before installing native tensors into a new session.
+model identity and branch incarnation before installing native tensors into a new session. See
+[Inferencer State And Recovery](./inferencer-state.md) for the carried state's contract.
 
 `StateSnapshotTasks`, `CheckpointWriter` and `SnapshotCadence` also provide the task lifetime,
 domain tracking, periodic cadence and final-write signal for Kafka domain offsets. Offsets keep
@@ -1826,7 +1846,7 @@ and a materialized relay's holding unit has a state task but no owner task.
 Each unit's owner publishes its holdings as one immutable value, replaced when the set changes,
 never per record: every key it holds that the current count places in another unit, keyed by
 fingerprint in a persistent ordered map, with that unit; the keys it claimed in the epoch; and the
-claims it has in flight. Claimants read catalog pages from that publication and DESCRIBE BRANCH
+claims it has in flight. Claimants read catalog pages from that publication and DESCRIBE PARAMETRIZER
 and the leader's retirement read the counts; neither reaches the owner's registry.
 
 A claim moves one key's durable state from its holding unit to the unit the current count places
@@ -2067,11 +2087,14 @@ it:
   in that queue. The executor's semaphore hands a freed place to waiting jobs in the order they
   asked, ahead of any job asking afterwards. The wait is scoped to the one class, holds no lock,
   and ends when a place frees or when the ingestor's shutdown or a new quiesce interrupts it
-- a live payload a paced ingestor or an ingestor whose loop may be held handed over without an
-  acknowledgement waits for a place the same way. The ingestor host registers for the next quiesce
-  publication before it compares it with the decision the payload was taken in under, so a new
-  decision always ends the wait, and the host then decides on the payload again; the ingestor's
-  stop ends it as well. The race holds no lock and no guard across an await
+- every live payload an ingestor hands over, acknowledged or not, waits for a place the same way,
+  and so does a WebSocket endpoint frame in `MODE NO ACK`. The ingestor host registers for the
+  next quiesce publication before it compares it with the decision the payload was taken in under,
+  so a new decision always ends the wait, and the host then decides on the payload again; the
+  ingestor's stop ends it as well, leaving its positions unconfirmed. While it waits, the host
+  polls the transport's hold hook beside it, and the payload counts in its unit's admitted work
+  until it reached its graph, so a drain, a handoff and a graceful stop wait for it. The race holds
+  no lock and no guard across an await
 - one concrete processor branch serializes its own batches, while other branches remain
   independent
 - accepted branch input and programs wait for a place in their bounded worker class through the
@@ -2456,7 +2479,7 @@ path but cannot prove the asynchronous proposal or DashMap protocol.
 
 ### Complete analysis and qualification
 
-The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The twelve
+The isolated tooling workspace uses `nightly-2026-11-21`; product builds use stable. The twelve
 configurations analyze ordinary workspace libraries/binaries, the browser's wasm32 library and
 binary, the server's testing capability, server/interconnect/primitives under Shuttle,
 server/consensus/primitives under Loom, interconnect/primitives under Turmoil, and, under each of
@@ -3586,6 +3609,25 @@ changes nothing. The owner's choice between clauses that act together is a pure 
 tests cover; the per-node drain views and reports cross the network in the Turmoil stop case of
 [Deterministic Interconnect Simulation](./interconnect-simulation.md#scenario-matrix).
 
+A node's runtime installations and activations run under the runtime admission's one installation
+turn. `RuntimeAdmission::begin_installation` waits for the turn as an owned guard, and
+`InstallationTurn::run` hands the section to a task that keeps the guard until the section ends.
+The caller only waits for that task, so a caller that goes away cuts nothing short: a request
+handler the interconnect server drops, or a task shutdown ends. Once drain support has ended,
+terminal teardown takes the turn through `finish_installations` and keeps it. Keeping it matters: a
+caller can check the shutdown just before drain support ends and ask for the turn only after
+teardown has taken it, and a turn given back would let that caller begin a section while the runtime
+stops. The check found exactly that schedule while `finish_installations` still released the turn.
+`shuttle_an_installation_whose_caller_goes_away_ends_before_the_next_turn_and_the_runtime_stop` in
+`src/application/runtime_admission_shuttle_tests.rs` explores two callers racing that teardown, one
+of which goes away at any moment while it waits for the turn or for its section. Every section that
+began ends, two sections never overlap, none begins after the runtime stopped, and the runtime stops
+only after the last section ended. This is a control-plane ordering check without a memory-ordering
+claim. The turn is an async mutex, outside Deloxide's tracked-lock detection. The owner test in
+`src/application/session_service/tests/abandoned_installation.rs` and the public
+`@abandoned_installation` scenario cover the stopped domain's teardown that a dropped drain-status
+request handler began.
+
 Consensus storage admits each Commands or Bulk working set through independent class-specific
 turns before asking its memory class, and a working set returns its bytes before its turn passes.
 Each Shuttle check holds one working set while a second admission waits for its turn and a progress
@@ -3611,7 +3653,7 @@ A family of names means each member runs independently through the recipe.
 | Application progress (`src/application/completion/progress.rs`) | `shuttle_a_barrier_that_observes_before_it_reads_sees_every_racing_report_and_advance` requires an advance or report racing a barrier's observation to wake that barrier. `shuttle_racing_reports_of_one_incarnation_keep_its_newest_progress` requires late reports to preserve every phase's newest revision. Both drive the production watch owner. |
 | Authority delivery attachments (`src/application/domain_clock/attachments/tests.rs`) | `shuttle_attachment_replacement_and_stop_wake_the_exact_delivery_lifetime` checks that replacement and stop cancel the selected lifetime. `shuttle_an_attachment_survives_a_preceding_availability_snapshot` and `shuttle_a_duplicate_attachment_survives_a_preceding_availability_snapshot` require an attachment accepted during observation to survive the earlier availability read. These checks drive the production attachment owner; network delivery remains outside their scope. |
 | Waiter registration and cancellation (`crates/primitives/src/tests/shuttle_races.rs`) | `shuttle_reaches_a_notify_waiters_published_between_a_read_and_the_registration` and `shuttle_reaches_a_send_between_a_read_and_the_subscription` require a waiter that reads before it registers to deadlock in some schedule, which shows the scheduler reaches a publication between the read and the registration; `shuttle_registering_before_reading_never_misses_a_notify_waiters` and `shuttle_subscribing_before_reading_never_misses_a_send` require the correct order never to lose one. `shuttle_reaches_a_wake_between_a_read_and_the_waker_registration` and `shuttle_registering_the_waker_before_reading_never_misses_a_wake` hold an atomic waker to the same pair. `shuttle_a_notify_one_between_a_read_and_the_registration_is_kept_as_the_permit` shows a single notification's permit makes the other order correct for `notify_one`, and `shuttle_a_waiter_cancelled_as_it_is_notified_passes_the_notification_on` requires the surviving waiter to complete however a cancellation and a notification interleave. |
-| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity, including optional state-read retention while the live relay class is full; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` keeps a held connector call from consuming filesystem or consensus admission; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
+| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity, including optional state-read retention while the live relay class is full; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` keeps a held connector call from consuming filesystem or consensus admission; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge, stops counting it among the class's waiting jobs and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_ingestor_observes_engagement_during_dispatch`, `shuttle_paced_ingestor_observes_engagement_during_dispatch`, and `shuttle_request_ingestor_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. `shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room` and `shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room` race a `BUFFER` engagement or the stop against a live payload waiting for such a place: the wait always ends, a new decision becomes the one the payload is decided under next and its buffer retains it, counted with its bytes, and a stop leaves nothing retained. `shuttle_a_payload_racing_the_stop_of_a_paused_buffering_ingestor_is_retained_for_the_cut_or_dispatched` races a domain stop's intake engagement against a payload a paused `BUFFER` ingestor receives: a payload decided under the pause is retained and stays counted for the stop's teardown to discard and report, one decided once the stop holds dispatches and is never retained, nothing retained replays while the stop holds, polling ends and endpoint admission refuses, and a stop called off replays everything the pause retained. |
 | Broker ingestor confirmation (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`, `src/runtime/ingestors/connector_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch` lets a drain read the domain's ownership-handoff count at any point while the graph resolves the two confirmed roots of one batch in either order and the ingestor's transport takes a round trip to confirm the batch. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed, and the count returns to zero once it is. The check fails under a batch acknowledgement that releases the last root before the loop drops it, and under a root released as it resolves. |

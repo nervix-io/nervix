@@ -106,7 +106,7 @@ enum ModelKind : ubyte {
   Codec,
   Client,
   Vhost,
-  Branch,
+  Parametrizer,
   Endpoint,
   SignalingProtocol,
   Generator,
@@ -138,7 +138,7 @@ enum ChoiceTarget : ubyte {
   DomainPace,
   PlacementPolicy,
   Schema,
-  Branch,
+  Parametrizer,
   Relay,
   /// The fields of one relay's records. Requires a domain and then a relay model reference.
   RelayField,
@@ -173,10 +173,10 @@ enum ChoiceTarget : ubyte {
   IngestSyslogSource,
   /// Codecs whose wire format can decode an ingestor payload.
   IngestCodec,
-  /// Relays with the exact route branch declaration; branched requires a branch reference.
+  /// Relays with the exact route branch declaration; branched requires a parametrizer reference.
   IngestUnbranchedRelay,
   IngestBranchedRelay,
-  /// Fields of the key schema selected by one branch reference.
+  /// Fields of the key schema selected by one parametrizer reference.
   BranchField,
   /// Relays with the same declared schema and exact branch as one selected input relay.
   ProcessorCompatibleInputRelay,
@@ -410,14 +410,14 @@ table AllBranchCoverage {}
 /// The node's single unbranched execution participates.
 table UnbranchedCoverage {}
 
-/// Every current and later concrete key of the declared branch participates.
-table DeclaredBranchCoverage {
-  branch: string (required);
+/// Every current and later concrete key of the parametrizer participates.
+table AllOfParametrizerCoverage {
+  parametrizer: string (required);
 }
 
-/// Only the selected concrete keys of the declared branch participate.
+/// Only the selected concrete keys of the parametrizer participate.
 table SelectedBranchCoverage {
-  branch: string (required);
+  parametrizer: string (required);
   /// Branch key fingerprints; a non-empty set.
   keys: [Fingerprint] (required);
 }
@@ -426,7 +426,7 @@ table SelectedBranchCoverage {
 union BranchCoverage {
   AllBranchCoverage,
   UnbranchedCoverage,
-  DeclaredBranchCoverage,
+  AllOfParametrizerCoverage,
   SelectedBranchCoverage
 }
 
@@ -435,7 +435,7 @@ union NodeBranchCoverage {
   ConfigurationCoverage,
   AllBranchCoverage,
   UnbranchedCoverage,
-  DeclaredBranchCoverage,
+  AllOfParametrizerCoverage,
   SelectedBranchCoverage
 }
 
@@ -514,6 +514,11 @@ table CreateResourceOperation {
   resource: string (required);
 }
 
+table EditResourceLabelsOperation {
+  domain: string (required);
+  resource: string (required);
+}
+
 /// `VERSION <n>`: exactly this version.
 table ResourceVersionNumber {
   version: ulong;
@@ -548,7 +553,8 @@ union TransactionOperation {
   StopDomainOperation = 6,
   CreateResourceOperation = 7,
   RebindResourceOperation = 8,
-  ResetWasmStateOperation = 9
+  ResetWasmStateOperation = 9,
+  EditResourceLabelsOperation = 10
 }
 
 enum ModelChangeAspect : ubyte {
@@ -621,14 +627,14 @@ enum ModelChangeAspect : ubyte {
   EndpointDefinition,
   SignalingProtocolDefinition,
   LookupDefinition,
-  BranchSchema,
-  BranchLifecycle,
+  ParametrizerSchema,
+  ParametrizerLifecycle,
   UdfDefinition,
   PlacementDefinition,
   EntityReplaced,
   EntityCreated,
   EntityDropped,
-  BranchPartitions,
+  ParametrizerPartitions,
   EmitterInstances,
   EntityLabels
 }
@@ -726,7 +732,8 @@ table ConfigurationImpact {
 }
 
 enum ResourceCatalogAction : ubyte {
-  Create
+  Create,
+  EditLabels
 }
 
 table ResourceCatalogImpact {
@@ -1084,9 +1091,9 @@ table RowField {
   sensitive: bool;
 }
 
-/// The declared branch of a branched relay and the fields of its key.
+/// The parametrizer of a branched relay and the fields of its branch key.
 table RowBranch {
-  branch: string (required);
+  parametrizer: string (required);
   /// The branch key fields in key order. Never empty.
   fields: [RowField] (required);
 }
@@ -1759,8 +1766,24 @@ table WasmRecoveryCounts { attempted: ulong; recovered: ulong; failed: ulong; }
 table WasmCheckpointFacts { generation: ulong; committed_revision: ulong = null; latest_revision: ulong = null; stage: WasmCheckpointStage = null; required_replicas: uint = null; confirmed_replicas: uint = null; }
 /// The recovery recorded for a branch's refused lifetime.
 table WasmRecoveryFacts { generation: ulong; rejection: WasmSavedStateRejection = null; request: string (required); outcome: WasmRecoveryOutcome = null; }
-/// One selected branch, absent for the unbranched execution, with at least one of its facts.
-table WasmBranchStateFacts { branch: Fingerprint; checkpoint: WasmCheckpointFacts; recovery: WasmRecoveryFacts; }
+/// One section a guest described of its state: its name, its fields with their types and
+/// optionality, and how many rows it holds. Guest state is always sensitive: every field is
+/// `sensitive`, and no row of a guest section is ever carried.
+table WasmGuestStateSection { name: string (required); fields: [RowField] (required); rows: ulong; }
+/// The sections a guest described, in its order; none when it describes no state.
+table WasmGuestStateSections { sections: [WasmGuestStateSection] (required); }
+/// The lifecycle stage of the scratch instance at which a render of a committed checkpoint failed.
+enum WasmGuestStateRenderStage : ubyte { ModuleCompilation, Instantiation, Initialization, SnapshotEnvelopeDecoding, ApplicationStateRestoration, StateRestore, StateDescription }
+/// A render that failed at `stage`, with its complete diagnostic.
+table WasmGuestStateRenderFailure { stage: WasmGuestStateRenderStage = null; diagnostic: string (required); }
+/// What rendering a committed checkpoint on a scratch instance produced.
+union WasmGuestStateRender { WasmGuestStateSections, WasmGuestStateRenderFailure }
+/// What a guest described of a branch's committed checkpoint, with the lifetime and the committed
+/// revision its render restored; the revision is absent while the lifetime has committed nothing.
+table WasmGuestStateDescription { generation: ulong; revision: ulong = null; render: WasmGuestStateRender (required); }
+/// One selected branch, absent for the unbranched execution, with at least one of its facts. Only
+/// an entry with a checkpoint carries a guest-state description.
+table WasmBranchStateFacts { branch: Fingerprint; checkpoint: WasmCheckpointFacts; recovery: WasmRecoveryFacts; description: WasmGuestStateDescription; }
 /// One unit's guest-state lifetimes, complete counts over the selection and one page of branch
 /// entries in branch order.
 table WasmUnitStateFacts { default_generation: ulong; reset: WasmResetFacts; entries: ulong; checkpoints: WasmCheckpointCounts (required); recoveries: WasmRecoveryCounts (required); branches: [WasmBranchStateFacts] (required); }
@@ -1830,7 +1853,12 @@ table EntityLabelPolicy { revision: ulong; limits: EntityLabelLimits (required);
 table CommittedEntityLabels { revision: ulong; }
 table StagedEntityLabels { preview: TransactionPreviewIdentity (required); }
 union EntityLabelView { CommittedEntityLabels, StagedEntityLabels }
-table EntityLabelsInspection { domain: string (required); entity: NodeRef (required); labels: [LabelEntry] (required); policy: EntityLabelPolicy (required); view: EntityLabelView (required); }
+table ModelLabelOwner { domain: string (required); model: NodeRef (required); }
+table DomainLabelOwner { name: string (required); }
+table ResourceLabelOwner { domain: string (required); name: string (required); }
+table UserLabelOwner { name: string (required); }
+union EntityLabelOwner { ModelLabelOwner, DomainLabelOwner, ResourceLabelOwner, UserLabelOwner }
+table EntityLabelsInspection { owner: EntityLabelOwner (required); labels: [LabelEntry] (required); policy: EntityLabelPolicy (required); view: EntityLabelView (required); }
 
 table CommandOutcome {
   /// The execution_reference of the request.
@@ -2530,12 +2558,38 @@ enum NoticeKind : ubyte {
   Licensing
 }
 
+/// One of the ten classes every error has, under the root `ANY` of the class tree: `Codec`
+/// through `Refused` form the `REJECTED` group, where the data itself is the problem, and
+/// `Unavailable` through `Internal` the `FAILED` group, where sending the data again may work.
+enum ErrorClass : ubyte {
+  Codec,
+  Validation,
+  Evaluation,
+  Limit,
+  Refused,
+  Unavailable,
+  Throttled,
+  Timeout,
+  Interrupted,
+  Internal
+}
+
+/// The error a `Runtime` notice reports: its class and the graph node that produced it.
+table NoticeError {
+  /// Required.
+  class: ErrorClass = null;
+  node: NodeRef (required);
+}
+
 table ServerNotice {
   /// Required.
   level: NoticeLevel = null;
   /// Required.
   kind: NoticeKind = null;
   message: string (required);
+  /// The error the notice reports, on a `Runtime` notice about an error of a graph node; absent on
+  /// every other notice.
+  error: NoticeError;
 }
 
 table LeaderIsServingNode {

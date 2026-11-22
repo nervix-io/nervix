@@ -2,10 +2,14 @@
 # Sourced by the stale-follower, former-owner-restart and cluster-restart scenarios after the shared
 # external cluster and graph are ready. Owns what the three restart and recovery cases share:
 # traffic around the fault, administration batches through the packaged CLI, node metric and status
-# records, committed-configuration captures, product findings and the final traffic boundary.
+# records, committed-configuration captures, the label probe, product findings and the final
+# traffic boundary. The partition-recovery scenario sources it too, for the administration batches
+# and the label probe its follower case carries.
 
 # shellcheck source=partition-scenario.sh
 source "${script_dir}/partition-scenario.sh"
+# shellcheck source=label-probe.sh
+source "${script_dir}/label-probe.sh"
 
 # Product violations that leave the experiment meaningful accumulate here. The run continues
 # through recovery and the final ledger, then fails with every violation it observed.
@@ -21,7 +25,7 @@ declare -A recovery_graph_models=(
     [wire-chaos_wire]='SHOW CREATE WIRE JSON SCHEMA chaos_wire;'
     [codec-chaos_json]='SHOW CREATE CODEC chaos_json;'
     [schema-chaos_branch_key]='SHOW CREATE SCHEMA chaos_branch_key;'
-    [branch-chaos_branch]='SHOW CREATE BRANCH chaos_branch;'
+    [branch-chaos_branch]='SHOW CREATE PARAMETRIZER chaos_branch;'
     [relay-chaos_records]='SHOW CREATE RELAY chaos_records;'
     [client-chaos_kafka]='SHOW CREATE CLIENT chaos_kafka;'
     [ingestor-chaos_ingestor]='SHOW CREATE INGESTOR chaos_ingestor;'

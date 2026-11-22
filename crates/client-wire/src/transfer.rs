@@ -8,13 +8,14 @@
 use bytes::Bytes;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::SessionFrameBytes;
 use thiserror::Error;
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, wire_size},
     common::RequestId,
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
-    limits::{MIN_FRAME_BYTES, SessionLimits},
+    limits::SessionLimits,
     server::{Reply, ServerMessage, finish_server_message},
     wire,
 };
@@ -22,9 +23,17 @@ use crate::{
 /// The bytes a transfer part's frame spends on everything but its chunk: the frame header, the
 /// server message, reply and part tables with their vtables, the chunk's length prefix, and
 /// alignment padding. A test encodes parts at the largest chunk this allows to keep it honest.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the session schema's transfer-part frame layout encodes everything but its \
+                  chunk within 256 bytes; the largest-chunk test pins it"
+    )
+)]
 pub(crate) const TRANSFER_PART_ENVELOPE_BYTES: usize = 256;
 
-const _: () = assert!(TRANSFER_PART_ENVELOPE_BYTES < MIN_FRAME_BYTES);
+const _: () = assert!(TRANSFER_PART_ENVELOPE_BYTES < SessionFrameBytes::MINIMUM);
 
 /// The parts of one reply, encoded one at a time as they are taken.
 #[derive(Debug)]

@@ -14,11 +14,11 @@ Feature: Logical ingestion time and admission
       CREATE VHOST edge batch-clock-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_batch_codec
         TIMESTAMP AT occurred_at
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO admission_errors
-            SET sequence = input.sequence, error_code = error.code
+            SET sequence = input.sequence, error_code = error.class
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION observations TO events;
       CREATE SUBSCRIPTION error_observations TO admission_errors;
@@ -75,7 +75,7 @@ Feature: Logical ingestion time and admission
       CREATE VHOST edge ingestion-clock-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TIMESTAMP AT occurred_at
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -132,7 +132,7 @@ Feature: Logical ingestion time and admission
       CREATE SCHEMA event ( tenant STRING, value I64, occurred_at DATETIME );
       CREATE SCHEMA summary ( tenant STRING, total I64, samples I64, source_at DATETIME );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 1h;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 1h;
       CREATE JAQ JSON CODEC event_codec TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY events SCHEMA event BRANCHED BY tenants;
@@ -140,7 +140,7 @@ Feature: Logical ingestion time and admission
       CREATE VHOST edge ingestion-window-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TIMESTAMP <timestamp_source>
         TO events INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -202,7 +202,7 @@ Feature: Logical ingestion time and admission
       CREATE VHOST edge retained-clock-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING request_codec
         TIMESTAMP AT occurred_at
         TO observations INHERIT ALL
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -245,12 +245,12 @@ Feature: Logical ingestion time and admission
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT clock_ingress ON edge PATH '/clock';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING request_codec
         TIMESTAMP NOW
         TO buffered_events INHERIT ALL
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR clock_ingestor FROM clock_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING request_codec
         TIMESTAMP NOW
         TO observations INHERIT ALL SET observed_at = now(), samples = 1
         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

@@ -16,9 +16,9 @@ use std::fmt;
 
 use error_stack::{Context, Report};
 use nervix_models::{
-    BranchName, BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind,
-    EndpointName, EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind,
-    ModelName, ReingestorName, RelayName,
+    BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
+    EndpointType, FieldName, IngestorEntityKind, IngestorMetadataType, ModelKind, ModelName,
+    ParametrizerName, ReingestorName, RelayName,
 };
 use nervix_vm::program::WindowAggregateFunction;
 use thiserror::Error;
@@ -340,7 +340,7 @@ pub(crate) enum RegistryError {
         reingestor: ReingestorName,
         input: RelayName,
         output: RelayName,
-        parametrization: BranchName,
+        parametrization: ParametrizerName,
     },
     #[error(
         "output relay '{relay}' requires SET assignments for parametrization '{parametrization}' \
@@ -350,7 +350,7 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         identifier: ModelName,
         relay: RelayName,
-        parametrization: BranchName,
+        parametrization: ParametrizerName,
     },
     #[error("external partition topology is invalid in domain '{domain}'")]
     PartitionTopology { domain: DomainName },
@@ -538,10 +538,10 @@ pub(crate) enum RegistryError {
         domain: DomainName,
         ingestor: ModelName,
     },
-    #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
+    #[error("parametrizer '{parametrizer}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,
-        branch: ModelName,
+        parametrizer: ModelName,
         field: FieldName,
     },
     #[error("lookup '{lookup}' in domain '{domain}' cannot read BYTES field '{field}'")]
@@ -715,6 +715,52 @@ pub(crate) enum RegistryError {
         left_identifier: String,
         right_kind: &'static str,
         right_identifier: String,
+    },
+    #[error(
+        "placements '{first_rule}' and '{second_rule}' conflict on runtime node {kind} \
+         '{identifier}' in domain '{domain}': ANY NODE and REQUIRE NODES win at the same rank"
+    )]
+    PlacementNodeRuleConflict {
+        domain: DomainName,
+        first_rule: nervix_models::PlacementName,
+        second_rule: nervix_models::PlacementName,
+        kind: &'static str,
+        identifier: ModelName,
+    },
+    #[error(
+        "placement '{placement}' does not admit node '{node}', which runs {kind} '{identifier}' \
+         in domain '{domain}'"
+    )]
+    PlacementNodeRuleViolation {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(node, reason = "the node the refused rule does not admit")
+        )]
+        node: nervix_models::ClusterNodeName,
+        kind: &'static str,
+        identifier: ModelName,
+    },
+    #[error(
+        "no cluster node satisfies placement '{placement}' for {kind} '{identifier}' in domain \
+         '{domain}'"
+    )]
+    PlacementNodeRuleUnsatisfiable {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
+        kind: &'static str,
+        identifier: ModelName,
+    },
+    #[error("placement '{placement}' in domain '{domain}' has an invalid node selector")]
+    PlacementNodeSelector {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
+    },
+    #[error("placement '{placement}' in domain '{domain}' could not evaluate its node selector")]
+    PlacementNodeSelectorEvaluation {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
     },
     #[error(
         "model '{identifier}' in domain '{domain}' has incompatible schema relationship: {reason}"
@@ -1021,11 +1067,13 @@ mod tests {
                 vec![Model::Placement(CreatePlacement {
                     labels: Default::default(),
                     name: named("pin_nothing"),
-                    scope: nervix_models::PlacementScope::Corridor {
-                        from: Vec::new(),
-                        to: vec![named("emit")],
+                    rule: nervix_models::PlacementRule::Colocation {
+                        scope: nervix_models::PlacementScope::Corridor {
+                            from: Vec::new(),
+                            to: vec![named("emit")],
+                        },
+                        policy: PlacementPolicy::Neutral,
                     },
-                    policy: PlacementPolicy::Neutral,
                     rank: None,
                 })],
             )

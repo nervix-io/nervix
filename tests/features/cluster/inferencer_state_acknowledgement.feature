@@ -22,7 +22,7 @@ Feature: Stateful inferencer acknowledgements
       CREATE WIRE JSON SCHEMA scored_wire MODE STRICT ( tenant string, score array );
       CREATE WIRE JSON CODEC scored_codec FROM WIRE SCHEMA scored_wire TO SCHEMA scored;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT infer_kafka CONFIG {
@@ -95,7 +95,7 @@ Feature: Stateful inferencer acknowledgements
       CREATE WIRE JSON SCHEMA scored_wire MODE STRICT ( tenant string, score array );
       CREATE WIRE JSON CODEC scored_codec FROM WIRE SCHEMA scored_wire TO SCHEMA scored;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT infer_kafka CONFIG {
@@ -194,7 +194,7 @@ Feature: Stateful inferencer acknowledgements
       CREATE WIRE JSON SCHEMA scored_wire MODE STRICT ( tenant string, score array );
       CREATE WIRE JSON CODEC scored_codec FROM WIRE SCHEMA scored_wire TO SCHEMA scored;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT infer_kafka CONFIG {

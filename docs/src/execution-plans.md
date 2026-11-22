@@ -264,6 +264,21 @@ predecessor for a retry, including after a local WASM reset operation. A node st
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
 
+A local installation, and the activation that starts a prepared revision's ingestors, runs to its
+end once it has begun. The runtime admission orders both through one turn: a caller waits for the
+turn, and the section then runs in a task of the admission's own that holds the turn until the
+section ends. The caller only waits for the outcome. Several kinds of caller begin installations:
+the background supervisor, a command, and a handler answering another node's request. A caller that
+goes away stops waiting and cuts nothing short. That includes a handler the interconnect server
+drops when its requester's deadline passes and the requester resets the request, and a task that
+shutdown ends at its grace. The next installation waits for the turn, so installations stay in
+order. Before it stops the runtime, terminal teardown takes the turn and keeps it, so the runtime
+never stops in the middle of an installation and none begins afterwards, even for a caller that
+checked the shutdown just before drain support ended. A stopped domain's teardown, once an
+installation began it, therefore always ends the domain's tasks, writes its final snapshot and
+completes the node's report of the stop. The waits of an application, for the turn and for the
+cluster's preparation and readiness, are what its bound and its caller can end.
+
 One background supervisor follows both committed schedule and domain changes. If installation fails,
 it reports the complete error chain and retries on the admission loop's half-second cadence even
 when neither committed value changes. A new schedule or domain update wakes it sooner. Each attempt
@@ -514,8 +529,9 @@ after it starts the tasks. The restore installs every branch its lifecycle names
 task takes no input until it has; [Restoring Processor Branches](./shutdown.md#restoring-processor-branches)
 owns its retry and its failure semantics. A stopped domain reconstructs
 passive surfaces; a running or paused domain reconstructs the applicable execution and intake
-state. [Shutdown And Recovery](./shutdown.md) and [WASM State And Recovery](./wasm-state.md) own
-the detailed handoff, checkpoint, duplicate-window, and restart guarantees.
+state. [Shutdown And Recovery](./shutdown.md), [WASM State And Recovery](./wasm-state.md) and
+[Inferencer State And Recovery](./inferencer-state.md) own the detailed handoff, checkpoint,
+duplicate-window, and restart guarantees.
 
 An archive restore first publishes the restored models as a stopped domain and recomputes its
 schedule. Archived node assignments are never installation authority. The coordinator requires

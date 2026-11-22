@@ -15,23 +15,24 @@
 use std::{fs, num::NonZeroU64, path::PathBuf};
 
 use nervix_models::{
-    AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
+    AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchSelection,
     ClientConfigEntry, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
     CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat,
-    CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
-    CreateClientKafka, CreateClientSyslog, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
-    CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, EmitterEntity, EmitterName,
-    EndpointName, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope, FlushPolicy,
-    GeneralErrorPolicy, IngestorEntity, Inheritance, JsonType, JunctionName, KafkaConfigEntry,
-    KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
-    KafkaTopicEmitter, KafkaTopicIngestor, KafkaTopicName, MaterializedRelayState, Model,
-    ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy,
-    ProcessorInputs, ProcessorOutputs, ReingestorName, RelayBranching, RelayName,
-    ResolvedBranching, RetryPolicy, ScheduledNode, ScheduledNodes, SchemaField, SchemaFingerprint,
-    SchemaName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    VhostName, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName,
+    CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateClientKafka,
+    CreateClientSyslog, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateIngestor, CreateJunction, CreateParametrizer, CreatePlacement, CreateReingestor,
+    CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule,
+    EmitterEntity, EmitterName, EndpointName, ErrorPolicies, Expression, FieldName, FieldReference,
+    FieldScope, FlushPolicy, GeneralErrorPolicy, IngestorEntity, Inheritance, JsonType,
+    JunctionName, KafkaConfigEntry, KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode,
+    KafkaIngestor, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor, KafkaTopicName,
+    MaterializedRelayState, Model, ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch,
+    ParametrizerName, ParseAsType, PlacementPolicy, ProcessorInputs, ProcessorOutputs,
+    ReingestorName, RelayBranching, RelayName, ResolvedBranching, RetryPolicy, ScheduledNode,
+    ScheduledNodes, SchemaField, SchemaFingerprint, SchemaName, SignalingProtocolOnConnect,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, VhostName, WindowBound,
+    WindowProcessorName, WireSchemaField, WireSchemaName,
 };
 use nonzero_ext::nonzero;
 
@@ -70,11 +71,11 @@ pub(in crate::registry) fn unplaced_schedule(models: Vec<Model>) -> ScheduledNod
     let mut nodes = ScheduledNodes::default();
     for model in models {
         let branching = if let Model::Relay(relay) = &model {
-            let resolved = match relay.branching.branch() {
+            let resolved = match relay.branching.parametrizer() {
                 None => ResolvedBranching::unbranched(),
                 Some(branch_name) => {
                     let branch = index
-                        .configured::<CreateBranch>(branch_name)
+                        .configured::<CreateParametrizer>(branch_name)
                         .expect("the fixture declares every branch its relays use");
                     let schema = index
                         .configured::<CreateSchema>(&branch.schema)
@@ -82,7 +83,7 @@ pub(in crate::registry) fn unplaced_schedule(models: Vec<Model>) -> ScheduledNod
                     ResolvedBranching::branched(
                         branch_name.clone(),
                         schema.clone(),
-                        nervix_models::ResolvedBranchPartitions::ONE,
+                        nervix_models::ResolvedParametrizerPartitions::ONE,
                     )
                 }
             };
@@ -134,13 +135,13 @@ where
     N::try_from(raw).expect("valid name")
 }
 
-pub(in crate::registry) fn branch_name_for_relay(relay: &str) -> BranchName {
+pub(in crate::registry) fn parametrizer_name_for_relay(relay: &str) -> ParametrizerName {
     named(&format!("by_{relay}"))
 }
 
 pub(in crate::registry) fn branched_by(relay: &str, fields: &[&str]) -> OutputBranch {
     OutputBranch::BranchedBy {
-        branch: branch_name_for_relay(relay),
+        parametrizer: parametrizer_name_for_relay(relay),
         assignments: fields
             .iter()
             .map(|field| Assignment {
@@ -173,7 +174,7 @@ pub(in crate::registry) fn with_processor_branching(mut model: Model) -> Model {
                 .first()
                 .expect("processor helper requires at least one input");
             processor.branched_by =
-                BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+                BranchSelection::branched_by(parametrizer_name_for_relay(branch.as_str()));
         }
         Model::Correlator(processor) => {
             let branch = processor
@@ -182,7 +183,7 @@ pub(in crate::registry) fn with_processor_branching(mut model: Model) -> Model {
                 .first()
                 .expect("processor helper requires at least one input");
             processor.branched_by =
-                BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+                BranchSelection::branched_by(parametrizer_name_for_relay(branch.as_str()));
         }
         Model::Junction(processor) => {
             let branch = processor
@@ -191,7 +192,7 @@ pub(in crate::registry) fn with_processor_branching(mut model: Model) -> Model {
                 .first()
                 .expect("processor helper requires at least one input");
             processor.branched_by =
-                BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+                BranchSelection::branched_by(parametrizer_name_for_relay(branch.as_str()));
         }
         Model::WindowProcessor(processor) => {
             let branch = processor
@@ -200,7 +201,7 @@ pub(in crate::registry) fn with_processor_branching(mut model: Model) -> Model {
                 .first()
                 .expect("processor helper requires at least one input");
             processor.branched_by =
-                BranchSelection::branched_by(branch_name_for_relay(branch.as_str()));
+                BranchSelection::branched_by(parametrizer_name_for_relay(branch.as_str()));
         }
         _ => panic!("model is not a branch-preserving processor"),
     }
@@ -243,23 +244,23 @@ pub(in crate::registry) fn branch_schema(name: &str, fields: &[&str]) -> Model {
 }
 
 pub(in crate::registry) fn branch(name: &str, schema: &str) -> Model {
-    Model::Branch(CreateBranch {
+    Model::Parametrizer(CreateParametrizer {
         labels: Default::default(),
         name: named(name),
         schema: named(schema),
         ttl: "5m".to_string(),
-        partitions: nervix_models::BranchPartitions::ONE,
+        partitions: nervix_models::ParametrizerPartitions::ONE,
         eviction: None,
     })
 }
 
 pub(in crate::registry) fn branch_for_relay(relay: &str, schema: &str) -> Model {
-    Model::Branch(CreateBranch {
+    Model::Parametrizer(CreateParametrizer {
         labels: Default::default(),
-        name: branch_name_for_relay(relay),
+        name: parametrizer_name_for_relay(relay),
         schema: named(schema),
         ttl: "5m".to_string(),
-        partitions: nervix_models::BranchPartitions::ONE,
+        partitions: nervix_models::ParametrizerPartitions::ONE,
         eviction: None,
     })
 }
@@ -597,7 +598,7 @@ pub(in crate::registry) fn relay_branched_by_relay_branch(name: &str, schema: &s
     let Model::Relay(mut relay) = relay(name, schema) else {
         unreachable!("relay helper must build a relay model")
     };
-    relay.branching = RelayBranching::branched_by(branch_name_for_relay(name));
+    relay.branching = RelayBranching::branched_by(parametrizer_name_for_relay(name));
     Model::Relay(relay)
 }
 
@@ -609,7 +610,7 @@ pub(in crate::registry) fn relay_branched_like(
     let Model::Relay(mut relay) = relay(name, schema) else {
         unreachable!("relay helper must build a relay model")
     };
-    relay.branching = RelayBranching::branched_by(branch_name_for_relay(source_relay));
+    relay.branching = RelayBranching::branched_by(parametrizer_name_for_relay(source_relay));
     Model::Relay(relay)
 }
 
@@ -619,7 +620,7 @@ pub(in crate::registry) fn materialized_relay(name: &str, schema: &str) -> Model
         name: RelayName::parse(name).expect("valid identifier"),
         schema: SchemaName::parse(schema).expect("valid identifier"),
         buffer: nonzero!(1usize),
-        branching: RelayBranching::branched_by(branch_name_for_relay(name)),
+        branching: RelayBranching::branched_by(parametrizer_name_for_relay(name)),
         materialized_state: Some(MaterializedRelayState::LastByTimestamp),
     })
 }
@@ -733,7 +734,7 @@ pub(in crate::registry) fn window_processor(
         name: WindowProcessorName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
         output_routes,
-        branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
+        branched_by: BranchSelection::branched_by(parametrizer_name_for_relay(from_relay)),
         width: WindowBound {
             messages: Some(10),
             duration: None,
@@ -767,7 +768,7 @@ pub(in crate::registry) fn junction(name: &str, from_relays: &[&str], into_relay
             interval: "100ms".to_string(),
             max_batch_size: "1MiB".to_string(),
         }),
-        branched_by: BranchSelection::branched_by(branch_name_for_relay(
+        branched_by: BranchSelection::branched_by(parametrizer_name_for_relay(
             from_relays
                 .first()
                 .expect("junction helper requires at least one input"),
@@ -796,7 +797,7 @@ pub(in crate::registry) fn deduplicator(
             interval: "100ms".to_string(),
             max_batch_size: "1MiB".to_string(),
         }),
-        branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
+        branched_by: BranchSelection::branched_by(parametrizer_name_for_relay(from_relay)),
         deduplicate_on: vec![
             nervix_plexus::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
                 .expect("deduplicate expression must parse"),

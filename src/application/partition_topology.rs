@@ -23,8 +23,8 @@ use nervix_connector_pulsar::PulsarTopicPartitionInspector;
 use nervix_consensus::{DomainPlanningInputs, LeaderTenure};
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
-    BranchName, ClusterSchedule, DomainName, DomainSchedule, ExternalPartitionSet,
-    GeneralErrorPolicy, IngestorName, SourcePartitionObservation,
+    ClusterSchedule, DomainName, DomainSchedule, ExternalPartitionSet, GeneralErrorPolicy,
+    IngestorName, ParametrizerName, SourcePartitionObservation,
 };
 use nervix_primitives::{
     sync::{Arc, CancellationToken},
@@ -45,10 +45,13 @@ use crate::registry::{
     partition_source_specs,
 };
 
+/// What one watcher observes for: an inherited branch and its producers, or one ingestor whose
+/// readers are dealt its source's partitions without an inherited branch (Kafka domain offsets and
+/// Pulsar `INSTANCES PER TRANSPORT PARTITION`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum ObservationSubject {
-    Branch(BranchName),
-    DomainOffsets(IngestorName),
+    Branch(ParametrizerName),
+    Readers(IngestorName),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,11 +103,11 @@ fn watcher_specs(
     let mut desired = BTreeMap::<WatcherKey, WatcherSpec>::new();
     for domain in schedule.domains.values() {
         for source in partition_source_specs(&domain.domain, domain)?.into_values() {
-            let subjects = if source.branches.is_empty() {
-                vec![ObservationSubject::DomainOffsets(source.ingestor.clone())]
+            let subjects = if source.parametrizers.is_empty() {
+                vec![ObservationSubject::Readers(source.ingestor.clone())]
             } else {
                 source
-                    .branches
+                    .parametrizers
                     .iter()
                     .cloned()
                     .map(ObservationSubject::Branch)

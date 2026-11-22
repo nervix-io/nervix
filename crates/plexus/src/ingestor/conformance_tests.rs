@@ -21,8 +21,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{
     ChoiceRequirement, CreateIngestor, DeclaredDelivery, IngestDeliveryKind, IngestQuiesceKind,
-    IngestorEntityCapabilities, IngestorEntityKind, IngestorInput, IngestorReferenceKind,
-    LocatorDeclaration, LocatorName, Model, OptionDeclaration, OptionForm, OptionValue,
+    IngestorEntityCapabilities, IngestorEntityKind, IngestorInput, IngestorInstances,
+    IngestorInstancingCapability, IngestorReferenceKind, LocatorDeclaration, LocatorName, Model,
+    OptionDeclaration, OptionForm, OptionValue,
 };
 use strum::IntoEnumIterator as _;
 
@@ -351,7 +352,7 @@ fn every_declared_delivery_and_quiesce_mode_parses_into_its_kind() {
                 }
                 .choosing(delivery.requires)
                 .choosing(quiesce.requires);
-                if !delivery.kind.allows_quiesce(quiesce.kind) {
+                if !quiesce.allows_delivery(delivery.kind) {
                     generated.assert_refused("a quiesce mode this delivery cannot honor");
                     continue;
                 }
@@ -729,6 +730,53 @@ fn completion_offers_a_rate_limit_after_exactly_the_modes_that_hold_their_source
                     .any(|suggestion| suggestion == "ON QUIESCE"),
                 "completion of `{prefix}` still offers the quiesce clause: {suggestions:?}"
             );
+        }
+    }
+}
+
+/// `INSTANCES` offers the transport-partition form only where the entity's transport keeps
+/// partitions. Every other instance-capable entity offers and accepts a count only, and the grammar
+/// refuses the transport-partition form there before the registry sees the statement.
+#[test]
+fn instances_offer_a_partition_form_only_where_the_transport_has_partitions() {
+    const CUT: &str = "INSTANCES __completion__";
+    for kind in IngestorEntityKind::all() {
+        let declared = kind.capabilities();
+        if declared
+            .option(OptionDeclaration::INSTANCES.keywords)
+            .is_none()
+        {
+            continue;
+        }
+        let follows_transport =
+            declared.instancing == IngestorInstancingCapability::PerTransportPartition;
+
+        let mut completing = Generated::of(kind);
+        completing.written = Some((OptionDeclaration::INSTANCES.keywords, CUT.to_owned()));
+        let through = completing.through_options();
+        let Some(position) = through.find(CUT) else {
+            panic!("{kind} writes its INSTANCES option: {through}");
+        };
+        let prefix = &through[..position + "INSTANCES ".len()];
+        if follows_transport {
+            assert_offers_exactly(prefix, &["PER TRANSPORT PARTITION", "instance_count"]);
+        } else {
+            assert_offers_exactly(prefix, &["instance_count"]);
+        }
+
+        let mut statement = Generated::of(kind);
+        statement.written = Some((
+            OptionDeclaration::INSTANCES.keywords,
+            "INSTANCES PER TRANSPORT PARTITION".to_owned(),
+        ));
+        if follows_transport {
+            assert_eq!(
+                statement.parse().input.instances(),
+                Some(IngestorInstances::PerTransportPartition),
+                "{kind} reads `INSTANCES PER TRANSPORT PARTITION`"
+            );
+        } else {
+            statement.assert_refused("`INSTANCES PER TRANSPORT PARTITION`");
         }
     }
 }

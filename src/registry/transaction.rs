@@ -17,20 +17,22 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
-    AttributedGateBoundary, AttributedImpactNode, BranchName, BranchPartitions, CanonicalImpactSet,
-    CommandExecutionReference, ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction,
-    DomainLifecycleImpact, DomainName, DomainSchedule, DomainState as ControlDomainState,
-    DomainStatus, DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact,
-    ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage,
-    ImpactPlanningBasis, ImpactReportCompleteness, ImpactReportError, ImpactTopology,
-    ImpactTopologyEdge, ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason,
-    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
-    QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResetWasmState, ResolvedBranchPartitions, ResourceBindingImpact, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
-    StateBranchSelectionError, StateResetImpact, Statement, TransactionCommitPlanStep,
-    TransactionCommitStepKind, TransactionImpactReport, TransactionOperation,
-    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
+    AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,
+    ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact,
+    DomainName, DomainSchedule, DomainState as ControlDomainState, DomainStatus,
+    DynamicModelUpdate, EntityLabelLimits, EntityLabelTarget, EntityLabels,
+    ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
+    ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
+    ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
+    ModelChangeAspect, ModelIndex, MutateEntityLabels, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, ParametrizerName, ParametrizerPartitions,
+    PauseRequirement, PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact,
+    RebuildReason, RequestedResourceVersion, ResetWasmState, ResolvedParametrizerPartitions,
+    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
+    ResourceUploads, ResourceVersionResolutionError, StateBranchSelectionError, StateResetImpact,
+    Statement, TransactionCommitPlanStep, TransactionCommitStepKind, TransactionImpactReport,
+    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPosition,
 };
 use thiserror::Error;
 
@@ -52,7 +54,7 @@ pub(crate) struct TransactionPlanningSnapshot {
     pub(crate) parameters: nervix_models::ClusterParameterValues,
     pub(crate) domain: ControlDomainState,
     pub(crate) models: ModelIndex,
-    pub(crate) resources: BTreeSet<ResourceName>,
+    pub(crate) resources: BTreeMap<ResourceName, EntityLabels>,
     /// The upload outcomes of the planned domain. Every resource version a statement writes is
     /// resolved against these, so `LATEST` names the highest version completed when this snapshot
     /// was captured.
@@ -87,7 +89,12 @@ pub(crate) enum PlannedTransactionStepKind {
     StopDomain,
     CreateResource {
         resource: ResourceName,
+        labels: EntityLabels,
         already_existed: bool,
+    },
+    EditResourceLabels {
+        resource: ResourceName,
+        labels: EntityLabels,
     },
     ResetWasmState {
         reset: ResetWasmState,
@@ -179,14 +186,14 @@ pub(crate) enum TransactionPlanningError {
     #[error("domain '{domain}' is already stopped")]
     DomainAlreadyStopped { domain: DomainName },
     #[error(
-        "branch '{branch}' in domain '{domain}' is still moving keys placed under its previous \
-         partition count {previous} to its current count {current}; change its partition count \
-         again once DESCRIBE BRANCH reports no previous partitions"
+        "parametrizer '{parametrizer}' in domain '{domain}' is still moving keys placed under its \
+         previous partition count {previous} to its current count {current}; change its partition \
+         count again once DESCRIBE PARAMETRIZER reports no previous partitions"
     )]
-    BranchPartitionsStillMoving {
+    ParametrizerPartitionsStillMoving {
         operation: TransactionOperationNumber,
         domain: DomainName,
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         previous: u16,
         current: u16,
     },
@@ -208,6 +215,11 @@ pub(crate) enum TransactionPlanningError {
     ResourceAlreadyExists { resource: ResourceName },
     #[error("resource '{resource}' does not exist")]
     ResourceNotFound { resource: ResourceName },
+    #[error("labels for resource '{resource}' are invalid")]
+    ResourceLabels {
+        operation: TransactionOperationNumber,
+        resource: ResourceName,
+    },
     #[error(
         "{kind} '{name}' does not exist in domain '{domain}'",
         kind = node.kind.keyword_phrase(),
@@ -282,10 +294,11 @@ impl TransactionPlanningError {
         match self {
             Self::InvalidOperation { operation }
             | Self::ResourceVersion { operation, .. }
+            | Self::ResourceLabels { operation, .. }
             | Self::ModelPreflight { operation, .. }
             | Self::ExternalModelValidation { operation }
             | Self::UdfPreparation { operation }
-            | Self::BranchPartitionsStillMoving { operation, .. } => Some(*operation),
+            | Self::ParametrizerPartitionsStillMoving { operation, .. } => Some(*operation),
             Self::ResetIdentityMissing { operation } => Some(*operation),
             Self::Schedule { .. }
             | Self::ClusterParametersUnseeded
@@ -337,7 +350,7 @@ struct ModelRunPlanningInput<'a> {
     parameters: &'a nervix_models::ClusterParameterValues,
     domain: &'a DomainName,
     domain_state: &'a ControlDomainState,
-    resources: &'a BTreeSet<ResourceName>,
+    resources: &'a BTreeMap<ResourceName, EntityLabels>,
     resource_uploads: &'a ResourceUploads,
     base_models: ModelIndex,
     current_schedule: Option<DomainSchedule>,
@@ -462,11 +475,16 @@ impl Registry {
             TransactionCommitStepKind::StopDomain => PlannedTransactionStepKind::StopDomain,
             TransactionCommitStepKind::CreateResource {
                 resource,
+                labels,
                 already_existed,
             } => PlannedTransactionStepKind::CreateResource {
                 resource,
+                labels,
                 already_existed,
             },
+            TransactionCommitStepKind::EditResourceLabels { resource, labels } => {
+                PlannedTransactionStepKind::EditResourceLabels { resource, labels }
+            }
             TransactionCommitStepKind::ResetWasmState {
                 reset,
                 request,
@@ -505,12 +523,12 @@ impl Registry {
             first_operation_index,
             allow_incomplete_final_model_run,
             schedule,
-            |_| (),
+            |_, _| (),
         )
         .map(|(plan, ())| plan)
     }
 
-    /// Project the complete final candidate before its temporary model index is released.
+    /// Project the final candidate before its temporary model index and resource catalog are released.
     pub(crate) fn plan_transaction_captured<F, T, I>(
         snapshot: TransactionPlanningSnapshot,
         statements: &[Statement],
@@ -520,7 +538,7 @@ impl Registry {
         inspect: I,
     ) -> Result<(PlannedTransaction, T), Report<TransactionPlanningError>>
     where
-        I: FnOnce(&ModelIndex) -> T,
+        I: FnOnce(&ModelIndex, &BTreeMap<ResourceName, EntityLabels>) -> T,
         F: FnMut(
             Option<ActiveGraph>,
             Option<&DomainSchedule>,
@@ -528,6 +546,7 @@ impl Registry {
         ) -> Result<TransactionScheduleDecision, Report<super::RegistryError>>,
     {
         let parameters = snapshot.parameters;
+        let label_limits = EntityLabelLimits::from(&parameters);
         let domain = snapshot.domain.id.clone();
         let mut domain_state = snapshot.domain;
         let mut models = snapshot.models;
@@ -672,7 +691,7 @@ impl Registry {
                         domain: domain.clone(),
                         resource: create.body.identifier.clone(),
                     };
-                    let already_existed = !resources.insert(create.body.identifier.clone());
+                    let already_existed = resources.contains_key(&create.identifier);
                     if already_existed && !create.if_not_exists {
                         return Err(Report::new(
                             TransactionPlanningError::ResourceAlreadyExists {
@@ -684,6 +703,14 @@ impl Registry {
                         reasons = Vec::new();
                         contribution = ImpactEffects::default();
                     } else {
+                        create
+                            .labels
+                            .validate(&label_limits)
+                            .change_context_lazy(|| TransactionPlanningError::ResourceLabels {
+                                operation: number,
+                                resource: create.identifier.clone(),
+                            })?;
+                        resources.insert(create.identifier.clone(), create.labels.clone());
                         reasons = vec![OperationImpactReason::ResourceCatalog {
                             resource: create.body.identifier.clone(),
                         }];
@@ -698,7 +725,50 @@ impl Registry {
                     }
                     kind = PlannedTransactionStepKind::CreateResource {
                         resource: create.body.identifier.clone(),
+                        labels: create.labels.clone(),
                         already_existed,
+                    };
+                    pause = PauseRequirement::NoPause;
+                }
+                Statement::MutateEntityLabels(MutateEntityLabels {
+                    entity: EntityLabelTarget::Resource(resource),
+                    mutation,
+                }) => {
+                    let current = resources.get_mut(resource).ok_or_else(|| {
+                        Report::new(TransactionPlanningError::ResourceNotFound {
+                            resource: resource.clone(),
+                        })
+                    })?;
+                    let labels = current
+                        .updated(mutation, &label_limits)
+                        .change_context_lazy(|| TransactionPlanningError::ResourceLabels {
+                            operation: number,
+                            resource: resource.clone(),
+                        })?;
+                    operation = TransactionOperation::EditResourceLabels {
+                        domain: domain.clone(),
+                        resource: resource.clone(),
+                    };
+                    if *current == labels {
+                        reasons = Vec::new();
+                        contribution = ImpactEffects::default();
+                    } else {
+                        reasons = vec![OperationImpactReason::ResourceCatalog {
+                            resource: resource.clone(),
+                        }];
+                        contribution = ImpactEffects {
+                            resource_catalog: CanonicalImpactSet::new([ResourceCatalogImpact {
+                                resource: resource.clone(),
+                                action: ResourceCatalogAction::EditLabels,
+                                attribution,
+                            }]),
+                            ..ImpactEffects::default()
+                        };
+                        *current = labels.clone();
+                    }
+                    kind = PlannedTransactionStepKind::EditResourceLabels {
+                        resource: resource.clone(),
+                        labels,
                     };
                     pause = PauseRequirement::NoPause;
                 }
@@ -765,7 +835,7 @@ impl Registry {
             .checked_add(statements.len())
             .assured("a transaction prefix is bounded by its configured statement limit");
         let completeness = combined_completeness(&steps);
-        let inspected = inspect(&models);
+        let inspected = inspect(&models, &resources);
         Ok((
             PlannedTransaction {
                 domain,
@@ -1097,7 +1167,8 @@ fn ensure_domain_not_paused(
 }
 
 /// Applies scheduling only to a complete mutation that changes the graph, retaining the
-/// current schedule for incomplete and no-op model runs.
+/// current schedule for incomplete and no-op model runs and the current placement for a run that
+/// changes nothing but metadata.
 fn schedule_model_run<F>(
     domain: &DomainName,
     planned: Option<&PlannedMutations>,
@@ -1115,6 +1186,21 @@ where
     if let Some(planned) = planned
         && !planned.is_noop()
     {
+        // Labels are control-plane metadata. A run that changes nothing else keeps every unit
+        // where the current schedule placed it, whichever nodes placement would choose now, so it
+        // plans no ownership move.
+        if planned.changes_only_metadata()
+            && let Some(current) = current_schedule.as_ref()
+            && let Some(schedule) = planned.definitions_in_place(current)
+        {
+            return Ok((
+                TransactionScheduleDecision {
+                    schedule: Some(schedule),
+                    ownership_moves: CanonicalImpactSet::default(),
+                },
+                planned.quiesce().level(),
+            ));
+        }
         let decision = schedule(
             planned.candidate_graph(),
             current_schedule.as_ref(),
@@ -1134,7 +1220,7 @@ where
     ))
 }
 
-/// `ALTER BRANCH … SET PARTITIONS` begins the branch's next partition epoch on a running, paused
+/// `ALTER PARAMETRIZER … SET PARTITIONS` begins the branch's next partition epoch on a running, paused
 /// or stopped domain alike. While keys placed under the epoch's previous count may still lie
 /// outside their partition, a change to yet another count is refused, so every key keeps exactly
 /// one unit that may hold it outside its partition: the unit its previous count placed it in.
@@ -1144,7 +1230,7 @@ fn ensure_branch_partitions_change_is_settled(
     statement: &Statement,
     operation: TransactionOperationNumber,
 ) -> Result<(), Report<TransactionPlanningError>> {
-    let Statement::AlterBranch(alter) = statement else {
+    let Statement::AlterParametrizer(alter) = statement else {
         return Ok(());
     };
     let Some(requested) = alter.requested_partitions() else {
@@ -1153,27 +1239,27 @@ fn ensure_branch_partitions_change_is_settled(
     let Some(schedule) = schedule else {
         return Ok(());
     };
-    let Some(epoch) = schedule.partition_epochs.get(&alter.branch) else {
+    let Some(epoch) = schedule.partition_epochs.get(&alter.parametrizer) else {
         return Ok(());
     };
     let Some(transition) = &epoch.transition else {
         return Ok(());
     };
     let unchanged = match (requested, epoch.partitions) {
-        (BranchPartitions::Direct(requested), ResolvedBranchPartitions::Direct(current)) => {
+        (ParametrizerPartitions::Direct(requested), ResolvedParametrizerPartitions::Direct(current)) => {
             requested == current
         }
-        _ => schedule.nodes.get(&NodeRef::new(nervix_models::ModelKind::Branch, &alter.branch))
-            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Branch(branch) if branch.partitions == requested)),
+        _ => schedule.nodes.get(&NodeRef::new(nervix_models::ModelKind::Parametrizer, &alter.parametrizer))
+            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Parametrizer(parametrizer) if parametrizer.partitions == requested)),
     };
     if unchanged {
         return Ok(());
     }
     Err(Report::new(
-        TransactionPlanningError::BranchPartitionsStillMoving {
+        TransactionPlanningError::ParametrizerPartitionsStillMoving {
             operation,
             domain: domain.clone(),
-            branch: alter.branch.clone(),
+            parametrizer: alter.parametrizer.clone(),
             previous: transition.previous.count().get(),
             current: epoch.partitions.count().get(),
         },

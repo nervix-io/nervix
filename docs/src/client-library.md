@@ -448,7 +448,9 @@ belong to the client rather than to one session, so a reader keeps calling them 
   them, including the ones not read yet, and the stream continues with the notices of the next
   session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
   `Leadership`, `ClusterParameters`, `Runtime`, `ControlPlane` or `Licensing`) and its display text; a reader
-  routes notices by `kind` and never by their text.
+  routes notices by `kind` and never by their text. A `Runtime` notice about an error of a graph node
+  also carries `error: Some(ReportedError)`, the error's `MessageErrorClass` and the producing node's
+  `NodeRef`, which a reader selects runtime errors by; every other notice carries `None`.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
 notices arrived faster than they were read: the client dropped the ones it held, and the next read
@@ -609,7 +611,7 @@ selector error on an individual node leaves its diagnostic on the outcome. See
 
 `SHOW LABELS ON <entity> FORMAT TEXT|JSON` also returns
 `CommandOutcome::entity_labels`. The retained `EntityLabelsInspection` exposes the existing typed
-`DomainNodeRef`, exact ordered label map, captured policy revision and four limits, and an explicit
+`EntityLabelOwner`, exact ordered label map, captured policy revision and four limits, and an explicit
 `EntityLabelView`. A committed view carries its applied revision, including zero; a staged view
 carries the existing transaction preview identity and accepted position. Both rendered formats
 project the same typed result. Clone it to retain the snapshot after the outcome is dropped;
@@ -747,7 +749,8 @@ order. Each branch entry names its opaque fingerprint, absent for the unbranched
 carries its current-lifetime checkpoint, its recorded recovery, or both.
 
 `DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
-and its `summary`, `quotas` and `transitions` sections, including when no domain is selected.
+and its `summary`, `quotas`, `capabilities` and `transitions` sections, including when no domain
+is selected.
 Match `StateInspectionEntity::DomainNode` to access the domain and graph-node reference of a
 materialized-state observation.
 

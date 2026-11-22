@@ -517,7 +517,7 @@ Feature: Emitter batching configuration
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -536,7 +536,7 @@ Feature: Emitter batching configuration
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation
         ON GENERAL ERROR LOG;
@@ -575,9 +575,9 @@ Feature: Emitter batching configuration
       """
     And within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 32B
-      "seq":3 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 32B
-      "seq":5 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 32B
+      "seq":2 | "error_code":"limit" | "operation":"encode" | exceeds MAX SIZE 32B
+      "seq":3 | "error_code":"limit" | "operation":"encode" | exceeds MAX SIZE 32B
+      "seq":5 | "error_code":"limit" | "operation":"encode" | exceeds MAX SIZE 32B
       """
 
     Examples:

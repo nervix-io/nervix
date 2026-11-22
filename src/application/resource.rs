@@ -876,7 +876,7 @@ impl SessionServiceImpl {
         match self
             .inner
             .consensus
-            .create_resource_catalog(domain, &create.identifier)
+            .create_resource_catalog(domain, &create.identifier, create.labels.clone())
             .await
         {
             Ok(()) => match self.wait_for_authoritative_visibility().await {
@@ -1430,6 +1430,7 @@ mod tests {
                 &domain,
                 CreateStatement::new(
                     CreateResource {
+                        labels: nervix_models::EntityLabels::default(),
                         identifier: resource.clone(),
                     },
                     false,
@@ -1507,6 +1508,7 @@ mod tests {
                 domain,
                 CreateStatement::new(
                     CreateResource {
+                        labels: nervix_models::EntityLabels::default(),
                         identifier: ResourceName::parse(identifier)
                             .assured("the test resource name is an identifier-shaped literal"),
                     },
@@ -1736,6 +1738,7 @@ mod tests {
                 &default,
                 CreateStatement::new(
                     CreateResource {
+                        labels: nervix_models::EntityLabels::default(),
                         identifier: named("fraud_model"),
                     },
                     false,
@@ -1750,6 +1753,7 @@ mod tests {
                 &default,
                 CreateStatement::new(
                     CreateResource {
+                        labels: nervix_models::EntityLabels::default(),
                         identifier: named("fraud_model"),
                     },
                     true,
@@ -1765,6 +1769,7 @@ mod tests {
                 &other,
                 CreateStatement::new(
                     CreateResource {
+                        labels: nervix_models::EntityLabels::default(),
                         identifier: named("fraud_model"),
                     },
                     false,

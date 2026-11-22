@@ -21,19 +21,19 @@ Feature: Co-producing inherited readers agree on their external partition count
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR first_reader
         FROM broker TOPIC 'inherited_first_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA TOPIC INGESTOR second_reader
         FROM broker TOPIC 'inherited_second_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -51,7 +51,7 @@ Feature: Co-producing inherited readers agree on their external partition count
       observes different external partition counts
       """
     Then the current leader node is saved as placeholder "topology_reader"
-    And within "30s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: awaiting topology
       """
@@ -69,7 +69,7 @@ Feature: Co-producing inherited readers agree on their external partition count
     And within "60s" every instance of ingestor "second_reader" reports running and ready on its scheduled owner
     And within "60s" every instance of emitter "agreed_writer" reports running on its scheduled owner
     Then the current leader node is saved as placeholder "topology_reader"
-    And within "30s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       external partitions: 16
       """

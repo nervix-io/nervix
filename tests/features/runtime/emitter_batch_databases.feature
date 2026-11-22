@@ -25,7 +25,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -107,7 +107,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -211,7 +211,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -227,7 +227,7 @@ Feature: Database emitter batches
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               error_operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -242,8 +242,8 @@ Feature: Database emitter batches
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"external" | "error_operation":"publish"
-      "seq":3 | "error_code":"validation" | "error_operation":"encode" | MAX SIZE 600B
+      "seq":2 | "error_code":"refused" | "error_operation":"publish"
+      "seq":3 | "error_code":"limit" | "error_operation":"encode" | MAX SIZE 600B
       """
     And the "<connector_body>" batch table "rejecting_{{test_id}}" eventually holds exactly these rows
       """
@@ -260,12 +260,12 @@ Feature: Database emitter batches
     And node "{{rejection_owner}}" observability metric "nervix_emitter_records_rejected_total" with labels eventually equals 1
       """
       emitter="batched"
-      code="external"
+      code="refused"
       """
     And node "{{rejection_owner}}" observability metric "nervix_emitter_records_rejected_total" with labels eventually equals 1
       """
       emitter="batched"
-      code="oversize"
+      code="limit"
       """
     And node "{{rejection_owner}}" observability metric "nervix_emitter_records_failed_total" with labels eventually equals 0
       """
@@ -304,7 +304,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -373,7 +373,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       <client>
@@ -441,7 +441,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MYSQL CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = '{{mysql_addr}}' };
@@ -496,7 +496,7 @@ Feature: Database emitter batches
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MONGODB CLIENT db POOL SIZE MIN 1 MAX 4 CONFIG {
@@ -511,7 +511,7 @@ Feature: Database emitter batches
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               error_operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -526,7 +526,7 @@ Feature: Database emitter batches
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"external" | "error_operation":"publish" | 16777216
+      "seq":2 | "error_code":"refused" | "error_operation":"publish" | 16777216
       """
     And within "30s" the "MongoDB" batch table "documents_{{test_id}}" records writes of "2" rows
     And the "MongoDB" batch table "documents_{{test_id}}" eventually holds exactly these rows

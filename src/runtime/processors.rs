@@ -11,11 +11,11 @@ use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
+    Assignment, AssignmentTarget, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
     CorrelatorMatchPolicy, ErrorPolicies, FieldName, InferencerExecutionMode,
-    InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorOperation,
-    MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, RelayName, ResourceName,
-    RouteConstruction, StructuredMessageError, Timestamp,
+    InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorClass, MessageErrorOperation,
+    MessageErrorPolicy, ModelKind, ModelName, NodeUnitRef, ParametrizerName, RaisedMessageError,
+    RelayName, ResourceName, RouteConstruction, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -135,7 +135,7 @@ pub(super) struct BranchInstanceTemplate {
     pub(super) revision: ProcessorPlanRevision,
     pub(super) owner: NodeUnitRef,
     pub(super) root_relay: RelayName,
-    pub(super) branch: Option<BranchName>,
+    pub(super) parametrizer: Option<ParametrizerName>,
     pub(super) branch_ttl: Option<Duration>,
     pub(super) branch_max_instances: Option<NonZeroUsize>,
     pub(super) error_policies: ErrorPolicies,
@@ -1186,7 +1186,7 @@ impl std::fmt::Debug for WasmCompiledBranchProcessor {
 
 pub(super) struct PlannedMessageError {
     pub(super) message: RelayMessage,
-    pub(super) error: StructuredMessageError,
+    pub(super) error: RaisedMessageError,
     pub(super) partial_output: Option<RuntimeRecordBatch>,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
     pub(super) execution_now: Timestamp,
@@ -1275,6 +1275,43 @@ pub(super) enum PlannedGeneralError {
     Envelope,
 }
 
+impl PlannedGeneralError {
+    /// The class of the batch-wide failure this names.
+    ///
+    /// A program that could not run over the batch (a UDF trap or watchdog, a `LOOKUP_HASH_MAP` key
+    /// expression, a column limit the whole batch exceeds) could not be computed; a branch key the
+    /// construction left empty or null, or a row whose branch construction failed, is data that
+    /// did not fit; every other step is Nervix's own planning, whose failure breaks its contract.
+    pub(super) fn class(&self) -> MessageErrorClass {
+        match self {
+            Self::Execute { .. } | Self::BranchRow { .. } => MessageErrorClass::EVALUATION,
+            Self::BranchFieldNull { .. } | Self::BranchKey => MessageErrorClass::VALIDATION,
+            Self::InheritedBranchConstruction
+            | Self::SidecarRowCount { .. }
+            | Self::SelectedRowCount { .. }
+            | Self::SelectedRowOutOfBounds { .. }
+            | Self::PrepareLookups { .. }
+            | Self::PrepareInput { .. }
+            | Self::MaterializeErrorInput { .. }
+            | Self::MaterializeOutput { .. }
+            | Self::BuildOutputBatch { .. }
+            | Self::OutputSchemaUnprepared { .. }
+            | Self::ProjectOutput { .. }
+            | Self::OutputSchemaMismatch { .. }
+            | Self::SelectBranchInputs
+            | Self::BranchFieldName { .. }
+            | Self::BranchFieldType { .. }
+            | Self::BranchFieldValue { .. }
+            | Self::GroupByBranch
+            | Self::OrderingGroupColumn
+            | Self::OrderingGroupType { .. }
+            | Self::OrderingGroupRow { .. }
+            | Self::HttpRequests
+            | Self::Envelope => MessageErrorClass::INTERNAL,
+        }
+    }
+}
+
 pub(super) type PlannedGeneralResult<T> = error_stack::Result<T, PlannedGeneralError>;
 
 /// A row sidecar a planned program reads beside the batch it runs over.
@@ -1324,6 +1361,11 @@ pub(super) struct PlannedGeneralFailure {
 impl PlannedGeneralFailure {
     pub(super) fn new(error: Report<PlannedGeneralError>, acks: Vec<AckSet>) -> Self {
         Self { error, acks }
+    }
+
+    /// The class of the failure, from the planning step it names.
+    pub(super) fn class(&self) -> MessageErrorClass {
+        self.error.current_context().class()
     }
 }
 

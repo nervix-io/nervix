@@ -486,47 +486,53 @@ pub(super) async fn encode_window_processor_snapshot(
         .try_reserve(MemoryClass::Bulk, length_u64)
         .change_context(WindowSnapshotError::Admission)?;
     let sealed = executor
-        .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
-            cancellation
-                .check()
-                .change_context(WindowSnapshotError::Execution)?;
-            let mut buffer = BudgetedBuffer::with_limit(charge, length_u64);
-            buffer
-                .write_all(&framed)
-                .change_context(WindowSnapshotError::Encode {
-                    section: WindowSnapshotSection::Header,
-                })?;
-            buffer
-                .write_all(input.as_ref())
-                .change_context(WindowSnapshotError::Encode {
-                    section: WindowSnapshotSection::Input,
-                })?;
-            buffer
-                .write_all(arguments.as_ref())
-                .change_context(WindowSnapshotError::Encode {
-                    section: WindowSnapshotSection::Arguments,
-                })?;
-            for section in typed_sections {
+        .run_cpu_with(
+            CpuClass::Bulk,
+            nervix_execution::QueueAdmission::WaitForPlace,
+            reservation,
+            move |charge, cancellation| {
                 cancellation
                     .check()
                     .change_context(WindowSnapshotError::Execution)?;
-                let section_length =
-                    u32::try_from(section.len()).change_context(WindowSnapshotError::Encode {
-                        section: WindowSnapshotSection::DelayedRemovals,
+                let mut buffer = BudgetedBuffer::with_limit(charge, length_u64);
+                buffer
+                    .write_all(&framed)
+                    .change_context(WindowSnapshotError::Encode {
+                        section: WindowSnapshotSection::Header,
                     })?;
                 buffer
-                    .write_all(&section_length.to_le_bytes())
+                    .write_all(input.as_ref())
                     .change_context(WindowSnapshotError::Encode {
-                        section: WindowSnapshotSection::DelayedRemovals,
+                        section: WindowSnapshotSection::Input,
                     })?;
-                buffer
-                    .write_all(section.as_ref())
-                    .change_context(WindowSnapshotError::Encode {
-                        section: WindowSnapshotSection::DelayedRemovals,
-                    })?;
-            }
-            Ok::<_, Report<WindowSnapshotError>>(ChargedBytes::from_buffer(buffer))
-        })
+                buffer.write_all(arguments.as_ref()).change_context(
+                    WindowSnapshotError::Encode {
+                        section: WindowSnapshotSection::Arguments,
+                    },
+                )?;
+                for section in typed_sections {
+                    cancellation
+                        .check()
+                        .change_context(WindowSnapshotError::Execution)?;
+                    let section_length = u32::try_from(section.len()).change_context(
+                        WindowSnapshotError::Encode {
+                            section: WindowSnapshotSection::DelayedRemovals,
+                        },
+                    )?;
+                    buffer
+                        .write_all(&section_length.to_le_bytes())
+                        .change_context(WindowSnapshotError::Encode {
+                            section: WindowSnapshotSection::DelayedRemovals,
+                        })?;
+                    buffer.write_all(section.as_ref()).change_context(
+                        WindowSnapshotError::Encode {
+                            section: WindowSnapshotSection::DelayedRemovals,
+                        },
+                    )?;
+                }
+                Ok::<_, Report<WindowSnapshotError>>(ChargedBytes::from_buffer(buffer))
+            },
+        )
         .await
         .change_context(WindowSnapshotError::Execution)??;
     Ok(sealed.as_ref().to_vec())
@@ -823,8 +829,13 @@ pub(in crate::runtime) async fn decode_window_processor_layout(
     let header = &layout.header;
     let input = &payload[layout.input.clone()];
     let arguments = &payload[layout.arguments.clone()];
+    // Every caller of this decode answers someone at once: a processor task restores its branches
+    // inline before it answers its commands, and archives and inspection are requests. A full bulk
+    // queue therefore fails the decode rather than holding the caller: a processor keeps answering
+    // as unrestored and retries on its backoff, and the checkpoint it reads stays where it is.
     let mut input = RestoredMaterializedSnapshot::open(
         executor,
+        nervix_execution::QueueAdmission::RefuseWhenFull,
         schemas.input,
         SealedSource::borrowed(executor, input),
         RestoredRows::Window,
@@ -835,6 +846,7 @@ pub(in crate::runtime) async fn decode_window_processor_layout(
     })?;
     let mut arguments = RestoredMaterializedSnapshot::open(
         executor,
+        nervix_execution::QueueAdmission::RefuseWhenFull,
         schemas.arguments,
         SealedSource::borrowed(executor, arguments),
         RestoredRows::Window,

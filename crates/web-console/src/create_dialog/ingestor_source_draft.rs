@@ -45,6 +45,11 @@ use thiserror::Error;
 
 use super::SelectedReference;
 
+/// The `INSTANCES` choice of an entity whose transport keeps partitions, spelled as the vocabulary
+/// spells it.
+pub(super) const TRANSPORT_PARTITION_INSTANCES: &str =
+    nervix_models::IngestorInstances::PerTransportPartition.choice();
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OffsetChoice {
     Domain,
@@ -323,8 +328,12 @@ impl IngestorEntityDraft {
     pub(super) fn chosen_option(&self, keywords: &str) -> Option<&'static str> {
         let selected = match keywords {
             "INSTANCES" => Some(
-                if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") {
-                    "PER PARTITION"
+                if self
+                    .instances
+                    .trim()
+                    .eq_ignore_ascii_case(TRANSPORT_PARTITION_INSTANCES)
+                {
+                    TRANSPORT_PARTITION_INSTANCES
                 } else {
                     "<count>"
                 },
@@ -344,8 +353,15 @@ impl IngestorEntityDraft {
     pub(super) fn choose_option(&mut self, keywords: &str, choice: &str) {
         match keywords {
             "INSTANCES" => match choice {
-                "PER PARTITION" => self.instances = "PER PARTITION".to_owned(),
-                "<count>" if self.instances.trim().eq_ignore_ascii_case("PER PARTITION") => {
+                TRANSPORT_PARTITION_INSTANCES => {
+                    self.instances = TRANSPORT_PARTITION_INSTANCES.to_owned()
+                }
+                "<count>"
+                    if self
+                        .instances
+                        .trim()
+                        .eq_ignore_ascii_case(TRANSPORT_PARTITION_INSTANCES) =>
+                {
                     self.instances.clear()
                 }
                 _ => {}
@@ -399,16 +415,14 @@ impl IngestorEntityDraft {
         let Some(mode) = self.delivery else {
             return false;
         };
-        if !mode.allows_quiesce(choice) {
-            return false;
-        }
         let Some(quiesce) = kind.capabilities().declared_quiesce(choice) else {
             return false;
         };
-        quiesce
-            .requires
-            .iter()
-            .all(|requirement| self.requirement_met(requirement))
+        quiesce.allows_delivery(mode)
+            && quiesce
+                .requires
+                .iter()
+                .all(|requirement| self.requirement_met(requirement))
     }
 
     pub(super) fn build(&self) -> error_stack::Result<IngestorEntity, IngestorEntityDraftError> {
@@ -657,8 +671,17 @@ impl IngestorEntityDraft {
         } else {
             self.instances.trim()
         };
-        if value.eq_ignore_ascii_case("PER PARTITION") {
-            return Ok(nervix_models::IngestorInstances::PerPartition);
+        if value.eq_ignore_ascii_case(TRANSPORT_PARTITION_INSTANCES) {
+            // Only an entity whose transport keeps partitions offers this form.
+            let declared = nervix_models::IngestorInstances::PerTransportPartition;
+            let permitted = match self.kind {
+                Some(kind) => kind.capabilities().instancing.permits(declared),
+                None => false,
+            };
+            if !permitted {
+                return Err(Report::new(IngestorEntityDraftError::Instances));
+            }
+            return Ok(declared);
         }
         let count = value.parse::<NonZeroU64>().map_err(|cause| {
             Report::new(cause).change_context(IngestorEntityDraftError::Instances)
@@ -915,7 +938,9 @@ impl IngestorEntityDraft {
         }
     }
 
-    fn build_quiesce(&self) -> error_stack::Result<IngestQuiesceMode, IngestorEntityDraftError> {
+    pub(super) fn build_quiesce(
+        &self,
+    ) -> error_stack::Result<IngestQuiesceMode, IngestorEntityDraftError> {
         let choice = self
             .quiesce
             .ok_or_else(|| Report::new(IngestorEntityDraftError::Quiesce))?;
@@ -929,9 +954,16 @@ impl IngestorEntityDraft {
                 retry_after: self
                     .required(&self.retry_after, IngestorEntityDraftError::RetryAfter)?,
             }),
-            IngestQuiesceKind::EndpointBuffer => Ok(IngestQuiesceMode::EndpointBuffer {
-                max_size: self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
-            }),
+            IngestQuiesceKind::EndpointBufferImmediate
+            | IngestQuiesceKind::EndpointBufferAfterResume => {
+                Ok(IngestQuiesceMode::EndpointBuffer {
+                    max_size: self
+                        .required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
+                    response: choice
+                        .endpoint_response()
+                        .assured("an endpoint's buffer choice states when to respond"),
+                })
+            }
             IngestQuiesceKind::Buffer => Ok(IngestQuiesceMode::Buffer {
                 max_size: self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
                 overflow: self
@@ -986,7 +1018,7 @@ pub(super) enum IngestorEntityDraftError {
     UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
-    #[error("INSTANCES must be a positive 64-bit count or PER PARTITION")]
+    #[error("INSTANCES must be a positive 64-bit count, or PER TRANSPORT PARTITION where offered")]
     Instances,
     #[error("Choose Kafka offset ownership")]
     Offset,
@@ -1154,7 +1186,9 @@ mod tests {
         match source.quiesce() {
             IngestQuiesceMode::Suspend | IngestQuiesceMode::Drop => {}
             IngestQuiesceMode::Reject { retry_after } => draft.retry_after = retry_after.clone(),
-            IngestQuiesceMode::EndpointBuffer { max_size } => draft.buffer_size = max_size.clone(),
+            IngestQuiesceMode::EndpointBuffer { max_size, .. } => {
+                draft.buffer_size = max_size.clone()
+            }
             IngestQuiesceMode::Buffer { max_size, overflow } => {
                 draft.buffer_size = max_size.clone();
                 draft.overflow = Some(*overflow);
@@ -1451,6 +1485,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_instance_draft_follows_transport_partitions_only_where_the_entity_offers_it() {
+        let declared = nervix_models::IngestorInstances::PerTransportPartition;
+        for kind in IngestorEntityKind::modeled() {
+            let capabilities = kind.capabilities();
+            if capabilities.option("INSTANCES").is_none() {
+                continue;
+            }
+            let mut draft = complete(kind);
+            draft.instances = super::TRANSPORT_PARTITION_INSTANCES.to_owned();
+            if capabilities.instancing.permits(declared) {
+                assert_eq!(
+                    draft
+                        .instances()
+                        .assured("the entity offers the transport-partition form"),
+                    declared,
+                    "{}",
+                    kind.phrase()
+                );
+            } else {
+                let error = draft
+                    .instances()
+                    .expect_err("an entity whose transport keeps no partitions takes a count");
+                assert_eq!(
+                    error.current_context(),
+                    &IngestorEntityDraftError::Instances,
+                    "{}",
+                    kind.phrase()
+                );
+            }
+        }
+    }
+
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {
         let mut draft = IngestorEntityDraft::default();
         draft.choose_kind(kind);
@@ -1615,6 +1682,24 @@ mod tests {
             for choice in draft.available_quiesce().iter() {
                 let mut candidate = draft.clone();
                 candidate.quiesce = Some(*choice);
+                let capabilities = kind.capabilities();
+                if capabilities.reference.endpoint_type().is_some() {
+                    let quiesce = capabilities
+                        .declared_quiesce(*choice)
+                        .assured("the offered choice is declared");
+                    for delivery in draft.available_modes() {
+                        candidate.delivery = Some(delivery);
+                        assert_eq!(
+                            candidate.build().is_ok(),
+                            quiesce.allows_delivery(delivery),
+                            "{} {} {}",
+                            kind.form_label(),
+                            delivery.form_key(),
+                            choice.keyword(),
+                        );
+                    }
+                    continue;
+                }
                 if kind == IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)
                     && *choice == IngestQuiesceKind::Suspend
                 {

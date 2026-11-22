@@ -56,8 +56,6 @@ pub(in crate::runtime) enum IngestMetadataOperation {
 pub(in crate::runtime) enum IngestGroupAdmittedOperation {
     #[strum(serialize = "prepare a branch input")]
     PrepareBranchInput,
-    #[strum(serialize = "unfold an ingested payload")]
-    UnfoldPayload,
 }
 
 /// Why one ingested payload did not decode into its group's builder.
@@ -87,16 +85,6 @@ impl PayloadDecodeFailure {
 #[derive(Debug, Error)]
 #[error("the node's bounded execution did not unfold the payload")]
 pub(in crate::runtime) struct UnfoldingNotAdmitted;
-
-impl UnfoldingNotAdmitted {
-    /// The failure of the ingest group whose payload's unfolding the node refused, with the
-    /// executor's refusal beneath it.
-    pub(super) fn group_error(refusal: Report<Self>) -> Report<IngestGroupError> {
-        refusal.change_context(IngestGroupError::Execution {
-            operation: IngestGroupAdmittedOperation::UnfoldPayload,
-        })
-    }
-}
 
 /// One payload of a batch an ingestor hands its host, and the entry that stays with it whatever its
 /// codec decides, such as the payload's metadata row.
@@ -784,7 +772,7 @@ pub(super) struct IngestorMessageError<'a> {
     pub(super) record: &'a RuntimeRow,
     pub(super) ingest_metadata: Option<IngestFilterMapMetadata>,
     pub(super) acks: AckSet,
-    pub(super) error: StructuredMessageError,
+    pub(super) error: RaisedMessageError,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
     pub(super) execution_now: Timestamp,
 }
@@ -1565,10 +1553,11 @@ impl Runtime {
             for group in &groups {
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     group.messages.iter().map(|message| &message.acks),
+                    // Nervix stopped the domain or the branch the payload was for: it cut the work.
+                    MessageErrorClass::INTERRUPTED,
                     &error,
                 );
             }
@@ -1589,10 +1578,11 @@ impl Runtime {
                 });
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     acks.iter(),
+                    // The ingestor's own routing failed, which breaks Nervix's contract.
+                    MessageErrorClass::INTERNAL,
                     &error,
                 );
                 first_error.get_or_insert(error);
@@ -1606,10 +1596,11 @@ impl Runtime {
                     });
                     self.handle_general_error_for_acks(
                         domain,
-                        ModelKind::Ingestor,
-                        ingestor,
+                        &NodeRef::new(ModelKind::Ingestor, ingestor),
                         &ErrorPolicies::handled_by_log(),
                         acks.iter(),
+                        // The ingestor's own routing failed, which breaks Nervix's contract.
+                        MessageErrorClass::INTERNAL,
                         &error,
                     );
                     first_error.get_or_insert(error);
@@ -1623,10 +1614,11 @@ impl Runtime {
                 });
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
+                    // The ingestor's own routing failed, which breaks Nervix's contract.
+                    MessageErrorClass::INTERNAL,
                     &error,
                 );
                 first_error.get_or_insert(error);
@@ -1640,10 +1632,11 @@ impl Runtime {
                 });
                 self.handle_general_error_for_acks(
                     domain,
-                    ModelKind::Ingestor,
-                    ingestor,
+                    &NodeRef::new(ModelKind::Ingestor, ingestor),
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
+                    // Nervix stopped the domain or the branch the payload was for: it cut the work.
+                    MessageErrorClass::INTERRUPTED,
                     &error,
                 );
                 first_error.get_or_insert(error);
@@ -1862,9 +1855,9 @@ impl Runtime {
                     .iter()
                     .any(|output| matches!(output.message_error_policy, MessageErrorPolicy::Log));
                 let missing = event_timestamps.is_null(row);
-                let error = structured_message_error(
+                let error = raised_message_error(
                     execution_now,
-                    MessageErrorCode::Validation,
+                    MessageErrorClass::VALIDATION,
                     ingestion_time
                         .rejection(timestamp_source, missing)
                         .to_string(),
@@ -1924,7 +1917,7 @@ impl Runtime {
         /// One route that failed, waiting for its share of the input row's ACK.
         struct RouteError {
             output_index: usize,
-            error: StructuredMessageError,
+            error: RaisedMessageError,
             partial_output: Option<RuntimeRecordBatch>,
             materialized_state: HashMap<String, RuntimeValue>,
         }
@@ -2099,9 +2092,9 @@ impl Runtime {
                             Err(error) => routed[row].push(RoutedOutcome {
                                 output_index,
                                 outcome: SingleRecordFilterMapOutcome::MessageError {
-                                    error: structured_message_error(
+                                    error: raised_message_error(
                                         execution_now,
-                                        MessageErrorCode::Evaluation,
+                                        MessageErrorClass::EVALUATION,
                                         error.to_string(),
                                         MessageErrorOperation::Set,
                                         None,
@@ -2229,9 +2222,9 @@ impl Runtime {
                 keep.append(true);
                 continue;
             };
-            let error = structured_message_error(
+            let error = raised_message_error(
                 execution_now,
-                MessageErrorCode::Validation,
+                MessageErrorClass::VALIDATION,
                 refusal.message(),
                 MessageErrorOperation::Admit,
                 None,
@@ -2390,14 +2383,16 @@ impl Runtime {
             .await
     }
 
-    /// Decodes every one of `payloads` into `collector`'s open group, their unfoldings admitted as
-    /// `admission` says, and divides their entries by whether the codec refused the payload.
+    /// Decodes every one of `payloads` into `collector`'s open group, and divides their entries by
+    /// whether the codec refused the payload.
     ///
-    /// A payload its codec refuses leaves the group exactly as it was while the payloads around it
-    /// still decode, because the refusal is the codec's judgement of that payload alone and would
-    /// repeat. A payload the node could not unfold now was judged by nothing, so the batch is
-    /// delivered together or not at all: that refusal takes the payloads decoded before it back
-    /// out of the group, and its caller presents the batch again or refuses it whole. A caller that
+    /// Each unfolding waits for a place on the node's extension workers rather than being refused,
+    /// because nothing can present a payload a source handed over again. A payload its codec
+    /// refuses leaves the group exactly as it was while the payloads around it still decode,
+    /// because the refusal is the codec's judgement of that payload alone and would repeat. An
+    /// unfolding the node no longer admits at all, once its executor stops, was judged by nothing,
+    /// so the batch is delivered together or not at all: that refusal takes the payloads decoded
+    /// before it back out of the group, and its caller ends its intake as stopped. A caller that
     /// drops this future before it completes discards what it decoded itself.
     #[cfg_attr(
         nervix_lint,
@@ -2408,7 +2403,6 @@ impl Runtime {
     pub(in crate::runtime) async fn decode_raw_ingest_payload<'p, T>(
         &self,
         collector: &mut IngestRouteCollector,
-        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payloads: impl IntoIterator<Item = BatchPayload<'p, T>>,
     ) -> Result<SplitPayloads<T>, Report<UnfoldingNotAdmitted>> {
@@ -2420,7 +2414,7 @@ impl Runtime {
             let outcome = collector
                 .decode_payload(
                     self.executor(),
-                    admission,
+                    QueueAdmission::WaitForPlace,
                     codec,
                     payload,
                     usize::try_from(self.cluster_parameters().payload_unfold_limit())

@@ -29,6 +29,7 @@ fn http_endpoint(endpoint: &str) -> HttpEndpointIngestor {
         mode: EndpointIngestMode::NoAck,
         quiesce: IngestQuiesceMode::EndpointBuffer {
             max_size: "1MiB".to_string(),
+            response: crate::EndpointPauseResponse::Immediate,
         },
     }
 }
@@ -42,8 +43,8 @@ fn http_endpoint_alteration(
 
 #[test]
 fn branch_selection_displays_its_named_or_unbranched_declaration() {
-    let name =
-        crate::BranchName::parse("by_tenant").assured("by_tenant is a valid branch identifier");
+    let name = crate::ParametrizerName::parse("by_tenant")
+        .assured("by_tenant is a valid branch identifier");
     assert_eq!(BranchSelection::branched_by(name).to_string(), "by_tenant");
     assert_eq!(BranchSelection::unbranched().to_string(), "UNBRANCHED");
 }
@@ -686,10 +687,13 @@ fn placement_creation_collapses_duplicate_members() {
     .expect("placement should be valid");
 
     assert_eq!(
-        placement.scope,
-        crate::PlacementScope::Corridor {
-            from: vec![named("ingest")],
-            to: vec![named("emit")]
+        placement.rule,
+        crate::PlacementRule::Colocation {
+            scope: crate::PlacementScope::Corridor {
+                from: vec![named("ingest")],
+                to: vec![named("emit")]
+            },
+            policy: PlacementPolicy::PreferColocation,
         }
     );
 }
@@ -730,12 +734,14 @@ fn placement_alter_applies_operations_in_order_and_is_atomic() {
 
     assert_eq!(placement.name, named("critical"));
     assert_eq!(placement.rank, Some(nonzero!(1u64)));
-    assert_eq!(placement.policy, PlacementPolicy::RequireColocation);
     assert_eq!(
-        placement.scope,
-        crate::PlacementScope::Corridor {
-            from: vec![named("source")],
-            to: vec![named("emitter")]
+        placement.rule,
+        crate::PlacementRule::Colocation {
+            scope: crate::PlacementScope::Corridor {
+                from: vec![named("source")],
+                to: vec![named("emitter")]
+            },
+            policy: PlacementPolicy::RequireColocation,
         }
     );
 
@@ -807,6 +813,169 @@ fn a_placement_without_members_on_either_side_is_refused() {
     assert_eq!(placement, before, "failed ALTER must not partially apply");
 }
 
+fn node_selector(zone: &str) -> crate::Expression {
+    crate::Expression::Binary {
+        operator: crate::BinaryOperator::Equal,
+        left: Box::new(crate::Expression::Call {
+            function: crate::BuiltinFunctionName::parse(crate::NODE_TAG_FUNCTION)
+                .expect("tag is a builtin function name"),
+            arguments: vec![crate::Expression::Literal(crate::Literal::String(
+                "zone".to_owned(),
+            ))],
+        }),
+        right: Box::new(crate::Expression::Literal(crate::Literal::String(
+            zone.to_owned(),
+        ))),
+    }
+}
+
+#[test]
+fn a_node_property_renders_as_the_node_scope_documents_it() {
+    let property = |name: &str| {
+        Expression::Field(crate::FieldReference::scoped(
+            crate::FieldScope::Node,
+            crate::FieldName::parse(name).assured("the fixture names a valid field"),
+        ))
+    };
+    let rendered = |name: &str| {
+        crate::expression_to_plexus(&property(name)).assured("a node field renders canonically")
+    };
+    assert_eq!(rendered("cuda.available"), "node.cuda.available");
+    assert_eq!(rendered("name"), "node.name");
+    // A name two plain segments cannot carry keeps its quoting, which Plexus reads back as it.
+    assert_eq!(rendered("gpu.models.first"), "node.`gpu.models.first`");
+    assert_eq!(rendered("gpu.memory-mib"), "node.`gpu.memory-mib`");
+}
+
+#[test]
+fn node_rule_alter_keeps_its_form_and_collapses_duplicate_members() {
+    let mut placement = CreatePlacement::node_rule(
+        named("eu_only"),
+        crate::NodeRuleScope::Members(vec![named("scorer"), named("scorer"), named("enrich")]),
+        crate::NodePolicy::Require(node_selector("eu")),
+        None,
+    )
+    .expect("node rule should be valid");
+    assert_eq!(
+        placement.rule,
+        crate::PlacementRule::Nodes {
+            scope: crate::NodeRuleScope::Members(vec![named("scorer"), named("enrich")]),
+            policy: crate::NodePolicy::Require(node_selector("eu")),
+        }
+    );
+
+    placement
+        .apply_alter(&AlterPlacement {
+            placement: named("eu_only"),
+            operations: vec![
+                AlterPlacementOperation::SetNodePolicy {
+                    policy: crate::NodePolicy::Prefer(node_selector("uk")),
+                },
+                AlterPlacementOperation::SetDomainWide,
+                AlterPlacementOperation::SetNodeMembers {
+                    members: vec![named("archiver"), named("archiver")],
+                },
+                AlterPlacementOperation::SetRank {
+                    rank: nonzero!(2u64),
+                },
+            ],
+        })
+        .expect("node rule alter should apply");
+    assert_eq!(
+        placement.rule,
+        crate::PlacementRule::Nodes {
+            scope: crate::NodeRuleScope::Members(vec![named("archiver")]),
+            policy: crate::NodePolicy::Prefer(node_selector("uk")),
+        }
+    );
+    assert_eq!(placement.rank, Some(nonzero!(2u64)));
+}
+
+#[test]
+fn placement_alter_refuses_an_operation_of_the_other_form_without_applying_any() {
+    let mut node_rule = CreatePlacement::node_rule(
+        named("named_node"),
+        crate::NodeRuleScope::DomainWide,
+        crate::NodePolicy::Any,
+        Some(nonzero!(1u64)),
+    )
+    .expect("node rule should be valid");
+    let before = node_rule.clone();
+    for (operation, expected) in [
+        (
+            AlterPlacementOperation::SetPolicy {
+                policy: PlacementPolicy::PreferColocation,
+            },
+            AlterPlacementError::ColocationPolicyOnNodeRule {
+                placement: named("named_node"),
+            },
+        ),
+        (
+            AlterPlacementOperation::SetMembers {
+                from: vec![named("a")],
+                to: vec![named("b")],
+            },
+            AlterPlacementError::ColocationOperationOnNodeRule {
+                placement: named("named_node"),
+                operation: "SET FROM ... TO ...",
+            },
+        ),
+    ] {
+        let error = node_rule
+            .apply_alter(&AlterPlacement {
+                placement: named("named_node"),
+                operations: vec![AlterPlacementOperation::DropRank, operation],
+            })
+            .expect_err("a colocation operation on a node rule is refused");
+        assert_eq!(error.current_context(), &expected);
+        assert_eq!(
+            node_rule, before,
+            "a refused ALTER applies none of its operations"
+        );
+    }
+
+    let mut colocation =
+        CreatePlacement::domain_wide(named("local"), PlacementPolicy::PreferColocation, None);
+    for (operation, expected) in [
+        (
+            AlterPlacementOperation::SetNodePolicy {
+                policy: crate::NodePolicy::Any,
+            },
+            AlterPlacementError::NodePolicyOnColocationRule {
+                placement: named("local"),
+            },
+        ),
+        (
+            AlterPlacementOperation::SetNodeMembers {
+                members: vec![named("a")],
+            },
+            AlterPlacementError::NodeOperationOnColocationRule {
+                placement: named("local"),
+                operation: "SET FOR",
+            },
+        ),
+    ] {
+        let error = colocation
+            .apply_alter(&AlterPlacement {
+                placement: named("local"),
+                operations: vec![operation],
+            })
+            .expect_err("a node operation on a colocation rule is refused");
+        assert_eq!(error.current_context(), &expected);
+    }
+    assert_eq!(
+        CreatePlacement::node_rule(
+            named("empty"),
+            crate::NodeRuleScope::Members(Vec::new()),
+            crate::NodePolicy::Any,
+            None,
+        )
+        .expect_err("a member list must not be empty")
+        .current_context(),
+        &AlterPlacementError::EmptyMembers
+    );
+}
+
 #[test]
 fn inherited_topology_retains_the_key_contract_without_inventing_execution_units() {
     let schema = crate::CreateSchema {
@@ -825,9 +994,12 @@ fn inherited_topology_retains_the_key_contract_without_inventing_execution_units
     assert_eq!(waiting.fields(), schema.fields.as_slice());
     assert_eq!(waiting.partitions(), None);
     assert!(waiting.units().is_empty());
-    let resolved = waiting
-        .clone()
-        .with_partitions(crate::ResolvedBranchPartitions::Inherited(nonzero!(12u16)));
+    let resolved =
+        waiting
+            .clone()
+            .with_partitions(crate::ResolvedParametrizerPartitions::Inherited(nonzero!(
+                12u16
+            )));
     assert!(waiting.same_key_as(&resolved));
     assert_eq!(
         resolved.units(),
@@ -837,12 +1009,15 @@ fn inherited_topology_retains_the_key_contract_without_inventing_execution_units
 
 #[test]
 fn inherited_declarations_keep_discovered_and_declared_counts_distinct() {
-    assert_eq!(crate::BranchPartitions::Inherited.declared_count(), None);
-    let grouped = crate::BranchPartitions::InheritedGrouped(nonzero!(16u16));
+    assert_eq!(
+        crate::ParametrizerPartitions::Inherited.declared_count(),
+        None
+    );
+    let grouped = crate::ParametrizerPartitions::InheritedGrouped(nonzero!(16u16));
     assert_eq!(grouped.declared_count(), Some(nonzero!(16u16)));
     assert_eq!(grouped.direct_layout(), None);
     assert_eq!(
-        crate::BranchPartitions::ONE.direct_layout(),
-        Some(crate::ResolvedBranchPartitions::ONE)
+        crate::ParametrizerPartitions::ONE.direct_layout(),
+        Some(crate::ResolvedParametrizerPartitions::ONE)
     );
 }

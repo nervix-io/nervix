@@ -32,7 +32,8 @@ In practice, the control plane covers:
 
 - domain creation and selection
 - model creation and deletion
-- scheduling decisions, including named corridor and domain-wide placement rules
+- scheduling decisions, including named corridor and domain-wide placement rules and the node rules
+  that select the cluster nodes runtime nodes may run on
 - explicit node removal with `DROP NODE <node_id>`
 - node cordon and uncordon with `CORDON NODE <node_id>` and `UNCORDON NODE <node_id>`
 - node drain with `DRAIN NODE <node_id>`, which cordons the node and moves scheduled graph nodes away one at a time
@@ -130,7 +131,7 @@ Only the bound domain's replicated configuration effects may be queued:
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `START` and `STOP`;
-- `CREATE RESOURCE` and `RESET WASM PROCESSOR ... STATE`.
+- `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, `DROP LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
 
 Completion on the bound session resolves identifiers against the configuration the queued
 statements produce, applied in written order, so a client is offered the models and resources its
@@ -141,8 +142,9 @@ same user, are offered committed configuration alone.
 For a `REBIND RESOURCE ... FOR` list, completion further limits each kind to queued-result models
 that bind the named resource.
 
-Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. `CREATE DOMAIN`
-and `CREATE USER` are rejected too: neither belongs to a domain, so neither is transaction content.
+Read-only `SHOW`, `DESCRIBE`, and `LOOKUP` statements are rejected at queue time. A single
+`SHOW LABELS` request reads beside the queue. `CREATE DOMAIN`, `CREATE USER` and domain or
+user label edits are administrative commands that run outside the transaction.
 Session subscriptions, `UPLOAD RESOURCE`, `BACKUP`, `RESTORE`, and node scheduling or membership
 operations (`CORDON`, `UNCORDON`, `DRAIN`, `DROP NODE`, and `RELOCATE`) are also immediate,
 non-transaction content. Run those statements outside `BEGIN`/`COMMIT`.
@@ -446,6 +448,26 @@ independent units. Ordinary relays have no replicas.
 Materialized relays use the same relay schedule entry: additional assigned nodes are replicas of
 materialized state only, not relay buffers, branch presence, fan-out, or metrics.
 
+Node rules are a scheduling input of their own. The planning snapshot captures the committed
+record of every schedulable node alongside its capacity claim, and the scheduler evaluates each
+node rule's selector over those records once per candidate. Each unit's candidates are restricted
+to the nodes its winning requirements admit, for every assignment slot, and ranked by node
+preference before the colocation score, upstream locality, capacity-weighted load, round robin and
+name. A hard colocation group is restricted to the intersection of its members' admitted nodes.
+Failover and drain choose destinations within that restriction. A unit whose owner is lost with no
+admitted destination keeps its last assignment and is reported `waiting_for=<rule>`, and the
+stickiness merge keeps a live assignment whose owner no longer qualifies, reported
+`violates=<rule>`.
+
+On a running domain, a candidate schedule that would put an executing unit on a node its rules do
+not admit, or leave a unit with no admitted node, refuses the change that produced it, naming the
+rule and the unit; a breach the schedule already held does not refuse an unrelated change. On a
+stopped domain a node rule is accepted, and the `START` step places every unit on an admitted node
+before the transaction prepares, moving a misplaced unit with its state through the planned
+ownership handoff. While a unit has no admitted node, `START` waits under the domain's mutation
+lease and checks again every scheduling interval. See
+[Placement Policies](placement.md#node-rules).
+
 Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
 through the normal ownership handoff path, and failover or drain moves the exact unit group
 together. Corresponding partition indices form separate groups; a healthy sibling retains its
@@ -612,13 +634,17 @@ earliest `ENFORCE AFTER` has passed, counted from each request's admission, or o
 licensing time reaches the licensing stop's fixed minute after the expiry; and it withdraws each
 request whose `CANCEL AFTER` passed, the last withdrawal calling the stop off. An ending names the
 stop it ends by the revision that began it, so a stop called off and begun again is never ended by
-the owner of the first. Once the domain is stopped, a task of its own collects every node's report
-of what its teardown cut and commits it beside the ending, and each request's `STOP` answers from
-that record. A `STOP` that a leader change interrupts is resumed under its execution reference: its
-request is already held, its stop already ended, or, when the domain has started again since the
-command was admitted, the stop it requested is long over. [Stopping A
-Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its answers, and [A
-Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
+the owner of the first. An owner whose ending fails to commit keeps the stop and ends it again
+rather than leaving it without an owner until something else changes. The owner applies nothing it
+commits: every node, the leader among them, tears the stopped domain down by applying the
+committed ending as it applies every committed change, so the owner's task, which ends as soon as
+that ending is applied, never takes a teardown with it. Once the domain is stopped, a task of its
+own collects every node's report of what its teardown cut and commits it beside the ending, and
+each request's `STOP` answers from that record. A `STOP` that a leader change interrupts is resumed
+under its execution reference: its request is already held, its stop already ended, or, when the
+domain has started again since the command was admitted, the stop it requested is long over.
+[Stopping A Domain](./domains-and-time.md#stopping-a-domain) describes the statement and its
+answers, and [A Domain's Stop](./shutdown.md#a-domains-stop) the drain and the teardown.
 
 ## Backing Up A Domain
 
@@ -909,7 +935,8 @@ node it reaches is refused: its record acknowledgements fail, and an ingestor wi
 redelivers the records. Failover is therefore at least once, not exactly once. A stateful processor
 that applied a record before its output was refused applies the redelivered record again, as the
 [WASM replay contract](wasm-state.md#replay-duplicates-and-exactly-once) and a stateful inferencer's
-[forced recovery](shutdown.md#when-the-former-owner-is-gone) describe.
+[forced recovery](shutdown.md#when-the-former-owner-is-gone) describe; see also [Replay, Skips And
+Duplicates](inferencer-state.md#replay-skips-and-duplicates).
 
 A survivor can also accept a batch before its own installation of the failover revision reaches the
 new route, and forward it to the lost owner. Such a batch never reached the lost owner, so it is
@@ -1041,7 +1068,9 @@ waiting operator's signal. Failed refreshes retain their pending work and respec
 The coalesced hint retains its activation and the revisions reported by a sync. After acquiring
 the request turn, an automatic refresh compares that requirement with the fresh committed
 observation. A foreground response that already covers those decision, conditions and trust
-revisions satisfies the sync without another service request. An explicit refresh still runs.
+revisions satisfies the sync without another service request. A refused response commits nothing
+and covers nothing, so a sync that reports the decision the service issued for it still
+refreshes. An explicit refresh still runs.
 A notification-revision gap, decision or trust event remains an invalidation, including a change
 that arrived after an in-flight response was issued; a due deadline or revoked signing key also
 continues to require refresh.

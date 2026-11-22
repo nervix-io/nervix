@@ -33,7 +33,7 @@ Feature: Materialized relay state
 
       CREATE HTTP ENDPOINT INGESTOR root_state_ingestor
         FROM root_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING root_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING root_event_codec
         TO root_state
           INHERIT ALL
           UNBRANCHED
@@ -73,14 +73,14 @@ Feature: Materialized relay state
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, value number );
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE SCHEMA reading_tenant ( tenant STRING );
-      CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
+      CREATE PARAMETRIZER by_reading_tenant SCHEMA reading_tenant TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge readings-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT readings_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM readings_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings INHERIT ALL BRANCHED BY by_reading_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -141,7 +141,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_state_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_state_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_state
         SCHEMA notification
         BRANCHED BY by_state_notifications
@@ -157,7 +157,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_state_notifications
@@ -167,7 +167,7 @@ Feature: Materialized relay state
         ON GENERAL ERROR LOG;
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
         BRANCHED BY by_state_notifications
@@ -264,7 +264,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA dependency_event_wire
         TO SCHEMA dependency_event;
       CREATE SCHEMA dependency_tenant ( tenant STRING );
-      CREATE BRANCH by_dependency_tenant SCHEMA dependency_tenant TTL 5m;
+      CREATE PARAMETRIZER by_dependency_tenant SCHEMA dependency_tenant TTL 5m;
       CREATE RELAY first_dependency_state
         SCHEMA dependency_event
         BRANCHED BY by_dependency_tenant
@@ -285,7 +285,7 @@ Feature: Materialized relay state
       CREATE HTTP ENDPOINT dependency_ingress ON edge PATH '/dependency-input';
       CREATE HTTP ENDPOINT INGESTOR first_state_ingestor
         FROM first_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING dependency_event_codec
         TO first_dependency_state
           INHERIT ALL
           BRANCHED BY by_dependency_tenant
@@ -295,7 +295,7 @@ Feature: Materialized relay state
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR second_state_ingestor
         FROM second_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING dependency_event_codec
         TO second_dependency_state
           INHERIT ALL
           BRANCHED BY by_dependency_tenant
@@ -305,7 +305,7 @@ Feature: Materialized relay state
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR dependency_ingestor
         FROM dependency_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING dependency_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING dependency_event_codec
         TO dependency_input
           INHERIT ALL
           BRANCHED BY by_dependency_tenant
@@ -418,7 +418,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -428,7 +428,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -494,7 +494,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -504,7 +504,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
         INHERIT ALL
@@ -562,7 +562,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 30s;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 30s;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -572,7 +572,7 @@ Feature: Materialized relay state
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -642,7 +642,7 @@ Feature: Materialized relay state
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-        CREATE IF NOT EXISTS BRANCH by_tenant_notifications SCHEMA tenant_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_tenant_notifications SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_state
         SCHEMA notification
         BRANCHED BY by_tenant_notifications
@@ -653,7 +653,7 @@ Feature: Materialized relay state
         PATH '/state';
         CREATE HTTP ENDPOINT INGESTOR state_notifications
         FROM state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 32MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 32MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
         BRANCHED BY by_tenant_notifications

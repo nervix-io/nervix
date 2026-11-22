@@ -25,7 +25,7 @@ Feature: Practical string search and normalization
       CREATE HTTP ENDPOINT ingress ON edge PATH '/text';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_codec
         TO source_texts INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE JUNCTION search FROM source_texts UNBRANCHED
@@ -45,7 +45,7 @@ Feature: Practical string search and normalization
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO search_errors
             SET source_id = input.id,
-                error_code = error.code,
+                error_code = error.class,
                 error_message = error.message;
       CREATE SUBSCRIPTION searched_texts_subscription TO searched_texts;
       CREATE SUBSCRIPTION search_errors_subscription TO search_errors;

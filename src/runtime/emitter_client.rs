@@ -212,7 +212,6 @@ impl ClientConsumerConnector {
                         };
                         rejected.push(RejectedEmitterRecord::structured(
                             position,
-                            EmitterRejectionCode::Oversize,
                             RejectedEmitterMember::oversize(
                                 position,
                                 batch.execution_now(),

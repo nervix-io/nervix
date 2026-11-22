@@ -129,6 +129,12 @@ staging. A second storage operation waits for the Bulk turn without taking the r
 permits. Commands and Bulk turns do not serialize each other. Both return their memory before
 passing the turn; cancellation while waiting retains neither a turn nor a memory queue place.
 
+Vote and committed-marker reads and writes, the log state read, the retention boundary scan and the
+store's idle barrier are management work. Each reserves four management events from the
+Management class, 256 KiB with the fixed 64 KiB event, and takes no turn. A node refuses to start
+with a Management budget smaller than this working set, so no reservation of these operations can
+exceed its whole class ([Node Settings](node-settings.md#execution-capabilities)).
+
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
 later leader may discard it. In either case, the client had not yet received an applied response.
@@ -530,11 +536,11 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_shutdown_logs`,
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_shutdown_meta`,
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_shutdown_state`, and
-`raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_shutdown_snapshots`. Opening it validates the
-complete keyspace namespace before reading any records. The committed cluster-parameter record
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_shutdown_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_shutdown_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_shutdown_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_shutdown_snapshots`. Opening it validates the complete
+keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
 group and payload unfold policy. Their durations use validated, lossless seconds and nanoseconds
@@ -558,7 +564,7 @@ whose signaling data exists only on its WebSockets variant, the branch partition
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
-`ALTER BRANCH` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+`ALTER PARAMETRIZER` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body (`SET RATE LIMIT` and `DROP RATE LIMIT` among them), an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
@@ -567,8 +573,9 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host, runtime, shutdown, operational and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 43, including the cluster identity reference,
-committed cluster parameters, the durable restore installation gate and the unit-keyed committed
+requires the current `ClusterState` encoding, 46. The state carries the endpoint pause response
+choice, domain, resource and user labels, placement node rules, the cluster identity reference, committed cluster
+parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions,
 typed ingestor and emitter instancing, exact-unit placement-group members
@@ -724,6 +731,7 @@ does not expose flags for them:
 | Follower decoded resident window | 4 batches per live append stream |
 | Commands memory budget | 24 MiB per node |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
+| Vote or metadata storage | 256 KiB working reservation from the Management class |
 | Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |

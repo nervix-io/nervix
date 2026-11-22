@@ -113,7 +113,7 @@ fn generated_family_forms_render_their_own_sections_and_omit_what_they_do_not_de
             &[
                 "create-generator-source",
                 "create-processor-branching",
-                "create-processor-branch",
+                "create-processor-parametrizer",
                 "create-generator-relay",
                 "create-generator-each",
                 "create-processor-route-relay",
@@ -255,8 +255,8 @@ fn a_generator_asks_for_materialized_relays_on_exactly_its_branch_and_routes_by_
         );
         select_choice(
             signals,
-            ChoiceControl::ProcessorBranch,
-            ChoiceValue::Model(node(ModelKind::Branch, "by_tenant")),
+            ChoiceControl::ProcessorParametrizer,
+            ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant")),
         );
         assert_eq!(
             question(signals, ChoiceControl::GeneratorRelay),
@@ -264,7 +264,7 @@ fn a_generator_asks_for_materialized_relays_on_exactly_its_branch_and_routes_by_
                 ChoiceTarget::GeneratorMaterializedRelay,
                 vec![
                     ChoiceValue::Domain(models()),
-                    ChoiceValue::Model(node(ModelKind::Branch, "by_tenant")),
+                    ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant")),
                 ]
             )
         );
@@ -329,7 +329,7 @@ fn a_generator_asks_for_materialized_relays_on_exactly_its_branch_and_routes_by_
                 ChoiceTarget::BranchField,
                 vec![
                     ChoiceValue::Domain(models()),
-                    ChoiceValue::Model(node(ModelKind::Branch, "by_tenant")),
+                    ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant")),
                 ]
             )
         );
@@ -471,7 +471,7 @@ fn inferencer_and_wasm_pickers_ask_for_their_binding_and_the_fields_their_routes
         // An unbranched inferencer has no branch key to read.
         assert_eq!(
             missing(signals, ChoiceControl::ProcessorBranchKeyField),
-            "Choose the named branch before its key fields"
+            "Choose the parametrizer before its key fields"
         );
         signals.inferencer.update(|draft| {
             if let Some(route) = draft.active_route_mut() {

@@ -21,7 +21,7 @@ every node has done so.
 This chapter describes the architecture. [Backup And Restore](./backup-and-restore.md) owns the
 statements, their options, the command-line and console surfaces, the archive's section and record
 tables, the operator limits and the reported failures. [WASM State And Recovery](./wasm-state.md),
-[Consensus Storage And Replication](./consensus-storage-and-replication.md), [Cluster
+[Inferencer State And Recovery](./inferencer-state.md), [Consensus Storage And Replication](./consensus-storage-and-replication.md), [Cluster
 Interconnect](./interconnect.md), [Data-Plane Concurrency](./data-plane-concurrency.md) and
 [Shutdown And Recovery](./shutdown.md) keep the contracts of the mechanisms backup and restore use.
 
@@ -111,8 +111,9 @@ selection, adoption and seed release. Restore retains the pending cut, so a dela
 resume it after the lifecycle advances. Count redistribution prepares the newest canonical
 generation and each actual owner's progress on every target primary and replica.
 
-The current archive uses format major `8` and manifest record version `4`. Its domain record is version `2` and carries the
-domain pace and lifecycle; named placement rules are canonical Models in the model document. Each unit-bearing record owns an eight-byte primitive
+The current archive uses format major `8` and manifest record version `4`. Its domain record is
+version `3` and carries the domain pace, lifecycle, and labels. Named placement rules are
+canonical Models in the model document. Each unit-bearing record owns an eight-byte primitive
 rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
 32-bit partition range, and subsequent ranks select instance indices from zero. Every rank is a
 valid unit, and the instance range includes every ingestor index an allocation can materialize.
@@ -1297,8 +1298,9 @@ Models. Manifest and individual state-record versions retain their own current c
 
 ### User Credential Records
 
-A users record has version 2, checked before its payload is decoded. It carries the complete
-current typed password credential, including algorithm, bounded iteration count, salt and digest.
+A users record has version 3, checked before its payload is decoded. It carries each user's labels
+and complete typed password credential, including algorithm, bounded iteration count, salt and
+digest.
 Restore preserves those values without re-deriving a password. Importing users raises the
 consensus verification-work count in the same publication, so restored costs and local users
 share one uniform authentication workload. Header or cost validation failures occur before

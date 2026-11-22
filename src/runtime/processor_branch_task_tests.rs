@@ -37,7 +37,7 @@ fn reset_target_template(entity_kind: ModelKind, branched: bool) -> BranchInstan
             Unit::SINGLE,
         ),
         root_relay: named("counted_input_events"),
-        branch: branched.then(|| named("by_tenant")),
+        parametrizer: branched.then(|| named("by_tenant")),
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -378,7 +378,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
             Unit::SINGLE,
         ),
         root_relay: named("orders"),
-        branch: None,
+        parametrizer: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: ErrorPolicies::handled_by_log(),
@@ -952,6 +952,7 @@ async fn a_branch_holding_output_reports_what_it_cannot_publish_without_its_cloc
         .await
         .expect("a branch reports the output it loses as it ends")
         .expect("the runtime keeps its event bus open");
+    let message = message.message;
     assert!(
         message.contains("stopped without its clock and cannot publish its accepted output"),
         "unexpected report: {message}"

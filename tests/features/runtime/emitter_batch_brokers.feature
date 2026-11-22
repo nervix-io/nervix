@@ -36,7 +36,7 @@ Feature: Batching across broker and message emitters
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -59,7 +59,7 @@ Feature: Batching across broker and message emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -92,7 +92,7 @@ Feature: Batching across broker and message emitters
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      "seq":7 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 80B
+      "seq":7 | "error_code":"limit" | "operation":"encode" | exceeds MAX SIZE 80B
       """
 
     Examples:
@@ -139,13 +139,13 @@ Feature: Batching across broker and message emitters
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge keyed-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
           INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -221,7 +221,7 @@ Feature: Batching across broker and message emitters
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -245,7 +245,7 @@ Feature: Batching across broker and message emitters
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -270,8 +270,8 @@ Feature: Batching across broker and message emitters
       | [{"seq":5,"tenant":"beta"},{"seq":6,"tenant":"beta"}] |     | tenant=beta |       |
     And within "10s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":3 | "error_code":"external" | "operation":"publish" | attribute 'tenant' has an empty value
-      "seq":4 | "error_code":"external" | "operation":"publish" | attribute 'tenant' has an empty value
+      "seq":3 | "error_code":"refused" | "operation":"publish" | attribute 'tenant' has an empty value
+      "seq":4 | "error_code":"refused" | "operation":"publish" | attribute 'tenant' has an empty value
       """
     And the relay subscription does not receive a payload within "1s"
 
@@ -310,7 +310,7 @@ Feature: Batching across broker and message emitters
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -328,7 +328,7 @@ Feature: Batching across broker and message emitters
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -348,9 +348,9 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | <limit_message>
-      "seq":2 | "error_code":"external" | "operation":"publish" | <limit_message>
-      "seq":3 | "error_code":"external" | "operation":"publish" | <limit_message>
+      "seq":1 | "error_code":"refused" | "operation":"publish" | <limit_message>
+      "seq":2 | "error_code":"refused" | "operation":"publish" | <limit_message>
+      "seq":3 | "error_code":"refused" | "operation":"publish" | <limit_message>
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -403,7 +403,7 @@ Feature: Batching across broker and message emitters
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -422,7 +422,7 @@ Feature: Batching across broker and message emitters
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -440,9 +440,9 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
-      "seq":2 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
-      "seq":3 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
+      "seq":1 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
+      "seq":2 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
+      "seq":3 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -485,7 +485,7 @@ Feature: Batching across broker and message emitters
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -509,7 +509,7 @@ Feature: Batching across broker and message emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -525,7 +525,7 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | SQS message is 1048591 bytes
+      "seq":1 | "error_code":"refused" | "operation":"publish" | SQS message is 1048591 bytes
       """
     And within "30s" the observed broker receives exactly these messages
       | payload               | key | headers    | group |

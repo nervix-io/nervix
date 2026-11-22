@@ -24,7 +24,7 @@ Feature: Postgres emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -103,7 +103,7 @@ Feature: Postgres emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -174,7 +174,10 @@ Feature: Postgres emission
         action STRING
       );
       CREATE SCHEMA emitter_error (
-        error_code STRING,
+        error_class STRING,
+        error_node STRING,
+        error_node_kind STRING,
+        external_code STRING OPTIONAL,
         error_message STRING,
         source_user_id I64,
         source_action STRING
@@ -217,7 +220,10 @@ Feature: Postgres emission
       } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_class = error.class,
+          error_node = error.node,
+          error_node_kind = error.node_kind,
+          external_code = error.external_code,
           error_message = error.message,
           source_user_id = input.user_id,
           source_action = input.action
@@ -233,13 +239,21 @@ Feature: Postgres emission
       """
     Then within "10s" the relay subscription receives exactly one payload for each fragment set
       """
-      "error_code":"external" | "error_message":"Postgres rejected record with SQLSTATE 23514" | "source_user_id":2 | "source_action":"POISON"
+      "error_class":"refused" | "error_node":"to_pg" | "error_node_kind":"emitter" | "external_code":"23514" | "error_message":"Postgres rejected record with SQLSTATE 23514" | "source_user_id":2 | "source_action":"POISON"
       """
     And the relay subscription does not receive a payload within "1s"
     And the Postgres table eventually holds exactly these rows
       """
       {"postgres_user_id":1,"postgres_action":"healthy_a"}
       {"postgres_user_id":3,"postgres_action":"healthy_b"}
+      """
+    And cluster observability metric "nervix_message_errors_total" with labels eventually totals 1 across the nodes that count it
+      """
+      domain="{{domain}}"
+      node_kind="emitter"
+      node="to_pg"
+      class="refused"
+      operation="publish"
       """
     # A write carrying only the poison row is refused as a whole, which already names its row.
     When these MQTT messages are rapidly published to topic "postgres_poison_in_{{test_id}}"
@@ -248,7 +262,7 @@ Feature: Postgres emission
       """
     Then within "10s" the relay subscription receives exactly one payload for each fragment set
       """
-      "error_code":"external" | "error_message":"Postgres rejected record with SQLSTATE 23514" | "source_user_id":4 | "source_action":"POISON"
+      "error_class":"refused" | "error_node":"to_pg" | "error_node_kind":"emitter" | "external_code":"23514" | "error_message":"Postgres rejected record with SQLSTATE 23514" | "source_user_id":4 | "source_action":"POISON"
       """
     And the relay subscription does not receive a payload within "1s"
     And the Postgres table eventually holds exactly these rows
@@ -301,17 +315,17 @@ Feature: Postgres emission
       CREATE HTTP ENDPOINT second_ingress ON edge PATH '/second';
       CREATE HTTP ENDPOINT INGESTOR http_poison
         FROM poison_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR http_first
         FROM first_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO first_notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR http_second
         FROM second_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO second_notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE POSTGRES CLIENT postgres_shared
@@ -324,7 +338,7 @@ Feature: Postgres emission
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
-        SET error_code = error.code,
+        SET error_code = error.class,
             error_message = error.message,
             source_user_id = input.user_id,
             source_action = input.action
@@ -374,7 +388,7 @@ Feature: Postgres emission
     When the lock on Postgres table "first_held_{{test_id}}" is released
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "error_code":"external" | "error_message":"Postgres rejected record with SQLSTATE 23514" | "source_user_id":2 | "source_action":"POISON"
+      "error_code":"refused" | "error_message":"Postgres rejected record with SQLSTATE 23514" | "source_user_id":2 | "source_action":"POISON"
       """
     And the Postgres table "poison_pg_{{test_id}}" eventually holds exactly these rows
       """
@@ -455,7 +469,7 @@ Feature: Postgres emission
       } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           error_operation = error.operation,
           source_user_id = input.user_id
       ON GENERAL ERROR LOG;

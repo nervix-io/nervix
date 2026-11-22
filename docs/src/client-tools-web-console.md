@@ -181,6 +181,16 @@ draft stays editable. Switching a corridor to the entire domain keeps its member
 restores them. The graph's **PLACE** action on a runtime node or relay opens a new corridor draft
 whose first `FROM` member is that item.
 
+The form's **Rule** choice switches between **Colocation**, the rules above, and **Cluster nodes**,
+a [node rule](placement.md#node-rules). A node rule's coverage is **Entire domain**, which writes
+`DOMAIN WIDE`, or **Members**, which writes `FOR` members chosen from the same list of runtime
+nodes, kept in their chosen order and editable the same way. Its policy is `REQUIRE NODES WHERE`,
+`PREFER NODES WHERE` or `ANY NODE`, and the two selecting policies take a node selector written in
+an expression field that the form parses as the server does. An empty member list, a missing
+selector or one that does not parse is refused inline before submission, and the preview shows the
+canonical rule. Switching between the two rules keeps each one's members, and switching to
+`ANY NODE` and back keeps the selector text.
+
 A resource draft captures the selected domain the first time it opens. If the console later
 selects another domain, reopening the retained draft keeps its captured scope and offers **Use
 current domain** as an explicit change. Domain and user creation are cluster scoped. Passwords are
@@ -217,9 +227,9 @@ A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definiti
 share a name. The preview and submitted command come from the completed semantic Model's
 canonical renderer, just as they do for the earlier forms.
 
-A branch form selects an internal key schema from a server-backed, searchable, paged list, then
-requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
-preview omits `PARTITIONS 1` as `SHOW CREATE BRANCH` does. It may set a positive maximum instance
+A parametrizer form selects an internal key schema from a server-backed, searchable, paged list,
+then requires a TTL. Its partition count starts at 1 and accepts a whole number from 1 through 65535; the
+preview omits `PARTITIONS 1` as `SHOW CREATE PARAMETRIZER` does. It may set a positive maximum instance
 count with LRU eviction. The schema list
 uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
 earlier in the same transaction is selectable. Changing the captured domain keeps a previous
@@ -484,10 +494,10 @@ as its form; where a contract is source text, the form embeds an editor for exac
 | `CREATE USER` | User | — | — |
 | `CREATE RESOURCE` | Resource | — | — |
 | `CREATE SUBSCRIPTION` | Subscription | a session subscription to one relay | filter expression |
-| `CREATE PLACEMENT` | Placement | `DOMAIN WIDE`, corridor `FROM` / `TO`, all four policies | — |
+| `CREATE PLACEMENT` | Placement | `DOMAIN WIDE`, corridor `FROM` / `TO`, all four colocation policies; node rules with `FOR` members or `DOMAIN WIDE`, `REQUIRE NODES WHERE`, `PREFER NODES WHERE` and `ANY NODE` | node selector |
 | `CREATE SCHEMA` | Schema | every internal scalar type with vector and array layers | — |
 | `CREATE WIRE JSON`, `CBOR`, `AVRO SCHEMA` | Wire schema, one per format | each format's wire types, `STRICT` and `LOOSE` | — |
-| `CREATE BRANCH` | Branch | key schema, TTL, partitions, LRU eviction | — |
+| `CREATE PARAMETRIZER` | Parametrizer | key schema, TTL, partitions, LRU eviction | — |
 | `CREATE RELAY` | Relay | `UNBRANCHED`, `BRANCHED BY`, materialized state | — |
 | `CREATE ... CODEC` | Codec | declared wire schemas, `SYSLOG`, every JAQ-native format, Protobuf | jaq programs |
 | `CREATE SIGNALING PROTOCOL` | Signaling protocol | JSON, YAML, TOML, XML, CBOR, RAW, Protobuf | jaq programs |
@@ -575,6 +585,9 @@ into the REPL and runs it, so the console never does anything you could not have
 
 - **DESCRIBE** — the runtime view of the item, where the item has a `DESCRIBE` form
 - **SHOW CREATE** — the Plexus that declares it
+- **Change pause settings** opens the current settings of an HTTP or WebSocket endpoint ingestor.
+  Choose when to respond, enter a buffer size or retry delay, and select **Save** to run
+  `ALTER … SET QUIESCE`. You can type the same command in the REPL.
 - **SUBSCRIBE** — relays only; opens the subscription form described below for that relay, whose
   tab runs the same `CREATE SUBSCRIPTION` the REPL accepts
 - **PLACE** — ingestors, processors, emitters and relays; opens a new corridor placement draft

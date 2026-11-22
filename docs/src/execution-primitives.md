@@ -395,14 +395,15 @@ builds the ordinary server.
 A node runs its variable-size encoding, decoding, validation, hashing, compilation, program
 execution and synchronous filesystem or database work through the bounded executor, which admits
 each job into a CPU or storage class, charges its memory, and gives it the cancellation it checks
-between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call or a JAQ
-transformation, takes the extension class, so a program that never returns holds only that class's
-workers. Password hashing takes the credentials class and its own budget, so anyone who can reach a
-listener spends only those, and saturated data, extension or bulk work never delays a login. A
-PBKDF2-HMAC-SHA-512 password operation charges its 64-byte verifier buffer; the Credentials memory
-class also carries mounted NATS credentials files and has a separate 19 MiB capacity. The
-executor's storage workers are the one built-in owner of the runtime's blocking pool, and no file
-owns `task::block_in_place`, which blocks the runtime worker thread that calls it.
+between its bounded units. Operator-supplied code the node cannot bound, a Roto UDF call, a JAQ
+transformation, an inferencer's model run or the scratch WASM guest a state inspection renders a
+committed checkpoint on, takes the extension class, so a program that never returns holds only that
+class's workers. Password hashing takes the credentials class and its own budget, so anyone who can
+reach a listener spends only those, and saturated data, extension or bulk work never delays a login.
+A PBKDF2-HMAC-SHA-512 password operation charges its 64-byte verifier buffer; the Credentials memory
+class also carries mounted NATS credentials files and has a separate 19 MiB capacity. The executor's
+storage workers are the one built-in owner of the runtime's blocking pool, and no file owns
+`task::block_in_place`, which blocks the runtime worker thread that calls it.
 
 Connector network control calls use a storage class of their own, with two admitted workers by
 default and the same bounded queue policy as other classes. Kafka ingestor metadata, watermarks,
@@ -465,9 +466,20 @@ hands a freed place to an existing `WaitForPlace` waiter before a later requeste
 data. `AcceptedWork` is a borrowed capability: ordinary admission adds no allocation, thread,
 lock or reference count. VM execution still owns its class and charge decisions. Branch input
 preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
-Request work keeps its immediate refusal, including client batch decoding, statement constants,
-subscription predicates and state inspection; ingestion-boundary admission follows its source's
-own contract.
+Request work, whose caller still holds its input and waits on the answer, keeps its immediate
+refusal through the refusing `run_cpu` and `run_storage`, including client batch decoding,
+statement constants, subscription predicates, a state inspection read on its owner, an HTTP endpoint
+body and the request frames one node sends another: a typed request, a stream opening, a connection
+hello, and a relay query or grant request. Every other job states `QueueAdmission::WaitForPlace` and
+waits: the unfolding of every payload an ingestor handed over, acknowledged or not, relay and
+subscription carriage, every answer frame one node sends another once its handler ran (a typed
+response, a duplex answer, a byte stream's answer such as a state inspection page, a connection
+answer, a relay status or grant answer, and an ack resolution), every frame a duplex stream carries
+after its opening, checkpoints and state captures, compilation for a committed change, lifecycle
+steps, and the consensus storage worker's jobs, which `submit_storage` admits in order. A wait ends
+in a refusal only once the executor admits no more work. [Traffic And Resource
+Isolation](./interconnect.md#traffic-and-resource-isolation) decides each protocol's frames and what
+ends their waits.
 
 An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
 job. Every inferencer does this before moving its branch's native session into the job that runs
@@ -486,7 +498,10 @@ submission returns only after its job has been selected. Each callback catches i
 returns `JobPanicked` to its caller, records its completed service and leaves successors runnable.
 The worker publishes its next selection or its idle transition before delivering the completed
 result. Existing per-class admission, refusal, completion, queue-time and work-time counters retain
-their meanings; work time measures callbacks, excluding dispatch and queue waits.
+their meanings; work time measures callbacks, excluding dispatch and queue waits. A class also
+reports how many `WaitForPlace` jobs wait for a place in its full queue: a job takes a free place
+exactly as a refusing job does, counts as waiting only once it finds the queue full, and stops
+counting when it takes a place, the pool closes or its caller drops the wait.
 
 Worker state distinguishes a selected callback, a callback executing and an idle worker. Runtime
 teardown that drops a worker between callbacks, or before its blocking task starts, returns its

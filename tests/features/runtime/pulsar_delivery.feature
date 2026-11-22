@@ -89,7 +89,7 @@ Feature: Pulsar receipt bounds and finishing accepted records
       CREATE HTTP ENDPOINT delivery_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR delivery_ingestor
         FROM delivery_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING delivery_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING delivery_codec
         TIMESTAMP NOW
         TO delivery_events
           INHERIT ALL

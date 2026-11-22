@@ -18,11 +18,11 @@ use std::{
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    BranchName, BranchPartitions, ClientConfigEntry, ClientName, ClientResourceMount, DomainName,
-    DomainSchedule, GeneralErrorPolicy, IngestorEntity, IngestorExternalPartitions, IngestorName,
+    ClientConfigEntry, ClientName, ClientResourceMount, DomainName, DomainSchedule,
+    GeneralErrorPolicy, IngestorEntity, IngestorExternalPartitions, IngestorName,
     InheritedPartitionLayout, KafkaIngestor, KafkaOffsetMode, KafkaTopicName, Model, ModelIndex,
-    ModelKind, NodeRef, PartitionSourceFingerprint, PartitionTopology, PulsarIngestor,
-    PulsarTopicName, SourcePartitionObservation,
+    ModelKind, NodeRef, ParametrizerName, ParametrizerPartitions, PartitionSourceFingerprint,
+    PartitionTopology, PulsarIngestor, PulsarTopicName, SourcePartitionObservation,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -32,28 +32,38 @@ use super::RegistryError;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum PartitionTopologyError {
     #[error(
-        "branch '{branch}' requires an enumerable external partition set; '{producer:?}' cannot \
-         construct it"
+        "parametrizer '{parametrizer}' requires an enumerable external partition set; \
+         '{producer:?}' cannot construct it"
     )]
     Producer {
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         producer: NodeRef,
     },
-    #[error("inherited branch '{branch}' observes different external partition counts: {counts:?}")]
+    #[error(
+        "parametrizer '{parametrizer}' with inherited partitions observes different external \
+         partition counts: {counts:?}"
+    )]
     CountMismatch {
-        branch: BranchName,
+        parametrizer: ParametrizerName,
         counts: BTreeMap<IngestorName, u32>,
     },
     #[error(
-        "inherited branch '{branch}' observes {count} partitions, above the maximum {}",
+        "parametrizer '{parametrizer}' with inherited partitions observes {count} partitions, \
+         above the maximum {}",
         u16::MAX
     )]
-    CountBound { branch: BranchName, count: u32 },
+    CountBound {
+        parametrizer: ParametrizerName,
+        count: u32,
+    },
     #[error(
-        "inherited branch '{branch}' observes {count} partitions beyond its signed metadata \
-         coordinates"
+        "parametrizer '{parametrizer}' with inherited partitions observes {count} partitions \
+         beyond its signed metadata coordinates"
     )]
-    MetadataBound { branch: BranchName, count: u32 },
+    MetadataBound {
+        parametrizer: ParametrizerName,
+        count: u32,
+    },
     #[error("partition observation source '{ingestor}' has no matching configured client")]
     Client { ingestor: IngestorName },
 }
@@ -92,8 +102,20 @@ pub(crate) struct PartitionSourceSpec {
     pub(crate) ingestor: IngestorName,
     pub(crate) source: PartitionSourcePlan,
     pub(crate) fingerprint: PartitionSourceFingerprint,
-    pub(crate) branches: BTreeSet<BranchName>,
+    pub(crate) parametrizers: BTreeSet<ParametrizerName>,
+    /// Whether the ingestor is a Pulsar reader declared `INSTANCES PER TRANSPORT PARTITION`, whose
+    /// instances are dealt the topic's partition topics whatever branch it constructs.
+    pub(crate) deals_partition_topics: bool,
     pub(crate) general_error_policy: GeneralErrorPolicy,
+}
+
+impl PartitionSourceSpec {
+    /// Whether the ingestor's intake waits until its source has been observed: an inherited
+    /// producer needs the committed layout, and a reader dealt partition topics needs the topics to
+    /// deal. Kafka domain-offset readers keep their native metadata diagnostics meanwhile.
+    pub(crate) fn waits_for_observation(&self) -> bool {
+        !self.parametrizers.is_empty() || self.deals_partition_topics
+    }
 }
 
 /// Borrowed semantic inputs shared by validation snapshots and the already validated graph.
@@ -129,8 +151,10 @@ impl PartitionModels for super::ActiveGraph {
     }
 }
 
-/// Source configurations that require observations: every inherited producer and Kafka readers
-/// whose offsets Nervix owns. Client and entity projection happens here, before observation runs.
+/// Source configurations that require observations: every inherited producer, Kafka readers whose
+/// offsets Nervix owns, and Pulsar readers dealt the topic's partition topics by
+/// `INSTANCES PER TRANSPORT PARTITION`. Client and entity projection happens here, before
+/// observation runs.
 /// Non-security BLAKE3: pins observations to their typed client and locator configuration; it
 /// authenticates no peer and grants no source access.
 pub(crate) fn source_specs(
@@ -147,11 +171,11 @@ pub(crate) fn source_specs(
             let Some(branching) = &route.branch else {
                 continue;
             };
-            let Some(branch) = branching.constructed_branch() else {
+            let Some(branch) = branching.constructed_parametrizer() else {
                 continue;
             };
-            if let Some(Model::Branch(declaration)) =
-                models.model(&NodeRef::new(ModelKind::Branch, branch))
+            if let Some(Model::Parametrizer(declaration)) =
+                models.model(&NodeRef::new(ModelKind::Parametrizer, branch))
                 && declaration.partitions.is_inherited()
             {
                 branches.insert(branch.clone());
@@ -159,7 +183,8 @@ pub(crate) fn source_specs(
         }
         let entity = ingestor.input.transport_entity();
         let domain_offsets = owns_domain_offsets(ingestor);
-        if branches.is_empty() && !domain_offsets {
+        let deals_partition_topics = deals_pulsar_partition_topics(ingestor);
+        if branches.is_empty() && !domain_offsets && !deals_partition_topics {
             continue;
         }
         let missing = || {
@@ -212,7 +237,8 @@ pub(crate) fn source_specs(
                 ingestor: ingestor.name.clone(),
                 source,
                 fingerprint,
-                branches,
+                parametrizers: branches,
+                deals_partition_topics,
                 general_error_policy: ingestor.general_error_policy.clone(),
             },
         );
@@ -246,18 +272,18 @@ pub(in crate::registry) fn validate_producers(
             continue;
         }
         for route in routes.outputs() {
-            let Some(branch) = route
+            let Some(parametrizer) = route
                 .branch
                 .as_ref()
-                .and_then(|branch| branch.constructed_branch())
+                .and_then(|branching| branching.constructed_parametrizer())
             else {
                 continue;
             };
-            if matches!(models.get(&NodeRef::new(ModelKind::Branch, branch)), Some(Model::Branch(declaration))
+            if matches!(models.get(&NodeRef::new(ModelKind::Parametrizer, parametrizer)), Some(Model::Parametrizer(declaration))
                 if declaration.partitions.is_inherited())
             {
                 return Err(Report::new(PartitionTopologyError::Producer {
-                    branch: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                     producer: node.clone(),
                 })
                 .change_context(RegistryError::PartitionTopology {
@@ -292,8 +318,9 @@ pub(crate) fn decide(
     let mut waiting = specs
         .values()
         // Ordinary domain-offset readers retain their native metadata diagnostics while their
-        // committed assignment is unknown. Inherited producers must wait for branch coherence.
-        .filter(|spec| !spec.branches.is_empty())
+        // committed assignment is unknown. Inherited producers must wait for branch coherence, and
+        // Pulsar readers dealt partition topics for the topics to deal.
+        .filter(|spec| spec.waits_for_observation())
         .filter(|spec| {
             topology
                 .sources
@@ -307,15 +334,15 @@ pub(crate) fn decide(
         .collect::<BTreeSet<_>>();
     let mut errors = BTreeMap::new();
     for model in models.models() {
-        let Model::Branch(branch) = model else {
+        let Model::Parametrizer(parametrizer) = model else {
             continue;
         };
-        if !branch.partitions.is_inherited() {
+        if !parametrizer.partitions.is_inherited() {
             continue;
         }
         let producers = specs
             .values()
-            .filter(|spec| spec.branches.contains(&branch.name))
+            .filter(|spec| spec.parametrizers.contains(&parametrizer.name))
             .collect::<Vec<_>>();
         let counts = producers
             .iter()
@@ -331,7 +358,7 @@ pub(crate) fn decide(
         let distinct = counts.values().copied().collect::<BTreeSet<_>>();
         let issue = if distinct.len() > 1 {
             Some(PartitionTopologyError::CountMismatch {
-                branch: branch.name.clone(),
+                parametrizer: parametrizer.name.clone(),
                 counts: counts.clone(),
             })
         } else if distinct.first().is_some_and(|count| {
@@ -341,18 +368,18 @@ pub(crate) fn decide(
                 > i32::MAX.cast_unsigned()
         }) {
             Some(PartitionTopologyError::MetadataBound {
-                branch: branch.name.clone(),
+                parametrizer: parametrizer.name.clone(),
                 count: *distinct
                     .first()
                     .verified("a bound failure observed a count"),
             })
-        } else if branch.partitions == BranchPartitions::Inherited
+        } else if parametrizer.partitions == ParametrizerPartitions::Inherited
             && distinct
                 .first()
                 .is_some_and(|count| *count > u32::from(u16::MAX))
         {
             Some(PartitionTopologyError::CountBound {
-                branch: branch.name.clone(),
+                parametrizer: parametrizer.name.clone(),
                 count: *distinct
                     .first()
                     .verified("a bound failure observed a count"),
@@ -367,23 +394,25 @@ pub(crate) fn decide(
                 None
             };
         let source_count = observed.and_then(std::num::NonZeroU32::new);
-        let layout = match (branch.partitions, source_count) {
-            (BranchPartitions::Inherited, Some(count)) => {
+        let layout = match (parametrizer.partitions, source_count) {
+            (ParametrizerPartitions::Inherited, Some(count)) => {
                 let count = u16::try_from(count.get()).verified("the bound was checked above");
                 Some(InheritedPartitionLayout::Identity(
                     NonZeroU16::new(count).verified("a source count is positive"),
                 ))
             }
-            (BranchPartitions::InheritedGrouped(groups), Some(source_count)) => {
+            (ParametrizerPartitions::InheritedGrouped(groups), Some(source_count)) => {
                 Some(InheritedPartitionLayout::Grouped {
                     source_count,
                     groups,
                 })
             }
-            _ => existing.branches.get(&branch.name).copied(),
+            _ => existing.parametrizers.get(&parametrizer.name).copied(),
         };
         if let Some(layout) = layout {
-            topology.branches.insert(branch.name.clone(), layout);
+            topology
+                .parametrizers
+                .insert(parametrizer.name.clone(), layout);
         }
         if observed.is_none() {
             for producer in producers {
@@ -405,14 +434,16 @@ pub(in crate::registry) fn changed_source_branches(
     specs: &BTreeMap<IngestorName, PartitionSourceSpec>,
     topology: &PartitionTopology,
     existing: Option<&DomainSchedule>,
-) -> Result<BTreeSet<BranchName>, Report<RegistryError>> {
+) -> Result<BTreeSet<ParametrizerName>, Report<RegistryError>> {
     let Some(existing) = existing else {
         return Ok(BTreeSet::new());
     };
     let previous = source_specs(domain, existing)?;
     let mut changed = BTreeSet::new();
-    for branch in topology.branches.keys() {
-        let current = specs.values().filter(|spec| spec.branches.contains(branch));
+    for parametrizer in topology.parametrizers.keys() {
+        let current = specs
+            .values()
+            .filter(|spec| spec.parametrizers.contains(parametrizer));
         let mut basis = BTreeMap::new();
         let mut coherent = true;
         for spec in current {
@@ -433,7 +464,7 @@ pub(in crate::registry) fn changed_source_branches(
         let mut prior = BTreeMap::new();
         for spec in previous
             .values()
-            .filter(|spec| spec.branches.contains(branch))
+            .filter(|spec| spec.parametrizers.contains(parametrizer))
         {
             if let Some(observation) = existing.partition_topology.sources.get(&spec.ingestor) {
                 prior.insert(
@@ -443,7 +474,7 @@ pub(in crate::registry) fn changed_source_branches(
             }
         }
         if basis != prior {
-            changed.insert(branch.clone());
+            changed.insert(parametrizer.clone());
         }
     }
     Ok(changed)
@@ -454,6 +485,16 @@ pub(in crate::registry) fn owns_domain_offsets(ingestor: &nervix_models::CreateI
     matches!(ingestor.input.transport_entity(),
         Some(IngestorEntity::Kafka(KafkaIngestor::Topic(topic)))
         if matches!(topic.offset_mode, KafkaOffsetMode::Domain))
+}
+
+/// A Pulsar reader declared `INSTANCES PER TRANSPORT PARTITION` is dealt the topic's partition
+/// topics whatever branch it constructs, so its topic is observed even without an inherited branch.
+pub(in crate::registry) fn deals_pulsar_partition_topics(
+    ingestor: &nervix_models::CreateIngestor,
+) -> bool {
+    matches!(ingestor.input.transport_entity(),
+        Some(IngestorEntity::Pulsar(PulsarIngestor::Topic(topic)))
+        if topic.instances == nervix_models::IngestorInstances::PerTransportPartition)
 }
 
 /// Source epochs fence an exact observation and reader layout. The layout is already present in
@@ -506,9 +547,9 @@ mod tests {
     use crate::registry::SchedulerMode;
     use crate::registry::{domain_state::DomainState, test_fixtures::*};
 
-    fn models(partitions: BranchPartitions, producers: &[&str]) -> ModelIndex {
+    fn models(partitions: ParametrizerPartitions, producers: &[&str]) -> ModelIndex {
         let mut branch = branch_for_relay("events", "row");
-        let Model::Branch(declaration) = &mut branch else {
+        let Model::Parametrizer(declaration) = &mut branch else {
             unreachable!("the fixture declares a branch")
         };
         declaration.partitions = partitions;
@@ -529,7 +570,7 @@ mod tests {
                 unreachable!("the fixture reads Kafka")
             };
             topic.offset_mode = KafkaOffsetMode::Domain;
-            topic.instances = IngestorInstances::PerPartition;
+            topic.instances = IngestorInstances::PerTransportPartition;
             values.push(Model::Ingestor(source));
         }
         let Model::Emitter(mut output) = emitter("output", "events", "json", "broker") else {
@@ -564,7 +605,7 @@ mod tests {
 
     #[test]
     fn an_unobserved_domain_offset_topic_keeps_its_native_diagnostic_reader() {
-        let models = models(BranchPartitions::Direct(nonzero!(4u16)), &["reader"]);
+        let models = models(ParametrizerPartitions::Direct(nonzero!(4u16)), &["reader"]);
         let specs = source_specs(&named("orders"), &models).assured("the fixture client resolves");
         let decision = decide(
             &models,
@@ -574,16 +615,104 @@ mod tests {
         );
         assert!(decision.topology.suspended.is_empty());
         assert!(decision.topology.sources.is_empty());
-        assert!(decision.topology.branches.is_empty());
+        assert!(decision.topology.parametrizers.is_empty());
+    }
+
+    /// One Pulsar reader of `orders` into a branch Nervix partitions by key.
+    fn pulsar_reader(instances: IngestorInstances) -> ModelIndex {
+        let mut branch = branch_for_relay("events", "row");
+        let Model::Parametrizer(declaration) = &mut branch else {
+            unreachable!("the fixture declares a branch")
+        };
+        declaration.partitions = ParametrizerPartitions::Direct(nonzero!(4u16));
+        let mut source = ingestor_statement("reader", "events", "json", "broker", &["value"]);
+        let IngestorInput::Transport(input) = &mut source.input else {
+            unreachable!("the fixture reads a transport")
+        };
+        input.source =
+            IngestorEntity::Pulsar(PulsarIngestor::Topic(nervix_models::PulsarTopicIngestor {
+                client: named("pulsar_broker"),
+                topic: named("orders"),
+                subscription: nervix_models::PulsarSubscription {
+                    name: named("readers"),
+                    ownership: nervix_models::PulsarSubscriptionOwnership::Provisioned,
+                    kind: nervix_models::PulsarSubscriptionType::Exclusive,
+                },
+                instances,
+                mode: nervix_models::PulsarIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+            }));
+        let client = Model::ClientPulsar(nervix_models::CreateClientPulsar {
+            labels: Default::default(),
+            name: named("pulsar_broker"),
+            mount: None,
+            config: Vec::new(),
+        });
+        [
+            schema("row"),
+            wire_schema("event_wire"),
+            codec("json", "row"),
+            client,
+            branch,
+            materialized_relay("events", "row"),
+            Model::Ingestor(source),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn a_pulsar_reader_dealt_partition_topics_waits_for_its_topic_into_any_branch() {
+        let dealt = pulsar_reader(IngestorInstances::PerTransportPartition);
+        let specs = source_specs(&named("orders"), &dealt).assured("the fixture client resolves");
+        let reader: IngestorName = named("reader");
+        let spec = &specs[&reader];
+        assert!(
+            spec.parametrizers.is_empty(),
+            "the reader builds no inherited branch"
+        );
+        assert!(spec.waits_for_observation());
+
+        let unobserved = decide(
+            &dealt,
+            &specs,
+            &PartitionTopology::default(),
+            &BTreeMap::new(),
+        );
+        assert!(unobserved.topology.suspended.contains(&reader));
+        assert!(unobserved.topology.sources.is_empty());
+
+        let observed = decide(
+            &dealt,
+            &specs,
+            &PartitionTopology::default(),
+            &observations(&specs, &[Some(4)]),
+        );
+        assert!(observed.topology.suspended.is_empty());
+        assert_eq!(
+            observed.topology.sources[&reader].partitions,
+            Some(nervix_models::ExternalPartitionSet::Partitioned(nonzero!(
+                4u32
+            )))
+        );
+        assert!(observed.topology.parametrizers.is_empty());
+
+        let fixed = pulsar_reader(IngestorInstances::ONE);
+        let specs = source_specs(&named("orders"), &fixed).assured("the fixture client resolves");
+        assert!(
+            specs.is_empty(),
+            "a fixed count reads the whole topic, unobserved"
+        );
     }
 
     #[test]
     fn unknown_topology_has_no_fabricated_count_and_incoherent_producers_keep_their_last_layout() {
-        let models = models(BranchPartitions::Inherited, &["first", "second"]);
+        let models = models(ParametrizerPartitions::Inherited, &["first", "second"]);
         let specs = source_specs(&named("orders"), &models).assured("the fixture clients resolve");
         let empty = PartitionTopology::default();
         let unknown = decide(&models, &specs, &empty, &BTreeMap::new());
-        assert!(unknown.topology.branches.is_empty());
+        assert!(unknown.topology.parametrizers.is_empty());
         assert_eq!(unknown.topology.suspended.len(), 2);
         let coherent = decide(
             &models,
@@ -591,7 +720,7 @@ mod tests {
             &empty,
             &observations(&specs, &[Some(12), Some(12)]),
         );
-        let layout = coherent.topology.branches[&branch_name_for_relay("events")];
+        let layout = coherent.topology.parametrizers[&parametrizer_name_for_relay("events")];
         assert_eq!(layout.partitions().count().get(), 12);
         assert!(coherent.topology.suspended.is_empty());
         let mismatch = decide(
@@ -601,7 +730,7 @@ mod tests {
             &observations(&specs, &[Some(16), Some(12)]),
         );
         assert_eq!(
-            mismatch.topology.branches[&branch_name_for_relay("events")],
+            mismatch.topology.parametrizers[&parametrizer_name_for_relay("events")],
             layout
         );
         assert_eq!(mismatch.topology.suspended.len(), 2);
@@ -617,7 +746,7 @@ mod tests {
     #[test]
     fn grouped_observations_publish_epoch_and_inverse_instance_placement_together() {
         let models = models(
-            BranchPartitions::InheritedGrouped(
+            ParametrizerPartitions::InheritedGrouped(
                 std::num::NonZeroU16::new(4).assured("four is positive"),
             ),
             &["input"],
@@ -635,7 +764,7 @@ mod tests {
         )
         .topology;
         let nodes = [named("node-1"), named("node-2"), named("node-3")];
-        let capabilities = crate::registry::uniform_capabilities(&nodes);
+        let capabilities = crate::registry::uniform_records(&nodes);
         let schedule = graph
             .schedule_for_domain_with_topology(
                 crate::registry::DomainSchedulingInputs {
@@ -643,7 +772,7 @@ mod tests {
                     cluster_nodes: &nodes,
                     replica_count: 0,
                     existing: None,
-                    capabilities: &capabilities,
+                    records: &capabilities,
                 },
                 #[cfg(feature = "testing")]
                 SchedulerMode::Sticky,
@@ -694,7 +823,7 @@ mod tests {
                     cluster_nodes: &nodes,
                     replica_count: 0,
                     existing: Some(&schedule),
-                    capabilities: &capabilities,
+                    records: &capabilities,
                 },
                 #[cfg(feature = "testing")]
                 SchedulerMode::Sticky,
@@ -702,11 +831,17 @@ mod tests {
                 None,
             )
             .assured("growth keeps the group count");
-        let branch = branch_name_for_relay("events");
-        assert_eq!(next.partition_epochs[&branch].number.get(), 2);
-        assert_eq!(next.partition_epochs[&branch].partitions.count().get(), 4);
+        let parametrizer = parametrizer_name_for_relay("events");
+        assert_eq!(next.partition_epochs[&parametrizer].number.get(), 2);
         assert_eq!(
-            next.partition_topology.branches[&branch]
+            next.partition_epochs[&parametrizer]
+                .partitions
+                .count()
+                .get(),
+            4
+        );
+        assert_eq!(
+            next.partition_topology.parametrizers[&parametrizer]
                 .source_count()
                 .get(),
             16
@@ -724,7 +859,7 @@ mod tests {
     #[test]
     fn groups_above_the_source_count_are_idle() {
         let models = models(
-            BranchPartitions::InheritedGrouped(
+            ParametrizerPartitions::InheritedGrouped(
                 std::num::NonZeroU16::new(16).assured("sixteen is positive"),
             ),
             &["input"],
@@ -736,7 +871,7 @@ mod tests {
             &PartitionTopology::default(),
             &observations(&specs, &[Some(12)]),
         );
-        let layout = decision.topology.branches[&branch_name_for_relay("events")];
+        let layout = decision.topology.parametrizers[&parametrizer_name_for_relay("events")];
         assert_eq!(
             layout.idle_partitions().collect::<Vec<_>>(),
             vec![12, 13, 14, 15]

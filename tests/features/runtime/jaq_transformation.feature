@@ -16,7 +16,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -24,7 +24,7 @@ Feature: JAQ transformation
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -69,7 +69,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE KAFKA CLIENT kafka_main
         CONFIG {
@@ -124,7 +124,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
         CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
@@ -178,7 +178,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_redis_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
         CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
@@ -234,7 +234,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_main
         CONFIG {
@@ -288,7 +288,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_nats_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_nats_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
         CREATE NATS CLIENT nats_main
         CONFIG {
@@ -340,7 +340,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_zeromq_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_zeromq_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
         CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
@@ -395,7 +395,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_sqs_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
         CREATE SQS CLIENT sqs_main
         CONFIG {
@@ -450,7 +450,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '.payload';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE VHOST edge ws-{{test_id}}.example.com;
         CREATE WEBSOCKETS ENDPOINT ws_notifications_endpoint
@@ -458,7 +458,7 @@ Feature: JAQ transformation
         PATH '/ws';
         CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_ws_notifications
@@ -503,7 +503,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE HTTP CLIENT http_main
         CONFIG {
@@ -553,7 +553,7 @@ Feature: JAQ transformation
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id, payload: "aligned"}';
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
         CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
@@ -603,7 +603,7 @@ Feature: JAQ transformation
         TO SCHEMA sample
         WITH JAQ TRANSFORMATIONS ON INGESTION '{source: .metric.source, value: (.value * 2), timestamp}';
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
-        CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
         CREATE PROMETHEUS CLIENT prom_main
         CONFIG {

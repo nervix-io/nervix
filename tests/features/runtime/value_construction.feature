@@ -35,7 +35,7 @@ Feature: Route-local value construction
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING source_event_codec
         TO source_events
           INHERIT ALL
           UNBRANCHED
@@ -113,7 +113,7 @@ Feature: Route-local value construction
       CREATE HTTP ENDPOINT header_calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR header_calculation_ingestor
         FROM header_calculation_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING header_calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING header_calculation_codec
         TO header_calculation_results
           SET id = input.id,
               result = input.numerator / input.denominator
@@ -188,7 +188,7 @@ Feature: Route-local value construction
       CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING calculation_codec
         TO calculations
           INHERIT ALL
           UNBRANCHED
@@ -206,7 +206,7 @@ Feature: Route-local value construction
           ON MESSAGE ERROR SEND TO calculation_errors
           SET input_id = input.id,
               error_reference = error.reference,
-              error_code = upper(error.code),
+              error_code = upper(error.class),
               error_message = error.message,
               operation = error.operation,
               operation_index = error.operation_index,

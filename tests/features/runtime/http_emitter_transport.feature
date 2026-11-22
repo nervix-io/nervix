@@ -31,7 +31,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
@@ -93,7 +93,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -152,7 +152,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api MOUNT receiver_tls VERSION 1 CONFIG {
@@ -207,7 +207,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -268,11 +268,11 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT ingress_a ON edge PATH '/a';
       CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR from_a FROM ingress_a MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO source_a INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR from_b FROM ingress_b MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO source_b INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -332,7 +332,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -395,7 +395,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -456,7 +456,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -531,7 +531,7 @@ Feature: HTTP REQUEST emitter transport failures and TLS identity
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {

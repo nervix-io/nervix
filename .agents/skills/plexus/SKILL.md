@@ -117,8 +117,8 @@ contract. Refer users to those chapters for cursor edits, transaction-aware cand
 relay candidates narrowed to what the statement can accept, and completion status messages, and
 completing multi-word creation heads. For connector expression
 completion, including filters, HTTP request expressions, ALTER constructions, metadata fields and
-entity-specific header functions, follow
-the CLI's Completion section.
+entity-specific header functions, and for the collection aggregates a window route's bound admits,
+follow the CLI's Completion section.
 For live subscription, clock and notice output while editing, and terminal omission notices,
 follow the CLI's [Asynchronous Output](../../../docs/src/client-tools-cli.md#asynchronous-output)
 section.
@@ -149,8 +149,13 @@ For cluster continuity and public identity inspection, read
 For node tags and detected properties, read [Selecting Nodes](../../../docs/src/placement.md#selecting-nodes)
 and [Node Selectors](../../../docs/src/filter-map-functions.md#node-selectors). Use `SHOW NODES WHERE ...`
 to preview the selector against the committed node records and `FORMAT JSON` for scripts.
+To keep work on chosen cluster nodes, read [Node Rules](../../../docs/src/placement.md#node-rules):
+`CREATE PLACEMENT <name> FOR <runtime_node> [, ...] | DOMAIN WIDE` with `REQUIRE NODES WHERE`,
+`PREFER NODES WHERE` or `ANY NODE`. Preview the selector with `SHOW NODES WHERE` first. A running
+domain refuses a rule an executing unit would break, and a stopped domain's `START` waits while a
+unit has no admitted node, so tell the user which node must carry the tag.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
-effective policy, credential handling and quota usage, read
+effective policy, capabilities, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
 For grace, replacement allowances and over-limit outcomes, also read
@@ -185,7 +190,7 @@ The web console's visual Create forms also cover internal schemas, declared JSON
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
 reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
-domain-wide and corridor placement rules, and session subscriptions; use the same web-console
+domain-wide, corridor and node placement rules, and session subscriptions; use the same web-console
 chapter for their typed fields, resource versions, tensor shapes, guest limits, program editors,
 reference lookup, placement members, contextual create actions, and transaction behavior, and its
 Creation Coverage section for which form creates each statement.
@@ -198,9 +203,9 @@ For the rows a reorderer holds or a correlator's pending records, read
 same clauses and envelope. Read the CLI chapter for one-shot JSON output; programs consume
 `CommandOutcome.state` directly.
 
-For domain entity metadata, read [Entity Labels](../../../docs/src/entity-labels.md) before
-choosing label targets, limits, transaction handling or inspection. Keep descriptive labels
-separate from physical node tags and authorization.
+For Model, domain, logical resource and user metadata, read [Entity Labels](../../../docs/src/entity-labels.md)
+for supported targets, limits, staged resource and Model reads, and administrative admission.
+Physical node tags and authorization have their own contracts.
 
 ## Gather the configuration contract
 
@@ -215,12 +220,16 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   LATEST creation position, the subscription's TYPE, endpoints, delivery/ACK expectations,
   emitter publishing mode, confirmation window and timeout where applicable, retry pacing,
   ordering, and offsets.
-- Isolation: unbranched or a concrete branch key, branch TTL, optional instance limit, and the
-  branch's partition count when one relay owner per branch would funnel too much traffic (see
+- Isolation: unbranched or a concrete branch key, the parametrizer's branch TTL, optional instance
+  limit, and partition count when one relay owner per branch would funnel too much traffic (see
   [Relay Partitions](https://docs.nervix.io/relay.html#relay-partitions)). For external partition
   inheritance and producer eligibility, read [Inherited Partitions](../../../docs/src/partitioning.md).
-  Check `DESCRIBE BRANCH` before another recount. When one emitter would funnel a partitioned branch back into one
-  node, decide its `INSTANCES` (a count or `PER PARTITION`); read
+  Check `DESCRIBE PARAMETRIZER` before another recount. Decide an ingestor's `INSTANCES` too: a count of
+  competing readers, or, on Kafka `OFFSET BY DOMAIN` and Pulsar only, `PER TRANSPORT PARTITION`,
+  which deals the topic's partitions among one reader per branch partition. NATS, RabbitMQ, SQS,
+  MQTT and Redis have no transport partitions, so they take a count; read
+  [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing). When one emitter would funnel
+  a partitioned branch back into one node, decide its `INSTANCES` (a count or `PER PARTITION`); read
   [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
   ordering it keeps, the entities that run one instance, and placement.
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
@@ -232,13 +241,16 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   `FLUSH`, and one message at a time a refused row fails alone through `ON MESSAGE ERROR`.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
   and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
-  branch isolation or recovery guarantees. Check the snapshot-section bound and branch retention;
-  distinguish a completed graceful stop from recovery of the last periodic snapshot.
+  branch isolation or recovery guarantees, and `Inferencer State And Recovery` → `Guarantees And
+  Limits` before promising what a restart, an owner loss or a handoff keeps. Check the
+  snapshot-section bound and branch retention; distinguish a completed graceful stop from recovery
+  of the last periodic snapshot.
   Use `DESCRIBE INFERENCER <name>;` to check the pinned model, tensor declarations, static bytes
   per branch and per-unit state progress. Read `Metrics And Observability` → `Inferencer state`
   before interpreting state bytes, initialization counters or branch-local revision summaries.
-- Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
-  whether ordinary scheduler heuristics should remain neutral.
+- Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence,
+  whether ordinary scheduler heuristics should remain neutral, and the cluster nodes, by tag or
+  detected property, that runtime nodes must or should run on.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
   subscriptions, each ingestor's declared quiesce behavior, and whether an existing schema
   must be evolved atomically with its dependents.
@@ -344,7 +356,7 @@ wall/logical mapping and time rate verbatim and projects downtime under a newly 
 authority. The default restore leaves the domain stopped; a normal `START` advances the generation
 and clears materialized state while preserving compatible WASM state, source offsets, branch
 lifecycle, deduplicator keys, windows and inferencer tensors. For model-carried state and either
-`WITHOUT STATE` option, read `Backup And Restore` → `Archive Sections` and `Runtime Nodes` →
+`WITHOUT STATE` option, read `Backup And Restore` → `Archive Format` and `Runtime Nodes` →
 `Inferencer` → `State tensors` before promising recovery. `RESUME` precedes the user policy and
 `DRY RUN`; the dry run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
@@ -510,7 +522,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   admission against the newest 256 reached logical centers with inclusive `SKEW`, independently
   of tick notification delivery. Never scale input timestamps by `TIME RATE` or admit against
   an unreached future center. Rejected or missing timestamps follow the route's message-error
-  policy per row with code `validation` and operation `admit`.
+  policy per row with class `validation` and operation `admit`.
 - Treat HTTP `EVERY`, Prometheus `EVERY`, and generator `EACH` as domain-clock cadence. HTTP and
   generators have an immediate first occurrence; Prometheus first becomes due after one interval.
   Later occurrences stay anchored, coalesce missed periods into one newest-due execution, and
@@ -674,7 +686,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   untrusted custom processing in WASM.
 - Include Roto `test` blocks with every agent-generated UDF. Creation runs those tests and rejects
   the UDF without persisting it when any test rejects.
-- Select `BRANCHED BY <branch>` or `UNBRANCHED` explicitly. Normal processors preserve their named
+- Select `BRANCHED BY <parametrizer>` or `UNBRANCHED` explicitly. Normal processors preserve their named
   branch. Use a reingestor to enter a parametrization distinct from every input relay's or to
   send records unbranched. See [Runtime Nodes](../../../docs/src/processors.md#reingestor).
 - Treat placement rules as path-gated overlays, not connectivity-independent groups. Use
@@ -931,9 +943,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   or relocation only while the domain `START` generation and endpoint contract still match; it
   never resends a batch merely because its outcome is missing.
 - End every transport ingestor body with an explicit declared `ON QUIESCE` body
-  immediately before `DECODE USING`. Include positive `MAX SIZE` and, outside `HTTP ENDPOINT` and
-  `WEBSOCKETS ENDPOINT`, an explicit `ON OVERFLOW DROP OLDEST|DROP NEWEST` for `BUFFER`; include
-  `RETRY AFTER` for endpoint `REJECT`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
+  immediately before `DECODE USING`. Write a positive `MAX SIZE` with `BUFFER`. An `HTTP ENDPOINT`
+  in `MODE NO ACK` can use `RESPOND IMMEDIATE` or `RESPOND AFTER RESUME`. A
+  `WEBSOCKETS ENDPOINT` in `MODE NO ACK` uses `RESPOND IMMEDIATE`. A buffered endpoint in `MODE ACK`
+  uses `RESPOND AFTER RESUME`. Either endpoint can use `REJECT RETRY AFTER <duration>` in
+  either mode. Connected sources write `ON OVERFLOW DROP OLDEST|DROP NEWEST` after the buffer size.
+  Use the same bodies in `SET QUIESCE`. Write every `MQTT TOPIC` ingestor's `SESSION CLEAN` or
   `SESSION PERSISTENT` and its `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, and use its `ACK` modes
   and `SUSPEND` only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. Write every `MQTT TOPIC`
   emitter's `QOS 0`, `QOS 1` or `QOS 2` before `MODE`, with `NO ACK` only at `QOS 0` and `ACK` only
@@ -957,7 +972,7 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - To intentionally replace an existing WASM processor's guest state, use
   `RESET WASM PROCESSOR <processor> STATE FOR UNBRANCHED|ALL BRANCHES|BRANCH KEY { <field> = <literal>, ... };`.
   It acts on the session's active domain, so `USE` that domain first.
-  Choose the explicit scope that matches its declared branch, and supply every branch-key field
+  Choose the explicit scope that matches its parametrizer, and supply every branch-key field
   with an exact typed literal for one selected branch. The processor must be running and the
   selected branch must already exist. This command loses the selected computation state; a fresh
   command reference is a new reset, while retrying the same reference returns its original outcome.
@@ -967,13 +982,14 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
 - To inspect WASM guest-state progress, use
   `SHOW WASM PROCESSOR <processor> STATE [FOR ...] [LIMIT <n> [AFTER '<continuation>']] [FORMAT TEXT|JSON];`.
   Read each unit's reset phase, generation and readiness beside every selected branch's checkpoint
-  revision, stage and replica counts; follow a returned continuation with `AFTER` to page the rest.
+  revision, stage and replica counts and the guest's description of that checkpoint, whose values
+  are always withheld; follow a returned continuation with `AFTER` to page the rest.
   `DESCRIBE WASM PROCESSOR <processor>;` prints only the binding and per-unit summary counts. See
   `Runtime Nodes` and `WASM Processor Guests` for the meaning of each stage.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.
-- Declare the error relay with the input route's exact named branch, or unbranched for an
+- Declare the error relay with the input route's exact parametrizer, or unbranched for an
   unbranched input. See `Runtime Nodes` for the branch and error-record contract.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
@@ -1011,7 +1027,9 @@ reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification s
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
-coverage, hop classes, effective policies, exact unit groups, and domain-wide scope. Use
+coverage, hop classes, effective policies, exact unit groups, and domain-wide scope. For a node
+rule they also show the matching nodes, each unit's satisfaction and the units violating or waiting,
+and `SHOW CLUSTER STATUS;` marks them `violates=` or `waiting_for=`. Use
 `DESCRIBE RELOCATION ...;` with the clauses of a planned `RELOCATE` to inspect the unit it would
 move, its quiesce level, the relays its hold would gate, and the preferences it would leave
 unsatisfied.

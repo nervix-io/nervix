@@ -44,7 +44,7 @@ Feature: Numeric classification, math and bit functions
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_batch_codec
         TO readings
           INHERIT ALL
           UNBRANCHED
@@ -135,7 +135,7 @@ Feature: Numeric classification, math and bit functions
       CREATE HTTP ENDPOINT register_ingress ON edge PATH '/registers';
       CREATE HTTP ENDPOINT INGESTOR register_ingestor
         FROM register_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING register_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING register_batch_codec
         TO register_samples
           INHERIT ALL
           UNBRANCHED

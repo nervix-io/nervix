@@ -38,7 +38,7 @@ final class Native {
     static native void fieldsElement(long handle, int kind, long length);
     static native long fieldsSchema(long handle);
     static native Object[] schemaFields(long handle, int part);
-    static native String schemaBranch(long handle);
+    static native String schemaParametrizer(long handle);
     static native long builderNew(long schema, int rows);
     static native void builderStates(long handle, int column, byte[] states);
     static native void builderOffsets(long handle, int column, int level, long[] offsets);
@@ -135,6 +135,7 @@ final class Native {
     static native long execute(long session, long execution, long token);
     static native long nextEvent(long session, long token);
     static native long nextClockEvent(long session, long token);
+    static native Object nextNotice(long session, long token);
     static native long domainClock(long session, String domain);
     static native int outcomeDisposition(long handle);
     static native int outcomeUploadFailure(long handle);

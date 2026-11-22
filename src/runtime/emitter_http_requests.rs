@@ -72,7 +72,7 @@ impl HttpRequestBody {
                     Err(error) => {
                         rejected.push(RejectedEmitterRecord::message(
                             position,
-                            EmitterRejectionCode::Encode,
+                            RejectedErrorClass::Codec,
                             format!(
                                 "emitter '{}' failed to encode record: {error:#}",
                                 context.emitter.as_str()

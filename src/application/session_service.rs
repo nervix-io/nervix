@@ -25,8 +25,8 @@ use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Propose
 use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CodecDirection, CommandExecutionReference, DomainName, Model, ModelIndex,
-    ModelName, PlacementPolicy, RelayQuestion, RequestedResourceVersion, ResourceId, ResourceName,
-    ResourceVersionStatus, SemanticReference, Statement, TransactionPosition,
+    ModelName, PlacementPolicy, RelayQuestion, ReportedError, RequestedResourceVersion, ResourceId,
+    ResourceName, ResourceVersionStatus, SemanticReference, Statement, TransactionPosition,
 };
 use nervix_plexus::{
     Token, Word,
@@ -39,7 +39,7 @@ use nervix_primitives::{
     sync::{Arc, CancellationToken, Mutex as AsyncMutex, StdArc, broadcast},
 };
 use nervix_recovery::Discarded;
-use nervix_vm::program::FunctionName;
+use nervix_vm::program::{FunctionName, WindowAggregateFunction};
 use tracing::warn;
 
 use super::{
@@ -82,9 +82,7 @@ use crate::{
 
 mod runtime_application;
 
-pub(in crate::application) use runtime_application::{
-    ApplicationBound, RuntimeStateApplication, apply_current_cluster_runtime_state,
-};
+pub(in crate::application) use runtime_application::ApplicationBound;
 
 /// The session event bus, and the one way a control-plane failure or a cluster transition reaches
 /// the sessions attached to this node.
@@ -110,31 +108,63 @@ impl SessionEvents {
     /// failure of any node, which a peer's runtime fans out here and traces only at `debug`.
     pub(in crate::application) fn report_error(&self, kind: NoticeKind, message: String) {
         warn!(error = %message, ?kind, "server error reported to sessions");
-        self.publish(NoticeLevel::Error, kind, message);
+        self.publish(NoticeLevel::Error, kind, message, None);
+    }
+
+    /// Report a runtime failure a peer recovered from and fanned out here: its text and, when it
+    /// reports an error of a graph node, the class and producing node the notice carries beside it.
+    pub(in crate::application) fn report_runtime_error(
+        &self,
+        message: String,
+        error: Option<ReportedError>,
+    ) {
+        match &error {
+            Some(reported) => warn!(
+                error = %message,
+                kind = ?NoticeKind::Runtime,
+                error_class = reported.class.as_str(),
+                node_kind = reported.node.kind.as_str(),
+                node = reported.node.identifier.as_str(),
+                "server error reported to sessions"
+            ),
+            None => warn!(
+                error = %message,
+                kind = ?NoticeKind::Runtime,
+                "server error reported to sessions"
+            ),
+        }
+        self.publish(NoticeLevel::Error, NoticeKind::Runtime, message, error);
     }
 
     /// Offer, as `kind`, an event its owner already recorded in its own `info` line (a live-set
     /// change, a consensus transition, an installed parameter revision); it logs nothing itself.
     pub(in crate::application) fn relay_info(&self, kind: NoticeKind, message: String) {
-        self.publish(NoticeLevel::Info, kind, message);
+        self.publish(NoticeLevel::Info, kind, message, None);
     }
 
     pub(in crate::application) fn relay_warning(&self, kind: NoticeKind, message: String) {
-        self.publish(NoticeLevel::Warning, kind, message);
+        self.publish(NoticeLevel::Warning, kind, message, None);
     }
 
     /// Offer, as `kind` at `Error` level, a condition its owner already recorded in its own log
     /// line, such as the licensing stop gate closing; unlike `report_error`, it reports no failure
     /// this node recovered from and logs nothing itself.
     pub(in crate::application) fn relay_error(&self, kind: NoticeKind, message: String) {
-        self.publish(NoticeLevel::Error, kind, message);
+        self.publish(NoticeLevel::Error, kind, message, None);
     }
 
-    fn publish(&self, level: NoticeLevel, kind: NoticeKind, message: String) {
+    fn publish(
+        &self,
+        level: NoticeLevel,
+        kind: NoticeKind,
+        message: String,
+        error: Option<ReportedError>,
+    ) {
         let notice = ServerNotice {
             level,
             kind,
             message,
+            error,
         };
         self.sender
             .send(notice)
@@ -579,12 +609,17 @@ impl CompletionSnapshot<'_> {
                     {
                         names.push(FunctionName::WriteHeader.as_str().to_string());
                     }
+                    BuiltinFunctionScope::WindowRoute(route) => {
+                        names.extend(WindowAggregateFunction::route_completion_names(&route));
+                    }
                     BuiltinFunctionScope::IngestorEntity(_)
                     | BuiltinFunctionScope::EmitterInvocation(_) => {}
                 }
+                // An aggregate is spelled as its declaration spells it, in capitals, so the name is
+                // compared with the lower-case word in ASCII lower case too.
                 names
                     .into_iter()
-                    .filter(|name| name.starts_with(&prefix))
+                    .filter(|name| name.to_ascii_lowercase().starts_with(&prefix))
                     .collect()
             }
             SemanticReference::Resource => {
@@ -965,7 +1000,7 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         ChoiceTarget::DomainPace
         | ChoiceTarget::PlacementPolicy
         | ChoiceTarget::Schema
-        | ChoiceTarget::Branch
+        | ChoiceTarget::Parametrizer
         | ChoiceTarget::Relay
         | ChoiceTarget::RelayField => {
             return Err(ChoiceStatus::MissingContext);
@@ -1232,18 +1267,7 @@ impl SessionServiceImpl {
         &self,
         bound: ApplicationBound,
     ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
-        let application = RuntimeStateApplication {
-            runtime: &self.inner.runtime,
-            https_certificates: &self.inner.https_certificates,
-            cluster: &self.inner.cluster,
-            interconnect: &self.inner.interconnect,
-            registry: &self.inner.registry,
-            consensus: &self.inner.consensus,
-            progress: &self.inner.application_progress,
-            admission: &self.inner.runtime_admission,
-            shutdown: &self.inner.drain_support_shutdown,
-        };
-        apply_current_cluster_runtime_state(application, bound).await
+        self.apply_admitted_runtime_state(bound).await
     }
 
     /// Report a control-plane failure this node recovered from to the sessions attached to it.
@@ -1266,7 +1290,7 @@ impl SessionServiceImpl {
                 choices_for(&request).map(|choices| (choices, None))
             }
             ChoiceTarget::Schema
-            | ChoiceTarget::Branch
+            | ChoiceTarget::Parametrizer
             | ChoiceTarget::Relay
             | ChoiceTarget::RelayField
             | ChoiceTarget::WireJsonSchema
@@ -1914,6 +1938,8 @@ pub(in crate::application) fn conflicting_reference(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    #[cfg(feature = "testing")]
+    mod abandoned_installation;
     mod application_deadline;
     mod completion_context;
     mod page_continuation;
@@ -2194,8 +2220,8 @@ mod tests {
         assert_eq!(response.diagnostics[0].span, Some(42..47));
 
         let query = "CREATE HTTP ENDPOINT INGESTOR logs FROM socket MODE NO ACK ON QUIESCE BUFFER \
-                     MAX SIZE 1MiB DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH \
-                     IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+                     MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING lines TO events INHERIT ALL \
+                     UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
         let err = error_stack::Report::new(RegistryError::IngestorEndpointTypeMismatch {
             domain: domain.clone(),
             ingestor: ingestor.clone(),
@@ -2446,7 +2472,7 @@ mod tests {
             &service,
             &subscriptions,
             "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE BUFFER MAX \
-             SIZE 1MiB DECODE USING codec TO outgoing SET value = read_",
+             SIZE 1MiB RESPOND IMMEDIATE DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert_eq!(endpoint, vec!["read_header", "read_headers"]);

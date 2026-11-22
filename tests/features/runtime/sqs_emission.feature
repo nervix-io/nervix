@@ -21,7 +21,7 @@ Feature: SQS emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -136,7 +136,7 @@ Feature: SQS emission
       INVOKE write_header(input.header_name, "test")
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           source_user_id = input.user_id
       ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
@@ -222,7 +222,7 @@ Feature: SQS emission
       INHERIT ALL
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           source_user_id = input.user_id
       ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
@@ -275,7 +275,7 @@ Feature: SQS emission
       FROM WIRE SCHEMA order_wire
       TO SCHEMA order_event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
       CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
@@ -364,7 +364,7 @@ Feature: SQS emission
       FROM WIRE SCHEMA order_wire
       TO SCHEMA order_event;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
       CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
@@ -494,7 +494,7 @@ Feature: SQS emission
       ON MESSAGE ERROR SEND TO rejected_orders
         SET tenant = input.tenant,
             sequence = input.sequence,
-            error_code = error.code,
+            error_code = error.class,
             error_message = error.message,
             operation = error.operation
       ON GENERAL ERROR LOG;
@@ -521,8 +521,8 @@ Feature: SQS emission
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      "tenant":"alpha" | "sequence":2 | "error_code":"external" | "operation":"publish" | ordering group expression failed with division_by_zero
-      "tenant":"beta" | "sequence":2 | "error_code":"external" | "operation":"publish" | ordering group expression failed with division_by_zero
+      "tenant":"alpha" | "sequence":2 | "error_code":"evaluation" | "operation":"publish" | ordering group expression failed with division_by_zero
+      "tenant":"beta" | "sequence":2 | "error_code":"evaluation" | "operation":"publish" | ordering group expression failed with division_by_zero
       """
 
     Examples:

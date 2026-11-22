@@ -5,12 +5,13 @@
 //! constructors, so a name, a clock period or a time rate read from an archive is exactly as valid
 //! as one written by a statement.
 
-use std::num::NonZeroU64;
+use std::{collections::BTreeSet, num::NonZeroU64};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainPace,
-    DomainStartPoint, DomainStatus, DomainTimeRate, ResourceName, Timestamp, UserName,
+    DomainStartPoint, DomainStatus, DomainTimeRate, EntityLabelPolicy, EntityLabels, ResourceName,
+    Timestamp, UserName,
 };
 
 use crate::{
@@ -24,9 +25,9 @@ use crate::{
 };
 
 /// The users record's format version.
-const USERS_VERSION: u16 = 2;
+const USERS_VERSION: u16 = 3;
 /// The domain record's format version.
-const DOMAIN_VERSION: u16 = 2;
+const DOMAIN_VERSION: u16 = 3;
 /// The resource version record's format version.
 const RESOURCE_VERSION_VERSION: u16 = 1;
 
@@ -34,6 +35,7 @@ const RESOURCE_VERSION_VERSION: u16 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsersRecord {
     pub users: Vec<UserRecord>,
+    pub label_policy: EntityLabelPolicy,
 }
 
 /// One user and its complete typed credential. The password itself is never stored.
@@ -41,12 +43,14 @@ pub struct UsersRecord {
 pub struct UserRecord {
     pub name: UserName,
     pub password_credential: nervix_models::PasswordCredential,
+    pub labels: EntityLabels,
 }
 
 /// A domain's lifecycle, clock and resource catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainRecord {
     pub domain: DomainName,
+    pub labels: EntityLabels,
     pub pace: DomainPace,
     pub status: DomainStatus,
     /// How many times the domain has been started.
@@ -69,6 +73,7 @@ pub struct DomainRecord {
 pub struct DeclaredResource {
     pub resource: ResourceName,
     pub next_version: NonZeroU64,
+    pub labels: EntityLabels,
 }
 
 /// The catalog metadata of one resource version.
@@ -114,12 +119,14 @@ impl ArchiveRecord for UsersRecord {
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let wire = UsersWire {
+            label_policy: self.label_policy,
             users: self
                 .users
                 .iter()
                 .map(|user| UserWire {
                     name: user.name.as_str().to_string(),
                     password_credential: user.password_credential.clone(),
+                    labels: user.labels.clone(),
                 })
                 .collect(),
         };
@@ -129,15 +136,26 @@ impl ArchiveRecord for UsersRecord {
     fn decode(path: &str, bytes: &[u8]) -> Result<Self, Report<ArchiveReadError>> {
         let wire: UsersWire = decode_record(path, Self::KIND, Self::VERSION, bytes)?;
         let mut users = Vec::with_capacity(wire.users.len());
+        let mut names = BTreeSet::new();
         for user in wire.users {
             let name = UserName::parse(&user.name)
                 .map_err(|error| error.change_context(invalid_value(path, "user name")))?;
+            if !names.insert(name.clone()) {
+                return Err(Report::new(invalid_value(path, "duplicate user name")));
+            }
+            user.labels
+                .validate(&wire.label_policy.limits)
+                .change_context_lazy(|| invalid_value(path, "user labels"))?;
             users.push(UserRecord {
                 name,
                 password_credential: user.password_credential,
+                labels: user.labels,
             });
         }
-        Ok(Self { users })
+        Ok(Self {
+            users,
+            label_policy: wire.label_policy,
+        })
     }
 }
 
@@ -183,6 +201,7 @@ impl ArchiveRecord for DomainRecord {
         });
         let wire = DomainWire {
             domain: self.domain.as_str().to_string(),
+            labels: self.labels.clone(),
             pace,
             status,
             start_version: self.start_version,
@@ -195,6 +214,7 @@ impl ArchiveRecord for DomainRecord {
                 .map(|declared| DeclaredResourceWire {
                     resource: declared.resource.as_str().to_string(),
                     next_version: declared.next_version.get(),
+                    labels: declared.labels.clone(),
                 })
                 .collect(),
         };
@@ -247,19 +267,25 @@ impl ArchiveRecord for DomainRecord {
             None => None,
         };
         let mut resources = Vec::with_capacity(wire.resources.len());
+        let mut names = BTreeSet::new();
         for declared in wire.resources {
             let resource = ResourceName::parse(&declared.resource)
                 .map_err(|error| error.change_context(invalid_value(path, "resource name")))?;
+            if !names.insert(resource.clone()) {
+                return Err(Report::new(invalid_value(path, "duplicate resource name")));
+            }
             let Some(next_version) = NonZeroU64::new(declared.next_version) else {
                 return Err(Report::new(invalid_value(path, "next resource version")));
             };
             resources.push(DeclaredResource {
                 resource,
                 next_version,
+                labels: declared.labels,
             });
         }
         Ok(Self {
             domain,
+            labels: wire.labels,
             pace,
             status,
             start_version: wire.start_version,
@@ -270,6 +296,25 @@ impl ArchiveRecord for DomainRecord {
                 .map(Timestamp::from_unix_nanos),
             resources,
         })
+    }
+}
+
+impl DomainRecord {
+    pub(crate) fn validate_labels(
+        &self,
+        path: &str,
+        policy: EntityLabelPolicy,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        self.labels
+            .validate(&policy.limits)
+            .change_context_lazy(|| invalid_value(path, "domain labels"))?;
+        for resource in &self.resources {
+            resource
+                .labels
+                .validate(&policy.limits)
+                .change_context_lazy(|| invalid_value(path, "resource labels"))?;
+        }
+        Ok(())
     }
 }
 

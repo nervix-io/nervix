@@ -405,7 +405,7 @@ fn WireFieldEditor(signals: CreateSignals, format: WireFormat, index: usize) -> 
 }
 
 #[component]
-pub(super) fn BranchEditor(
+pub(super) fn ParametrizerEditor(
     signals: CreateSignals,
     name_input: NodeRef<leptos::html::Input>,
     request_tx: RwSignal<Option<RequestSender>>,
@@ -413,76 +413,76 @@ pub(super) fn BranchEditor(
 ) -> impl IntoView {
     view! {
         <label class="create-field">
-            <span>"Branch name"</span>
+            <span>"Parametrizer name"</span>
             <input node_ref=name_input class="create-name" type="text" autocomplete="off"
-                prop:value=move || signals.structured.get().branch.name
+                prop:value=move || signals.structured.get().parametrizer.name
                 disabled=move || signals.progress.get().is_pending()
                 on:input=move |event| {
                     let name = event_target_value(&event);
-                    signals.structured.update(|drafts| drafts.branch.name = name);
+                    signals.structured.update(|drafts| drafts.parametrizer.name = name);
                     signals.edit();
                 } />
         </label>
         <ChoiceGroup class_name="create-schema-ref" label="Key schema"
             control=ChoiceControl::BranchSchema signals=signals request_tx=request_tx
             session_generation=session_generation />
-        <Show when=move || signals.structured.get().branch.schema.is_some() fallback=|| ()>
+        <Show when=move || signals.structured.get().parametrizer.schema.is_some() fallback=|| ()>
             <p class="create-selected-schema">{move || {
-                let branch = signals.structured.get().branch;
-                match branch.schema {
+                let parametrizer = signals.structured.get().parametrizer;
+                match parametrizer.schema {
                     Some(schema) => format!("Selected schema: {}", schema.name()),
                     None => String::new(),
                 }
             }}</p>
         </Show>
         <Show when=move || {
-            let branch = signals.structured.get().branch;
-            branch.schema.is_some_and(|schema| !schema.is_current())
+            let parametrizer = signals.structured.get().parametrizer;
+            parametrizer.schema.is_some_and(|schema| !schema.is_current())
         } fallback=|| ()>
             <p class="create-reference-invalid" role="alert">"The selected schema's domain changed. Select a schema again."</p>
         </Show>
         <label class="create-field">
             <span>"TTL"</span>
             <input class="create-ttl" type="text" autocomplete="off"
-                prop:value=move || signals.structured.get().branch.ttl
+                prop:value=move || signals.structured.get().parametrizer.ttl
                 disabled=move || signals.progress.get().is_pending()
                 on:input=move |event| {
                     let ttl = event_target_value(&event);
-                    signals.structured.update(|drafts| drafts.branch.ttl = ttl);
+                    signals.structured.update(|drafts| drafts.parametrizer.ttl = ttl);
                     signals.edit();
                 } />
         </label>
         <label class="create-field">
             <span>"Partitions"</span>
             <input class="create-partitions" type="number" min="1" max="65535"
-                prop:value=move || signals.structured.get().branch.partitions
+                prop:value=move || signals.structured.get().parametrizer.partitions
                 disabled=move || signals.progress.get().is_pending()
                 on:input=move |event| {
                     let partitions = event_target_value(&event);
-                    signals.structured.update(|drafts| drafts.branch.partitions = partitions);
+                    signals.structured.update(|drafts| drafts.parametrizer.partitions = partitions);
                     signals.edit();
                 } />
         </label>
         <label class="create-check">
             <input class="create-limit-instances" type="checkbox"
-                prop:checked=move || signals.structured.get().branch.limit_instances
+                prop:checked=move || signals.structured.get().parametrizer.limit_instances
                 disabled=move || signals.progress.get().is_pending()
                 on:change=move |event| {
                     let checked = event_target_checked(&event);
-                    signals.structured.update(|drafts| drafts.branch.limit_instances = checked);
+                    signals.structured.update(|drafts| drafts.parametrizer.limit_instances = checked);
                     signals.edit();
                 } />
             <span>"Maximum instances with LRU eviction"</span>
         </label>
-        <Show when=move || signals.structured.get().branch.limit_instances fallback=|| ()>
+        <Show when=move || signals.structured.get().parametrizer.limit_instances fallback=|| ()>
             <label class="create-field">
                 <span>"Maximum instances"</span>
                 <input class="create-max-instances" type="number" min="1"
-                    prop:value=move || signals.structured.get().branch.max_instances
+                    prop:value=move || signals.structured.get().parametrizer.max_instances
                     disabled=move || signals.progress.get().is_pending()
                     on:input=move |event| {
                         let max = event_target_value(&event);
-                        signals.structured.update(|drafts| drafts.branch.max_instances = max);
+                        signals.structured.update(|drafts| drafts.parametrizer.max_instances = max);
                         signals.edit();
                     } />
             </label>

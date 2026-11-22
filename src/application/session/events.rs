@@ -91,11 +91,12 @@ pub(super) async fn run_session_events(shared: Arc<SessionShared>) {
                 Err(RecvError::Closed) => return,
             },
             event = runtime_events.recv() => match event {
-                Ok(RuntimeEvent::Error(message)) => {
+                Ok(RuntimeEvent::Error(event)) => {
                     let notice = ServerNotice {
                         level: NoticeLevel::Error,
                         kind: NoticeKind::Runtime,
-                        message,
+                        message: event.message,
+                        error: event.error,
                     };
                     if !shared.send_notice(notice).await {
                         return;
@@ -328,8 +329,9 @@ impl SessionServiceImpl {
         };
         let snapshot_domain = domain.clone();
         let encoded = executor
-            .run_cpu(
+            .run_cpu_with(
                 CpuClass::Bulk,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, _cancellation| {
                     encode_snapshot(&snapshot_domain, &graph, &entities, &limits)

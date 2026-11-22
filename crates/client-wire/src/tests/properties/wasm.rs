@@ -1,4 +1,5 @@
-//! Typed WASM state inspections exercise every current checkpoint, reset and recovery state.
+//! Typed WASM state inspections exercise every current checkpoint, reset and recovery state, and
+//! every guest-state description: described sections of generated fields and every render stage.
 //!
 //! Layer: test harness.
 //! - **Owns.** Bounded current envelope cases with WASM tables and their complete values.
@@ -14,10 +15,11 @@ use meticulous::ResultExt as _;
 use nervix_models::{
     BranchKeyFingerprint, ClusterNodeIdentity, ClusterNodeIncarnation, DomainNodeRef, ModelKind,
     StateInspectionCounts, StateInspectionOrigin, StateInspectionStage, WasmBranchStateInspection,
-    WasmCheckpointCounts, WasmCheckpointStage, WasmCheckpointState, WasmRecoveryCounts,
-    WasmRecoveryInspection, WasmSavedStateRejection, WasmStateBinding, WasmStateGeneration,
-    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetInspection, WasmStateResetReadiness,
-    WasmStateResetReason, WasmStateResetScope, WasmUnitStateInspection,
+    WasmCheckpointCounts, WasmCheckpointStage, WasmCheckpointState, WasmGuestStateDescription,
+    WasmGuestStateField, WasmGuestStateRender, WasmGuestStateRenderStage, WasmGuestStateSection,
+    WasmRecoveryCounts, WasmRecoveryInspection, WasmSavedStateRejection, WasmStateBinding,
+    WasmStateGeneration, WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetInspection,
+    WasmStateResetReadiness, WasmStateResetReason, WasmStateResetScope, WasmUnitStateInspection,
 };
 
 use super::WireValues;
@@ -79,8 +81,52 @@ impl WireValues<'_> {
         }
     }
 
+    /// A guest-state description: sections of generated fields with every field type the
+    /// generator draws, or the failure of a render at `stage`.
+    fn wasm_description(
+        &mut self,
+        stage: WasmGuestStateRenderStage,
+        described: bool,
+    ) -> WasmGuestStateDescription {
+        let render = if described {
+            let mut sections = Vec::new();
+            for _ in 0..self.arbitrary.entropy().count(3) {
+                let mut fields = Vec::new();
+                for field in self.arbitrary.schema_fields(1) {
+                    fields.push(WasmGuestStateField {
+                        name: field.name,
+                        ty: field.ty,
+                        optional: field.optional,
+                    });
+                }
+                sections.push(WasmGuestStateSection {
+                    name: self.arbitrary.name(),
+                    fields,
+                    rows: self.wasm_count(),
+                });
+            }
+            WasmGuestStateRender::Described { sections }
+        } else {
+            WasmGuestStateRender::Failed {
+                stage,
+                diagnostic: self.arbitrary.string(),
+            }
+        };
+        WasmGuestStateDescription {
+            generation: self.wasm_generation(),
+            revision: if self.arbitrary.entropy().flag() {
+                Some(self.arbitrary.positive_u64())
+            } else {
+                None
+            },
+            render,
+        }
+    }
+
     /// Branch entries in strictly increasing branch order that reach every checkpoint stage,
-    /// every recovery outcome and rejection, and every combination of the two facts.
+    /// every recovery outcome and rejection, every combination of the two facts, and every
+    /// guest-state description beside a checkpoint: described sections and a failure at every
+    /// render stage.
     fn wasm_entries(&mut self) -> Vec<WasmBranchStateInspection> {
         let stages = [
             WasmCheckpointStage::Empty,
@@ -103,13 +149,28 @@ impl WireValues<'_> {
                 WasmSavedStateRejection::ApplicationState,
             ),
         ];
+        let render_stages = [
+            WasmGuestStateRenderStage::ModuleCompilation,
+            WasmGuestStateRenderStage::Instantiation,
+            WasmGuestStateRenderStage::Initialization,
+            WasmGuestStateRenderStage::SnapshotEnvelopeDecoding,
+            WasmGuestStateRenderStage::ApplicationStateRestoration,
+            WasmGuestStateRenderStage::StateRestore,
+            WasmGuestStateRenderStage::StateDescription,
+        ];
         let mut entries = Vec::new();
         if self.arbitrary.entropy().flag() {
             let checkpoint = self.wasm_checkpoint(WasmCheckpointStage::ReplicaConfirmed);
+            let description = if self.arbitrary.entropy().flag() {
+                Some(self.wasm_description(WasmGuestStateRenderStage::StateDescription, true))
+            } else {
+                None
+            };
             entries.push(WasmBranchStateInspection {
                 branch: None,
                 checkpoint: Some(checkpoint),
                 recovery: None,
+                description,
             });
         }
         for (index, stage) in stages.into_iter().enumerate() {
@@ -122,12 +183,42 @@ impl WireValues<'_> {
             } else {
                 None
             };
+            let description = if self.arbitrary.entropy().flag() {
+                let described = self.arbitrary.entropy().flag();
+                Some(self.wasm_description(render_stages[index], described))
+            } else {
+                None
+            };
             entries.push(WasmBranchStateInspection {
                 branch: Some(BranchKeyFingerprint::new(fingerprint)),
                 checkpoint: Some(checkpoint),
                 recovery,
+                description,
             });
         }
+        // Every unit also carries a failure at every render stage and one described entry.
+        for (index, stage) in render_stages.into_iter().enumerate() {
+            let mut fingerprint: [u8; 32] = self.digest();
+            fingerprint[0] = 0x40 | u8::try_from(index).assured("seven stages index below 64");
+            let checkpoint = self.wasm_checkpoint(WasmCheckpointStage::ReplicaConfirmed);
+            entries.push(WasmBranchStateInspection {
+                branch: Some(BranchKeyFingerprint::new(fingerprint)),
+                checkpoint: Some(checkpoint),
+                recovery: None,
+                description: Some(self.wasm_description(stage, false)),
+            });
+        }
+        let mut fingerprint: [u8; 32] = self.digest();
+        fingerprint[0] = 0x60;
+        let checkpoint = self.wasm_checkpoint(WasmCheckpointStage::ReplicaConfirmed);
+        entries.push(WasmBranchStateInspection {
+            branch: Some(BranchKeyFingerprint::new(fingerprint)),
+            checkpoint: Some(checkpoint),
+            recovery: None,
+            description: Some(
+                self.wasm_description(WasmGuestStateRenderStage::StateDescription, true),
+            ),
+        });
         for (index, (outcome, rejection)) in recoveries.into_iter().enumerate() {
             let mut fingerprint: [u8; 32] = self.digest();
             fingerprint[0] = 0x80 | u8::try_from(index).assured("three outcomes index below 128");
@@ -136,6 +227,7 @@ impl WireValues<'_> {
                 branch: Some(BranchKeyFingerprint::new(fingerprint)),
                 checkpoint: None,
                 recovery: Some(recovery),
+                description: None,
             });
         }
         entries

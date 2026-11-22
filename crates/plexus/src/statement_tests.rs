@@ -14,13 +14,13 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AckMode, AlterBranch, AlterBranchOperation, AlterRelay, AlterRelayOperation, BranchName,
-    BranchPartitions, ClusterNodeName, CordonNode, CorrelatorName, DeduplicatorName, DescribeRelay,
-    DrainNode, DropModel, DropNode, EmitterName, EndpointName, FieldName, FlushPolicy,
-    IngestorName, JunctionName, Model, ModelKind, ModelName, ReingestorName, RelayName,
-    ReordererName, RequestedResourceVersion, ResourceName, SchemaName, ShowEmitters, ShowIngestors,
-    Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode, WasmProcessorName,
-    WindowProcessorName,
+    AckMode, AlterParametrizer, AlterParametrizerOperation, AlterRelay, AlterRelayOperation,
+    ClusterNodeName, CordonNode, CorrelatorName, DeduplicatorName, DescribeRelay, DrainNode,
+    DropModel, DropNode, EmitterName, EndpointName, FieldName, FlushPolicy, IngestorName,
+    JunctionName, Model, ModelKind, ModelName, ParametrizerName, ParametrizerPartitions,
+    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
+    ShowEmitters, ShowIngestors, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
+    WasmProcessorName, WindowProcessorName,
 };
 use nonzero_ext::nonzero;
 use rstest::rstest;
@@ -55,14 +55,14 @@ fn numeric_slots_offer_a_named_placeholder_rather_than_nothing() {
             "mqtt_qos",
         ),
         (
-            "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES ",
+            "CREATE PARAMETRIZER b SCHEMA s TTL 1s MAX INSTANCES ",
             "max_instances",
         ),
         (
-            "CREATE BRANCH b SCHEMA s TTL 1s PARTITIONS ",
+            "CREATE PARAMETRIZER b SCHEMA s TTL 1s PARTITIONS ",
             "partition_count",
         ),
-        ("ALTER BRANCH b SET PARTITIONS ", "partition_count"),
+        ("ALTER PARAMETRIZER b SET PARTITIONS ", "partition_count"),
         (
             "CREATE RELAY r SCHEMA s UNBRANCHED CAPACITY ",
             "relay_capacity",
@@ -134,7 +134,7 @@ fn route_construction_offers_its_head_then_names_the_body() {
 #[test]
 fn set_only_route_contexts_offer_only_set() {
     let input = "CREATE HTTP ENDPOINT INGESTOR i FROM e MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-                 1MiB DECODE USING c TO s BRANCHED BY b ";
+                 1MiB RESPOND IMMEDIATE DECODE USING c TO s BRANCHED BY b ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"SET".to_string()));
     for rejected in ["INHERIT", "INVOKE", "WHERE"] {
@@ -274,7 +274,7 @@ fn ingestor_mode_context_suggestions_do_not_leak_schema_keywords() {
 #[test]
 fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
     let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-                 1MiB DECODE USING sch TO s ";
+                 1MiB RESPOND IMMEDIATE DECODE USING sch TO s ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"UNBRANCHED".to_string()));
     assert!(suggestions.contains(&"BRANCHED BY".to_string()));
@@ -284,8 +284,8 @@ fn ingestor_branch_context_suggests_only_branch_selection_keywords() {
 #[test]
 fn ingestor_bare_by_is_rejected() {
     let input = "CREATE HTTP ENDPOINT INGESTOR i FROM ep MODE NO ACK ON QUIESCE BUFFER MAX SIZE \
-                 1MiB DECODE USING sch TO s BY u_branch FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON \
-                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+                 1MiB RESPOND IMMEDIATE DECODE USING sch TO s BY u_branch FLUSH EACH 100ms MAX \
+                 BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
 
     let error = parse_statement(input).expect_err("bare BY is not a branch selection mode");
     assert!(!error.current_context().diagnostics().is_empty());
@@ -581,29 +581,52 @@ fn alter_context_suggestions_include_all_supported_model_families() {
     assert!(suggestions.contains(&"GENERATOR".to_string()));
     assert!(suggestions.contains(&"SCHEMA".to_string()));
     assert!(suggestions.contains(&"WIRE".to_string()));
-    assert!(suggestions.contains(&"BRANCH".to_string()));
+    assert!(suggestions.contains(&"PARAMETRIZER".to_string()));
     assert!(!suggestions.contains(&"JSON".to_string()));
     assert!(!suggestions.contains(&"AVRO".to_string()));
 }
 
 #[test]
-fn parses_alter_branch_set_partitions_statement() {
-    let parsed =
-        parse_statement("ALTER BRANCH by_tenant SET PARTITIONS 4;").expect("parse should succeed");
+fn creation_heads_beginning_pa_offer_the_paced_domain_and_the_parametrizer() {
+    for (input, offered, withheld) in [
+        ("CREATE PA", &["PACED DOMAIN", "PARAMETRIZER"][..], &[][..]),
+        ("CREATE PAC", &["PACED DOMAIN"][..], &["PARAMETRIZER"][..]),
+        ("CREATE PAR", &["PARAMETRIZER"][..], &["PACED DOMAIN"][..]),
+    ] {
+        let suggestions = suggest_statement(input, input.len());
+        for phrase in offered {
+            assert!(
+                suggestions.contains(&phrase.to_string()),
+                "{input} offers {phrase}: {suggestions:?}"
+            );
+        }
+        for phrase in withheld {
+            assert!(
+                !suggestions.contains(&phrase.to_string()),
+                "{input} withholds {phrase}: {suggestions:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn parses_alter_parametrizer_set_partitions_statement() {
+    let parsed = parse_statement("ALTER PARAMETRIZER by_tenant SET PARTITIONS 4;")
+        .expect("parse should succeed");
     assert_eq!(
         parsed,
-        Statement::AlterBranch(AlterBranch {
-            branch: BranchName::try_from("by_tenant").expect("valid branch name"),
-            operations: vec![AlterBranchOperation::SetPartitions {
-                partitions: BranchPartitions::Direct(nonzero!(4u16)),
+        Statement::AlterParametrizer(AlterParametrizer {
+            parametrizer: ParametrizerName::try_from("by_tenant").expect("valid parametrizer name"),
+            operations: vec![AlterParametrizerOperation::SetPartitions {
+                partitions: ParametrizerPartitions::Direct(nonzero!(4u16)),
             }],
         })
     );
 }
 
 #[test]
-fn create_branch_tail_suggestions_offer_partitions_before_eviction_only() {
-    let input = "CREATE BRANCH b SCHEMA s TTL 1s ";
+fn create_parametrizer_tail_suggestions_offer_partitions_before_eviction_only() {
+    let input = "CREATE PARAMETRIZER b SCHEMA s TTL 1s ";
     let suggestions = suggest_statement(input, input.len());
     assert!(
         suggestions.contains(&"PARTITIONS".to_string()),
@@ -616,7 +639,7 @@ fn create_branch_tail_suggestions_offer_partitions_before_eviction_only() {
         "{suggestions:?}"
     );
 
-    let input = "CREATE BRANCH b SCHEMA s TTL 1s PARTITIONS 4 ";
+    let input = "CREATE PARAMETRIZER b SCHEMA s TTL 1s PARTITIONS 4 ";
     let suggestions = suggest_statement(input, input.len());
     assert!(suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
     assert!(
@@ -624,7 +647,7 @@ fn create_branch_tail_suggestions_offer_partitions_before_eviction_only() {
         "{suggestions:?}"
     );
 
-    let input = "CREATE BRANCH b SCHEMA s TTL 1s MAX INSTANCES 3 EVICT LRU ";
+    let input = "CREATE PARAMETRIZER b SCHEMA s TTL 1s MAX INSTANCES 3 EVICT LRU ";
     let suggestions = suggest_statement(input, input.len());
     assert!(
         !suggestions.contains(&"PARTITIONS".to_string()),
@@ -634,7 +657,7 @@ fn create_branch_tail_suggestions_offer_partitions_before_eviction_only() {
 
 #[test]
 fn alter_branch_suggestions_do_not_leak_relay_operations() {
-    let input = "ALTER BRANCH by_tenant SET ";
+    let input = "ALTER PARAMETRIZER by_tenant SET ";
     let suggestions = suggest_statement(input, input.len());
     assert!(
         suggestions.contains(&"PARTITIONS".to_string()),
@@ -773,7 +796,7 @@ fn parses_describe_resource_summary_statement() {
 fn describe_context_suggestions_include_resource_and_stream() {
     let input = "DESCRIBE ";
     let suggestions = suggest_statement(input, input.len());
-    assert!(suggestions.contains(&"BRANCH".to_string()));
+    assert!(suggestions.contains(&"PARAMETRIZER".to_string()));
     assert!(suggestions.contains(&"CLUSTER".to_string()));
     assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
     assert!(suggestions.contains(&"DOMAIN".to_string()));
@@ -935,20 +958,20 @@ fn parses_describe_relay_statement() {
 
 #[test]
 fn parses_describe_branch_statement() {
-    let parsed = parse_statement("DESCRIBE BRANCH by_tenant;").expect("parse should succeed");
+    let parsed = parse_statement("DESCRIBE PARAMETRIZER by_tenant;").expect("parse should succeed");
     assert_eq!(
         parsed,
-        Statement::DescribeBranch(nervix_models::DescribeBranch {
-            branch: BranchName::try_from("by_tenant").expect("valid branch name"),
+        Statement::DescribeParametrizer(nervix_models::DescribeParametrizer {
+            parametrizer: ParametrizerName::try_from("by_tenant").expect("valid parametrizer name"),
         })
     );
 }
 
 #[test]
 fn describe_branch_suggests_only_a_branch_reference_after_its_keyword() {
-    let input = "DESCRIBE BRANCH ";
+    let input = "DESCRIBE PARAMETRIZER ";
     let suggestions = suggest_statement(input, input.len());
-    assert_eq!(suggestions, vec!["ref:branch".to_string()]);
+    assert_eq!(suggestions, vec!["ref:parametrizer".to_string()]);
 }
 
 #[test]
@@ -1059,6 +1082,7 @@ fn parses_create_resource_statement() {
         parsed,
         Statement::CreateResource(nervix_models::CreateStatement::new(
             nervix_models::CreateResource {
+                labels: nervix_models::EntityLabels::default(),
                 identifier: ResourceName::parse("fraud_model").expect("valid resource name"),
             },
             false,
@@ -1275,9 +1299,9 @@ fn runtime_nodes_require_supported_error_policy_blocks() {
         (
             "ingestor",
             "CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint \
-             MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO \
-             notifications BRANCHED BY user_id_branch SET user_id = message.user_id FLUSH EACH \
-             100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
+             MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING \
+             notification_codec TO notifications BRANCHED BY user_id_branch SET user_id = \
+             message.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
             " ON GENERAL ERROR LOG;",
         ),
         (
@@ -1512,7 +1536,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         "ALTER JUNCTION route_events ADD FROM incoming_b WHERE input.kind = 'event', SET \
              COLLECT FOR 10ms MAX BATCH SIZE 1MiB, SET FILTER WHERE input.kind != '', ADD \
              MATERIALIZED STATE profiles REQUIRED WAIT, ADD ROUTE TO projected INHERIT ALL FLUSH \
-             IMMEDIATE ON MESSAGE ERROR SEND TO errors SET code = error.code, SET DETACHED;",
+             IMMEDIATE ON MESSAGE ERROR SEND TO errors SET class = error.class, SET DETACHED;",
         None,
         &[]
     )]
@@ -1539,7 +1563,7 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::alter_ingestor(
         "ALTER HTTP ENDPOINT INGESTOR event_source SET FROM ingress_b MODE NO ACK ON \
-             QUIESCE BUFFER MAX SIZE 1MiB, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
+             QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE, SET DECODE USING event_codec_v2, SET TIMESTAMP AT \
              occurred_at, SET FILTER WHERE input.active, REPLACE ROUTE TO events INHERIT ALL \
              UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET GENERAL ERROR IGNORE;",
         None,

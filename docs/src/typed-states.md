@@ -357,10 +357,12 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX NODE VIEW` archive signature identifies the current Model layout, including
-that union, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
+The registry's `NERVIX NODE RULE` archive signature identifies the current Model layout, including
+the `parametrizer` kind text of the declared entity that defines a parametrization, that union, a
+placement's colocation or node rule with its `FOR` members or domain-wide scope and its
+`REQUIRE NODES`, `PREFER NODES` or `ANY NODE` policy and selector, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
-a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited branch declaration,
+a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited partitions of a parametrizer,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
 an SQS QUEUE emitter's `SEND` request shape,
 the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quality of
@@ -379,10 +381,11 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_node_selector_runtime_entity_labels_inherited_topology_ratelimit_stopping_shutdown_` keyspaces and current
-`ClusterState` metadata encoding, 43, identify its stored shapes, including the partition count of every resolved
-branch declaration in the committed schedule, the partition epoch the schedule records for each
-branch whose count changed, and the statements a transaction keeps, including per-entity
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_shutdown_` keyspaces and `ClusterState`
+metadata encoding 46 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+domain, resource and user labels, node selector statements, placement node rules and the partition count of every resolved
+parametrizer in the committed schedule, the partition epoch the schedule records for each
+parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
 its domain from the transaction. The runtime state store's
 `inherited-partition-origin-checkpoint-index` format identifies the checkpoints it keeps, including the
@@ -830,9 +833,10 @@ record. Registry publication, recovered committed configuration and wire inspect
 against that captured policy and their outer representation bounds. Compiled defaults never
 replace a missing policy or normalize invalid stored metadata.
 
-An `EntityLabelsInspection` carries the existing `DomainNodeRef`, complete map and captured
-policy. Its view is explicitly committed, with its applied revision, or staged, with a
-`TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
+An `EntityLabelsInspection` carries a typed `EntityLabelOwner`, complete map and captured
+policy. The owner is a Model's `DomainNodeRef`, a domain name, a domain-scoped
+`ResourceCatalogKey` or a cluster-wide user name. Its view is explicitly committed, with its
+applied revision, or staged, with a `TransactionPreviewIdentity`. The discriminant determines which identity is present; an absent
 committed revision is never inferred to be zero or to describe a staged candidate. Labels remain
 control-plane state and are excluded from execution identities. [Entity Labels](entity-labels.md)
 owns their product semantics.
@@ -1424,13 +1428,13 @@ read-only buffers retain the native allocation through their root rather than a 
 
 ## Intake Unit And Gate Identity
 
-An instancing declaration is `Count(NonZeroU64)` or `PerPartition`; entity capabilities admit the
-forms before placement. Its native and archived representations occupy eight bytes. The archive
-encodes `PerPartition` as zero and each positive count as its exact unsigned 64-bit value; semantic
-JSON retains the tagged forms. A resolved ingestor unit uses the shared `NodeUnitRef` and
-`DomainNodeUnitRef` identities throughout plans, runtime registrations and durable state placement.
-There is no node-local index conversion. An ingestor's readiness is one scalar whose retirement ends
-that exact lifetime.
+An instancing declaration is `Count(NonZeroU64)` or `PerTransportPartition`; entity capabilities
+admit the forms before placement. Its native and archived representations occupy eight bytes. The
+archive encodes `PerTransportPartition` as zero and each positive count as its exact unsigned 64-bit
+value; semantic JSON retains the tagged forms. A resolved ingestor unit uses the shared
+`NodeUnitRef` and `DomainNodeUnitRef` identities throughout plans, runtime registrations and durable
+state placement. There is no node-local index conversion. An ingestor's readiness is one scalar
+whose retirement ends that exact lifetime.
 The shared `Unit` identity occupies eight bytes with four-byte archive alignment. Its private rank
 orders `Single`, all 32-bit partitions, and then instance indices. `UnitKind` is its semantic view;
 JSON uses that tagged view and validates an instance index through `Unit::try_instance`.

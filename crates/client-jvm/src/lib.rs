@@ -81,6 +81,7 @@ mod entity_labels;
 mod events;
 mod inspection;
 mod node_inspection;
+mod notices;
 mod sessions;
 
 use jni::sys::jlong;

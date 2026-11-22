@@ -24,7 +24,7 @@ Feature: MySQL emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -103,7 +103,7 @@ Feature: MySQL emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -269,17 +269,17 @@ Feature: MySQL emission
       CREATE HTTP ENDPOINT second_ingress ON edge PATH '/second';
       CREATE HTTP ENDPOINT INGESTOR http_poison
         FROM poison_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR http_first
         FROM first_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO first_notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR http_second
         FROM second_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO second_notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE MYSQL CLIENT mysql_shared
@@ -292,7 +292,7 @@ Feature: MySQL emission
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
-        SET error_code = error.code,
+        SET error_code = error.class,
             error_message = error.message,
             source_user_id = input.user_id,
             source_action = input.action
@@ -342,7 +342,7 @@ Feature: MySQL emission
     When the lock on MySQL table "first_held_{{test_id}}" is released
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "error_code":"external" | "error_message":"MySQL rejected record with SQLSTATE HY000 and code 3819" | "source_user_id":2 | "source_action":"POISON"
+      "error_code":"refused" | "error_message":"MySQL rejected record with SQLSTATE HY000 and code 3819" | "source_user_id":2 | "source_action":"POISON"
       """
     And the MySQL table "poison_mysql_{{test_id}}" eventually holds exactly these rows
       """

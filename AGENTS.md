@@ -366,15 +366,19 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   coordinate, and only tests of elapsed-time behavior enable the `test-util` paused clock.
 - **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
   or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
-  code the node cannot bound (UDF calls, JAQ transformations) takes the extension class and password
-  hashing the credentials class. A refusal is a typed error the caller maps to its own outcome, and
-  one that judged nothing stays retryable, never a decode, encode or authentication failure. A full
-  queue refuses work that answers a request; accepted work nothing can present again (a payload a
-  quiesce buffer retained, a poll a paced ingestor moved past) states
-  `QueueAdmission::WaitForPlace`, and its owner lets shutdown and a new quiesce end the wait and
-  keeps or re-decides the work. A payload handed over without an acknowledgement waits only when
-  holding the ingestor's loop keeps its transport connected with bounded memory; otherwise its refusal
-  is reported and counted. `task::spawn_cpu` belongs to the executor's worker pools,
+  code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
+  class and password hashing the credentials class. A full queue is a temporary condition and never
+  costs data: work a source handed over, with or without an acknowledgement, and every other work
+  no caller waits to be answered about (relay and subscription deliveries, the answer of an
+  interconnect request whose handler already ran, checkpoints and state captures, consensus
+  storage, compilation for a committed change, lifecycle steps) states
+  `QueueAdmission::WaitForPlace`, and its owner holds back whatever feeds it while it waits, lets
+  shutdown and a new quiesce end the wait, and keeps or re-decides the work. Only a request whose
+  caller still holds its input and waits on the answer may be refused, with a typed, retryable busy
+  answer the caller maps to its own outcome, never a decode, encode or authentication failure; the
+  executor's refusing `run_cpu` and `run_storage` serve only such requests. A wait ends in a refusal
+  only once the executor admits no more work, which its owner treats as its own stop. Loss is reserved
+  for cluster disruption. `task::spawn_cpu` belongs to the executor's worker pools,
   `spawn_blocking` to its storage workers, and `block_in_place` to no file by default.
 - **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
   thread through `thread::{spawn, Builder, scope, spawn_detached}` or `unmodeled::thread::Builder`,
@@ -522,6 +526,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   guest state, state generations and the events that advance them, ownership fencing or forced
   recovery of guest state, coordinated, guest-requested or rejected-state resets, the guest save,
   restore and reset ABI, how rebinding affects guest state.
+- [Inferencer State And Recovery](docs/src/inferencer-state.md): the tensors an inferencer's
+  `STATE` carries per branch, their schema and model identity, publication after admitted batches,
+  the snapshot frame, cadence and bound, restore under the branch incarnation, eviction, replica
+  copies, planned handoff and forced recovery of inferencer state, its archive sections, how
+  rebinding or redeclaration affects it, and what recovery can skip or replay.
 - [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md): the archive crate
   or format; how a backup cuts a domain or captures, stages, transfers, assembles, retains or serves
   state; how a restore receives, prepares, plans, admits, records or resumes its steps; how restored
@@ -599,7 +608,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   value requires explicit leakage, including codec payloads, direct `VALUES`, inherited fields and
   written headers.
 - Multiple ordinary inputs to one processor reference the same declared schema Model, and they share
-  the exact named branch or are all unbranched. Correlators apply the same rule independently to the
+  the exact parametrizer or are all unbranched. Correlators apply the same rule independently to the
   left and right sides.
 
 ### Wire schemas
@@ -651,8 +660,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   named parametrization distinct from every input relay's. Equal key schemas or values still
   require the route to evaluate the destination's key assignments.
 - Junctions, deduplicators, reorderers, window processors, inferencers, WASM processors, correlators
-  and generators preserve branch identity. Their branch declaration is node-wide, and every input
-  and output uses that exact named branch.
+  and generators preserve branch identity. Their parametrizer is declared node-wide, and every input
+  and output uses that exact parametrizer.
 - Emitters collapse branch identity only at the successful external boundary. Their envelope and
   ordering-group expressions may read each source branch's typed fields before that boundary;
   every input retains its own branch schema and partition count through evaluation and publication.
@@ -660,7 +669,7 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   processing state across branches, or publish through a fallback that bypasses concrete branch
   routing.
 - Error routes preserve the branch in which the failed operation executed, and their target relay
-  has the same exact branch declaration; ingestor errors are unbranched.
+  has the same exact parametrizer; ingestor errors are unbranched.
 
 ### A branch owns its runtime
 
@@ -684,7 +693,7 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 ### Materialized state
 
 - Materialized dependencies are explicit, node-wide, same-domain and compatible with the node's
-  exact branch; state is never scanned across branches.
+  exact parametrizer; state is never scanned across branches.
 - Dependency declarations execute strictly in written order. Available state binds immediately;
   defaults bind typed constant records; `REQUIRED SKIP` skips the message; `REQUIRED WAIT` retains
   it in memory and applies backpressure, and resolution restarts from the first declaration after
@@ -754,6 +763,10 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   policy, with no unsafe synchronous or reactor-blocking alternative publicly callable beside it.
   Callers never choose blocking, yielding, batching, throttling or similar safety behavior unless it
   is an explicit typed part of the operation's contract.
+- Planned operations cost backpressure, never data. A stop, a shutdown, an ownership move or an
+  alteration waits for the work in motion, a payload an ingestor holds while it waits for a place on
+  the bounded executor included, rather than cutting it, and a full queue holds back what feeds it
+  rather than dropping what it was handed.
 - In async code, a loop whose body performs async work calls
   `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one
@@ -773,6 +786,29 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   justifiably shared, because several owners register into it or observers read it across owners,
   and whose accesses stay off recurring data-plane paths. State one owner mutates stays in an
   ordinary collection that owner holds.
+
+### Branch-local runtime state
+
+- A branch-local runtime state kind, state a placement names by its branch, joins the shared
+  periodic snapshot owner, `ReplicatedBranchState`, instead of a persistence path of its own: its
+  branch task publishes immutable generations there, and the shared writer persists, announces and
+  replicates them. The change that adds the kind also ships its fingerprinted placement identity,
+  its archive section, its typed inspection, its external chaos coverage and its qualification
+  ledger. [Data-Plane
+  Concurrency](docs/src/data-plane-concurrency.md#periodically-snapshotted-branch-state) owns the
+  carrier; WASM guest state keeps the per-callback checkpoint [WASM State And
+  Recovery](docs/src/wasm-state.md) owns.
+
+### Inference
+
+- Every inferencer runs through one implementation: the model runs once for each admitted batch,
+  before any route, batched or one message at a time, and a route's `FLUSH` governs dispatch only.
+  `STATE` is a variation of one message at a time that carries its tensors from message to message,
+  never a second execution path, and an inferencer behaves differently with and without `STATE`
+  only where [State tensors](docs/src/processors.md#state-tensors) declares it.
+- An inferencer form the grammar accepts is honoured by the runtime in the same change; no accepted
+  clause, declaration or mode is stored and ignored. [Inferencer State And
+  Recovery](docs/src/inferencer-state.md) owns the carried state's contract.
 
 ### Domains and external systems
 
@@ -1185,7 +1221,7 @@ keep their own inputs and evidence; they may invoke the Rust owner as a process 
 its compiler evidence.
 
 The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns use
-`nightly-2026-09-17`; product builds stay stable. An upgrade moves every declaration of that nightly
+`nightly-2026-11-21`; product builds stay stable. An upgrade moves every declaration of that nightly
 in one change that keeps every compiler fixture's result. The driver's workspace wrapper composes
 beneath the configured kache. Analysis requires current source, annotations, rule, dependency and
 configuration inputs and complete declared target evidence, zero findings included, and missing

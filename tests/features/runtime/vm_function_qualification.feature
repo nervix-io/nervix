@@ -18,7 +18,7 @@ Feature: VM functions remain valid through public graph changes
       CREATE HTTP ENDPOINT ingress ON edge PATH '/functions';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING function_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING function_codec
         TO function_inputs
           INHERIT ALL
           UNBRANCHED
@@ -100,7 +100,7 @@ Feature: VM functions remain valid through public graph changes
       CREATE HTTP ENDPOINT ingress ON edge PATH '/patterns';
       CREATE HTTP ENDPOINT INGESTOR ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING pattern_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING pattern_codec
         TO pattern_inputs
           INHERIT ALL
           UNBRANCHED

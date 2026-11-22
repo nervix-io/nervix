@@ -643,7 +643,7 @@ impl CompiledHttpRequestFields {
                 Some(row_acks) => std::mem::take(row_acks),
                 None => AckSet::empty(),
             };
-            message_errors.push(planned_structured_message_error(
+            message_errors.push(planned_message_error(
                 RelayMessage {
                     key,
                     record: source_record,
@@ -805,11 +805,11 @@ impl CompiledHttpRequestFields {
         emitter: &EmitterName,
         failed: FailedRequestField<'_>,
         execution_now: Timestamp,
-    ) -> StructuredMessageError {
+    ) -> RaisedMessageError {
         let site = self.sites.get(failed.position);
         let (code, message) = match failed.failure {
             RequestFieldFailure::Evaluation(error) => (
-                MessageErrorCode::Evaluation,
+                MessageErrorClass::EVALUATION,
                 format!(
                     "emitter '{}' HTTP request side error {}: {} at {}",
                     emitter.as_str(),
@@ -819,7 +819,7 @@ impl CompiledHttpRequestFields {
                 ),
             ),
             RequestFieldFailure::Invalid(error) => (
-                MessageErrorCode::Validation,
+                MessageErrorClass::VALIDATION,
                 format!(
                     "emitter '{}' cannot publish its HTTP request: {error}",
                     emitter.as_str()
@@ -827,7 +827,7 @@ impl CompiledHttpRequestFields {
             ),
         };
         let Some(site) = site else {
-            return structured_message_error(
+            return raised_message_error(
                 execution_now,
                 code,
                 message,
@@ -836,7 +836,7 @@ impl CompiledHttpRequestFields {
                 std::iter::empty(),
             );
         };
-        structured_message_error(
+        raised_message_error(
             execution_now,
             code,
             message,
@@ -1140,7 +1140,7 @@ mod tests {
         assert!(format!("{report:?}").contains(&compile.message));
     }
 
-    fn field_paths(error: &StructuredMessageError) -> Vec<&str> {
+    fn field_paths(error: &RaisedMessageError) -> Vec<&str> {
         error.fields.iter().map(FieldPath::as_str).collect()
     }
 
@@ -1148,7 +1148,7 @@ mod tests {
     #[derive(Debug, PartialEq)]
     struct Rejection<'a> {
         id: RuntimeValue,
-        code: MessageErrorCode,
+        class: MessageErrorClass,
         operation: MessageErrorOperation,
         operation_index: Option<u32>,
         fields: Vec<&'a str>,
@@ -1231,7 +1231,7 @@ mod tests {
                 .expect("the id is set");
             rejected.push(Rejection {
                 id,
-                code: planned.error.code,
+                class: planned.error.class,
                 operation: planned.error.operation,
                 operation_index: planned.error.operation_index,
                 fields: field_paths(&planned.error),
@@ -1243,49 +1243,49 @@ mod tests {
             vec![
                 Rejection {
                     id: id("method"),
-                    code: MessageErrorCode::Validation,
+                    class: MessageErrorClass::VALIDATION,
                     operation: MessageErrorOperation::Publish,
                     operation_index: None,
                     fields: vec!["input.method", "method"],
                 },
                 Rejection {
                     id: id("path"),
-                    code: MessageErrorCode::Validation,
+                    class: MessageErrorClass::VALIDATION,
                     operation: MessageErrorOperation::Publish,
                     operation_index: None,
                     fields: vec!["input.padding", "input.path", "path"],
                 },
                 Rejection {
                     id: id("long-path"),
-                    code: MessageErrorCode::Validation,
+                    class: MessageErrorClass::VALIDATION,
                     operation: MessageErrorOperation::Publish,
                     operation_index: None,
                     fields: vec!["input.padding", "input.path", "path"],
                 },
                 Rejection {
                     id: id("reserved"),
-                    code: MessageErrorCode::Validation,
+                    class: MessageErrorClass::VALIDATION,
                     operation: MessageErrorOperation::Invoke,
                     operation_index: Some(1),
                     fields: vec!["input.header_name", "input.header_value"],
                 },
                 Rejection {
                     id: id("injected"),
-                    code: MessageErrorCode::Validation,
+                    class: MessageErrorClass::VALIDATION,
                     operation: MessageErrorOperation::Invoke,
                     operation_index: Some(1),
                     fields: vec!["input.header_name", "input.header_value"],
                 },
                 Rejection {
                     id: id("ratio"),
-                    code: MessageErrorCode::Evaluation,
+                    class: MessageErrorClass::EVALUATION,
                     operation: MessageErrorOperation::Invoke,
                     operation_index: Some(2),
                     fields: vec!["input.divisor"],
                 },
                 Rejection {
                     id: id("method-first"),
-                    code: MessageErrorCode::Validation,
+                    class: MessageErrorClass::VALIDATION,
                     operation: MessageErrorOperation::Publish,
                     operation_index: None,
                     fields: vec!["input.method", "method"],

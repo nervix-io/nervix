@@ -20,14 +20,14 @@ Feature: Inferencer state in backup archives
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-backup-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
@@ -134,14 +134,14 @@ Feature: Inferencer state in backup archives
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-backup-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
@@ -240,14 +240,14 @@ Feature: Inferencer state in backup archives
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT ( tenant string, vector array );
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY features SCHEMA features BRANCHED BY by_tenant;
       CREATE RELAY scored SCHEMA scored BRANCHED BY by_tenant;
       CREATE VHOST edge infer-backup-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR feature_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
@@ -292,7 +292,7 @@ Feature: Inferencer state in backup archives
     And the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
     When the CLI restores "domain {{domain}} --resume --dry-run" from "foreign-key.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "/descriptor.rkyv' does not belong to the branching of inferencer 'running' in domain '{{domain}}': it is not a key of branch 'by_tenant': the key has no field 'tenant'"
+    Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "/descriptor.rkyv' does not belong to the branching of inferencer 'running' in domain '{{domain}}': it is not a key of parametrizer 'by_tenant': the key has no field 'tenant'"
 
     Examples:
       | cluster_size | replica_count | input_type    | output_type   | tensor_type       |

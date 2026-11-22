@@ -540,6 +540,13 @@ impl Runtime {
             .stop_ledgers
             .remove_if(domain, |_, entry| entry.start_version < start_version);
     }
+
+    /// Whether this node's teardown of a stopped `domain` has begun and taken the domain's
+    /// execution out of the node, so only the teardown under way still holds the domain's tasks.
+    #[cfg(all(test, feature = "testing"))]
+    pub(crate) fn stop_teardown_holds_execution(&self, domain: &DomainName) -> bool {
+        self.inner.stop_ledgers.contains_key(domain) && !self.inner.executions.contains_key(domain)
+    }
 }
 
 #[cfg(test)]

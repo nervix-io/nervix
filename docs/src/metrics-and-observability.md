@@ -29,8 +29,8 @@ curl http://127.0.0.1:<observability-port>/metrics
 Prometheus metrics are intentionally branch-aggregated. They aggregate across concrete relay
 branches and do not include a branch key label. This keeps Prometheus cardinality bounded when a
 relay is branched by high-cardinality values such as tenant, user, account, or device id. Branch
-lifecycle metrics identify the declared branch, not the concrete key. A partitioned relay or processor's series
-carry its partition, whose cardinality is bounded by the partition count its branch declares.
+lifecycle metrics identify the parametrizer, not the concrete key. A partitioned relay or processor's series
+carry its partition, whose cardinality is bounded by the partition count its parametrizer declares.
 
 ## Metric Labels
 
@@ -46,7 +46,7 @@ Graph metric series use these labels:
 - `partition`: the partition of a partitioned relay or processor recording the series, or `-`
   for a unit without partitions
 - `instance`: the global index of an ingestor instance, or `-` for a non-instance unit
-- `branch`: named branch declaration on branch lifecycle metrics
+- `parametrizer`: the parametrizer on branch lifecycle metrics
 - `reason`: branch eviction reason, either `lru` or `ttl`
 - `le`: Prometheus histogram bucket boundary
 
@@ -108,9 +108,26 @@ families for ingestors and emitters. Nervix also records these raw metric famili
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
-- `nervix_branch_partition_epoch`: the partition epoch a branch executes in on the physical node
+- `nervix_message_errors_total{domain,node_kind,node,class,operation}`: total message errors each
+  graph node handled, every record a route's `ON MESSAGE ERROR` received and every payload an
+  ingestor's codec or `RATE LIMIT` rejected, whatever the policy did with them. A failure that ends a
+  node's work without a record, which only `ON GENERAL ERROR` reports, is not counted here. `class` is one of the ten
+  [error classes](./errors-and-diagnostics.md#the-message-error-record) (`codec`, `validation`,
+  `evaluation`, `limit`, `refused`, `unavailable`, `throttled`, `timeout`, `interrupted`,
+  `internal`), `node_kind` the node's kind in its snake_case name (`junction`, `emitter`,
+  `window_processor`) and `operation` the work that failed (`set`, `publish`, `decode`,
+  `rate_limit`, `window`, ...). A node exposes a series only for a class and operation it has
+  produced, and its series leave with the node. Decode and `RATE LIMIT` rejections count here under
+  their ingestor beside their own families. No label carries a branch key or a payload value.
+- `nervix_placement_violating_units{domain}`: units of the domain whose live owner a winning
+  `REQUIRE NODES` rule does not admit, as the physical node observes the committed schedule and
+  node records
+- `nervix_placement_waiting_units{domain}`: units of the domain with no live owner their node rules
+  admit and no cluster node that satisfies them, as the physical node observes them
+- `nervix_branch_partition_epoch`: the partition epoch a parametrizer executes in on the physical
+  node
 - `nervix_branch_partition_keys_pending`: concrete keys the physical node's units still have to move
-  while their branch changes its partition count
+  while their parametrizer changes its partition count
 - `nervix_branch_partition_keys_claimed_total`: total concrete keys the physical node's units claimed
   from the unit a previous partition count placed them in
 - `nervix_inferencer_state_bytes`: declared native tensor bytes held by active stateful branches
@@ -441,6 +458,11 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
   queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
+- `nervix_execution_jobs_waiting`: jobs that found their class's wait queue full and wait for a
+  place in it instead of being refused. They carry work no caller is waiting to be answered about,
+  such as a payload an ingestor handed over, a relay or subscription delivery, a checkpoint or the
+  compilation for a committed change. A nonzero value is backpressure, never loss: the jobs take
+  the places the class frees, in the order they asked
 - `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
   `nervix_execution_job_rejections_total`: jobs admitted, jobs that left a worker, and jobs refused
   because the class already held its whole wait queue
@@ -623,7 +645,7 @@ The two wait counters preserve fractional seconds.
 
 | Family | Additional label | Meaning |
 | --- | --- | --- |
-| `nervix_emitter_records_rejected_total` | `code="external\|oversize\|invalid\|encode"` | Source rows definitively refused by the destination, size limit, value validation or encoding. The host carries the class from the typed refusal site and counts a row when its message-error handling settles its rejection. A container encoding failure remains `encode` even when its public message error is `validation/encode`. |
+| `nervix_emitter_records_rejected_total` | `code="refused\|limit\|validation\|evaluation\|codec"` | Source rows definitively rejected: refused by the destination, over a size limit, holding a value that does not fit, whose expression could not be computed, or that the codec could not encode. `code` is the [error class](./errors-and-diagnostics.md#the-message-error-record) of the row's own message error, the one its error route reads as `error.class`, so the two never disagree; a rejection is always of the `REJECTED` group. The host counts a row when its message-error handling settles its rejection. |
 | `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure. Delivered, rejected and connector-staged rows are excluded. |
 | `nervix_emitter_records_retried_total` | None | Unresolved source rows selected by each retried host publish attempt, after transport acquisition. Drain retries count too. A staged commit alone presents no source rows again. |
 | `nervix_emitter_retries_total` | `cause="publish\|connect\|commit"` | Successfully scheduled retry deferrals and inline retry waits, classified by the typed operation being retried. |
@@ -715,6 +737,9 @@ their process-local history across task restarts.
 | `nervix_ingestor_read_bytes_total` | Counter | Bytes of those raw payloads. |
 | `nervix_ingestor_poll_duration_seconds` | Histogram | Elapsed wall seconds of scheduled polls, including failed and interrupted polls. |
 | `nervix_ingestor_endpoint_requests_total` | Counter, `outcome` as listed below | Requests and data frames answered by each bound endpoint ingestor. |
+| `nervix_ingestor_endpoint_pause_waiting_requests` | Gauge | Requests whose senders are waiting for the body to enter the graph. |
+| `nervix_ingestor_endpoint_pause_waiting_bytes` | Gauge | Bytes in those waiting request bodies. |
+| `nervix_ingestor_endpoint_pause_refusals_total` | Counter, `cause="buffer_full\|deadline\|intake_ended"` | Requests refused by the pause buffer, grouped by the reason they could not proceed. |
 
 A returned nonempty message batch is `delivered`; a successful answer carrying no payload, including
 an oversized-only answer, a resume request or end of input, is `empty`. A read returning an error is
@@ -741,11 +766,15 @@ route, under the outcome that ingestor reached:
 | `outcome` | The ingestor |
 | --- | --- |
 | `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
-| `busy` | had no free slot in its `MODE ACK MAX` response window (HTTP 503, `not_admitted` with `busy`). |
-| `refused` | refused it: its quiesce refused new intake, such as `ON QUIESCE REJECT` while it is quiesced or a full endpoint `BUFFER` (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | could not have it unfolded because the node's extension workers had no room, which `nervix_ingestor_unfolding_refused_total` counts too (HTTP 503). |
+| `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
+| `refused` | refused new intake under quiesce, overflowed or ended a waiting `MODE NO ACK` request (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
+| `not_admitted` | had no extension-worker capacity to unfold an HTTP body or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). Extension-worker refusals also count in `nervix_ingestor_unfolding_refused_total`. A WebSocket frame in `MODE NO ACK` waits for a place instead. |
 | `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
 | `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
+
+The pause metrics appear under `source:` in `DESCRIBE INGESTOR` and in the node's `/metrics`.
+The waiting gauges count requests still waiting for admission. The quiesce buffer gauges also
+count bodies already answered with `RESPOND IMMEDIATE`. Each `cause` has its own refusal counter.
 
 A route refuses a request before reading its body, or a WebSocket upgrade, only when none of its
 ingestors can take it, and counts that refusal once for each of them there. Otherwise every
@@ -784,7 +813,7 @@ These three additional counters are available in `/metrics`:
 
 | Family | Meaning |
 | --- | --- |
-| `nervix_ingestor_unfolding_refused_total` | Payloads refused because the extension workers had no room to unfold them. Waiting for a place leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
+| `nervix_ingestor_unfolding_refused_total` | Endpoint request bodies answered as refused because the extension workers had no room to unfold them, which their senders send again. Every other payload, acknowledged or not, waits for a place, and waiting leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
 | `nervix_ingestor_header_values_dropped_total` | Invalid UTF-8 header values skipped while retaining their valid siblings and the payload. Applies to `HTTP REQUEST` responses, `HTTP ENDPOINT` requests and `WEBSOCKETS ENDPOINT` upgrades. Requests and upgrades count once per invalid value for each bound ingestor. |
 | `nervix_ingestor_read_ahead_dropped_payloads_total` | QoS 0 publishes that exceed the separate read-ahead quota of an ACK-mode MQTT ingestor, counted immediately, including during a downstream acknowledgement wait. [MQTT ingestor connections](connector-contract.md#mqtt-ingestor-connections) owns the bound. |
 
@@ -804,7 +833,7 @@ with its full selector and `total`, `count` and `sum_seconds` for the duration h
 | `nervix_ingestor_transport_acknowledgement_duration_seconds` | `operation="acknowledge\|reject"` | Elapsed wall seconds of each of those transport operations, such as a Kafka consumer-group commit or an SQS deletion, failed operations included. |
 | `nervix_ingestor_resumes_total` | `outcome="ready\|waiting\|failed"` | Every resume of the ingestor's connector that completed: ready to read, waiting for an external assignment, or failed. A resume a stop or a quiesce change ended before it completed is not counted. |
 | `nervix_ingestor_suspends_total` | `cause="quiesce\|read_failure\|rejection"` | Every suspension of a ready connector: by a quiesce that suspends intake, by a read that failed and left the connector needing a resume, or because a rejection failed and the transport must be reopened before the same positions are read again. A connector asking for a resume without a failed read, such as after a Kafka domain-offset reassignment, counts only its resume. |
-| `nervix_ingestor_unconfirmed_stop_positions_total` | None | Positions the ingestor read whose acknowledgement trees had not all resolved when it stopped. Their transport presents them again by its own redelivery contract. |
+| `nervix_ingestor_unconfirmed_stop_positions_total` | None | Positions the ingestor read whose acknowledgement trees had not all resolved when it stopped, including a batch that still waited for the node's extension workers. A transport that keeps positions presents them again by its own redelivery contract. |
 | `nervix_ingestor_transient_failure` | None | `1` while the current task has a published transient failure, which `DESCRIBE INGESTOR` shows as its transient error, otherwise `0`. Ending the task resets the observation to `0`; an ending predecessor cannot clear its replacement. |
 
 Broker ingestors record every family. Paced ingestors acknowledge nothing on a transport, so they
@@ -955,25 +984,26 @@ is read to produce the summary.
 
 Prometheus exposes branch lifecycle state without a concrete branch-key label:
 
-- `nervix_branch_instances{domain,branch,physical_node_id}` is a gauge of live concrete branch
+- `nervix_branch_instances{domain,parametrizer,physical_node_id}` is a gauge of live concrete branch
   keys on that physical node. A key is counted once even when multiple local graph nodes hold
   runtime state for it.
-- `nervix_branch_evictions_total{domain,branch,physical_node_id,reason}` counts each concrete key
+- `nervix_branch_evictions_total{domain,parametrizer,physical_node_id,reason}` counts each concrete key
   once when branch eviction begins on that physical node, even if multiple local graph nodes hold
   the key. `reason="lru"` is a `MAX INSTANCES ... EVICT LRU` capacity eviction; `reason="ttl"` is
   idle expiration.
-- `nervix_branch_partition_epoch{domain,branch,physical_node_id}` is the partition epoch the branch
-  executes in on that physical node: `1` until its first partition count change, then one more for
+- `nervix_branch_partition_epoch{domain,parametrizer,physical_node_id}` is the partition epoch the
+  parametrizer executes in on that physical node: `1` until its first partition count change, then one more for
   each committed change.
-- `nervix_branch_partition_keys_pending{domain,branch,physical_node_id}` is a gauge of the concrete
-  keys the physical node's units of the branch's deduplicators, window and WASM processors,
-  inferencers that declare state and materialized relays still have to move while the branch changes its partition count: the keys
+- `nervix_branch_partition_keys_pending{domain,parametrizer,physical_node_id}` is a gauge of the concrete
+  keys the physical node's units of the parametrizer's deduplicators, window and WASM processors,
+  inferencers that declare state and materialized relays still have to move while the parametrizer
+  changes its partition count: the keys
   each holds that the current count places in another unit, and the keys each is claiming. It is
   `0` once every key lies in its partition; the summed value across the cluster is what
-  `DESCRIBE BRANCH` reports as `keys pending`.
-- `nervix_branch_partition_keys_claimed_total{domain,branch,physical_node_id}` counts each key the
+  `DESCRIBE PARAMETRIZER` reports as `keys pending`.
+- `nervix_branch_partition_keys_claimed_total{domain,parametrizer,physical_node_id}` counts each key the
   physical node's units claimed from the unit the previous count placed it in; within one epoch,
-  the summed value across the cluster is what `DESCRIBE BRANCH` reports as `keys claimed`.
+  the summed value across the cluster is what `DESCRIBE PARAMETRIZER` reports as `keys claimed`.
 
 Normal shutdown, schedule replacement, and runtime detachment reduce the live gauge but do not
 increment the eviction counter. Relay branch presence and its TTL or LRU decisions exist only on
@@ -1021,6 +1051,13 @@ phase log records and by `terminating: true` in its status, as described in
 [Shutdown And Recovery](shutdown.md#observability). A timed-out precommit handoff leaves the schedule and metric authority unchanged.
 Unexpected owner loss continues through failover immediately and starts fresh relay metrics on the
 new owner.
+
+The two placement gauges carry only the domain: no label names a node, a rule or a tag value. A
+domain's series is removed once it has no node rule or no longer exists. Every node exports them
+from its own view of the committed schedule and records, and the leader logs at `info` each unit
+that starts or stops breaking a node rule, naming the domain, the unit and the rules. The schedule
+line of such a unit in `SHOW CLUSTER STATUS` adds `violates=<rule>` or `waiting_for=<rule>`, the
+rules comma-separated; see [Node Rules](placement.md#observing-node-rules).
 
 The schedule line `SHOW CLUSTER STATUS` prints for a unit whose owner changed names that
 transition as `transition_from=<former owner> state_recovery=<outcome>`. A planned handoff reports

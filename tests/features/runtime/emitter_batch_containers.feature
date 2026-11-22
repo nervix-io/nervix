@@ -73,7 +73,7 @@ Feature: Emitter batch containers
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -223,7 +223,7 @@ Feature: Emitter batch containers
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -325,7 +325,7 @@ Feature: Emitter batch containers
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING json_batch_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -427,7 +427,7 @@ Feature: Emitter batch containers
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -444,7 +444,7 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation
         ON GENERAL ERROR LOG;
@@ -466,7 +466,7 @@ Feature: Emitter batch containers
       """
     And within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":6 | "error_code":"validation" | "operation":"encode" | emitter 'subdivided' codec 'padded_pairs_codec' JSON payload exceeds MAX SIZE 80B
+      "seq":6 | "error_code":"limit" | "operation":"encode" | emitter 'subdivided' codec 'padded_pairs_codec' JSON payload exceeds MAX SIZE 80B
       "seq":7 | "operation":"encode" | emitter 'subdivided' failed to encode record
       """
 
@@ -506,7 +506,7 @@ Feature: Emitter batch containers
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -524,7 +524,7 @@ Feature: Emitter batch containers
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation
         ON GENERAL ERROR LOG;
@@ -548,11 +548,11 @@ Feature: Emitter batch containers
       | 1            | JSON   | empty            | evaluation | ON EMITTING BATCH produced no output            |
       | 1            | JSON   | .[]              | evaluation | ON EMITTING BATCH produced more than one output |
       | 1            | JSON   | error("private") | evaluation | ON EMITTING BATCH evaluation failed             |
-      | 1            | TOML   | .                | validation | cannot write the batch as TOML                  |
+      | 1            | TOML   | .                | codec      | cannot write the batch as TOML                  |
       | 3            | JSON   | empty            | evaluation | ON EMITTING BATCH produced no output            |
       | 3            | JSON   | .[]              | evaluation | ON EMITTING BATCH produced more than one output |
       | 3            | JSON   | error("private") | evaluation | ON EMITTING BATCH evaluation failed             |
-      | 3            | TOML   | .                | validation | cannot write the batch as TOML                  |
+      | 3            | TOML   | .                | codec      | cannot write the batch as TOML                  |
 
   @emitter_batch_syslog
   Scenario Outline: A syslog batch is one RFC 5424 frame per run of records sharing a header
@@ -581,7 +581,7 @@ Feature: Emitter batch containers
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO syslog_events
         INHERIT ALL
         UNBRANCHED

@@ -1562,6 +1562,7 @@ mod tests {
                         level: NoticeLevel::Info,
                         kind: NoticeKind::Leadership,
                         message: "an event unrelated to the status request".to_string(),
+                        error: None,
                     }
                     .encode(&SessionLimits::DEFAULT)
                     .assured("a short notice fits a frame");

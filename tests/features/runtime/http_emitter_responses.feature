@@ -29,7 +29,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -44,7 +44,7 @@ Feature: HTTP REQUEST emitter response classification
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              code = error.code,
+              code = error.class,
               operation = error.operation,
               message = error.message
         ON GENERAL ERROR LOG;
@@ -57,7 +57,7 @@ Feature: HTTP REQUEST emitter response classification
       """
     Then within "20s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"1" | "code":"external" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>"
+      "event_id":"1" | "code":"refused" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>"
       """
     And HTTP receiver "api" eventually receives at least 2 requests
     And HTTP receiver "api" request 1 is
@@ -112,7 +112,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -204,7 +204,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -274,7 +274,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -341,7 +341,7 @@ Feature: HTTP REQUEST emitter response classification
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {

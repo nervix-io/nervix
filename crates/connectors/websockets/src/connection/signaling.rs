@@ -520,21 +520,67 @@ impl SessionState {
         &self,
         frame: WebsocketDataFrame,
         connector: &D,
-        websocket: &mut WebSocketStream<S>,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
         D: SignalingDataEmitter,
     {
-        if self.accepting
-            && let Some(reply) = connector.accept_and_reply(frame).await
-        {
-            websocket
-                .send(reply)
-                .await
-                .map_err(|error| Report::new(WebsocketSignalingError::Send(Box::new(error))))?;
+        if self.accepting {
+            connector.deliver_data(frame, websocket).await?;
         }
         Ok(())
+    }
+}
+
+/// A connected peer that can keep one message already read at a response boundary. A handshake
+/// and the established session share it, so a control frame is still interpreted by its owner.
+pub struct WebsocketSessionSocket<'a, S> {
+    websocket: &'a mut WebSocketStream<S>,
+    next: Option<(Message, time::Instant)>,
+    deferred_arrival: Option<time::Instant>,
+}
+
+impl<'a, S: AsyncRead + AsyncWrite + Unpin> WebsocketSessionSocket<'a, S> {
+    pub fn new(websocket: &'a mut WebSocketStream<S>) -> Self {
+        Self {
+            websocket,
+            next: None,
+            deferred_arrival: None,
+        }
+    }
+
+    pub async fn next(&mut self) -> Option<Result<Message, tokio_tungstenite::tungstenite::Error>> {
+        if let Some((message, received_at)) = self.next.take() {
+            self.deferred_arrival = Some(received_at);
+            return Some(Ok(message));
+        }
+        self.deferred_arrival = None;
+        self.websocket.next().await
+    }
+
+    pub async fn send(
+        &mut self,
+        message: Message,
+    ) -> error_stack::Result<(), WebsocketSignalingError> {
+        self.websocket
+            .send(message)
+            .await
+            .map_err(|error| Report::new(WebsocketSignalingError::Send(Box::new(error))))
+    }
+
+    /// Leaves a data message read during a response race for the next serial read to interpret.
+    pub fn put_back(&mut self, message: Message, received_at: time::Instant) {
+        assert!(
+            self.next.is_none(),
+            "the socket has just yielded the message to put back"
+        );
+        self.next = Some((message, received_at));
+    }
+
+    /// The original read time when the current message was read ahead of the previous reply.
+    pub fn take_deferred_arrival(&mut self) -> Option<time::Instant> {
+        self.deferred_arrival.take()
     }
 }
 
@@ -561,6 +607,22 @@ pub trait SignalingDataEmitter {
         async move {
             accepted.await;
             None
+        }
+    }
+
+    /// Delivers one data message. A request-scoped endpoint can keep serving the socket while
+    /// its data wait is paused. Other transports simply write their optional response.
+    fn deliver_data<S: AsyncRead + AsyncWrite + Unpin + Send>(
+        &self,
+        frame: WebsocketDataFrame,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
+    ) -> impl Future<Output = error_stack::Result<(), WebsocketSignalingError>> + Send {
+        let accepted = self.accept_and_reply(frame);
+        async move {
+            if let Some(reply) = accepted.await {
+                websocket.send(reply).await?;
+            }
+            Ok(())
         }
     }
 }
@@ -608,7 +670,20 @@ impl WebsocketSignalingSession {
         connector: &D,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+        D: SignalingDataEmitter,
+    {
+        self.run_on_socket(&mut WebsocketSessionSocket::new(websocket), connector)
+            .await
+    }
+
+    pub async fn run_on_socket<S, D>(
+        &self,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
+        connector: &D,
+    ) -> error_stack::Result<(), WebsocketSignalingError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
         D: SignalingDataEmitter,
     {
         // Outlives the timed future so a timeout can name what the current step was waiting on.
@@ -637,13 +712,13 @@ impl WebsocketSignalingSession {
 
     async fn run_steps<'a, S, D>(
         &'a self,
-        websocket: &mut WebSocketStream<S>,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
         pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
         session: &mut SessionState,
         connector: &D,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
         D: SignalingDataEmitter,
     {
         let mut sent = 0usize;
@@ -680,9 +755,7 @@ impl WebsocketSignalingSession {
                                 }),
                             }
                         }?;
-                        websocket.send(frame).await.map_err(|error| {
-                            Report::new(WebsocketSignalingError::Send(Box::new(error)))
-                        })?;
+                        websocket.send(frame).await?;
                     }
                 }
                 CompiledSignalingStep::Wait(wait) => {
@@ -704,14 +777,14 @@ impl WebsocketSignalingSession {
 
     async fn wait_for_step<'a, S, D>(
         &'a self,
-        websocket: &mut WebSocketStream<S>,
+        websocket: &mut WebsocketSessionSocket<'_, S>,
         step: &'a CompiledWaitStep,
         pending: &mut Vec<&'a Arc<StatefulJaqProgram>>,
         session: &mut SessionState,
         connector: &D,
     ) -> error_stack::Result<(), WebsocketSignalingError>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
         D: SignalingDataEmitter,
     {
         while !pending.is_empty() {
@@ -725,9 +798,7 @@ impl WebsocketSignalingSession {
                 Message::Text(text) => WebsocketDataFrame::Text(text),
                 Message::Binary(bytes) => WebsocketDataFrame::Binary(bytes),
                 Message::Ping(ping) => {
-                    websocket.send(Message::Pong(ping)).await.map_err(|error| {
-                        Report::new(WebsocketSignalingError::Send(Box::new(error)))
-                    })?;
+                    websocket.send(Message::Pong(ping)).await?;
                     continue;
                 }
                 Message::Close(frame) => {

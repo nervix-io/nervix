@@ -18,7 +18,7 @@ Feature: Runtime persistence
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT http_notifications_endpoint
@@ -26,7 +26,7 @@ Feature: Runtime persistence
         PATH '/ingest';
         CREATE HTTP ENDPOINT INGESTOR http_notifications
         FROM http_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -81,16 +81,16 @@ Feature: Runtime persistence
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_restart_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_restart_tenant SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS SCHEMA sensor_branch ( sensor STRING );
-      CREATE IF NOT EXISTS BRANCH by_restart_sensor SCHEMA sensor_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_restart_sensor SCHEMA sensor_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_restart_tenant;
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_restart_sensor;
       CREATE VHOST edge http-{{test_id}}-restart-readings.example.com;
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_restart_tenant
@@ -153,16 +153,16 @@ Feature: Runtime persistence
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
       CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_flushed_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_flushed_tenant SCHEMA tenant_branch TTL 5m;
       CREATE IF NOT EXISTS SCHEMA sensor_branch ( sensor STRING );
-      CREATE IF NOT EXISTS BRANCH by_flushed_sensor SCHEMA sensor_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_flushed_sensor SCHEMA sensor_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_flushed_tenant;
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_flushed_sensor;
       CREATE VHOST edge http-{{test_id}}-flushed-readings.example.com;
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_flushed_tenant

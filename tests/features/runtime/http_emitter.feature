@@ -437,7 +437,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_event_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -542,7 +542,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_event_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -619,7 +619,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {
@@ -698,7 +698,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -743,7 +743,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
@@ -834,7 +834,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -854,7 +854,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
@@ -937,7 +937,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -962,7 +962,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index
         ON GENERAL ERROR LOG;
@@ -1049,7 +1049,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR routes_ingestor
         FROM routes_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routes_codec
         TO routes
           INHERIT ALL
           UNBRANCHED
@@ -1058,7 +1058,7 @@ Feature: HTTP REQUEST emitter
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -1082,7 +1082,7 @@ Feature: HTTP REQUEST emitter
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
               tenant = input.tenant,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation,
               state_prefix = relay_state.routes.prefix,
@@ -1121,7 +1121,7 @@ Feature: HTTP REQUEST emitter
       """
     And within "30s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"2" | "tenant":"south" | "error_code":"external" | "operation":"encode" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND" | emitter 'guarded' failed to encode record
+      "event_id":"2" | "tenant":"south" | "error_code":"codec" | "operation":"encode" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND" | emitter 'guarded' failed to encode record
       """
     And HTTP receiver "api" has captured exactly 2 requests
 
@@ -1168,7 +1168,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -1197,7 +1197,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index,
               affected_fields = error.fields
@@ -1340,7 +1340,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               operation_index = error.operation_index,
               affected_fields = error.fields
@@ -1440,7 +1440,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -1460,7 +1460,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
@@ -1542,7 +1542,7 @@ Feature: HTTP REQUEST emitter
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
       CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE SCHEMA rejected_request (event_id STRING, operation STRING);
       CREATE RELAY outgoing SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
@@ -1550,7 +1550,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           BRANCHED BY by_tenant
@@ -1641,7 +1641,7 @@ Feature: HTTP REQUEST emitter
       CREATE WIRE JSON SCHEMA event_body_wire MODE STRICT (event_id string, payload string);
       CREATE WIRE JSON CODEC event_body_codec FROM WIRE SCHEMA event_body_wire TO SCHEMA event_body;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE SCHEMA rejected_request (event_id STRING, source STRING, error_message STRING);
       CREATE RELAY source_a SCHEMA outbound_event BRANCHED BY by_tenant;
       CREATE RELAY source_b SCHEMA outbound_event BRANCHED BY by_tenant;
@@ -1651,7 +1651,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT ingress_b ON edge PATH '/b';
       CREATE HTTP ENDPOINT INGESTOR from_a
         FROM ingress_a MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO source_a
           INHERIT ALL
           BRANCHED BY by_tenant
@@ -1661,7 +1661,7 @@ Feature: HTTP REQUEST emitter
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR from_b
         FROM ingress_b MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO source_b
           INHERIT ALL
           BRANCHED BY by_tenant
@@ -1791,7 +1791,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -1870,7 +1870,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT outgoing_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR routes_ingestor
         FROM routes_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routes_codec
         TO routes
           INHERIT ALL
           UNBRANCHED
@@ -1879,7 +1879,7 @@ Feature: HTTP REQUEST emitter
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR outgoing_ingestor
         FROM outgoing_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
           UNBRANCHED
@@ -1904,7 +1904,7 @@ Feature: HTTP REQUEST emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation,
               operation_index = error.operation_index,
@@ -1978,7 +1978,7 @@ Feature: HTTP REQUEST emitter
       CREATE HTTP ENDPOINT accounts_ingress ON edge PATH '/accounts';
       CREATE HTTP ENDPOINT INGESTOR accounts_ingestor
         FROM accounts_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING account_events_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING account_events_codec
         TO accounts
           INHERIT ALL
           UNBRANCHED

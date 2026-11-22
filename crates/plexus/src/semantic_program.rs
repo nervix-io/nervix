@@ -20,7 +20,7 @@ use std::num::NonZeroU32;
 use ahash_compile_time::{HashSet, HashSetExt};
 use chumsky::{Boxed, prelude::*};
 use error_stack::Report;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, BuiltinFunctionName,
     CaseBranch, Expression, FieldName, FieldReference, FieldScope, Float64Literal, Inheritance,
@@ -1094,6 +1094,69 @@ pub(crate) fn read_assignment_prefix(
     read_prefix(assignment(), tokens)
 }
 
+/// The assignment a `SET` body is still writing where `tokens` end, as the tokens written for it so
+/// far, or `None` when the body's assignments end before `tokens` do.
+///
+/// `tokens` follow the `SET` keyword. Each complete assignment is read as `SET` reads it, and a `,`
+/// right after one begins the next. Any other token after a complete assignment ends the body: a
+/// route's `WHERE`, its message-error policy or the statement's next clause follows it.
+pub(crate) fn open_assignment(tokens: &[Token]) -> Option<&[Token]> {
+    let mut rest = tokens;
+    loop {
+        let Ok(Prefix { length, .. }) = read_assignment_prefix(rest) else {
+            return Some(rest);
+        };
+        let after = rest
+            .get(length..)
+            .assured("a reader's prefix never runs past the tokens it read");
+        match after.split_first() {
+            None => return Some(rest),
+            Some((Token::Comma, next)) => rest = next,
+            Some(_) => return None,
+        }
+    }
+}
+
+/// The builtin calls whose argument lists are still open where `tokens` end, outermost first: the
+/// calls whose arguments hold a position written there.
+///
+/// `tokens` hold a construction the grammar accepts up to its end, so their parentheses nest. A
+/// `(` right after a name the grammar reads as a builtin call opens that call's arguments. Every
+/// other `(` opens a group, an `IN` set, a conversion, a JSON read or a UDF call, none of which calls
+/// a builtin.
+pub(crate) fn open_builtin_calls(tokens: &[Token]) -> Vec<BuiltinFunctionName> {
+    let mut open = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            Token::LParen => open.push(builtin_called_before(tokens, index)),
+            Token::RParen => {
+                // A construction the grammar accepts closes only a parenthesis it opened.
+                if let Some(remaining) = open.len().checked_sub(1) {
+                    open.truncate(remaining);
+                }
+            }
+            _ => {}
+        }
+    }
+    open.into_iter().flatten().collect()
+}
+
+/// The builtin a call whose arguments open at `open` in `tokens` names, when the grammar reads a
+/// builtin call there: a name [`name`] accepts as a builtin's, which neither a scope's `.` nor
+/// `udf::` qualifies.
+fn builtin_called_before(tokens: &[Token], open: usize) -> Option<BuiltinFunctionName> {
+    let name_at = open.checked_sub(1)?;
+    if let Some(qualifier_at) = name_at.checked_sub(1)
+        && let Some(Token::Dot | Token::DoubleColon) = tokens.get(qualifier_at)
+    {
+        return None;
+    }
+    let called = tokens.get(name_at)?;
+    name(BuiltinFunctionName::parse)
+        .parse(std::slice::from_ref(called))
+        .into_output()
+}
+
 /// Reads the field one assignment writes at the front of `tokens`, as `SET` spells it.
 pub(crate) fn read_assignment_target_prefix(
     tokens: &[Token],
@@ -1153,6 +1216,74 @@ pub fn parse_route_construction(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lexed(input: &str) -> Vec<Token> {
+        let mut tokens = Vec::new();
+        for token in crate::lexer::lex(input).expect("the test input lexes") {
+            tokens.push(token.token);
+        }
+        tokens
+    }
+
+    #[test]
+    fn the_open_assignment_is_the_one_a_set_body_is_still_writing() {
+        let open = |body: &str| open_assignment(&lexed(body)).map(<[Token]>::to_vec);
+        assert_eq!(open(""), Some(Vec::new()));
+        assert_eq!(open("value ="), Some(lexed("value =")));
+        assert_eq!(open("value = COUNT(input.x),"), Some(Vec::new()));
+        assert_eq!(
+            open("value = COUNT(input.x), other = list_mean("),
+            Some(lexed("other = list_mean("))
+        );
+        assert_eq!(
+            open("value = COUNT(input.x) +"),
+            Some(lexed("value = COUNT(input.x) +"))
+        );
+        assert_eq!(
+            open("value = COUNT(input.x)"),
+            Some(lexed("value = COUNT(input.x)"))
+        );
+        assert_eq!(
+            open("value = COUNT(input.x) WHERE output.value > 0 AND"),
+            None
+        );
+        assert_eq!(open("value = COUNT(input.x) ON MESSAGE ERROR"), None);
+    }
+
+    #[test]
+    fn open_builtin_calls_are_the_calls_whose_arguments_hold_the_end() {
+        let open = |expression: &str| {
+            let mut names = Vec::new();
+            for call in open_builtin_calls(&lexed(expression)) {
+                names.push(call.as_str().to_string());
+            }
+            names
+        };
+        assert_eq!(
+            open("list_flatten(COLLECT_VEC("),
+            ["list_flatten", "collect_vec"]
+        );
+        assert_eq!(
+            open("coalesce(list_mean(COLLECT_VEC(input.x)), "),
+            ["coalesce"]
+        );
+        assert_eq!(open("`count`("), ["count"]);
+        assert_eq!(open("abs(("), ["abs"]);
+        for closed_or_not_a_call in [
+            "COUNT(input.x) + ",
+            "(",
+            "udf::scale(",
+            "input.x IN (",
+            "TRY_CAST(",
+            "JSON_VALUE(",
+            "relay_state.limits.ceiling(",
+        ] {
+            assert!(
+                open(closed_or_not_a_call).is_empty(),
+                "{closed_or_not_a_call}"
+            );
+        }
+    }
 
     #[test]
     fn preserves_udf_namespace_in_the_public_expression_model() {

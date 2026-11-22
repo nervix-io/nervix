@@ -21,7 +21,7 @@ Feature: Pulsar emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_pulsar_ingress SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_pulsar_ingress SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_pulsar_ingress;
         CREATE PULSAR CLIENT pulsar_main
         CONFIG {
@@ -90,7 +90,7 @@ Feature: Pulsar emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
-      CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -180,7 +180,7 @@ Feature: Pulsar emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -197,7 +197,7 @@ Feature: Pulsar emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -226,8 +226,8 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":4 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1970-01-01T00:00:00.000
-      "seq":5 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999
+      "seq":4 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1970-01-01T00:00:00.000
+      "seq":5 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999
       """
     And within "30s" the observed broker receives exactly these Pulsar messages
       | payload                                                    | event time               |
@@ -280,7 +280,7 @@ Feature: Pulsar emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -357,7 +357,7 @@ Feature: Pulsar emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -418,7 +418,7 @@ Feature: Pulsar emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -522,7 +522,7 @@ Feature: Pulsar emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -539,7 +539,7 @@ Feature: Pulsar emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -552,7 +552,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: the Pulsar broker does not allow the message
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: the Pulsar broker does not allow the message
       """
 
     Examples:
@@ -591,7 +591,7 @@ Feature: Pulsar emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TIMESTAMP NOW
         TO events
         INHERIT ALL
@@ -609,7 +609,7 @@ Feature: Pulsar emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -622,7 +622,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: DELIVER AFTER 3153600000s
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: DELIVER AFTER 3153600000s
       """
 
     Examples:

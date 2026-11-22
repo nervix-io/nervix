@@ -18,7 +18,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION route_events FROM incoming UNBRANCHED
@@ -81,7 +81,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING input_event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION route_events FROM incoming UNBRANCHED
@@ -141,7 +141,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION route_events FROM incoming UNBRANCHED
@@ -186,7 +186,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE SCHEMA input_event ( tenant STRING, seq I64 );
       CREATE SCHEMA output_event ( tenant STRING, seq I64, label STRING );
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_event_source SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_event_source SCHEMA tenant_branch TTL 5m;
       CREATE WIRE JSON SCHEMA input_event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC input_event_codec FROM WIRE SCHEMA input_event_wire TO SCHEMA input_event;
       CREATE RELAY incoming SCHEMA input_event BRANCHED BY by_event_source;
@@ -195,7 +195,7 @@ Feature: Dynamically applying junction ALTER operations
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING input_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING input_event_codec
         TO incoming INHERIT ALL BRANCHED BY by_event_source SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION route_events FROM incoming BRANCHED BY by_event_source

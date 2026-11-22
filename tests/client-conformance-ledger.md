@@ -408,8 +408,9 @@ for the outstanding-outcome deadline or a producer close that cannot drain that 
   no live probe of theirs follows a domain clock.
 - The Go and TypeScript clients decode server notices, with their level and kind, only from the
   corpus: a live probe skips the notices its session receives, which arrive whenever its node sees
-  a cluster event rather than at a point the report could fix. Binding hosts receive no notices,
-  because the shared binding does not expose them.
+  a cluster event rather than at a point the report could fix. Binding hosts read notices through
+  the shared host runtime, and each host suite's cluster tier reads the runtime notice of a junction
+  error with its class and node; no probe reports notices.
 
 
 Historical run results and audit findings are retained on [Client Wire 14](https://app.clickup.com/t/86bc1ahyr).

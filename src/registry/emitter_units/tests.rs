@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    BranchPartitions, ClusterNodeName, EmitterEntity, EmitterEntityKind, MqttEmitterEntity,
-    NodeUnitRef, ProcessorInputs, RetryPolicy, SingleEmitterReason,
+    ClusterNodeName, EmitterEntity, EmitterEntityKind, MqttEmitterEntity, NodeUnitRef,
+    ParametrizerPartitions, ProcessorInputs, RetryPolicy, SingleEmitterReason,
 };
 use nonzero_ext::nonzero;
 
@@ -45,10 +45,10 @@ fn relay_ref(relay: &str) -> NodeRef {
 /// A branch of `partitions` partitions on relay `relay`, with the relay branched by it.
 fn partitioned_relay(relay: &str, partitions: u16) -> [Model; 2] {
     let mut branch = branch_for_relay(relay, "row");
-    let Model::Branch(declaration) = &mut branch else {
+    let Model::Parametrizer(declaration) = &mut branch else {
         unreachable!("the fixture declares a branch")
     };
-    declaration.partitions = BranchPartitions::Direct(
+    declaration.partitions = ParametrizerPartitions::Direct(
         std::num::NonZeroU16::new(partitions).assured("the fixture counts are nonzero"),
     );
     [branch, relay_branched_by_relay_branch(relay, "row")]
@@ -122,7 +122,7 @@ fn an_emitter_without_instances_and_one_over_a_single_partition_run_as_their_sin
             &nodes,
             0,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     assert_eq!(
@@ -204,7 +204,7 @@ fn a_counted_emitter_over_an_unpartitioned_input_serves_it_from_its_first_instan
             &nodes,
             0,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     assert_eq!(
@@ -234,7 +234,7 @@ fn counted_instances_prefer_the_owner_of_a_partition_they_serve() {
             &nodes,
             0,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     let relay = &schedule.nodes[&relay_ref("events")];
@@ -282,7 +282,7 @@ fn per_partition_groups_bind_each_instance_to_its_partition_of_every_input() {
         emitter.emitter_units,
         Some(EmitterUnits::PerPartition {
             count: Some(nonzero!(4u16)),
-            branch: branch_name_for_relay("events"),
+            parametrizer: parametrizer_name_for_relay("events"),
             relays: vec![named("events"), named("more_events")],
         })
     );
@@ -324,7 +324,7 @@ fn per_partition_groups_bind_each_instance_to_its_partition_of_every_input() {
             &nodes,
             1,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     for index in 0..4 {

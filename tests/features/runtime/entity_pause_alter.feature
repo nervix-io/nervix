@@ -15,14 +15,14 @@ Feature: Entity-pause model alterations
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_branch_schema ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch_schema TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch_schema TTL 5m;
       CREATE RELAY incoming SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY outgoing SCHEMA routed_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-entity-swap.example.com;
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO incoming INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -126,7 +126,7 @@ Feature: Entity-pause model alterations
       CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR event_ingestor
         FROM event_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION altered_path FROM incoming UNBRANCHED
@@ -238,12 +238,12 @@ Feature: Entity-pause model alterations
       CREATE HTTP ENDPOINT disjoint_ingress ON disjoint_edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR affected_ingestor
         FROM affected_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING scoped_codec
         TO affected_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR disjoint_ingestor
         FROM disjoint_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING scoped_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING scoped_codec
         TO disjoint_input INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION altered_path FROM affected_input UNBRANCHED
@@ -314,7 +314,7 @@ Feature: Entity-pause model alterations
         FROM WIRE SCHEMA parked_event_wire
         TO SCHEMA parked_event;
       CREATE SCHEMA parked_tenant ( tenant STRING );
-      CREATE BRANCH by_parked_tenant SCHEMA parked_tenant TTL 5m;
+      CREATE PARAMETRIZER by_parked_tenant SCHEMA parked_tenant TTL 5m;
       CREATE RELAY parked_state
         SCHEMA parked_event
         BRANCHED BY by_parked_tenant
@@ -326,7 +326,7 @@ Feature: Entity-pause model alterations
       CREATE HTTP ENDPOINT parked_input_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR parked_state_ingestor
         FROM parked_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING parked_event_codec
         TO parked_state
           INHERIT ALL
           BRANCHED BY by_parked_tenant
@@ -336,7 +336,7 @@ Feature: Entity-pause model alterations
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR parked_input_ingestor
         FROM parked_input_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING parked_event_codec
         TO parked_input
           INHERIT ALL
           BRANCHED BY by_parked_tenant

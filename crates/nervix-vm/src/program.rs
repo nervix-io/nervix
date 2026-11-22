@@ -911,7 +911,9 @@ impl DateBinWidth {
 ///
 /// Variants are declared in name order, which is the order a shared aggregate structure lists
 /// the functions it serves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString, strum::EnumIter,
+)]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WindowAggregateFunction {
     ApproxCountDistinct,

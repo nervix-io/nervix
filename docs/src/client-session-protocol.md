@@ -567,7 +567,7 @@ answers from the same rule, so the REPL, a visual form and the rule's validation
 member.
 
 Choice lookups on the concurrent lane return typed values for structured client controls. A domain
-dependency selects internal schemas, branches, relays, codecs, VHOSTs, signaling protocols,
+dependency selects internal schemas, parametrizers, relays, codecs, VHOSTs, signaling protocols,
 JSON/CBOR/AVRO wire schemas, or resource catalogs; a domain and relay reference select relay
 fields; a domain and codec reference select that codec's output schema fields; a domain and resource
 reference select completed resource versions. Wire-schema targets have separate discriminants, so
@@ -577,9 +577,9 @@ pairs that read an external system; a client producer ingestor selects its schem
 schema target instead. Each ingestor-reference target requires a domain and offers clients of its
 pair's connector, except the HTTP endpoint and WebSocket endpoint targets, which offer endpoints of
 that `TYPE`. Its decoding-codec target offers codecs that can decode. An unbranched-relay
-target needs a domain; a branched-relay target also needs the selected branch and offers relays
-with exactly that branch. Ingestor error relays use the unbranched target. A branch-field target
-takes a domain and branch reference. Ingestor decoded and output fields use the existing
+target needs a domain; a branched-relay target also needs the selected parametrizer and offers
+relays with exactly that parametrizer. Ingestor error relays use the unbranched target. A
+branch-field target takes a domain and parametrizer reference. Ingestor decoded and output fields use the existing
 codec-field and relay-field targets. A junction, deduplicator, reorderer, or reingestor asks for
 another input relay with a domain and the first relay reference; candidates have that relay's exact named schema and branch.
 The same dependencies with the output-relay target select the input branch, and with the
@@ -1186,6 +1186,16 @@ reports, so a client routes notices by kind and never by their text:
 | `Runtime` | A failure the runtime of the serving node, or of another node, recovered from | `Error` |
 | `ControlPlane` | A control-plane failure the serving node recovered from | `Error` |
 | `Licensing` | A licensing lifecycle observation, a refresh/policy warning, or the licensing stop gate closing (`Error`) and lifting (`Info`) | `Info`, `Warning`, `Error` |
+
+A `Runtime` notice that reports an error of a graph node also carries that error as typed fields:
+`ServerNotice.error` is a `NoticeError` table holding the error's `ErrorClass` (one of the ten
+[error classes](./errors-and-diagnostics.md#the-message-error-record), `Codec` through `Internal`)
+and the producing node as a `NodeRef` (its `ModelKind` and its name). It is present when a route's
+`ON MESSAGE ERROR LOG`, a node's `ON GENERAL ERROR LOG` or a WASM processor's `ON GLOBAL ERROR LOG`
+reported a failure, a decode rejection or a `RATE LIMIT` rejection, on the serving node or on the
+peer whose runtime fanned the event out; it is absent on every other notice, including a runtime
+notice about a connector failure the node recovered from. A client that selects runtime errors by
+class or by node reads these fields and never parses the text.
 
 A membership notice reports only a change of the live set. Model changes, subscriptions opening or
 closing and domain starts change what members publish through gossip, not which members are live,
@@ -2470,9 +2480,10 @@ The C ABI also exposes an independently retained typed state-inspection envelope
 `nx_outcome_inspection`: JSON, counts, section schemas and verified Row frames outlive the
 originating outcome. Python, Ruby and JVM project that same shared owner through typed metadata,
 JSON, section schemas and retained Row frames; [Typed Inspection](client-host-bindings.md#typed-inspection)
-owns their lifetime contract. Typed
-transaction status/inspection, choice lookups, server notices and leadership observation are
-outside the shared binding surface. The architecture chapter's
+owns their lifetime contract. Every binding reads the session's server notices through the shared
+host runtime, each with its level, kind and text and, on a runtime notice about a classified error,
+its class and the producing node's kind and name. Typed transaction status/inspection, choice
+lookups and leadership observation are outside the shared binding surface. The architecture chapter's
 [guarantees and limits](client-host-bindings.md#guarantees-and-limits) and the ledger distinguish
 available host operations from the wider Rust client API.
 
@@ -2702,11 +2713,13 @@ policies are applicable. Domain pace is a separate domain-creation choice.
 ## Entity Label Inspection
 
 `CommandOutcome.entity_labels` carries one `EntityLabelsInspection`, independently of the display
-message and selected `TEXT` or `JSON` presentation. It contains the existing domain/node identity,
-the complete exact string map, captured committed policy revision and four acceptance limits.
-Its required view union is committed, with a required applied revision (zero included), or staged,
-with the complete existing transaction preview identity. Neither variant supplies the other's
-identity by default.
+message and selected `TEXT` or `JSON` presentation. The required owner union carries a Model's
+domain and node reference, a domain's name, a logical resource's domain and name, or a cluster
+user's name. It also carries the complete exact string map, captured committed policy revision
+and four acceptance limits. Its required view union is committed, with an applied revision (zero
+included), or staged, with the complete transaction preview identity. A staged view is defined
+for Models and resources. The logical `DESCRIBE DOMAIN` and `DESCRIBE RESOURCE` outcomes
+also use this envelope.
 
 The receiver validates every key, duplicate-key absence, complete-set limits and ordinary outer
 string/vector/transfer bounds. Missing required policy or view fields, undeclared discriminants
@@ -2749,10 +2762,12 @@ carries its domain and node reference. A cluster-license entity has neither a do
 name. `DESCRIBE LICENSE` uses the same page, unit, origin and Row-section contract, capturing one
 published policy revision and its committed usage. Its single unit belongs to the answering node.
 The `summary` includes typed decision issue/receipt timestamps and the active transition count.
-The `quotas` section reports current usage against each target; `transitions` reports the original
-and target quota, affected usage, identity, start, deadline, effective deadline, acknowledgement and
-current quota state. Its datetime cells retain full timestamp precision. Counts include transition
-rows, and a client preserves every section through the generic inspection contract.
+The `quotas` section reports current usage against each target; `capabilities` reports each
+catalog capability's `state` (`enabled`, `disabled` or `permitted`) with a `permitted_until`
+deadline only for `permitted`; `transitions` reports the original and target quota, affected usage,
+identity, start, deadline, effective deadline, acknowledgement and current quota state. Its
+datetime cells retain full timestamp precision. Counts include capability and transition rows, and
+a client preserves every section through the generic inspection contract.
 
 Stateful processor reads use the same envelope. Deduplicators publish `keys`; windows publish
 retained `rows` plus per-branch `header` and `accumulators` sections. Window metadata consumes
@@ -2776,11 +2791,16 @@ count, `WasmCheckpointCounts` and `WasmRecoveryCounts`, and the returned `WasmBr
 strictly increasing branch order. An entry's absent `branch` is the unbranched execution; it carries
 a `WasmCheckpointFacts` (generation, optional committed and latest revisions, stage and optional
 required and confirmed replica counts), a `WasmRecoveryFacts` (refused generation, rejection,
-request reference and outcome) or both, never neither. Generations and revisions are positive; a
-decoder refuses a zero, an unordered or stateless entry, more returned entries than the complete
-count, and every undeclared enum value or union member. Other kinds carry neither table. A WASM
-page has no row sections, so its `rows` and `bytes` counts are zero and `branches` counts the
-selected branches.
+request reference and outcome) or both, never neither. An entry with a checkpoint also carries a
+`WasmGuestStateDescription`: the generation and optional committed revision the scratch render
+restored, and the `WasmGuestStateRender` union of `WasmGuestStateSections`, each
+`WasmGuestStateSection` with its name, its `RowField`s and its row count, or
+`WasmGuestStateRenderFailure` with its `WasmGuestStateRenderStage` and diagnostic. Guest state is
+always sensitive, so every guest section field is `sensitive` and no row of a guest section is
+carried. Generations and revisions are positive; a decoder refuses a zero, an unordered or stateless
+entry, more returned entries than the complete count, a description beside no checkpoint, a guest
+section field that is not sensitive, and every undeclared enum value or union member. Other kinds carry neither table. A WASM page has no
+row sections, so its `rows` and `bytes` counts are zero and `branches` counts the selected branches.
 
 The shared host runtime keeps this envelope in `Inspection`. Python, Ruby and JVM applications
 read its typed metadata and lossless JSON through their native binding, using the host guides'
@@ -2798,8 +2818,9 @@ single-terminal reply gate still govern that outcome. Other typed reasons are `U
 
 The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
 bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
-metadata; WASM stages, phases, reasons, readiness, rejections and outcomes render as snake-case
-strings and reset scopes as `{"kind": ..., "branch": ...}`. See
+metadata; WASM stages, phases, reasons, readiness, rejections, outcomes and render stages render as
+snake-case strings and reset scopes as `{"kind": ..., "branch": ...}`, and a guest-state
+description's fields carry their Plexus type text. See
 [Inspect Materialized State](./relay.md#inspect-materialized-state) and
 [WASM State And Recovery](./wasm-state.md#observability) for token fencing and query semantics. This operator page protocol does not change subscription batches or the
 internal dependency/generator full-snapshot protocol.

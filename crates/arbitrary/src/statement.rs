@@ -5,30 +5,31 @@ use std::num::NonZeroUsize;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter,
-    AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
-    AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
+    AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
+    AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
+    AlterParametrizer, AlterParametrizerOperation, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
     AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
     BinaryOperator, BuiltinFunctionName, ClientIngestorEntity, CordonNode, CreateDomain,
-    CreateResource, CreateStatement, CreateUser, DescribeBranch, DescribeClient, DescribeCluster,
+    CreateResource, CreateStatement, CreateUser, DescribeClient, DescribeCluster,
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLicense, DescribeLookup, DescribePlacement,
-    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
-    DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality, EmitterBodyForm,
-    EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind, ExistingUserPolicy,
-    Expression, FieldName, FieldReference, FieldScope, HttpIngestorEntity, IngestorAlteration,
-    IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind, InspectionFormat,
-    KafkaIngestorEntity, Literal, LookupQuery, ModelKind, ModelName, MqttIngestorEntity,
-    NODE_TAG_FUNCTION, NatsIngestorEntity, NodeRef, NodeSelectorField, PlacementPolicy,
-    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope,
-    RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes,
-    ShowPlacements, ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    DescribeIngestor, DescribeJunction, DescribeLicense, DescribeLookup, DescribeParametrizer,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
+    DomainPace, DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality,
+    EmitterBodyForm, EmitterEntityKind, EmitterEnvelopeAlteration, EmitterReferenceKind,
+    ExistingUserPolicy, Expression, FieldName, FieldReference, FieldScope, HttpIngestorEntity,
+    IngestorAlteration, IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind,
+    InspectionFormat, KafkaIngestorEntity, Literal, LookupQuery, ModelKind, ModelName,
+    MqttIngestorEntity, NODE_TAG_FUNCTION, NatsIngestorEntity, NodePolicy, NodeRef,
+    NodeSelectorField, PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity,
+    RabbitMqIngestorEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
+    RedisIngestorEntity, RelayBranching, RelayName, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes, ShowPlacements,
+    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
     ShowWasmProcessorState, SqsIngestorEntity, StartDomain, StateBranchField, StateBranchSelection,
     StateInspectedProcessor, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral,
     SyslogIngestorEntity, TransactionInspectionRequest, TransactionInspectionTarget,
@@ -176,8 +177,8 @@ pub enum StatementVariant {
     RefreshLicense,
     ReleaseLicense,
     RotateLicenseClusterKey,
-    AlterBranch,
-    DescribeBranch,
+    AlterParametrizer,
+    DescribeParametrizer,
     AlterCluster,
     MutateEntityLabels,
     ShowLabels,
@@ -216,8 +217,8 @@ impl StatementVariant {
             Statement::AlterReingestor(_) => Self::AlterReingestor,
             Statement::AlterGenerator(_) => Self::AlterGenerator,
             Statement::AlterPlacement(_) => Self::AlterPlacement,
-            Statement::AlterBranch(_) => Self::AlterBranch,
-            Statement::DescribeBranch(_) => Self::DescribeBranch,
+            Statement::AlterParametrizer(_) => Self::AlterParametrizer,
+            Statement::DescribeParametrizer(_) => Self::DescribeParametrizer,
             Statement::Drop(_) => Self::Drop,
             Statement::DropNode(_) => Self::DropNode,
             Statement::CordonNode(_) => Self::CordonNode,
@@ -436,6 +437,7 @@ impl Arbitrary<'_> {
                     CreateDomain {
                         id: self.name(),
                         config: DomainConfig { pace },
+                        labels: self.entity_labels(),
                     },
                     if_not_exists,
                 ))
@@ -446,6 +448,7 @@ impl Arbitrary<'_> {
                     CreateUser {
                         name: self.name(),
                         password: self.string(),
+                        labels: self.entity_labels(),
                     },
                     if_not_exists,
                 ))
@@ -455,6 +458,7 @@ impl Arbitrary<'_> {
                 Statement::CreateResource(CreateStatement::new(
                     CreateResource {
                         identifier: self.name(),
+                        labels: self.entity_labels(),
                     },
                     if_not_exists,
                 ))
@@ -590,12 +594,13 @@ impl Arbitrary<'_> {
                     operations,
                 })
             }
-            StatementVariant::AlterBranch => {
-                let operations = self.operations(|arbitrary| AlterBranchOperation::SetPartitions {
-                    partitions: arbitrary.branch_partitions(),
-                });
-                Statement::AlterBranch(AlterBranch {
-                    branch: self.name(),
+            StatementVariant::AlterParametrizer => {
+                let operations =
+                    self.operations(|arbitrary| AlterParametrizerOperation::SetPartitions {
+                        partitions: arbitrary.branch_partitions(),
+                    });
+                Statement::AlterParametrizer(AlterParametrizer {
+                    parametrizer: self.name(),
                     operations,
                 })
             }
@@ -737,9 +742,11 @@ impl Arbitrary<'_> {
             StatementVariant::DescribeLookup => {
                 Statement::DescribeLookup(DescribeLookup { name: self.name() })
             }
-            StatementVariant::DescribeBranch => Statement::DescribeBranch(DescribeBranch {
-                branch: self.name(),
-            }),
+            StatementVariant::DescribeParametrizer => {
+                Statement::DescribeParametrizer(DescribeParametrizer {
+                    parametrizer: self.name(),
+                })
+            }
             StatementVariant::DescribeEndpoint => {
                 Statement::DescribeEndpoint(DescribeEndpoint { name: self.name() })
             }
@@ -786,8 +793,7 @@ impl Arbitrary<'_> {
                 key: self.subscription_literal(),
             }),
             StatementVariant::MutateEntityLabels => {
-                let kind = self.model_kind();
-                let entity = nervix_models::NodeRef::new(kind, self.model_name_of(kind));
+                let entity = self.entity_label_target();
                 let labels = self.entity_labels();
                 let mutation = if self.entropy.flag() {
                     nervix_models::EntityLabelMutation::Set(labels)
@@ -806,14 +812,10 @@ impl Arbitrary<'_> {
                     mutation,
                 })
             }
-            StatementVariant::ShowLabels => {
-                let kind = self.model_kind();
-                let entity = nervix_models::NodeRef::new(kind, self.model_name_of(kind));
-                Statement::ShowLabels(nervix_models::ShowLabels {
-                    entity,
-                    format: self.inspection_format(),
-                })
-            }
+            StatementVariant::ShowLabels => Statement::ShowLabels(nervix_models::ShowLabels {
+                entity: self.entity_label_target(),
+                format: self.inspection_format(),
+            }),
             StatementVariant::ShowCreate => {
                 let kind = self.model_kind();
                 Statement::ShowCreate(ShowCreate {
@@ -923,23 +925,36 @@ impl Arbitrary<'_> {
         operations
     }
 
-    /// A node preview with no selector, a declared property read or a literal tag comparison.
+    /// A node preview with no selector or with one.
     fn show_nodes(&mut self) -> ShowNodes {
+        let selector = if self.entropy.byte().is_multiple_of(4) {
+            None
+        } else {
+            Some(self.node_selector())
+        };
+        ShowNodes {
+            selector,
+            format: self.inspection_format(),
+        }
+    }
+
+    /// A node selector: a declared property read, or a literal comparison of a node's name or of
+    /// one of its tags.
+    pub(crate) fn node_selector(&mut self) -> Expression {
         let field = |field: NodeSelectorField| {
             let name = FieldName::parse(field.name()).assured("a selector field has a valid name");
             Expression::Field(FieldReference::scoped(FieldScope::Node, name))
         };
-        let selector = match self.entropy.byte() % 4 {
-            0 => None,
-            1 => Some(field(NodeSelectorField::CudaAvailable)),
-            2 => Some(Expression::Binary {
+        match self.entropy.byte() % 3 {
+            0 => field(NodeSelectorField::CudaAvailable),
+            1 => Expression::Binary {
                 operator: BinaryOperator::Equal,
                 left: Box::new(field(NodeSelectorField::Name)),
                 right: Box::new(Expression::Literal(Literal::String(
                     self.non_empty_string(),
                 ))),
-            }),
-            _ => Some(Expression::Binary {
+            },
+            _ => Expression::Binary {
                 operator: BinaryOperator::Equal,
                 left: Box::new(Expression::Call {
                     function: BuiltinFunctionName::parse(NODE_TAG_FUNCTION)
@@ -951,11 +966,16 @@ impl Arbitrary<'_> {
                 right: Box::new(Expression::Literal(Literal::String(
                     self.non_empty_string(),
                 ))),
-            }),
-        };
-        ShowNodes {
-            selector,
-            format: self.inspection_format(),
+            },
+        }
+    }
+
+    /// Any of a node rule's three policies, a selector for the two that read one.
+    pub(crate) fn node_policy(&mut self) -> NodePolicy {
+        match self.entropy.byte() % 3 {
+            0 => NodePolicy::Require(self.node_selector()),
+            1 => NodePolicy::Prefer(self.node_selector()),
+            _ => NodePolicy::Any,
         }
     }
 
@@ -1065,7 +1085,7 @@ impl Arbitrary<'_> {
 
     /// The name of a Model of `kind`. Plexus reads a relay's name wherever it names a relay, so in
     /// the Plexus domain the name of a relay avoids the words Plexus refuses for one.
-    fn model_name_of(&mut self, kind: ModelKind) -> ModelName {
+    pub(crate) fn model_name_of(&mut self, kind: ModelKind) -> ModelName {
         match kind {
             ModelKind::Relay => self.name_refusing::<ModelName>(RelayName::REFUSED_IN_PLEXUS),
             _ => self.name(),
@@ -1272,7 +1292,7 @@ impl Arbitrary<'_> {
             2 => AlterRelayOperation::SetBranching {
                 branching: if self.entropy.flag() {
                     RelayBranching::BranchedBy {
-                        branch: self.name(),
+                        parametrizer: self.name(),
                     }
                 } else {
                     RelayBranching::Unbranched
@@ -1725,26 +1745,28 @@ impl Arbitrary<'_> {
         }
     }
 
+    /// Any `ALTER PLACEMENT` operation of either rule form. A statement may mix the forms, as a
+    /// parser does; applying it to a stored rule is what refuses an operation of the other form.
     fn alter_placement_operation(&mut self) -> AlterPlacementOperation {
-        match self.entropy.byte() % 5 {
+        match self.entropy.byte() % 8 {
             0 => AlterPlacementOperation::SetPolicy {
                 policy: self.placement_policy(),
             },
-            1 => AlterPlacementOperation::SetRank {
+            1 => AlterPlacementOperation::SetNodePolicy {
+                policy: self.node_policy(),
+            },
+            2 => AlterPlacementOperation::SetRank {
                 rank: self.positive_u64(),
             },
-            2 => AlterPlacementOperation::DropRank,
-            3 => {
-                let placement = self.create_placement();
-                match placement.scope {
-                    nervix_models::PlacementScope::Corridor { from, to } => {
-                        AlterPlacementOperation::SetMembers { from, to }
-                    }
-                    nervix_models::PlacementScope::DomainWide => {
-                        AlterPlacementOperation::SetDomainWide
-                    }
-                }
-            }
+            3 => AlterPlacementOperation::DropRank,
+            4 => AlterPlacementOperation::SetMembers {
+                from: self.placement_members(),
+                to: self.placement_members(),
+            },
+            5 => AlterPlacementOperation::SetNodeMembers {
+                members: self.placement_members(),
+            },
+            6 => AlterPlacementOperation::SetDomainWide,
             _ => AlterPlacementOperation::RenameTo { name: self.name() },
         }
     }

@@ -116,7 +116,7 @@ Feature: Drain node
       CREATE HTTP ENDPOINT drain_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR drain_ingestor
         FROM drain_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING drain_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING drain_event_codec
         TO stalled_output INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE ZEROMQ CLIENT drain_sink CONFIG {
@@ -211,7 +211,7 @@ Feature: Drain node
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA transaction_id_branch TTL 5m;
 
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_source_txns;
 
@@ -225,7 +225,7 @@ Feature: Drain node
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_source_txns

@@ -181,7 +181,7 @@ throughout, and missing analysis never reads as zero findings.
 
 Product code and the `nervix-ratchet` orchestration binary build with the stable toolchain
 `rust-toolchain.toml` declares. The analysis driver links rustc's internal crates and builds on one
-pinned nightly, `nightly-2026-09-17`, which the isolated tooling workspace declares with `rustc-dev`,
+pinned nightly, `nightly-2026-11-21`, which the isolated tooling workspace declares with `rustc-dev`,
 `rust-src`, `rustfmt` and `llvm-tools`. `just toolchains-install` installs both toolchains. The
 driver refuses any other analysis compiler: it locates the pinned compiler through rustup and checks
 the commit that `rustc -vV` reports. Bolero's sanitizer campaigns use the same nightly, which the
@@ -386,9 +386,13 @@ the collection. The compiler reports the resolved declaration and the reason eve
 expectation is fulfilled. The gate uses the complete checked compiler matrix. It counts one
 declaration across build configurations, requires a repair task link, and compares each declaration
 with the recorded sites in `debt-baseline.json`. Replacing a recorded site with a different one
-fails even at the same total. `just ratchet --show branch_inversions` lists the current sites and
-their repair references. `just ratchet --update` drops the retired declarations from the baseline
-with their count.
+fails even at the same total. Declarations are compared without the compiler's impl
+disambiguators and counted: adding or removing an impl block earlier in a module renumbers the
+declarations after it, `{impl#14}` becoming `{impl#13}`, without changing which declaration each
+is, so a renumbered declaration keeps its pin, while one more declaration under an equal stable
+form is still new. `just ratchet --show branch_inversions` lists the current sites and their repair
+references. `just ratchet --update` drops the retired declarations from the baseline with their
+count and records a renumbered declaration under its current identity.
 
 Source counts and refusals have no semantic exception channel. A current structural occurrence
 remains counted, or refused, until its owner changes it; a compiler expectation cannot hide its

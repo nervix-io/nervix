@@ -212,7 +212,7 @@ mod tests {
         let parsed = parse_alter_junction(
             "ALTER JUNCTION project_events SET FILTER WHERE concat(input.kind, ',') != '', ADD \
              ROUTE TO projected SET normalized = concat(input.raw, ',ready') FLUSH IMMEDIATE ON \
-             MESSAGE ERROR SEND TO errors SET code = concat(error.code, ',bad'), SET DETACHED;",
+             MESSAGE ERROR SEND TO errors SET class = concat(error.class, ',bad'), SET DETACHED;",
         )
         .expect("ALTER JUNCTION should preserve expression commas and find operation separators");
 

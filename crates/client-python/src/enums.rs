@@ -225,6 +225,27 @@ host_enum! {
 }
 
 host_enum! {
+    /// How urgently a server notice asks for an operator's attention.
+    NoticeLevel from NoticeLevel {
+        Info = 1 as "INFO",
+        Warning = 2 as "WARNING",
+        Error = 3 as "ERROR",
+    }
+}
+
+host_enum! {
+    /// What a server notice reports, which a host routes the notice by instead of its text.
+    NoticeKind from NoticeKind {
+        Membership = 1 as "MEMBERSHIP",
+        Leadership = 2 as "LEADERSHIP",
+        ClusterParameters = 3 as "CLUSTER_PARAMETERS",
+        Runtime = 4 as "RUNTIME",
+        ControlPlane = 5 as "CONTROL_PLANE",
+        Licensing = 6 as "LICENSING",
+    }
+}
+
+host_enum! {
     /// Whether a producer or a consumer is attached.
     EndpointState from EndpointState {
         Active = 1 as "ACTIVE",
@@ -408,6 +429,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ClockEventKind>()?;
     module.add_class::<ClockState>()?;
     module.add_class::<ClockEndReason>()?;
+    module.add_class::<NoticeLevel>()?;
+    module.add_class::<NoticeKind>()?;
     module.add_class::<EndpointState>()?;
     module.add_class::<OpenRefusal>()?;
     module.add_class::<ReopenReason>()?;

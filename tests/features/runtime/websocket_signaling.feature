@@ -39,7 +39,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -108,7 +108,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -171,7 +171,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -255,7 +255,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -337,7 +337,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -404,7 +404,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -473,7 +473,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -542,7 +542,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -610,7 +610,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED
@@ -677,7 +677,7 @@ Feature: Websocket signaling protocols
 
       CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
         FROM ws_notifications_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         UNBRANCHED

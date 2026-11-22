@@ -53,7 +53,7 @@ Feature: Language-level client suites
         echo U32
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY typed_rows SCHEMA suite_row BRANCHED BY by_tenant;
       CREATE RELAY watched_rows SCHEMA suite_row BRANCHED BY by_tenant;
       CREATE CLIENT PRODUCER INGESTOR typed_in

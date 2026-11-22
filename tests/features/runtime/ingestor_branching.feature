@@ -10,13 +10,13 @@ Feature: Ingestor branching
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT http_notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       SHOW CREATE INGESTOR http_notifications;
       """
     Then the last command output contains
       """
       CREATE HTTP ENDPOINT INGESTOR http_notifications
-        FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
+        FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE
         DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -74,21 +74,21 @@ Feature: Ingestor branching
         TO SCHEMA reading
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA bucket_branch (bucket I64);
-      CREATE BRANCH by_bucket SCHEMA bucket_branch TTL 5m;
+      CREATE PARAMETRIZER by_bucket SCHEMA bucket_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_bucket;
       CREATE RELAY branch_failures SCHEMA branch_failure UNBRANCHED;
       CREATE VHOST edge ingestor-branch-error-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT reading_ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM reading_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_batch_codec
         TO readings
           INHERIT ALL
           BRANCHED BY by_bucket SET bucket = message.amount / message.divisor
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR SEND TO branch_failures
           SET failed_id = input.id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message,
               captured_amount = partial_output.amount

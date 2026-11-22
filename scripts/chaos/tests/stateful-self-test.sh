@@ -791,7 +791,7 @@ source "${chaos_dir}/stateful-scenario.sh"
 # shellcheck source=materialized-profile-controls.sh
 source "${chaos_dir}/tests/materialized-profile-controls.sh"
 check_materialized_profile_reader stateful
-[[ "${recovery_graph_models[branch-chaos_state_branch]}" == 'SHOW CREATE BRANCH chaos_state_branch;' ]] \
+[[ "${recovery_graph_models[branch-chaos_state_branch]}" == 'SHOW CREATE PARAMETRIZER chaos_state_branch;' ]] \
     || fail 'the stateful branch is absent from the before/after graph comparison'
 printf 'owner: node-1\nreplicas: node-2\n' >"${tmp_dir}/single-description.txt"
 stateful_entity_placement "${tmp_dir}/single-description.txt" \
@@ -808,35 +808,121 @@ stateful_entity_placement "${tmp_dir}/partition-description.txt" \
     | jq -e '.owner == "-" and (.units | map(.unit)) == [0,1,2,3]
         and .units[0].owner == "node-1" and .units[1].owner == "node-2"' >/dev/null \
     || fail 'partition placement lost a unit or conflated its owners'
-# An entity without a DESCRIBE statement is placed from the schedule section of SHOW CLUSTER STATUS
-# alone, by its exact kind and name.
-cat >"${tmp_dir}/scheduled-status.txt" <<'EOF'
-raft.id: node-1
-[schedule]
-- domain=chaos_baseline kind=relay name=chaos_inferred owner=node-1 replicas=node-2
-- domain=chaos_baseline kind=inferencer name=chaos_running owner=node-2 replicas=node-3 transition_from=node-1 state_recovery=complete
-- domain=chaos_baseline kind=inferencer name=chaos_running_shadow owner=node-1 replicas=-
-[warnings]
-- domain=chaos_baseline kind=inferencer name=chaos_running owner=node-9 replicas=-
+# DESCRIBE INFERENCER names each execution unit in its own block: the unit, its owner and its
+# replicas, then the state that owner reports. The indented definition is never read as placement.
+inferencer_description() {
+    cat <<'EOF'
+inferencer: chaos_running
+resource: chaos_running_model@1
+file: models/running_sum.onnx
+execution: per message
+state bytes per branch: 8
+definition:
+  CREATE INFERENCER chaos_running
+    FROM chaos_state_records
+    ATTACHED
+    USING RESOURCE chaos_running_model VERSION 1
+    FILE 'models/running_sum.onnx'
 EOF
-stateful_scheduled_placement "${tmp_dir}/scheduled-status.txt" 'INFERENCER chaos_running' \
+}
+inferencer_unit() {
+    printf 'unit: %s\n  owner: %s\n  replicas: %s\n' "$1" "$2" "$3"
+    printf '  branches: 1\n  state bytes: 8\n  published revision: 41\n  persisted revision: 40\n'
+}
+{ inferencer_description; inferencer_unit Single node-2 node-3; } >"${tmp_dir}/inferencer-single.txt"
+printf '  replica node-3 replicated revision: 40\n' >>"${tmp_dir}/inferencer-single.txt"
+stateful_entity_placement "${tmp_dir}/inferencer-single.txt" \
     | jq -e '.owner == "node-2" and .replicas == "node-3" and .units == []' >/dev/null \
-    || fail 'the scheduled single-unit placement was not read from the schedule section alone'
-cat >"${tmp_dir}/scheduled-partitions.txt" <<'EOF'
-[schedule]
-- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:0 owner=node-1 replicas=node-3
-- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:1 owner=node-2 replicas=node-3
-- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:2 owner=node-1 replicas=node-2
-- domain=chaos_baseline kind=inferencer name=chaos_running unit=partition:3 owner=node-2 replicas=node-1
-EOF
-stateful_scheduled_placement "${tmp_dir}/scheduled-partitions.txt" 'INFERENCER chaos_running' \
+    || fail 'the inferencer single-unit placement was not read from its unit block'
+{
+    inferencer_description
+    inferencer_unit 'Partition(0)' node-1 node-3
+    inferencer_unit 'Partition(1)' node-2 node-3
+    inferencer_unit 'Partition(2)' node-1 'node-2, node-3'
+    inferencer_unit 'Partition(3)' node-2 node-1
+} >"${tmp_dir}/inferencer-partitions.txt"
+stateful_entity_placement "${tmp_dir}/inferencer-partitions.txt" \
     | jq -e '.owner == "-" and (.units | map(.unit)) == [0,1,2,3]
-        and .units[0].owner == "node-1" and .units[1].owner == "node-2"' >/dev/null \
-    || fail 'the scheduled partition placement lost a unit or conflated its owners'
-printf 'raft.id: node-1\n[schedule]\n- none\n' >"${tmp_dir}/scheduled-absent.txt"
-stateful_scheduled_placement "${tmp_dir}/scheduled-absent.txt" 'INFERENCER chaos_running' \
+        and .units[0].owner == "node-1" and .units[1].owner == "node-2"
+        and .units[2].replicas == "node-2, node-3"' >/dev/null \
+    || fail 'the inferencer partition placement lost a unit or conflated its owners'
+# On one node a unit has no replicas, and a unit without an execution node names no owner.
+{ inferencer_description; printf 'unit: Single\n  owner: unavailable\n  replicas: \n  state: unavailable\n'; } \
+    >"${tmp_dir}/inferencer-unowned.txt"
+stateful_entity_placement "${tmp_dir}/inferencer-unowned.txt" \
+    | jq -e '.owner == "unavailable" and .replicas == "-" and .units == []' >/dev/null \
+    || fail 'an inferencer unit without an execution node or replicas was misread'
+inferencer_description >"${tmp_dir}/inferencer-unscheduled.txt"
+stateful_entity_placement "${tmp_dir}/inferencer-unscheduled.txt" \
+    | jq -e '.owner == null and .units == []' >/dev/null \
+    || fail 'an unscheduled inferencer was given an owner'
+{
+    inferencer_description
+    inferencer_unit 'Partition(0)' node-1 node-3
+    inferencer_unit 'Instance(0)' node-1 node-3
+} >"${tmp_dir}/inferencer-unreadable.txt"
+stateful_entity_placement "${tmp_dir}/inferencer-unreadable.txt" \
     | jq -e '.owner == "-" and .units == []' >/dev/null \
-    || fail 'an unscheduled entity was given an owner'
+    || fail 'an inferencer unit the reader cannot place was dropped instead of withholding the owner'
+
+# The placement read DESCRIBEs every stateful entity in one batch, the inferencer included, and the
+# inferencer's units decide where the stateful work is, as every other entity's units do. Every
+# other entity answers from OTHERS_OWNER here, and the ingestors from node-1.
+(
+    node_hosts=(nervix-1 nervix-2 nervix-3)
+    stateful_partitions=4
+    others_owner=node-2
+    inferencer_answer=''
+    admin_cli_batch() {
+        local output_dir="$3"
+        shift 4
+        mkdir -p "${output_dir}"
+        while [[ "$#" -ge 2 ]]; do
+            printf '%s\n' "$2" >>"${output_dir}/statements.txt"
+            case "$2" in
+                'DESCRIBE INFERENCER chaos_running;') cp "${inferencer_answer}" "${output_dir}/$1.txt" ;;
+                'DESCRIBE INGESTOR '*) printf 'owner: node-1\nreplicas: -\n' >"${output_dir}/$1.txt" ;;
+                'DESCRIBE EMITTER '*) printf 'owner: %s\nreplicas: -\n' "${others_owner}" >"${output_dir}/$1.txt" ;;
+                *)
+                    printf 'partitions: 4\n' >"${output_dir}/$1.txt"
+                    printf "partition %d: owner=${others_owner} replicas=-\n" 0 1 2 3 >>"${output_dir}/$1.txt"
+                    ;;
+            esac
+            printf '0\n' >"${output_dir}/$1.status"
+            shift 2
+        done
+    }
+    # Writes a DESCRIBE INFERENCER answer to FILE with one partition unit per OWNER, in order.
+    inferencer_partitions() {
+        local file="$1"
+        shift
+        local unit=0
+        local owner
+        inferencer_description >"${file}"
+        for owner in "$@"; do
+            inferencer_unit "Partition(${unit})" "${owner}" - >>"${file}"
+            unit=$((unit + 1))
+        done
+        inferencer_answer="${file}"
+    }
+    inferencer_partitions "${tmp_dir}/inferencer-on-owner.txt" node-2 node-2 node-2 node-2
+    stateful_placed_on node-2 node-1 "${tmp_dir}/placed-on-owner" \
+        || fail 'the stateful work was not placed on its owner with the inferencer read from DESCRIBE'
+    grep -Fxq 'DESCRIBE INFERENCER chaos_running;' "${tmp_dir}/placed-on-owner/statements.txt" \
+        || fail 'the placement read did not DESCRIBE the inferencer'
+    inferencer_partitions "${tmp_dir}/inferencer-partly-elsewhere.txt" node-2 node-2 node-2 node-3
+    if stateful_placed_on node-2 node-1 "${tmp_dir}/placed-partly-elsewhere"; then
+        fail 'the stateful work was placed on its owner while an inferencer unit ran elsewhere'
+    fi
+    others_owner=node-3
+    inferencer_partitions "${tmp_dir}/inferencer-moved.txt" node-3 node-1 node-3 node-1
+    stateful_moved_off node-2 nervix-1 "${tmp_dir}/moved-off" \
+        || fail 'the stateful work did not count as moved off once every inferencer unit had left'
+    inferencer_partitions "${tmp_dir}/inferencer-left-behind.txt" node-3 node-2 node-3 node-1
+    if stateful_moved_off node-2 nervix-1 "${tmp_dir}/moved-off-left-behind"; then
+        fail 'the stateful work counted as moved off while an inferencer unit stayed on the faulted owner'
+    fi
+) || exit 1
 stateful_partitions=4
 CHAOS_REPLICA_COUNT=1
 jq -n '{outcome: "page", continuation: null, units: [range(0;4) | . as $unit | {wasm: {

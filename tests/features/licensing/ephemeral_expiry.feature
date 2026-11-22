@@ -334,7 +334,7 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR buffered
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -443,21 +443,18 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       """
     # The publish never finishes, so the licensing stop is forced at its fixed time.
     Then within "120s" node "<observer>" eventually reports status containing "{{domain}} status=Stopped"
-    When these Plexus commands are executed on node "<observer>"
+    # The cut report follows the stopped status once the nodes finish tearing down the domain.
+    And within "30s" DESCRIBE DOMAIN on node "<observer>" contains
       """
-      DESCRIBE DOMAIN;
+      emitter 'published': work in motion cut by enforcement
       """
-    Then the last command output contains
+    And the last command output contains
       """
       stopped by licensing: ephemeral activation expired at {{expired_at}}
       """
     And the last command output contains
       """
       the licensing stop enforced the stop
-      """
-    And the last command output contains
-      """
-      emitter 'published'
       """
     And HTTP receiver "stuck" eventually sees the client abandon at least 1 unfinished response
 

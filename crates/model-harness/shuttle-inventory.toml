@@ -56,6 +56,7 @@ checks = [
   "connection::stream_slots::shuttle_checks::replication_drain_stops_leasing_and_waits_for_every_leased_slot",
   "request::shuttle_checks::a_membership_change_between_a_callers_check_and_its_wait_is_never_lost",
   "request::shuttle_checks::racing_registrations_lose_no_handler_and_publish_each_name_once",
+  "wire::admission_tests::shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place",
   "wire::admission_tests::shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs",
 ]
 name = "nervix-interconnect"
@@ -156,6 +157,7 @@ checks = [
   "application::restore::shuttle_tests::shuttle_a_resumed_restore_never_repeats_a_recorded_effect",
   "application::restore::shuttle_tests::shuttle_an_abandoned_restore_upload_releases_its_quota_exactly_once",
   "application::restore::shuttle_tests::shuttle_concurrent_restore_retries_join_one_execution",
+  "application::runtime_admission::shuttle_tests::shuttle_an_installation_whose_caller_goes_away_ends_before_the_next_turn_and_the_runtime_stop",
   "application::shutdown::shuttle_tests::shuttle_phases_only_advance_and_every_completion_waiter_observes_the_one_outcome",
   "application::shutdown::shuttle_tests::shuttle_racing_stop_requests_accept_exactly_one",
   "application::domain_clock::attachments::tests::modeled::shuttle_attachment_replacement_and_stop_wake_the_exact_delivery_lifetime",
@@ -210,6 +212,9 @@ checks = [
   "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_a_deadline_racing_an_ack_resolves_once_and_returns_its_slot",
   "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_intake_stop_wakes_a_held_response_without_waiting_for_ingestor_close",
   "runtime::endpoint_acknowledgement::shuttle_tests::shuttle_endpoint_every_binding_starts_before_a_shared_request_waits_for_acknowledgements",
+  "runtime::endpoint_pause::shuttle_tests::shuttle_endpoint_pause_deadline_and_resume_resolve_the_body_once",
+  "runtime::endpoint_pause::shuttle_tests::shuttle_endpoint_pause_disconnect_and_resume_resolve_the_body_once",
+  "runtime::endpoint_pause::shuttle_tests::shuttle_endpoint_pause_disconnect_removes_the_body_when_replay_is_interrupted",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_a_source_that_ends_while_its_stop_is_called_off_is_never_published_again",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_a_stopping_domains_withdrawal_keeps_the_intake_a_retained_request_borrowed",
   "runtime::endpoint_route_table::shuttle_tests::shuttle_endpoint_domain_teardown_ends_intake_even_when_a_request_retains_the_table",
@@ -343,6 +348,8 @@ name = "nervix-server"
 checks = [
   "entity_labels::tests::shuttle_entity_label_reads_hold_one_map_revision_and_committed_policy",
   "entity_labels::tests::shuttle_entity_label_reads_remain_coherent_across_drop_and_recreation",
+  "entity_labels::tests::shuttle_two_user_label_edits_each_apply_once_and_a_late_replay_keeps_the_later_edit",
+  "entity_labels::tests::shuttle_a_model_label_edit_planned_before_a_drop_never_reaches_the_recreated_model",
   "planning_parameter_fence_tests::shuttle_partition_observation_and_instance_assignment_publish_one_epoch",
   "restore::tests::shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers",
   "domain_pause_recovery::tests::shuttle_checks::shuttle_transaction_adoption_and_reconcile_fence_delayed_recovery",

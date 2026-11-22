@@ -48,9 +48,9 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `BACKUP CLUSTER` covers every domain and every user.
 - `BACKUP DOMAIN <name>` covers one domain. Without a name it covers the session's selected domain.
   A domain backup holds no users.
-- `WITHOUT RESOURCES` records every resource version with its checksums and sizes, and leaves out
-  the version's bytes.
-- `WITHOUT STATE` omits runtime state and takes no domain mutation lease.
+- `WITHOUT RESOURCES` preserves logical resource labels and all catalog metadata, including
+  checksums and sizes. It omits the version bytes.
+- `WITHOUT STATE` omits runtime state, retains configuration and labels, and takes no domain mutation lease.
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
 - `TIMEOUT <duration>` bounds each running domain's cut, from the wait for its mutation lease
@@ -360,8 +360,8 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   licensing is reported stopped, and the message reports `restored domains are stopped by
   licensing: <reason>`, or names those domains when others already run.
 - `WITHOUT STATE` restores the configuration and purges state for the target domain.
-- `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle, materialized, deduplicator and window
-  state but starts ingestors without the archived Kafka positions.
+- `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle, materialized, deduplicator, window and
+  inferencer state but starts ingestors without the archived Kafka positions.
 - A state section whose entity is absent or whose schema fingerprint differs from the published
   schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
   command diagnostics and CLI output; that entity starts without the skipped checkpoint. A dry run
@@ -399,14 +399,15 @@ prints `cluster_uid`. Archives carry no cluster private key, identity record or 
 Restoring into a fresh cluster is a clone with that cluster's own UUID and key. Recovering a
 licensed installation requires an administrative transfer to the rebuilt cluster.
 
-- **Users.** Each archived user, with its complete credential exactly as the archive holds it.
-- **Domains.** Each restored domain is initially created stopped, with its archived pace,
+- **Users.** Each archived user, with its exact labels and complete credential. `ON EXISTING USER SKIP`
+  keeps both on the destination. `ON EXISTING USER REPLACE` imports both from the archive.
+- **Domains.** Each restored domain is initially created stopped, with its archived pace, labels,
   start generation and latest start point. Named placement rules are restored with the Models.
   Complete publication releases its installation
   gate. With `RESUME`, that same consensus effect changes it to running, without a new `START`.
   `LIST DOMAINS`, `DESCRIBE DOMAIN`, restore reports and dry-run reports expose the status and start
   generation; `DESCRIBE DOMAIN` also exposes the start point and installed mapping.
-- **Resources.** Each resource the domain declared, and each completed version under its archived
+- **Resources.** Each resource the domain declared, its logical labels, and each completed version under its archived
   number, with its checksums, file count, sizes, creation time and creating node as
   `DESCRIBE RESOURCE` showed them in the source cluster. A number the source assigned to an upload
   that failed or was still installing when the backup read it stays a gap, and the next upload of
@@ -418,8 +419,8 @@ licensed installation requires an administrative transfer to the rebuilt cluster
   these labels; the target cluster's committed acceptance limits still apply to restore.
 
 A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, Kafka
-positions, materialized relay checkpoints, deduplicator keyspaces and windows on every newly
-assigned owner and replica after its models are scheduled. Each node validates the complete staged
+positions, materialized relay checkpoints, deduplicator keyspaces, windows and inferencer tensors on
+every newly assigned owner and replica after its models are scheduled. Each node validates the complete staged
 set and durably selects it at once, so its readers see either the complete previous set or the
 complete restored one; nodes without assigned checkpoints publish an empty set. A replicated
 installation gate refuses `START` until every target node has published its complete
@@ -468,11 +469,11 @@ instead, leave the domain stopped and use `START AT '<frontier>' TIME RATE <rate
 
 A restore installs an archived branch key only when it is a key of the branching its restored
 entity declares in the schedule the restore publishes. A processor runs every branch under its one
-declaration, and a relay's materialized records carry its declared branch. An ingestor or a
+parametrizer, and a relay's materialized records carry its parametrizer. An ingestor or a
 reingestor keeps one branch lifecycle for all of its routes, and each route writes the branch of
 the relay it targets, so a key it archived may belong to the branching of any of those relays,
 unbranched included. A key belongs to a branching when it is absent exactly where the branching is
-unbranched, and otherwise holds exactly the fields of the branch's key schema, each with a value of
+unbranched, and otherwise holds exactly the fields of the parametrizer's key schema, each with a value of
 exactly the field's declared type: the same integer width, a float that is finite, a datetime that
 reads as RFC 3339 text, and an `ARRAY` of its declared length. A key lists its fields in field-name
 order, the order the archive reader requires. No value is converted to fit, and a key that does not
@@ -486,12 +487,12 @@ window skipped only for its window model or branch incarnation still is. The con
 record identity as it reads it. A dry run runs the same checks, and a restore `WITHOUT STATE`
 installs no archived key and checks none. A key that does not belong refuses the whole restore
 before it changes anything. The refusal names the archive section, the lifecycle entry, descriptor
-or record identity, numbered from 1, the entity, the branches it runs in and, for a key of another
+or record identity, numbered from 1, the entity, the parametrizers it runs under and, for a key of another
 shape, the field that is missing, undeclared or of another type. It never includes a key value,
 which a branch schema may declare `SENSITIVE`:
 
 ```text
-restore refused: the branch key of lifecycle entry 1 in archive section 'domains/payments/state/branch_lifecycle/deduplicator/unique_payment_filter/single/branches.rkyv' does not belong to the branching of deduplicator 'unique_payment_filter' in domain 'payments': it is not a key of branch 'by_tenant': field 'tenant' does not hold a value of its declared type: expected STRING, found I64
+restore refused: the branch key of lifecycle entry 1 in archive section 'domains/payments/state/branch_lifecycle/deduplicator/unique_payment_filter/single/branches.rkyv' does not belong to the branching of deduplicator 'unique_payment_filter' in domain 'payments': it is not a key of parametrizer 'by_tenant': field 'tenant' does not hold a value of its declared type: expected STRING, found I64
 ```
 
 Installation checks the same keys against the schedule it installs under before it stages any
@@ -693,7 +694,7 @@ expired reference cannot settle an earlier complete upload whose outcome was los
 `OutcomeUnknown`; keep its original reference and restore the same archive for recovery. See
 [Restoring](client-library.md#restoring) for the native-client contract.
 
-In the [web console](client-tools-web-console.md#backup-and-restore), an unrecorded request failure
+In the [web console](client-tools-web-console.md#backing-up-and-restoring), an unrecorded request failure
 on a later attempt also leaves an earlier possibly admitted restore unknown. Keep the same
 statement, archive and execution reference to recover its recorded outcome. A recovered failure
 or a restore step report remains definitive and preserves the steps already applied.
@@ -896,17 +897,18 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
 | Manifest | 1 | 5 | Archive format major version, producer and Plexus releases, cluster id and source cluster UID, capture time, scope, whether resource bytes are included, each domain's revision, captured label policy, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
-| Users | 2 | 2 | Every user's name and typed PBKDF2-HMAC-SHA-512 credential: validated iterations, 128-bit salt and 64-byte digest |
-| Domain | 3 | 2 | Pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
+| Users | 2 | 3 | Captured label policy and each user's name, exact labels and typed PBKDF2-HMAC-SHA-512 credential with validated iterations, 128-bit salt and 64-byte digest |
+| Domain | 3 | 3 | Domain labels, pace, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number and labels |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
-| WASM guest state descriptor | 5 | 4 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
+| WASM guest state descriptor | 5 | 5 | The scheduled unit, saved branch key, schema fingerprint, guest state generation and checkpoint revision |
 | Kafka domain offsets | 6 | 5 | The scheduled unit, ingestor schema fingerprint, optional applied explicit-start generation, and ordered topic and partition positions, expressed as the next offset to consume |
-| Branch lifecycle | 7 | 4 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
+| Branch lifecycle | 7 | 5 | The scheduled unit, owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
 | Materialized relay descriptor | 8 | 4 | Domain and relay names, scheduled unit, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
-| Materialized record identities | 9 | 4 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
-| Deduplicator keyspace descriptor | 10 | 4 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
-| Window state descriptor | 11 | 4 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
-| Inferencer state descriptor | 12 | 1 | Domain and inferencer names, scheduled unit, schema and pinned model fingerprints, typed branch key and fingerprint, nonzero branch incarnation, revision, ordered shapes and the exact raw section byte length and BLAKE3 digest |
+| Materialized record identities | 9 | 5 | The scheduled unit and ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
+| Deduplicator keyspace descriptor | 10 | 5 | Domain and deduplicator names, scheduled unit, schema fingerprint, branch fingerprint and typed branch fields, revision, key count and group count |
+| Window state descriptor | 11 | 5 | Domain and window processor names, scheduled unit, schema fingerprint, window model digest, branch fingerprint and typed branch fields, revision, branch incarnation, first and next admission sequence, each retained row's low/high ingestion watermarks, group count, and each aggregate's structure: rebuilt from the retained rows, or a linear histogram with its delayed removals as expiry time and bucket |
+| Inferencer state descriptor | 12 | 2 | Domain and inferencer names, scheduled unit, schema and pinned model fingerprints, typed branch key and fingerprint, nonzero branch incarnation, revision, ordered shapes and the exact raw section byte length and BLAKE3 digest |
+| Partition topology | 13 | 1 | The domain's captured external partition sets, each inherited branch's partition epoch and grouping, the units still holding keys of a previous count, and the installed intake count of each per-partition ingestor |
 
 The archive format major version is `9`. An archive with another major version fails before any
 state section can be skipped or installed; capture a new archive in the current instance-unit format. A reader refuses invalid record magic, an unsupported
@@ -1108,8 +1110,8 @@ steps it recorded stay applied. A restore whose archive no client sent to a new 
 retry validity of its execution reference ended reports `restore stopped after the steps it
 recorded`. No message includes password hashes or resource bytes.
 
-Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A
-quiesced cut observes and checkpoints each locally owned ingestor unit; restore preserves those
-identities and lets the current scheduler choose their owners. Canonical Models retain fixed
-counts or `INSTANCES PER PARTITION`. The current major fences this ownership contract before any
+Ingestor offset and branch-lifecycle records retain their global `Instance(i)` placement. A quiesced
+cut observes and checkpoints each locally owned ingestor unit; restore preserves those identities
+and lets the current scheduler choose their owners. Canonical Models retain fixed counts or
+`INSTANCES PER TRANSPORT PARTITION`. The current major fences this ownership contract before any
 configuration or state is installed.

@@ -26,7 +26,9 @@ use strum::AsRefStr;
 use super::{CounterSeries, RuntimeMetrics, format_number, format_optional, physical_node_label};
 
 mod endpoint_requests;
-pub(crate) use endpoint_requests::{EndpointIntakeOutcome, IngestorEndpointMetrics};
+pub(crate) use endpoint_requests::{
+    EndpointIntakeOutcome, EndpointPauseRefusal, IngestorEndpointMetrics,
+};
 mod ingestor;
 pub(crate) use ingestor::IngestorInteractionMetrics;
 mod ingestor_acknowledgements;
@@ -37,9 +39,7 @@ pub(crate) use ingestor_reads::IngestorReadMetrics;
 mod payloads;
 pub(crate) use payloads::{EmitterWork, EmitterWorkKind};
 mod outcomes;
-pub(crate) use outcomes::{
-    EmitterFinishOutcome, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
-};
+pub(crate) use outcomes::{EmitterFinishOutcome, EmitterOpenOutcome, EmitterRetryCause};
 mod events;
 mod status;
 pub(crate) use status::TaskFailureBinding;

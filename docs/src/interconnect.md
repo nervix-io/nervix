@@ -558,8 +558,8 @@ descriptors, so checkpoint identity and inspection operations advance as one wir
 
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
-`WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the typed
-`payload` expression scope, typed materialized relay inspection, ingestor read interactions,
+`WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the `parametrizer`
+Model kind, the typed `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and
@@ -810,13 +810,79 @@ still receives grants and admission beside it, and cancelling the held batch ret
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
 
-A CPU class admits each job separately: one of its workers runs, a bounded number wait, and the
-next job is refused at once instead of joining an unbounded queue. A typed request runs several
-jobs of its class in turn, encoding its payload and envelope and later decoding the response.
-While a burst keeps the queue full, a request that was admitted for one job can therefore be
-refused at its next one. A request refused at its first encode fails with `RequestError::Encode`,
-and one refused at a later stage fails with `RequestError::Transport`. Every refused job holds no
-memory charge, and every other class keeps admitting independently.
+A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
+joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
+payload and envelope and later decoding the response. The request's own jobs are refused at once
+when the queue is full: the caller still holds the request, so it fails with
+`RequestError::Encode` and can be sent again, and the peer refuses a request it cannot decode now
+the same way. A refused job holds no memory charge, so a burst beyond the queue cannot hold the
+class's memory. The response's jobs wait for a place instead, because the response carries
+work the handler already did: the peer's encoding of the answer waits until the caller resets the
+stream, and the caller's decoding of it waits within the request's own deadline. A request that
+fails at one of its later stages fails with `RequestError::Transport`. Every other class keeps
+admitting independently.
+
+Every protocol between nodes decides its frames by what a refusal would cost. A frame that carries
+work a peer already did is an answer: a full queue holds it back, holding only its own charge,
+until a place frees or the exchange it answers ends. A frame its opener still holds, and whose
+answer it waits on, is a request: a full queue refuses it at once, and the opener sends it again or
+opens again. A duplex stream's frames after its opening wait as well, because its codec cannot tell
+a request among them from a frame whose refusal would end the stream. Each protocol decides its
+frames as follows.
+
+| Protocol | Refused when the queue is full (the request case) | Waits for a place | What ends the wait |
+|---|---|---|---|
+| Typed request | The caller's encoding of the request and the peer's decoding of it | The peer's encoding of the answer and the caller's decoding of it | The caller's reset; the request's own deadline |
+| Connection handshake | The dialing node's hello and the accepting node's decoding of it | The accepting node's answer, accepted or refused, and the dialing node's decoding of it | The dialing node's setup deadline, which closes the connection |
+| Relay admission status and cancellation | The sender's query and the receiver's decoding of it | The receiver's status and the sender's decoding of it | The sender's reset; the query's deadline |
+| Relay grant | The sender's grant request and the receiver's decoding of it, which takes only free relay memory | The receiver's disposition and the sender's decoding of it | The sender's reset; the delivery's deadline |
+| Ack resolution | Nothing | The sender's encoding of the ack and the registrar's decoding of it | The send's deadline |
+| Duplex stream | The opening, encoded and decoded | Every frame the initiator submits and every answer the responder produces, encoded and decoded | The stream's reset or end; the leader's answer deadline on a Raft append stream, and either side's heartbeat silence limit on a client consumer stream or producer link |
+| Byte stream | The opening, encoded and decoded | Every job of the answer once the handler has done its work, and the caller's decoding of it | The caller's reset; the stream's progress timeout; the caller's own deadline |
+
+The reasons, protocol by protocol:
+
+- **Connection handshake.** The dialing node keeps its hello and dials again. The accepting node's
+  answer carries a binding it has already validated and registered, and losing it would make the
+  dialing node set its connection up again from the TLS handshake. A refusal is the accepting
+  node's verdict on the dialing node's prerequisites, which the dialing node reports and counts as
+  the reason its connection did not bind.
+- **Relay admission status and cancellation.** The sender keeps its delivery and asks again. The
+  status is the receiver's verdict on the attempt, and a cancellation it answers is already
+  applied. A terminal status whose answer never left stays answerable, so the query the sender
+  repeats finds the same status.
+- **Relay grant.** The sender keeps its delivery. A grant the receiver issued already holds its
+  relay memory, so losing its answer would leave the grant held until the sender reconciles the
+  indeterminate attempt. The relay's memory backpressure stays the `FreeRoom` refusal of a grant
+  the receiver has no relay memory for; only a full CPU queue no longer refuses the answer.
+- **Ack resolution.** An ack carries the outcome of a delivery its sender already resolved, which
+  nothing presents again.
+- **Duplex streams.** The initiator keeps its opening and opens the stream again. After the
+  opening, one codec decodes each frame before it knows its kind, and a stream's frames include
+  answers and frames nobody answers, so every frame waits, in both directions. A client consumer
+  stream's serving node sends heartbeats and a close besides its settlements, and a producer
+  link's serving node sends clearances, which answer the owning node's admission, besides
+  heartbeats, closes and detaches. A refused heartbeat or clearance would end the stream and every
+  consumer or producer on it, and a refused Raft batch would end the append stream and make the
+  leader send again entries the follower may already hold. A side that hears nothing within the
+  heartbeat silence limit ends its stream, so a class that stays full longer than that ends a
+  consumer stream or producer link as a lost peer would. The answers carry a durable append, a
+  delivery, an admission or a settlement. A Raft follower decodes one batch at a time into its
+  resident window and encodes its answers one at a time, after the batch each one answers has
+  given back its charge, so an append stream holds at most one waiting frame in each direction on
+  each node. A heartbeat or vote, whose own request frames keep the refusal, therefore waits
+  behind at most two short jobs per stream, far inside an election timeout of six heartbeat
+  intervals or more.
+- **Byte streams.** The caller keeps its request and opens again. State inspection pages are the
+  owner's answer to a read it has already served: the encoding of their rows, the identity of each
+  body and the reply wait, and so do the reply's decoding, the body's identity check and the rows'
+  decoding at the coordinator. The owner's own reading of its state is part of serving the read and
+  keeps the refusal. Checkpoint, offset, captured-section, snapshot and resource-archive transfers
+  already wait for a place on every job of their answers.
+
+A one-way control frame, such as a state replication ack, a checkpoint announcement or a runtime
+error event, keeps the refusal, because the receiving node decodes it on the same path as a typed
+request, whose decoding must refuse.
 
 The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
 bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of

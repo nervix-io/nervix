@@ -192,17 +192,19 @@ fn independent_choice_controls_discard_older_drafts_and_session_generations() {
             append: false,
         };
         let placement_context = ChoiceRequestContext {
-            control: ChoiceControl::RelayBranch,
+            control: ChoiceControl::RelayParametrizer,
             ..pace_context
         };
         let pace = signals.choice_signals(ChoiceControl::RelaySchema).load;
-        let placement = signals.choice_signals(ChoiceControl::RelayBranch).load;
+        let placement = signals
+            .choice_signals(ChoiceControl::RelayParametrizer)
+            .load;
 
         signals.apply_choice(
             placement_context,
             7,
             outcome(
-                ChoiceValue::Model(node(ModelKind::Branch, "tenant")),
+                ChoiceValue::Model(node(ModelKind::Parametrizer, "tenant")),
                 "tenant",
             ),
         );
@@ -239,7 +241,7 @@ fn independent_choice_controls_discard_older_drafts_and_session_generations() {
             },
             8,
             outcome(
-                ChoiceValue::Model(node(ModelKind::Branch, "region")),
+                ChoiceValue::Model(node(ModelKind::Parametrizer, "region")),
                 "region",
             ),
         );
@@ -859,14 +861,25 @@ fn typed_choice_selection_updates_only_the_draft_its_control_edits() {
             ChoiceControl::BranchSchema,
             &schema
         ));
-        assert!(signals.structured.get_untracked().branch.schema.is_none());
+        assert!(
+            signals
+                .structured
+                .get_untracked()
+                .parametrizer
+                .schema
+                .is_none()
+        );
 
-        let branch = ChoiceValue::Model(node(ModelKind::Branch, "by_tenant"));
-        select_choice(signals, ChoiceControl::RelayBranch, branch.clone());
+        let parametrizer = ChoiceValue::Model(node(ModelKind::Parametrizer, "by_tenant"));
+        select_choice(
+            signals,
+            ChoiceControl::RelayParametrizer,
+            parametrizer.clone(),
+        );
         assert!(selected_choice(
             signals,
-            ChoiceControl::RelayBranch,
-            &branch
+            ChoiceControl::RelayParametrizer,
+            &parametrizer
         ));
 
         let relay = ChoiceValue::Model(node(ModelKind::Relay, "orders"));
@@ -913,28 +926,28 @@ fn branch_scope_change_keeps_the_draft_and_requires_reselecting_its_schema() {
         assert_eq!(signals.captured_domain.get_untracked(), None);
 
         signals.open(
-            CreateKind::Model(ModelKind::Branch),
+            CreateKind::Model(ModelKind::Parametrizer),
             Some(first.clone()),
             "trigger",
         );
         signals.structured.update(|drafts| {
-            drafts.branch.name = "by_tenant".to_string();
-            drafts.branch.schema = Some(SelectedReference::chosen(schema.clone()));
-            drafts.branch.ttl = "5m".to_string();
+            drafts.parametrizer.name = "by_tenant".to_string();
+            drafts.parametrizer.schema = Some(SelectedReference::chosen(schema.clone()));
+            drafts.parametrizer.ttl = "5m".to_string();
         });
         signals.change_scope(Some(first.clone()));
         assert!(
             signals
                 .structured
                 .get_untracked()
-                .branch
+                .parametrizer
                 .schema
                 .assured("the schema stays selected")
                 .is_current()
         );
 
         signals.change_scope(Some(second.clone()));
-        let retained = signals.structured.get_untracked().branch;
+        let retained = signals.structured.get_untracked().parametrizer;
         let retained_schema = retained.schema.assured("the schema stays selected");
         assert_eq!(retained_schema.name(), &schema);
         assert!(!retained_schema.is_current());
@@ -944,9 +957,16 @@ fn branch_scope_change_keeps_the_draft_and_requires_reselecting_its_schema() {
             Some(second.clone())
         );
 
-        signals.open(CreateKind::Model(ModelKind::Branch), Some(first), "trigger");
+        signals.open(
+            CreateKind::Model(ModelKind::Parametrizer),
+            Some(first),
+            "trigger",
+        );
         assert_eq!(signals.captured_domain.get_untracked(), Some(second));
-        assert_eq!(signals.structured.get_untracked().branch.name, "by_tenant");
+        assert_eq!(
+            signals.structured.get_untracked().parametrizer.name,
+            "by_tenant"
+        );
     });
 }
 
@@ -961,12 +981,12 @@ fn relay_and_subscription_scope_changes_invalidate_their_references() {
         );
         signals.relay.update(|draft| {
             draft.select_schema(&node(ModelKind::Schema, "order_record"));
-            draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
+            draft.select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
         });
         signals.change_scope(Some(domain("second")));
         let relay = signals.relay.get_untracked();
         assert!(!relay.selects_schema(&node(ModelKind::Schema, "order_record")));
-        assert!(!relay.selects_branch(&node(ModelKind::Branch, "by_tenant")));
+        assert!(!relay.selects_branch(&node(ModelKind::Parametrizer, "by_tenant")));
 
         signals.open_subscription(
             domain("first"),
@@ -1007,7 +1027,7 @@ fn branch_schema_requests_bind_the_captured_domain_and_page_cursor() {
         let branch_schema = signals.choice_signals(ChoiceControl::BranchSchema);
         let (sender, mut receiver) = request_handoff();
         let request_tx = RwSignal::new(Some(sender));
-        signals.open(CreateKind::Model(ModelKind::Branch), None, "trigger");
+        signals.open(CreateKind::Model(ModelKind::Parametrizer), None, "trigger");
         request_choices(signals, ChoiceControl::BranchSchema, request_tx, 9, false);
         assert_eq!(
             branch_schema.load.get_untracked(),
@@ -1074,8 +1094,8 @@ fn relay_and_subscription_controls_ask_typed_questions_of_the_captured_domain() 
                 "Select a domain before choosing a schema",
             ),
             (
-                ChoiceControl::RelayBranch,
-                "Select a domain before choosing a branch",
+                ChoiceControl::RelayParametrizer,
+                "Select a domain before choosing a parametrizer",
             ),
             (
                 ChoiceControl::SubscriptionRelay,
@@ -1111,7 +1131,7 @@ fn relay_and_subscription_controls_ask_typed_questions_of_the_captured_domain() 
         );
         for (control, target) in [
             (ChoiceControl::RelaySchema, ChoiceTarget::Schema),
-            (ChoiceControl::RelayBranch, ChoiceTarget::Branch),
+            (ChoiceControl::RelayParametrizer, ChoiceTarget::Parametrizer),
             (ChoiceControl::SubscriptionRelay, ChoiceTarget::Relay),
         ] {
             request_choices(signals, control, request_tx, 2, false);
@@ -1164,7 +1184,7 @@ fn branch_schema_selection_is_exact_and_does_not_clear_an_invalid_reference() {
 
         signals
             .structured
-            .update(|drafts| drafts.branch.invalidate_references());
+            .update(|drafts| drafts.parametrizer.invalidate_references());
         assert!(!selected_choice(
             signals,
             ChoiceControl::BranchSchema,
@@ -1174,7 +1194,7 @@ fn branch_schema_selection_is_exact_and_does_not_clear_an_invalid_reference() {
             signals
                 .structured
                 .get_untracked()
-                .branch
+                .parametrizer
                 .schema
                 .assured("the schema stays selected")
                 .name(),
@@ -1302,7 +1322,7 @@ fn domain_scoped_forms_need_their_captured_domain_and_run_where_they_belong() {
             CreateKind::Subscription
         );
         assert_eq!(
-            ChoiceControl::RelayBranch.form(),
+            ChoiceControl::RelayParametrizer.form(),
             CreateKind::Model(ModelKind::Relay)
         );
     });
@@ -1317,7 +1337,7 @@ fn each_form_asks_only_the_questions_its_draft_needs() {
             [ChoiceControl::DomainPace]
         );
         assert_eq!(
-            open_form_controls(signals, CreateKind::Model(ModelKind::Branch)),
+            open_form_controls(signals, CreateKind::Model(ModelKind::Parametrizer)),
             [ChoiceControl::BranchSchema]
         );
         assert_eq!(
@@ -1327,7 +1347,7 @@ fn each_form_asks_only_the_questions_its_draft_needs() {
         signals.relay.update(|draft| draft.choose_branched());
         assert_eq!(
             open_form_controls(signals, CreateKind::Model(ModelKind::Relay)),
-            [ChoiceControl::RelaySchema, ChoiceControl::RelayBranch]
+            [ChoiceControl::RelaySchema, ChoiceControl::RelayParametrizer]
         );
         assert_eq!(
             open_form_controls(signals, CreateKind::Subscription),
@@ -1519,26 +1539,29 @@ fn creation_components_render_each_typed_draft_and_accessible_status() {
         }
 
         signals.structured.update(|drafts| {
-            drafts.branch.name = "by_tenant".to_string();
-            drafts.branch.schema = Some(SelectedReference::chosen(
+            drafts.parametrizer.name = "by_tenant".to_string();
+            drafts.parametrizer.schema = Some(SelectedReference::chosen(
                 SchemaName::parse("visual_record").assured("valid name"),
             ));
-            drafts.branch.ttl = "5m".to_string();
+            drafts.parametrizer.ttl = "5m".to_string();
         });
         signals.open(
-            CreateKind::Model(ModelKind::Branch),
+            CreateKind::Model(ModelKind::Parametrizer),
             Some(scope.clone()),
             "global-create-button",
         );
-        let branch_markup = render();
-        assert!(branch_markup.contains("Create branch"));
-        assert!(branch_markup.contains("Selected schema: visual_record"));
-        assert!(branch_markup.contains("CREATE BRANCH by_tenant SCHEMA visual_record TTL 5m;"));
+        let parametrizer_markup = render();
+        assert!(parametrizer_markup.contains("Create parametrizer"));
+        assert!(parametrizer_markup.contains("Selected schema: visual_record"));
+        assert!(
+            parametrizer_markup
+                .contains("CREATE PARAMETRIZER by_tenant SCHEMA visual_record TTL 5m;")
+        );
 
         signals.relay.update(|draft| {
             draft.name = "visual_orders".to_string();
             draft.select_schema(&node(ModelKind::Schema, "visual_record"));
-            draft.select_branch(&node(ModelKind::Branch, "by_tenant"));
+            draft.select_branch(&node(ModelKind::Parametrizer, "by_tenant"));
             draft.capacity = "4".to_string();
         });
         signals.open(

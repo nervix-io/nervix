@@ -635,7 +635,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         revision: ProcessorPlanRevision::new(),
         owner: NodeUnitRef::new(NodeRef::new(kind, identifier), unit),
         root_relay: route.relay.clone(),
-        branch: None,
+        parametrizer: None,
         branch_ttl: None,
         branch_max_instances: None,
         error_policies: route.error_policies.clone(),
@@ -645,7 +645,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
         partition_transition: None,
     };
     if let Some(retention) = route.branch.retention() {
-        branch.branch = Some(retention.branch.clone());
+        branch.parametrizer = Some(retention.parametrizer.clone());
         branch.branch_ttl = Some(retention.ttl);
         branch.branch_max_instances = retention.max_instances;
     }
@@ -703,7 +703,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
             unit,
         ),
         root_relay,
-        branch: node.branch.clone(),
+        parametrizer: node.parametrizer.clone(),
         branch_ttl: parse_branch_ttl_setting(
             node.branch_ttl.as_deref(),
             spec.kind,

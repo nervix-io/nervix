@@ -22,7 +22,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT queue_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR queue_ingestor
         FROM queue_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING queue_ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING queue_ingest_codec
         TO queue_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT small_queue CONFIG {
@@ -110,7 +110,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING incoming_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -188,7 +188,7 @@ Feature: Kafka emission
 
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
 
       CREATE MQTT CLIENT mqtt_ingress
@@ -271,7 +271,7 @@ Feature: Kafka emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
@@ -343,7 +343,7 @@ Feature: Kafka emission
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE SCHEMA user_id_branch ( user_id I64 );
-      CREATE BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
+      CREATE PARAMETRIZER by_kafka_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
@@ -566,7 +566,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -637,7 +637,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_events
           INHERIT ALL
@@ -723,7 +723,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT unsent_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR unsent_ingestor
         FROM unsent_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING unsent_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING unsent_event_codec
         TIMESTAMP NOW
         TO unsent_events
           INHERIT ALL
@@ -819,7 +819,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT swap_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR swap_ingestor
         FROM swap_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING swap_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING swap_codec
         TIMESTAMP NOW
         TO swap_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -900,7 +900,7 @@ Feature: Kafka emission
       CREATE VHOST edge retire-out-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT intake ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR healthy_ingestor
-        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retired_event_codec
         TO retired_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE KAFKA CLIENT retiring_kafka CONFIG {
@@ -1000,7 +1000,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -1017,7 +1017,7 @@ Feature: Kafka emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -1046,8 +1046,8 @@ Feature: Kafka emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":4 | "error_code":"external" | "operation":"publish" | "error_message":"kafka record timestamp 1970-01-01T00:00:00.000999999Z precedes 1970-01-01T00:00:00.001Z
-      "seq":5 | "error_code":"external" | "operation":"publish" | "error_message":"kafka record timestamp 1969-12-31T23:59:59.999Z precedes 1970-01-01T00:00:00.001Z
+      "seq":4 | "error_code":"refused" | "operation":"publish" | "error_message":"kafka record timestamp 1970-01-01T00:00:00.000999999Z precedes 1970-01-01T00:00:00.001Z
+      "seq":5 | "error_code":"refused" | "operation":"publish" | "error_message":"kafka record timestamp 1969-12-31T23:59:59.999Z precedes 1970-01-01T00:00:00.001Z
       """
     And within "30s" the observed broker receives exactly these timed messages
       | payload                                                    | created at               |
@@ -1098,7 +1098,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -1165,7 +1165,7 @@ Feature: Kafka emission
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events
         INHERIT ALL
         UNBRANCHED

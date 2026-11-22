@@ -9,7 +9,7 @@ Feature: Web console visual relay and subscription creation
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA tenant_key (tenant STRING);
       CREATE SCHEMA order_record (tenant STRING, amount I64);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -24,10 +24,10 @@ Feature: Web console visual relay and subscription creation
     When selector ".create-schema-ref [data-value='order_record']" is clicked
     Then selector ".create-selected-schema" contains "order_record"
     When selector ".create-branching-options [data-value='BRANCHED BY']" is clicked
-    And selector ".create-branch-ref .create-choice-search" is filled with "by_tenant"
-    Then selector ".create-branch-ref [data-value='by_tenant']" exists
-    When selector ".create-branch-ref [data-value='by_tenant']" is clicked
-    Then selector ".create-selected-branch" contains "by_tenant"
+    And selector ".create-parametrizer-ref .create-choice-search" is filled with "by_tenant"
+    Then selector ".create-parametrizer-ref [data-value='by_tenant']" exists
+    When selector ".create-parametrizer-ref [data-value='by_tenant']" is clicked
+    Then selector ".create-selected-parametrizer" contains "by_tenant"
     When selector ".create-capacity" is filled with "4"
     And selector ".create-materialized-options [data-value='LAST BY TIMESTAMP']" is clicked
     Then selector ".create-preview" contains "CREATE RELAY visual_orders SCHEMA order_record BRANCHED BY by_tenant CAPACITY 4 WITH MATERIALIZED STATE LAST BY TIMESTAMP;"
@@ -67,11 +67,11 @@ Feature: Web console visual relay and subscription creation
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string, user_id integer );
       CREATE WIRE JSON CODEC notification_codec FROM WIRE SCHEMA notification_wire TO SCHEMA notification;
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR notifications_ingestor FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR notifications_ingestor FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -137,7 +137,7 @@ Feature: Web console visual relay and subscription creation
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
@@ -190,7 +190,7 @@ Feature: Web console visual relay and subscription creation
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics';
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_ingestor FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -230,7 +230,7 @@ Feature: Web console visual relay and subscription creation
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT notifications_endpoint ON edge PATH '/ingest';
-      CREATE HTTP ENDPOINT INGESTOR notifications_ingestor FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR notifications_ingestor FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -374,7 +374,7 @@ Feature: Web console visual relay and subscription creation
       CREATE DOMAIN {{domain}};
       CREATE DOMAIN {{domain}}_other;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
       """
     And the web console is opened on the leader node
     Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
@@ -386,13 +386,13 @@ Feature: Web console visual relay and subscription creation
     Then selector ".create-schema-ref [data-value='tenant_key']" exists
     When selector ".create-schema-ref [data-value='tenant_key']" is clicked
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "Choose UNBRANCHED or a branch"
+    Then selector ".create-validation" contains "Choose UNBRANCHED or a parametrizer"
     When selector ".create-branching-options [data-value='BRANCHED BY']" is clicked
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "Choose a branch"
-    When selector ".create-branch-ref .create-choice-search" is filled with "by_tenant"
-    Then selector ".create-branch-ref [data-value='by_tenant']" exists
-    When selector ".create-branch-ref [data-value='by_tenant']" is clicked
+    Then selector ".create-validation" contains "Choose a parametrizer"
+    When selector ".create-parametrizer-ref .create-choice-search" is filled with "by_tenant"
+    Then selector ".create-parametrizer-ref [data-value='by_tenant']" exists
+    When selector ".create-parametrizer-ref [data-value='by_tenant']" is clicked
     And selector ".create-capacity" is filled with "0"
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "Capacity"
@@ -407,7 +407,7 @@ Feature: Web console visual relay and subscription creation
     When selector ".create-scope-change" is clicked
     Then selector ".create-scope" contains "{{domain}}_other"
     And selector ".create-selected-schema" contains "tenant_key"
-    And selector ".create-selected-branch" contains "by_tenant"
+    And selector ".create-selected-parametrizer" contains "by_tenant"
     And selector ".create-reference-invalid" exists
     When selector ".create-submit" is clicked
     Then selector ".create-validation" contains "belongs to a changed context"
@@ -441,7 +441,7 @@ Feature: Web console visual relay and subscription creation
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
-    And selector ".create-menu [data-create-kind='branch']" is clicked
+    And selector ".create-menu [data-create-kind='parametrizer']" is clicked
     Then selector ".create-schema-ref .create-choice-state.create-choice-missing" contains "Select a domain before choosing a schema"
     When selector ".create-close" is clicked
     And selector ".create-menu-button" is clicked

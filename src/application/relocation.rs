@@ -18,8 +18,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
     ClusterNodeName, DomainName, DomainSchedule, DomainStatus, Model, NodeRef, NodeUnitRef,
-    PlacementPolicy, QuiesceLevel, RelayName, Relocation, RelocationPreferenceStrategy,
-    ScheduledNode,
+    PlacementName, PlacementPolicy, QuiesceLevel, RelayName, Relocation,
+    RelocationPreferenceStrategy, ScheduledNode,
 };
 
 use super::{
@@ -34,7 +34,7 @@ use super::{
     session_service::SessionServiceImpl,
 };
 use crate::registry::{
-    ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit,
+    ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit, UnitRuleState,
     ownership_handoff_relays_for_schedule,
 };
 
@@ -66,6 +66,16 @@ enum RelocationError {
     MemberOwnerUnavailable {
         member: NodeRef,
         owner: ClusterNodeName,
+    },
+    #[error("placement '{placement}' does not admit node '{node}' for {kind} '{name}'", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    DestinationNodeRule {
+        placement: PlacementName,
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(node, reason = "the relocation destination the rule does not admit")
+        )]
+        node: ClusterNodeName,
+        member: NodeRef,
     },
 }
 
@@ -435,7 +445,7 @@ impl SessionServiceImpl {
             &inputs,
             &live_nodes,
             terminating_node_ids,
-            planning.capabilities(),
+            planning.records(),
         )?;
 
         let moved = unit
@@ -452,7 +462,7 @@ impl SessionServiceImpl {
                 &graph,
                 &schedulable_nodes,
                 current,
-                planning.capabilities(),
+                planning.records(),
             )
             .change_context(RelocationError::Graph)?;
         let planned = (!moved.is_empty()).then(|| {
@@ -467,6 +477,17 @@ impl SessionServiceImpl {
                 &live_nodes,
             )
         });
+        if let Some(planned) = &planned {
+            Self::refuse_relocation_breaking_node_rules(
+                domain,
+                &graph,
+                planned,
+                &planning,
+                &schedulable_nodes,
+                &moved,
+                &relocation.destination,
+            )?;
+        }
 
         let domain_running = matches!(domain_state.status, DomainStatus::Running);
         let level = if planned.is_some() && domain_running {
@@ -542,13 +563,50 @@ impl SessionServiceImpl {
         })
     }
 
+    /// Refuses a relocation that would run a moved unit on a node a winning `REQUIRE` rule does
+    /// not admit, naming the first such rule, so a relocation never starts a breach of an
+    /// accepted node rule.
+    fn refuse_relocation_breaking_node_rules(
+        domain: &DomainName,
+        graph: &ActiveGraph,
+        planned: &DomainSchedule,
+        planning: &DomainSchedulePlanningSnapshot,
+        schedulable_nodes: &BTreeSet<ClusterNodeName>,
+        moved: &[NodeUnitRef],
+        destination: &ClusterNodeName,
+    ) -> error_stack::Result<(), RelocationError> {
+        // The destination is judged as the node each moved unit runs on, whatever the domain's
+        // status, so a relocation never stores an assignment its rules refuse.
+        let judgement = graph
+            .judge_node_rules(
+                domain,
+                planned,
+                planning.records(),
+                schedulable_nodes,
+                crate::registry::ScheduleActivity::Executing,
+            )
+            .change_context(RelocationError::Graph)?;
+        for unit in moved {
+            if let Some(UnitRuleState::Violates(rules)) = judgement.state_of(unit)
+                && let Some(placement) = rules.first()
+            {
+                return Err(Report::new(RelocationError::DestinationNodeRule {
+                    placement: placement.clone(),
+                    node: destination.clone(),
+                    member: unit.node.clone(),
+                }));
+            }
+        }
+        Ok(())
+    }
+
     /// The destination must be a cluster node the scheduler could choose for a new assignment.
     fn validate_relocation_destination(
         destination: &ClusterNodeName,
         inputs: &DomainPlanningInputs,
         live_nodes: &BTreeSet<ClusterNodeName>,
         terminating_node_ids: &BTreeSet<ClusterNodeName>,
-        capabilities: &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
+        records: &std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord>,
     ) -> error_stack::Result<(), RelocationError> {
         if !inputs.topology().members().contains(destination) {
             return Err(Report::new(RelocationError::DestinationNotMember {
@@ -570,7 +628,7 @@ impl SessionServiceImpl {
                 node: destination.clone(),
             }));
         }
-        if !capabilities.contains_key(destination) {
+        if !records.contains_key(destination) {
             return Err(Report::new(
                 RelocationError::DestinationCapabilityUncommitted {
                     node: destination.clone(),
@@ -589,7 +647,7 @@ impl SessionServiceImpl {
         graph: &ActiveGraph,
         schedulable_nodes: &BTreeSet<ClusterNodeName>,
         current: &DomainSchedule,
-        capabilities: &std::collections::BTreeMap<ClusterNodeName, nervix_models::NodeCapabilities>,
+        records: &std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord>,
     ) -> error_stack::Result<DomainSchedule, crate::registry::RegistryError> {
         let cluster_nodes = schedulable_nodes.iter().cloned().collect::<Vec<_>>();
         #[cfg(feature = "testing")]
@@ -601,7 +659,7 @@ impl SessionServiceImpl {
                     .assured("the committed count fits a supported target"),
                 Some(current),
                 self.inner.runtime.scheduler_mode(),
-                capabilities,
+                records,
             )
         }
         #[cfg(not(feature = "testing"))]
@@ -612,7 +670,7 @@ impl SessionServiceImpl {
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
                 Some(current),
-                capabilities,
+                records,
             )
         }
     }
@@ -1000,7 +1058,7 @@ mod tests {
             panic!("the fixture is a junction");
         };
         model.branched_by = BranchSelection::BranchedBy {
-            branch: "tenants".try_into().assured("valid name"),
+            parametrizer: "tenants".try_into().assured("valid name"),
         };
         node = node.with_resolved_branching(Some(ResolvedBranching::branched(
             "tenants".try_into().assured("valid name"),
@@ -1014,7 +1072,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
-            nervix_models::ResolvedBranchPartitions::Direct(nonzero_ext::nonzero!(2u16)),
+            nervix_models::ResolvedParametrizerPartitions::Direct(nonzero_ext::nonzero!(2u16)),
         )));
         assert!(node.place_unit(
             Unit::partition(0),

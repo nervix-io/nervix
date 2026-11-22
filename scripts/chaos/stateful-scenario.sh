@@ -13,7 +13,7 @@ source "${script_dir}/node-faults.sh"
 # shellcheck source=materialized-profile.sh
 source "${script_dir}/materialized-profile.sh"
 
-recovery_graph_models[branch-chaos_state_branch]='SHOW CREATE BRANCH chaos_state_branch;'
+recovery_graph_models[branch-chaos_state_branch]='SHOW CREATE PARAMETRIZER chaos_state_branch;'
 
 # The stateful entities, by the kind their DESCRIBE and RELOCATE statements spell. The ingestors run
 # apart from the state owner, so a fault on the owner leaves their Kafka consumers in place.
@@ -23,11 +23,8 @@ stateful_owned_entities=(
     'EMITTER chaos_window_emitter' 'RELAY chaos_profiles' 'JUNCTION chaos_enrich'
     'RELAY chaos_enriched' 'EMITTER chaos_enriched_emitter' 'WASM PROCESSOR chaos_counter'
     'RELAY chaos_counted' 'EMITTER chaos_counted_emitter' 'RELAY chaos_inferred'
-    'EMITTER chaos_inferred_emitter'
+    'EMITTER chaos_inferred_emitter' 'INFERENCER chaos_running'
 )
-# Stateful entities whose kind has no DESCRIBE statement. They move with the others, and their
-# placement is read from the schedule section of SHOW CLUSTER STATUS instead.
-stateful_scheduled_entities=('INFERENCER chaos_running')
 stateful_ingestors=('INGESTOR chaos_state_ingestor' 'INGESTOR chaos_profile_ingestor')
 stateful_output_topics=(chaos_unique_output chaos_window_output chaos_enriched_output chaos_counted_output
     chaos_inferred_output)
@@ -74,53 +71,44 @@ stateful_fault_seconds() {
     esac
 }
 
-# Prints one JSON object naming the owner and replicas of every stateful entity, read through HOST.
+# Prints one JSON object naming the owner and replicas of a stateful entity, read from its DESCRIBE
+# answer in FILE. Most kinds print one `owner:` and `replicas:` pair, or one `partition N:` line per
+# partition. DESCRIBE INFERENCER prints one block per execution unit instead: `unit: Single` or
+# `unit: Partition(N)`, then that unit's `owner:` and `replicas:` lines and the state its owner
+# reports. A unit block naming any other unit leaves the entity without an owner.
 stateful_entity_placement() {
     jq -Rn --rawfile description "$1" '
         ($description | split("\n")) as $lines
-        | ($lines | map(capture("^partition (?<index>[0-9]+): owner=(?<owner>[^ ]+) replicas=(?<replicas>.*)$")?
-            | {unit: (.index | tonumber), owner, replicas})) as $units
-        | if ($units | length) > 0 then
+        | [range(0; $lines | length) as $at
+           | ($lines[$at] | capture("^unit: (?<label>.+)$")?) as $block
+           | {label: $block.label,
+              owner: ((($lines[$at + 1] // "") | capture("^  owner: (?<value>.+)$")? | .value) // "-"),
+              replicas: ((($lines[$at + 2] // "") | capture("^  replicas: (?<value>.+)$")? | .value) // "-")}]
+          as $blocks
+        | ($blocks | map(select(.label | test("^Partition\\([0-9]+\\)$"))
+            | {unit: (.label | capture("^Partition\\((?<index>[0-9]+)\\)$") | .index | tonumber), owner, replicas}))
+          as $partition_blocks
+        | ($blocks | map(select(.label == "Single"))) as $single_blocks
+        | (($lines | map(capture("^partition (?<index>[0-9]+): owner=(?<owner>[^ ]+) replicas=(?<replicas>.*)$")?
+            | {unit: (.index | tonumber), owner, replicas})) + $partition_blocks) as $units
+        | if ($blocks | length) > ($partition_blocks | length) + ($single_blocks | length) then
+            {units: [], owner: "-", replicas: "-"}
+          elif ($units | length) > 0 then
             {units: $units,
              owner: ($units | map(.owner) | unique | if length == 1 then .[0] else "-" end),
              replicas: ($units | map(.replicas) | unique | join(";"))}
+          elif ($single_blocks | length) > 0 then
+            {units: [], owner: $single_blocks[0].owner, replicas: $single_blocks[0].replicas}
           else
             {units: [], owner: ($lines | map(capture("^owner: (?<value>.*)$")? | .value) | first),
              replicas: ($lines | map(capture("^replicas: (?<value>.*)$")? | .value) | first)}
           end'
 }
 
-# Prints the same JSON object for ENTITY, a `KIND name` pair, from the schedule section of the
-# SHOW CLUSTER STATUS answer in FILE. Each of the entity's lines names one unit; a partition unit
-# adds `unit=partition:N` after the name.
-stateful_scheduled_placement() {
-    local status_file="$1"
-    local entity="$2"
-    jq -Rn --rawfile status "${status_file}" --arg kind "${entity% *}" --arg name "${entity##* }" '
-        ($status | split("\n")) as $lines
-        | ($lines | index("[schedule]")) as $start
-        | (if $start == null then [] else $lines[($start + 1):] end) as $after
-        | ([$after | to_entries[] | select(.value | startswith("[")) | .key] | first // ($after | length)) as $length
-        | ($kind | ascii_downcase | gsub(" "; "_")) as $status_kind
-        | [$after[:$length][]
-           | capture("^- domain=chaos_baseline kind=(?<kind>[^ ]+) name=(?<name>[^ ]+)(?: unit=partition:(?<index>[0-9]+))? owner=(?<owner>[^ ]+) replicas=(?<replicas>[^ ]+)")?
-           | select(.kind == $status_kind and .name == $name)] as $lines_of_entity
-        | ($lines_of_entity | map(select(.index != null)
-            | {unit: (.index | tonumber), owner, replicas})) as $units
-        | if ($units | length) > 0 then
-            {units: $units,
-             owner: ($units | map(.owner) | unique | if length == 1 then .[0] else "-" end),
-             replicas: ($units | map(.replicas) | unique | join(";"))}
-          else
-            {units: [], owner: ($lines_of_entity | map(.owner) | first // "-"),
-             replicas: ($lines_of_entity | map(.replicas) | first // "-")}
-          end'
-}
-
 stateful_placement() {
     local host="$1"
     local output_dir="$2"
-    local pairs=(cluster-status 'SHOW CLUSTER STATUS;')
+    local pairs=()
     local entity
     for entity in "${stateful_owned_entities[@]}" "${stateful_ingestors[@]}"; do
         pairs+=("describe-${entity// /_}" "DESCRIBE ${entity};")
@@ -132,11 +120,6 @@ stateful_placement() {
         local label="describe-${entity// /_}"
         batch_read_succeeded "${output_dir}" "${label}" || { rm -f "${placements_file}"; return 1; }
         stateful_entity_placement "${output_dir}/${label}.txt" \
-            | jq --arg entity "${entity}" '{key: $entity, value: .}' >>"${placements_file}" || return 1
-    done
-    batch_read_succeeded "${output_dir}" cluster-status || { rm -f "${placements_file}"; return 1; }
-    for entity in "${stateful_scheduled_entities[@]}"; do
-        stateful_scheduled_placement "${output_dir}/cluster-status.txt" "${entity}" \
             | jq --arg entity "${entity}" '{key: $entity, value: .}' >>"${placements_file}" || return 1
     done
     jq -s 'from_entries' "${placements_file}" >"${output_dir}.json"
@@ -584,7 +567,7 @@ run_stateful() {
             fi
         done
         local selection
-        selection="$(printf '%s, ' "${stateful_owned_entities[@]}" "${stateful_scheduled_entities[@]}")"
+        selection="$(printf '%s, ' "${stateful_owned_entities[@]}")"
         domain_cli_command "RELOCATE ${selection%, } ONTO NODE ${state_owner} IGNORE PREFERENCES;" \
             >"${case_dir}/relocate-state.txt" 2>&1
         selection="$(printf '%s, ' "${stateful_ingestors[@]}")"

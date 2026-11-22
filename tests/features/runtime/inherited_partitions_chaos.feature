@@ -19,7 +19,7 @@ Feature: Inherited partition growth with an unavailable state owner
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -70,7 +70,7 @@ Feature: Inherited partition growth with an unavailable state owner
       {"tenant":"alpha","seq":1}
       """
     Then the leader of the running nodes is saved as placeholder "topology_reader"
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 16
       partition epoch: 2
@@ -104,6 +104,6 @@ Feature: Inherited partition growth with an unavailable state owner
     And the observed broker does not receive a payload within "500ms"
 
     Examples:
-      | cluster_size | replicas | owners | offset_mode                                                      | reader_instances | readers_after_growth | reader_owners |
-      | 3            | 1        | 2      | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 2             |
-      | 3            | 1        | 2      | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
+      | cluster_size | replicas | owners | offset_mode                                                      | reader_instances        | readers_after_growth | reader_owners |
+      | 3            | 1        | 2      | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 2             |
+      | 3            | 1        | 2      | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |

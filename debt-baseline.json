@@ -61,8 +61,8 @@
     "nervix_server::runtime::generator::{impl#7}::spawn_generator_task::latest_state",
     "nervix_server::runtime::generator::{impl#7}::spawn_generator_task::source_state_by_branch",
     "nervix_server::runtime::ingest_group::IngestRouteCollector::routed",
-    "nervix_server::runtime::ingest_group::{impl#14}::branch_selections::positions",
-    "nervix_server::runtime::ingest_group::{impl#8}::drain_groups::routed",
+    "nervix_server::runtime::ingest_group::{impl#13}::branch_selections::positions",
+    "nervix_server::runtime::ingest_group::{impl#7}::drain_groups::routed",
     "nervix_server::runtime::materialized_snapshot::{impl#7}::open_relay::branches",
     "nervix_server::runtime::materialized_state::MaterializedRelayStateOriginator::branches",
     "nervix_server::runtime::materialized_state::ReplicatedMaterializedRelayState::entries",
@@ -155,8 +155,8 @@
   ],
   "branch_inversions": 151,
   "files_over_3000_lines": 8,
-  "functions_over_complexity_30": 111,
-  "hidden_tunables": 540,
+  "functions_over_complexity_30": 110,
+  "hidden_tunables": 511,
   "non_aws_lc_crypto": 60,
   "testing_feature_struct_fields": 0
 }

@@ -40,7 +40,7 @@ Feature: OTEL Export requests through unknown outcomes
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -64,7 +64,7 @@ Feature: OTEL Export requests through unknown outcomes
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
@@ -89,8 +89,8 @@ Feature: OTEL Export requests through unknown outcomes
       """
     And within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":3 | "error_code":"external" | "operation":"publish"
-      "seq":4 | "error_code":"external" | "operation":"publish"
+      "seq":3 | "error_code":"refused" | "operation":"publish"
+      "seq":4 | "error_code":"refused" | "operation":"publish"
       """
     And OTLP receiver "collector" has captured exactly 4 export requests
     And within "30s" DESCRIBE EMITTER "retried_logs" on the leader node contains
@@ -144,7 +144,7 @@ Feature: OTEL Export requests through unknown outcomes
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED

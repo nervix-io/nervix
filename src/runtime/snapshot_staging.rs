@@ -215,8 +215,9 @@ impl SnapshotStaging {
         let root = self.root.clone();
         let executor = self.executor.clone();
         let file = executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 self.executor
                     .try_reserve(MemoryClass::Bulk, 1)
                     .change_context(SnapshotStagingError::Admission)?,
@@ -300,8 +301,9 @@ impl StagedSnapshotWriter {
             .assured("a staging writer holds its hasher between completed storage jobs");
         let write = self
             .executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     let mut file = file;
@@ -364,8 +366,9 @@ impl StagedSnapshotWriter {
         let executor = self.executor.clone();
         let length = self.declared;
         let file = executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     if cancellation.is_cancelled() {
@@ -425,8 +428,9 @@ impl StagedSnapshotWriter {
             .assured("an unfinished staging writer owns its hasher");
         let executor = self.executor.clone();
         let file = executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     if cancellation.is_cancelled() {
@@ -492,8 +496,9 @@ impl StagedArtifact {
         let path = self.file.path().to_path_buf();
         let file = self
             .executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     if cancellation.is_cancelled() {
@@ -581,8 +586,9 @@ impl StagedArtifactReader {
             .assured("an artifact reader holds its file between completed storage jobs");
         let read = self
             .executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |charge, cancellation| {
                     let mut file = file;
@@ -691,8 +697,9 @@ impl StagedSnapshot {
         let block_bound = self.executor.limits().bulk_chunk_bytes.as_u64();
         let read = self
             .executor
-            .run_storage(
+            .run_storage_with(
                 StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |charge, cancellation| {
                     let mut file = file;

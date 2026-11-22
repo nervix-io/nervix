@@ -29,7 +29,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -97,7 +97,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -153,7 +153,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -222,7 +222,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -240,7 +240,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -253,7 +253,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"external" | "operation":"publish" | reply code 312 | NO_ROUTE
+      "seq":2 | "error_code":"refused" | "operation":"publish" | reply code 312 | NO_ROUTE
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -303,7 +303,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -320,7 +320,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -333,7 +333,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"external" | "operation":"publish" | reply code 312 | NO_ROUTE
+      "seq":2 | "error_code":"refused" | "operation":"publish" | reply code 312 | NO_ROUTE
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -376,7 +376,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED
@@ -393,7 +393,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -415,7 +415,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":2 | "error_code":"external" | "operation":"publish" | reply code 312 | NO_ROUTE
+      "seq":2 | "error_code":"refused" | "operation":"publish" | reply code 312 | NO_ROUTE
       """
 
     Examples:
@@ -446,7 +446,7 @@ Feature: RabbitMQ exchange emission and unroutable messages
       CREATE HTTP ENDPOINT events_endpoint ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR http_events
         FROM events_endpoint MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING ingest_codec
         TO events
         INHERIT ALL
         UNBRANCHED

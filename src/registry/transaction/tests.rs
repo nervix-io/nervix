@@ -27,6 +27,7 @@ fn domain_state(status: DomainStatus) -> ControlDomainState {
         config: DomainConfig {
             pace: DomainPace::Unpaced,
         },
+        labels: nervix_models::EntityLabels::default(),
         status,
         start_version: 0,
         last_start: DomainStartPoint::Resume,
@@ -43,7 +44,7 @@ pub(super) fn snapshot(
         parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
         models: models.into_iter().collect(),
-        resources: BTreeSet::new(),
+        resources: BTreeMap::new(),
         resource_uploads: ResourceUploads::default(),
         schedule: None,
         basis: ImpactPlanningBasis::new([7; 32]),
@@ -68,14 +69,14 @@ pub(super) fn scheduled_snapshot(
             std::slice::from_ref(&node),
             0,
             None,
-            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+            &crate::registry::uniform_records(std::slice::from_ref(&node)),
         )
         .assured("the fixture topology resolves");
     TransactionPlanningSnapshot {
         parameters: nervix_models::ClusterParameterValues::default(),
         domain: domain_state(status),
         models,
-        resources: BTreeSet::new(),
+        resources: BTreeMap::new(),
         resource_uploads: ResourceUploads::default(),
         schedule: Some(schedule),
         basis: ImpactPlanningBasis::new([7; 32]),
@@ -111,10 +112,10 @@ pub(super) fn preserve_schedule(
 }
 
 fn set_partitions(count: std::num::NonZeroU16) -> Statement {
-    Statement::AlterBranch(nervix_models::AlterBranch {
-        branch: named("by_tenant"),
-        operations: vec![nervix_models::AlterBranchOperation::SetPartitions {
-            partitions: nervix_models::BranchPartitions::Direct(count),
+    Statement::AlterParametrizer(nervix_models::AlterParametrizer {
+        parametrizer: named("by_tenant"),
+        operations: vec![nervix_models::AlterParametrizerOperation::SetPartitions {
+            partitions: nervix_models::ParametrizerPartitions::Direct(count),
         }],
     })
 }
@@ -123,10 +124,10 @@ fn schedule_moving_by_tenant_from_four_to_eight() -> DomainSchedule {
     DomainSchedule::new(named("default"), Vec::new(), Vec::new()).with_partition_epochs(
         std::collections::BTreeMap::from([(
             named("by_tenant"),
-            nervix_models::BranchPartitionEpoch::changed(
+            nervix_models::ParametrizerPartitionEpoch::changed(
                 None,
-                nervix_models::ResolvedBranchPartitions::Direct(nonzero!(4u16)),
-                nervix_models::ResolvedBranchPartitions::Direct(nonzero!(8u16)),
+                nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(4u16)),
+                nervix_models::ResolvedParametrizerPartitions::Direct(nonzero!(8u16)),
             ),
         )]),
     )
@@ -176,9 +177,9 @@ fn a_partition_count_change_is_refused_while_the_previous_count_still_moves_keys
         &set_partitions(nonzero!(16u16)),
         operation,
     )
-    .expect_err("a moving branch keeps its count until its transition retires");
-    let TransactionPlanningError::BranchPartitionsStillMoving {
-        branch,
+    .expect_err("a moving parametrizer keeps its count until its transition retires");
+    let TransactionPlanningError::ParametrizerPartitionsStillMoving {
+        parametrizer,
         domain: refused_domain,
         previous,
         current,
@@ -187,12 +188,12 @@ fn a_partition_count_change_is_refused_while_the_previous_count_still_moves_keys
     else {
         panic!("the refusal names the moving transition: {error:?}");
     };
-    assert_eq!(branch.as_str(), "by_tenant");
+    assert_eq!(parametrizer.as_str(), "by_tenant");
     assert_eq!(refused_domain.as_str(), "default");
     assert_eq!((*previous, *current), (4, 8));
     assert!(
         format!("{error:#}").contains(
-            "branch 'by_tenant' in domain 'default' is still moving keys placed under its \
+            "parametrizer 'by_tenant' in domain 'default' is still moving keys placed under its \
              previous partition count 4 to its current count 8"
         ),
         "{error:#}"
@@ -434,6 +435,7 @@ fn an_incomplete_model_run_cannot_be_repaired_after_a_resource_boundary() {
         )),
         Statement::CreateResource(CreateStatement::new(
             CreateResource {
+                labels: nervix_models::EntityLabels::default(),
                 identifier: ResourceName::parse("weights")
                     .assured("the resource fixture is an identifier-shaped literal"),
             },
@@ -629,9 +631,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
                             std::slice::from_ref(&destination),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &destination,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&destination)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -681,6 +681,171 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
     assert_eq!(transition.destination.as_str(), "node-b");
     assert_eq!(transition.state_recovery.as_ref(), "complete");
     assert_eq!(transition.id, "transition-1");
+}
+
+fn label_map(entries: serde_json::Value) -> nervix_models::EntityLabels {
+    serde_json::from_value(entries).assured("the fixture label map has valid keys and values")
+}
+
+fn set_model_labels(kind: ModelKind, name: &str, entries: serde_json::Value) -> Statement {
+    Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
+        entity: nervix_models::EntityLabelTarget::Model(node_ref(kind, name)),
+        mutation: nervix_models::EntityLabelMutation::Set(label_map(entries)),
+    })
+}
+
+/// Placement would move every unit to another node, as it does once the current owner is no
+/// longer schedulable. A run that changes only labels never asks it and keeps the current
+/// placement, carrying the edited definitions.
+#[test]
+fn a_run_that_changes_only_labels_keeps_every_unit_where_the_current_schedule_placed_it() {
+    let snapshot = scheduled_snapshot(
+        DomainStatus::Stopped,
+        [schema("event_schema"), relay("events", "event_schema")],
+    );
+    let current = snapshot
+        .schedule
+        .clone()
+        .assured("the scheduled fixture carries its schedule");
+    let schema_node = node_ref(ModelKind::Schema, "event_schema");
+    let relay_node = node_ref(ModelKind::Relay, "events");
+    let statements = [
+        set_model_labels(
+            ModelKind::Schema,
+            "event_schema",
+            serde_json::json!({ "owner": "Platform" }),
+        ),
+        set_model_labels(
+            ModelKind::Relay,
+            "events",
+            serde_json::json!({ "owner": "Platform", "unit": "kept" }),
+        ),
+    ];
+    let plan = Registry::plan_transaction(
+        snapshot,
+        &statements,
+        0,
+        false,
+        |_graph, _current, _attribution| -> Result<TransactionScheduleDecision, _> {
+            panic!("a run that changes only labels asks placement for no schedule")
+        },
+    )
+    .assured("the label edits are valid");
+
+    let step = plan
+        .first_step()
+        .verified("the label edits produce one execution step");
+    assert!(step.impact.planned().effects.ownership_moves.is_empty());
+    assert_eq!(step.impact.planned().pause, PauseRequirement::NoPause);
+    let PlannedTransactionStepKind::Models { plan: model_plan } = &step.kind else {
+        unreachable!("label edits on domain Models produce a model step");
+    };
+    let mut expected = current;
+    expected
+        .nodes
+        .get_mut(&schema_node)
+        .assured("the fixture schedules its schema")
+        .config
+        .labels_mut()
+        .clone_from(&label_map(serde_json::json!({ "owner": "Platform" })));
+    expected
+        .nodes
+        .get_mut(&relay_node)
+        .assured("the fixture schedules its relay")
+        .config
+        .labels_mut()
+        .clone_from(&label_map(
+            serde_json::json!({ "owner": "Platform", "unit": "kept" }),
+        ));
+    assert_eq!(model_plan.schedule.as_ref(), Some(&expected));
+    let report = plan
+        .report()
+        .assured("the complete plan has a valid report");
+    assert_eq!(report.summary().level(), QuiesceLevel::Dynamic);
+}
+
+/// A label edit beside a configuration change is no metadata-only run: placement plans the run
+/// under the rules every configuration change follows.
+#[test]
+fn a_run_that_changes_labels_and_configuration_asks_placement() {
+    let mut asked = 0_usize;
+    let statements = [
+        set_model_labels(
+            ModelKind::Relay,
+            "events",
+            serde_json::json!({ "owner": "Platform" }),
+        ),
+        Statement::AlterRelay(AlterRelay {
+            relay: named("events"),
+            operations: vec![AlterRelayOperation::SetCapacity {
+                capacity: nonzero!(32usize),
+            }],
+        }),
+    ];
+    Registry::plan_transaction(
+        scheduled_snapshot(
+            DomainStatus::Stopped,
+            [schema("event_schema"), relay("events", "event_schema")],
+        ),
+        &statements,
+        0,
+        false,
+        |graph, current, attribution| {
+            asked = asked
+                .checked_add(1)
+                .assured("a two-statement run asks placement a bounded number of times");
+            preserve_schedule(graph, current, attribution)
+        },
+    )
+    .assured("the label edit and the relay alteration are valid");
+    assert_eq!(asked, 1);
+}
+
+/// A run that relabels one Model and drops another changes the graph, so placement decides its
+/// schedule: keeping the current placement would keep the dropped Model scheduled.
+#[test]
+fn a_run_that_changes_labels_and_drops_a_model_asks_placement() {
+    let mut asked = 0_usize;
+    let statements = [
+        set_model_labels(
+            ModelKind::Relay,
+            "events",
+            serde_json::json!({ "owner": "Platform" }),
+        ),
+        Statement::Drop(DropModel {
+            kind: ModelKind::Relay,
+            name: named("audit"),
+        }),
+    ];
+    let plan = Registry::plan_transaction(
+        scheduled_snapshot(
+            DomainStatus::Stopped,
+            [
+                schema("event_schema"),
+                relay("events", "event_schema"),
+                relay("audit", "event_schema"),
+            ],
+        ),
+        &statements,
+        0,
+        false,
+        |graph, current, attribution| {
+            asked = asked
+                .checked_add(1)
+                .assured("a two-statement run asks placement a bounded number of times");
+            preserve_schedule(graph, current, attribution)
+        },
+    )
+    .assured("the label edit and the relay drop are valid");
+    let report = plan
+        .report()
+        .assured("the complete plan has a valid report");
+    assert_eq!(
+        report.execution_steps().len(),
+        1,
+        "the label edit and the drop share one model run"
+    );
+    assert_eq!(asked, 1);
 }
 
 #[test]
@@ -738,9 +903,7 @@ fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -874,9 +1037,7 @@ fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
                             std::slice::from_ref(&destination),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &destination,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&destination)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -937,9 +1098,7 @@ fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -1008,9 +1167,7 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),

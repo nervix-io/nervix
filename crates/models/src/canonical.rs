@@ -24,39 +24,40 @@ use meticulous::OptionExt as _;
 use thiserror::Error;
 
 use crate::{
-    AckWindow, AlterBranch, AlterBranchOperation, AlterDeduplicator, AlterDeduplicatorOperation,
-    AlterEmitter, AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
-    AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
+    AckWindow, AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
+    AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
+    AlterParametrizer, AlterParametrizerOperation, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
     AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
     AlterWireSchemaOperation, Assignment, AssignmentTarget, AssignmentTargetScope, AvroType,
-    Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction,
-    BranchName, BranchPartitions, BranchSelection, CborType, ClickHouseValueMapping,
-    ClientConfigEntry, ClientIngestMode, ClientResourceMount, CodecEncodingRule,
-    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
-    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
-    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
-    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    Backup, BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchSelection, CborType,
+    ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode, ClientResourceMount,
+    CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
+    CorrelationTimeoutAction, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
+    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
+    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
-    DomainStartPoint, EmitterBatchPolicy, EmitterBody, EmitterEntity, EmitterEnvelope,
-    EmitterPublishing, EnvelopeClause, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, InferencerStateBinding, InferencerStateInitial,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
-    InferencerTensorSchema, IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy,
-    InspectionFormat, Invocation, JsonType, Literal, MaterializedStateDependency,
-    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
-    MongoDbConflictAction, MySqlConflictAction, NamePosition, OutputBranch, ParseAsType,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RangeOperator,
-    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
-    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, Statement, SubscriptionLiteral,
-    TransactionInspectionTarget, UnaryOperator, WindowBound, WindowStateLimit, WireSchemaField,
+    CreateJunction, CreateLookup, CreateParametrizer, CreatePlacement, CreateReingestor,
+    CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DescribeBackup,
+    DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
+    EmitterEntity, EmitterEnvelope, EmitterPublishing, EnvelopeClause, ExistingUserPolicy,
+    Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
+    InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
+    InferencerTensorDimension, InferencerTensorMapping, InferencerTensorSchema,
+    IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
+    Invocation, JsonType, Literal, MaterializedStateDependency, MaterializedStatePolicy,
+    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MySqlConflictAction, NamePosition, OutputBranch, ParametrizerEviction, ParametrizerName,
+    ParametrizerPartitions, ParseAsType, PostgresConflictAction, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutputs, RangeOperator, RelayBranching, RelayName, Restore,
+    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy, RouteConstruction,
+    SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+    Statement, SubscriptionLiteral, TransactionInspectionTarget, UnaryOperator, WindowBound,
+    WindowStateLimit, WireSchemaField,
 };
 
 /// The Plexus release canonical rendering writes.
@@ -255,6 +256,22 @@ fn operand_to_plexus(
     }
 }
 
+/// A node property, one field name holding a dot such as `cuda.available`, written as the two
+/// plain segments Plexus reads it back from, `node.cuda.available`, as the node scope documents it.
+/// `None` for a name another spelling must carry: more dots, or a segment that needs quoting.
+fn node_property_path(field: &str) -> Option<String> {
+    let (group, property) = field.split_once('.')?;
+    if property.contains('.') {
+        return None;
+    }
+    if NamePosition::Qualified.spell(group) != group
+        || NamePosition::Qualified.spell(property) != property
+    {
+        return None;
+    }
+    Some(format!("{}.{group}.{property}", crate::NODE_SCOPE))
+}
+
 pub fn expression_to_plexus(
     expression: &Expression,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
@@ -265,6 +282,11 @@ pub fn expression_to_plexus(
         Expression::Literal(Literal::String(value)) => Ok(string_literal(value)),
         Expression::Literal(Literal::Null) => Ok("NULL".to_string()),
         Expression::Field(reference) => {
+            if let FieldScope::Node = reference.scope
+                && let Some(path) = node_property_path(reference.field.as_str())
+            {
+                return Ok(path);
+            }
             let prefix = match &reference.scope {
                 FieldScope::Bare => None,
                 FieldScope::Message => Some("message".to_string()),
@@ -632,8 +654,8 @@ pub(crate) fn value_mapping_items(
 
 fn branch_selection_to_plexus(branching: &BranchSelection) -> String {
     match branching {
-        BranchSelection::BranchedBy { branch } => {
-            format!("BRANCHED BY {}", branch.as_str())
+        BranchSelection::BranchedBy { parametrizer } => {
+            format!("BRANCHED BY {}", parametrizer.as_str())
         }
         BranchSelection::Unbranched => "UNBRANCHED".to_string(),
     }
@@ -644,13 +666,13 @@ fn output_branch_to_plexus(
 ) -> error_stack::Result<String, CanonicalPlexusError> {
     match branching {
         OutputBranch::BranchedBy {
-            branch,
+            parametrizer,
             assignments,
         } => {
             if assignments.is_empty() {
                 return Err(Report::new(
                     CanonicalPlexusError::MissingBranchKeyAssignments {
-                        branch: branch.clone(),
+                        parametrizer: parametrizer.clone(),
                     },
                 ));
             }
@@ -659,7 +681,10 @@ fn output_branch_to_plexus(
                 ..RouteConstruction::default()
             };
             let construction = route_construction_to_plexus(&construction)?;
-            Ok(format!("BRANCHED BY {} {construction}", branch.as_str()))
+            Ok(format!(
+                "BRANCHED BY {} {construction}",
+                parametrizer.as_str()
+            ))
         }
         OutputBranch::Unbranched => Ok("UNBRANCHED".to_string()),
     }
@@ -671,8 +696,8 @@ fn output_branch_to_plexus(
 /// holding it, so a caller can locate the refusal without reading its message.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CanonicalPlexusError {
-    #[error("branch '{branch}' requires SET assignments to render an output route")]
-    MissingBranchKeyAssignments { branch: BranchName },
+    #[error("parametrizer '{parametrizer}' requires SET assignments to render an output route")]
+    MissingBranchKeyAssignments { parametrizer: ParametrizerName },
     /// An `F64` literal that is NaN or infinite. Plexus spells a float only as a finite decimal.
     #[error("cannot represent non-finite float in Plexus: {}", .value.value())]
     UnrepresentableFloat { value: Float64Literal },
@@ -692,27 +717,48 @@ impl AlterPlacement {
             .iter()
             .map(|operation| match operation {
                 AlterPlacementOperation::SetPolicy { policy } => {
-                    format!("SET POLICY {}", policy.as_ref())
+                    Ok(format!("SET POLICY {}", policy.as_ref()))
                 }
-                AlterPlacementOperation::SetRank { rank } => format!("SET RANK {rank}"),
-                AlterPlacementOperation::DropRank => "DROP RANK".to_string(),
-                AlterPlacementOperation::SetDomainWide => "SET DOMAIN WIDE".to_string(),
-                AlterPlacementOperation::SetMembers { from, to } => format!(
+                AlterPlacementOperation::SetNodePolicy { policy } => {
+                    Ok(format!("SET POLICY {}", node_policy_to_plexus(policy)?))
+                }
+                AlterPlacementOperation::SetRank { rank } => Ok(format!("SET RANK {rank}")),
+                AlterPlacementOperation::DropRank => Ok("DROP RANK".to_string()),
+                AlterPlacementOperation::SetDomainWide => Ok("SET DOMAIN WIDE".to_string()),
+                AlterPlacementOperation::SetMembers { from, to } => Ok(format!(
                     "SET FROM {} TO {}",
                     model_name_list(from),
                     model_name_list(to)
-                ),
+                )),
+                AlterPlacementOperation::SetNodeMembers { members } => {
+                    Ok(format!("SET FOR {}", model_name_list(members)))
+                }
                 AlterPlacementOperation::RenameTo { name } => {
-                    format!("RENAME TO {}", name.as_str())
+                    Ok(format!("RENAME TO {}", name.as_str()))
                 }
             })
-            .collect::<Vec<_>>()
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER PLACEMENT {} {operations};",
             self.placement.as_str()
         ))
     }
+}
+
+/// A node rule's policy as its body writes it, the selector in canonical expression text.
+pub(crate) fn node_policy_to_plexus(
+    policy: &crate::NodePolicy,
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    Ok(match policy {
+        crate::NodePolicy::Require(selector) => {
+            format!("REQUIRE NODES WHERE {}", expression_to_plexus(selector)?)
+        }
+        crate::NodePolicy::Prefer(selector) => {
+            format!("PREFER NODES WHERE {}", expression_to_plexus(selector)?)
+        }
+        crate::NodePolicy::Any => "ANY NODE".to_owned(),
+    })
 }
 
 fn model_name_list(names: &[ModelName]) -> String {
@@ -763,7 +809,10 @@ impl Statement {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
                     }
                 };
-                Ok(format!("CREATE {modifier}{pacing};"))
+                Ok(entity_labels::append_labels(
+                    format!("CREATE {modifier}{pacing};"),
+                    &create.labels,
+                ))
             }
             Self::CreateUser(create) => {
                 let modifier = if create.if_not_exists {
@@ -771,11 +820,12 @@ impl Statement {
                 } else {
                     ""
                 };
-                Ok(format!(
+                let creation = format!(
                     "CREATE {modifier}USER {} WITH PASSWORD {};",
                     create.body.name.as_str(),
                     string_literal(&create.body.password)
-                ))
+                );
+                Ok(entity_labels::append_labels(creation, &create.labels))
             }
             Self::CreateResource(create) => {
                 let modifier = if create.if_not_exists {
@@ -783,10 +833,8 @@ impl Statement {
                 } else {
                     ""
                 };
-                Ok(format!(
-                    "CREATE {modifier}RESOURCE {};",
-                    create.body.identifier.as_str()
-                ))
+                let creation = format!("CREATE {modifier}RESOURCE {};", create.identifier);
+                Ok(entity_labels::append_labels(creation, &create.labels))
             }
             Self::RebindResource(rebind) => {
                 let latest = match rebind.version {
@@ -862,7 +910,7 @@ impl Statement {
             Self::AlterReingestor(alter) => alter.to_canonical_plexus(),
             Self::AlterGenerator(alter) => alter.to_canonical_plexus(),
             Self::AlterPlacement(alter) => alter.to_canonical_plexus(),
-            Self::AlterBranch(alter) => alter.to_canonical_plexus(),
+            Self::AlterParametrizer(alter) => alter.to_canonical_plexus(),
             Self::Drop(drop) => Ok(format!(
                 "DROP {} {};",
                 drop.kind.keyword_phrase(),
@@ -919,9 +967,10 @@ impl Statement {
             Self::DescribeLookup(describe) => {
                 Ok(format!("DESCRIBE HASH MAP {};", describe.name.as_str()))
             }
-            Self::DescribeBranch(describe) => {
-                Ok(format!("DESCRIBE BRANCH {};", describe.branch.as_str()))
-            }
+            Self::DescribeParametrizer(describe) => Ok(format!(
+                "DESCRIBE PARAMETRIZER {};",
+                describe.parametrizer.as_str()
+            )),
             Self::DescribeEndpoint(describe) => {
                 Ok(format!("DESCRIBE ENDPOINT {};", describe.name.as_str()))
             }
@@ -1245,7 +1294,7 @@ impl<Version: Display> Model<Version> {
             Self::ClientAzureBlob(client) => client.to_canonical_plexus(),
             Self::ClientIcebergRest(client) => client.to_canonical_plexus(),
             Self::Vhost(vhost) => vhost.to_canonical_plexus(),
-            Self::Branch(branch) => branch.to_canonical_plexus(),
+            Self::Parametrizer(parametrizer) => parametrizer.to_canonical_plexus(),
             Self::Endpoint(endpoint) => endpoint.to_canonical_plexus(),
             Self::SignalingProtocol(protocol) => protocol.to_canonical_plexus(),
             Self::Generator(generator) => generator.to_canonical_plexus(),
@@ -1278,25 +1327,27 @@ impl CreatePlacement {
     pub(crate) fn configuration_to_canonical_plexus(
         &self,
     ) -> error_stack::Result<String, CanonicalPlexusError> {
-        let scope = match &self.scope {
-            crate::PlacementScope::DomainWide => "DOMAIN WIDE".to_owned(),
-            crate::PlacementScope::Corridor { from, to } => format!(
-                "FROM {} TO {}",
-                from.iter()
-                    .map(ModelName::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                to.iter()
-                    .map(ModelName::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
+        let body = match &self.rule {
+            crate::PlacementRule::Colocation { scope, policy } => {
+                let scope = match scope {
+                    crate::PlacementScope::DomainWide => "DOMAIN WIDE".to_owned(),
+                    crate::PlacementScope::Corridor { from, to } => {
+                        format!("FROM {} TO {}", model_name_list(from), model_name_list(to))
+                    }
+                };
+                format!("{scope} {policy}")
+            }
+            crate::PlacementRule::Nodes { scope, policy } => {
+                let scope = match scope {
+                    crate::NodeRuleScope::DomainWide => "DOMAIN WIDE".to_owned(),
+                    crate::NodeRuleScope::Members(members) => {
+                        format!("FOR {}", model_name_list(members))
+                    }
+                };
+                format!("{scope} {}", node_policy_to_plexus(policy)?)
+            }
         };
-        let mut rendered = format!(
-            "CREATE PLACEMENT {} {scope} {}",
-            self.name.as_str(),
-            self.policy
-        );
+        let mut rendered = format!("CREATE PLACEMENT {} {body}", self.name.as_str());
         if let Some(rank) = self.rank {
             rendered.push_str(&format!(" RANK {rank}"));
         }
@@ -1401,21 +1452,21 @@ impl AlterSchema {
     }
 }
 
-impl AlterBranch {
+impl AlterParametrizer {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
             .map(|operation| match operation {
-                AlterBranchOperation::SetPartitions { partitions } => {
+                AlterParametrizerOperation::SetPartitions { partitions } => {
                     format!("SET PARTITIONS {partitions}")
                 }
             })
             .collect::<Vec<_>>()
             .join(", ");
         Ok(format!(
-            "ALTER BRANCH {} {operations};",
-            self.branch.as_str()
+            "ALTER PARAMETRIZER {} {operations};",
+            self.parametrizer.as_str()
         ))
     }
 }
@@ -1433,8 +1484,8 @@ impl AlterRelay {
                     format!("SET SCHEMA {}", schema.as_str())
                 }
                 AlterRelayOperation::SetBranching { branching } => match branching {
-                    RelayBranching::BranchedBy { branch } => {
-                        format!("SET BRANCHED BY {}", branch.as_str())
+                    RelayBranching::BranchedBy { parametrizer } => {
+                        format!("SET BRANCHED BY {}", parametrizer.as_str())
                     }
                     RelayBranching::Unbranched => "SET UNBRANCHED".to_string(),
                 },
@@ -1997,7 +2048,7 @@ fn codec_encoding_rule_to_plexus(rule: &CodecEncodingRule) -> String {
     format!("{} AS {}", rule.field.as_str(), rule.encoding.as_ref())
 }
 
-impl CreateBranch {
+impl CreateParametrizer {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         Ok(entity_labels::append_labels(
             self.configuration_to_canonical_plexus()?,
@@ -2009,19 +2060,19 @@ impl CreateBranch {
         &self,
     ) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut rendered = format!(
-            "CREATE BRANCH {} SCHEMA {} TTL {}",
+            "CREATE PARAMETRIZER {} SCHEMA {} TTL {}",
             self.name.as_str(),
             self.schema.as_str(),
             self.ttl
         );
         // One partition is the default every declaration without a count has, so its canonical
         // rendering omits it.
-        if self.partitions != BranchPartitions::ONE {
+        if self.partitions != ParametrizerPartitions::ONE {
             rendered.push_str(&format!(" PARTITIONS {}", self.partitions));
         }
         if let Some(eviction) = &self.eviction {
             match eviction {
-                BranchEviction::Lru { max_instances } => {
+                ParametrizerEviction::Lru { max_instances } => {
                     rendered.push_str(&format!(" MAX INSTANCES {max_instances} EVICT LRU"));
                 }
             }
@@ -2123,8 +2174,8 @@ impl CreateRelay {
             self.schema.as_str()
         );
         match &self.branching {
-            RelayBranching::BranchedBy { branch } => {
-                rendered.push_str(&format!(" BRANCHED BY {}", branch.as_str()));
+            RelayBranching::BranchedBy { parametrizer } => {
+                rendered.push_str(&format!(" BRANCHED BY {}", parametrizer.as_str()));
                 rendered.push_str(&format!(" CAPACITY {}", self.buffer));
             }
             RelayBranching::Unbranched => {
@@ -3318,8 +3369,8 @@ pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
         crate::IngestQuiesceMode::Reject { retry_after } => {
             format!("REJECT RETRY AFTER {retry_after}")
         }
-        crate::IngestQuiesceMode::EndpointBuffer { max_size } => {
-            format!("BUFFER MAX SIZE {max_size}")
+        crate::IngestQuiesceMode::EndpointBuffer { max_size, response } => {
+            format!("BUFFER MAX SIZE {max_size} {}", response.phrase())
         }
     }
 }
@@ -5627,11 +5678,12 @@ mod tests {
                         mode: EndpointIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                             max_size: "1MiB".to_string(),
+                            response: crate::EndpointPauseResponse::Immediate,
                         },
                     }),
                 ),
                 "CREATE WEBSOCKETS ENDPOINT INGESTOR ws_endpoint_ingestor\n  FROM orders_socket \
-                 MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB",
+                 MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE",
             ),
             (
                 orders_ingestor(

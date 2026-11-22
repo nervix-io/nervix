@@ -200,9 +200,12 @@ pub(super) fn reborrow_maintenance<'wait>(
     Some(transport)
 }
 
+/// Services the held transport until the hold ends at `until`, or, without a deadline, until the
+/// host stops polling, and returns the failure its connector reported. A transport without
+/// session control has nothing to service, so its hold only waits.
 pub(super) async fn maintain_held_transport(
     maintenance: Option<&mut dyn IngestorReadHold>,
-    until: Instant,
+    until: Option<Instant>,
 ) -> Report<IngestorError> {
     match maintenance {
         Some(maintenance) => maintenance.maintain(until).await,
@@ -226,7 +229,7 @@ pub(super) async fn hold_for_allowance(
 ) -> AllowanceHoldEnd {
     let started = Instant::now();
     host.record_rate_limit_hold_started();
-    let mut maintenance = pin!(maintain_held_transport(maintenance, until));
+    let mut maintenance = pin!(maintain_held_transport(maintenance, Some(until)));
     let end = loop {
         nervix_primitives::task::consume_budget().await;
         let next_flush = host.next_flush();

@@ -7,7 +7,7 @@ Ingestors are the entry points into the runtime graph.
 A typical ingestor:
 
 ```plexus
-CREATE BRANCH by_user
+CREATE PARAMETRIZER by_user
   SCHEMA user_branch TTL 5m;
 
 CREATE IF NOT EXISTS KAFKA TOPIC INGESTOR kafka_notifications
@@ -98,7 +98,7 @@ At runtime, the ingestor:
   batch built from external input at 1,023 messages plus one payload's records
 - executes `FILTER WHERE` once against that whole group
 - executes each route's ordered construction and `WHERE` program once against the surviving group
-- resolves the concrete branch group from the referenced `CREATE BRANCH`
+- resolves the concrete branch group from the referenced parametrizer
 - accumulates decoded rows independently for every matching destination and branch group
 - writes each route's buffered rows when its configured interval or size boundary fires, when the
   documented [`FLUSH IMMEDIATE` system timeout](plexus-overview.md) expires, or when the domain is
@@ -128,7 +128,7 @@ from delivery and observation time throughout the graph. The 5 ms idle close and
 domain-logical time. See [Domains And Time](domains-and-time.md#ingestion-timestamps).
 For a decoded group, timestamp selection and paced admission operate on Arrow columns. The group
 keeps admitted rows together; each rejected or missing event timestamp follows the ingestor route's
-`ON MESSAGE ERROR` policy with code `validation` and operation `admit`, preserving that row's ACK
+`ON MESSAGE ERROR` policy with class `validation` and operation `admit`, preserving that row's ACK
 and ingestor metadata. A batch containing both kinds can therefore deliver its accepted rows while
 its rejected rows reach the configured error route.
 
@@ -144,8 +144,9 @@ Every ingestor body declares its delivery mode with `MODE`, polled and listener 
   is the longest wait for a partial batch. A `CLIENT PRODUCER` ingestor writes `ACK PARALLEL MAX
   <n> ACK TIMEOUT ...` without `BATCH TIMEOUT`.
 - `ACK MAX <n> ACK TIMEOUT <duration>` is the endpoint response mode. It holds at most `n`
-  outstanding payloads per ingestor on each node and requires `ON QUIESCE REJECT RETRY AFTER
-  <duration>`. The sender owns retry.
+  outstanding payloads per ingestor on each node. During a pause it can refuse requests with
+  `REJECT RETRY AFTER <duration>` or hold them with `BUFFER MAX SIZE <bytes> RESPOND AFTER RESUME`.
+  The sender owns retry.
 
 For `ACK SEQUENTIAL` and `ACK PARALLEL`, `ACK TIMEOUT` bounds how long a payload may make no
 acknowledgement progress, not how long its processing takes. Work under way on its records reports
@@ -160,9 +161,11 @@ reports that as a timeout, not as a failed acknowledgement: its error event name
 failing branch gave. See [Ingestor Acknowledgement And
 Lifecycle](metrics-and-observability.md#ingestor-acknowledgement-and-lifecycle).
 
-Endpoint `ACK TIMEOUT` instead bounds the complete response wait on the physical clock; progress
-does not restart it. Expiry reports `processing_failed` with cause `ack_timeout` without undoing
-admitted effects. See [endpoint ingestion](#http-endpoint-and-websockets-endpoint).
+Endpoint `ACK TIMEOUT` bounds the complete response wait on the physical clock, including any time
+in a pause buffer. Progress never restarts it. An expired payload still in the pause buffer is
+removed and answered `not_admitted` with cause `suspended`. Once a payload enters the graph,
+expiry reports `processing_failed` with cause `ack_timeout` and admitted effects may complete.
+See [endpoint ingestion](#http-endpoint-and-websockets-endpoint).
 
 Each entity accepts only the modes it can honor, and completion offers only those:
 
@@ -402,9 +405,9 @@ is refused once every operation of the statement has applied, by the registry ch
 `CREATE` result also passes. An `MQTT TOPIC` ingestor that moves from `NO ACK` to an acknowledged
 mode therefore writes the session, the quality of service and the mode in one statement:
 `SET SESSION PERSISTENT, SET QOS 1, SET MODE ACK SEQUENTIAL …`. A declared quiesce mode the
-stored delivery mode cannot honor is refused the same way: `SET QUIESCE BUFFER MAX SIZE 1MiB` on
-an `HTTP ENDPOINT` ingestor in `MODE ACK MAX 8 ACK TIMEOUT 5s` fails with `HTTP ENDPOINT ingestors
-do not support ON QUIESCE BUFFER`.
+stored delivery mode cannot honor is refused the same way. For an acknowledged endpoint, setting
+`SET QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE` is refused because the endpoint owes each
+request its actual outcome.
 
 `SET DECODE USING` exists under every head except `CLIENT PRODUCER`, which decodes nothing.
 `ADD ROUTE` appends a route, while `REPLACE ROUTE` preserves the matched route's position.
@@ -444,11 +447,17 @@ The shared mode vocabulary is:
 - `REJECT RETRY AFTER <duration>` is available only to `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`.
   HTTP requests and new WebSocket upgrades receive 503; HTTP includes `Retry-After`, rounded up to
   whole seconds. Established WebSockets close with code 1013 (Try Again Later).
-- Endpoint buffering, for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT`, is `BUFFER MAX SIZE <bytes>`
-  without `ON OVERFLOW`, available only with `MODE NO ACK`. HTTP requests that fit receive 202 and
-  are held; WebSocket data frames that fit are held without a per-frame acknowledgement. A full
-  buffer, or a body that cannot fit, is rejected with HTTP 503 or a WebSocket 1013 close; an accepted
-  body is never discarded by buffer policy. `MODE ACK` requires `REJECT RETRY AFTER <duration>`.
+- `BUFFER MAX SIZE <bytes> RESPOND IMMEDIATE` retains what fits and sends HTTP 202 as soon as the
+  body is buffered. An unacknowledged WebSocket buffers each frame that fits and sends no
+  per-frame reply.
+- `BUFFER MAX SIZE <bytes> RESPOND AFTER RESUME` holds the client's reply while the body waits.
+  An unacknowledged HTTP request receives 202 once its payload proceeds. An acknowledged HTTP
+  request or WebSocket frame gets the outcome of its graph acknowledgement. A disconnected
+  client’s waiting body is removed before it can reach the graph.
+- Both endpoint buffer forms refuse overflow, with HTTP 503 or WebSocket close code 1013. Each
+  serving ingestor keeps its buffered bodies in arrival order ahead of new live input. A stop
+  discards the pause buffer with its session and refuses the requests still waiting to enter the
+  graph.
 
 A read already in progress when an ingestor quiesces ends without losing what it took from
 the transport: under `SUSPEND` those payloads still dispatch before the ingestor suspends, and under
@@ -464,7 +473,8 @@ An ingestor accepts only the modes it can honor, and completion of its body offe
 | `NATS SUBJECT`, `REDIS PUBSUB`, `WEBSOCKETS CONNECTION` | `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `ZEROMQ PULL`, `SYSLOG LISTENER`, `NATS STREAM` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...`, `DROP` |
 | `HTTP REQUEST`, `PROMETHEUS QUERY` | `SUSPEND`, `BUFFER ... ON OVERFLOW ...` |
-| `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...`; `BUFFER MAX SIZE ...` only with `MODE NO ACK` |
+| `HTTP ENDPOINT` | `REJECT RETRY AFTER ...` and `BUFFER MAX SIZE ... RESPOND AFTER RESUME` in either mode, plus `BUFFER MAX SIZE ... RESPOND IMMEDIATE` in `MODE NO ACK` |
+| `WEBSOCKETS ENDPOINT` | `REJECT RETRY AFTER ...` in either mode, `BUFFER MAX SIZE ... RESPOND IMMEDIATE` in `MODE NO ACK`, and `BUFFER MAX SIZE ... RESPOND AFTER RESUME` in `MODE ACK` |
 | `CLIENT PRODUCER` | `SUSPEND` |
 
 For `SYSLOG LISTENER`, suspension retains frames already held by the listener, while UDP arrivals
@@ -566,7 +576,7 @@ past it and a RabbitMQ queue no longer holds it. In `MODE NO ACK` the payload is
 rejection. A JAQ-backed codec that refuses one message an unfolding payload produced refuses the
 whole payload, and so does an unfolding that panics.
 
-A decode rejection carries a stable UUIDv7 reference, the code `validation`, the operation `decode`,
+A decode rejection carries a stable UUIDv7 reference, the class `codec`, the operation `decode`,
 the codec, the fields the codec named at fault, the instant the ingestor took the payload in, and the
 codec's diagnostic as its message. When the ingestor's metadata names where on its transport the
 payload was read, the rejection names it too: a Kafka record's topic, partition and offset, or the
@@ -588,56 +598,66 @@ its quiesce buffer retained.
 
 A codec with an `ON INGESTION` transformation [unfolds](schemas-and-codecs.md#unfolding-payloads)
 every payload on the node's extension workers. When every worker is busy and the class's wait queue
-is full, what happens to a payload depends on whether its sender can present it again:
+is full, a payload a source handed over waits for a place and is never refused: a busy node delivers
+late, and it never drops what it was handed.
 
-- An acknowledged delivery mode counts the refused raw payloads in
-  `nervix_ingestor_unfolding_refused_total`, rejects the batch, and delivers it again on its
-  `RETRY POLICY`.
-- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
-  `Retry-After` and closes an established WebSocket with 1013, counts the refused request payload,
-  and lets the sender send it again.
+- An ingestor's payload, acknowledged or not, waits in its host before it is decoded. The ingestor
+  takes nothing further from its source while it waits, so the wait reaches the transport as
+  backpressure, and the payloads behind it stay with the transport, in order. An acknowledged batch
+  is not rejected and presented again, and its `ACK TIMEOUT` starts only once it is dispatched.
 - A payload that `BUFFER` retained waits for a place when its buffer drains; see
   [Quiesce Modes](#quiesce-modes).
-- A paced ingestor has already moved past its poll, so the poll waits for a place. Waiting delays the
-  next poll, and the domain cadence coalesces the occurrences it missed into one poll at the newest
-  due instant.
-- An ingestor read in `MODE NO ACK` cannot present a payload again either. The payload waits for a
-  place when holding the ingestor's loop keeps its transport connected with bounded memory. Otherwise
-  it is refused: the ingestor reports the refusal as an error and counts the payload in
-  `nervix_ingestor_unfolding_refused_total`.
+- A paced ingestor's poll waits the same way. Waiting delays the next poll, and the domain cadence
+  coalesces the occurrences it missed into one poll at the newest due instant.
+- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
+  `Retry-After`, counts the refused request payload in `nervix_ingestor_unfolding_refused_total`, and
+  lets the sender send it again: an HTTP sender still holds its body and waits for the answer. A
+  WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for a place like
+  an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
+  work its ingestor admitted, so a drain, an ownership handoff and a graceful stop wait for it, and
+  it ends unprocessed only when its ingestor's intake ends.
 
-| Entity | A payload the extension workers cannot take now | Why |
-| --- | --- | --- |
-| `HTTP REQUEST`, `PROMETHEUS QUERY` | Waits | Holding the loop only delays the next poll. |
-| `NATS SUBJECT` | Waits | The client keeps its connection and reads the subscription while the loop waits, holding up to 65,536 messages before it drops the newest as a slow consumer. |
-| `ZEROMQ PULL` | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
-| `SYSLOG LISTENER` | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
-| `MQTT TOPIC` | Refused and counted | The connection keeps sending its keep-alive while the loop is held, but reads only 64 publishes ahead of it and then stops reading, and its keep-alive with it, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the ingestor reconnects is lost. |
-| `REDIS PUBSUB` | Refused and counted | The subscription reader holds at most `subscription_buffer_messages` messages. The host keeps polling it so its same-connection idle probes can continue instead of waiting for extension-worker admission. |
-| `WEBSOCKETS CONNECTION` | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the ingestor reconnects. |
-| `KAFKA TOPIC` in `MODE NO ACK` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
-| `PULSAR TOPIC` in `MODE NO ACK` | Refused and counted | A consumer whose receive queue fills cannot complete its close, so a later suspension or stop would wait on it. The refused message stays unacknowledged until the consumer reconnects, when the broker delivers it again. |
+While a payload waits, its ingestor keeps its transport within the transport's own bounds:
 
-A wait never delays a stop or a new quiesce. Stopping the ingestor ends the wait and drops the
-payload with the rest of the ingestor's in-flight input. A new quiesce decides on the payload again,
-as on input that arrives while quiesced: `BUFFER` retains it, `DROP` drops it and counts it in
-`nervix_ingestor_quiesce_dropped_total`, and a suspension, under which a payload the ingestor already
-handed over still dispatches, lets it wait on until the workers have room. While a payload waits,
-the ones behind it stay with the transport, in order.
+| Entity | While a payload waits for a place |
+| --- | --- |
+| `HTTP REQUEST`, `PROMETHEUS QUERY` | Nothing is read. The next poll is delayed. |
+| `NATS SUBJECT` | The client keeps its connection and reads the subscription, holding up to 65,536 messages before it drops the newest as a slow consumer. |
+| `NATS STREAM`, `SQS QUEUE` | Every delivery mode is acknowledged, and the transport keeps what the ingestor has not read yet. |
+| `ZEROMQ PULL` | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
+| `SYSLOG LISTENER` | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
+| `KAFKA TOPIC` | A consumer group's member stays in its group: Nervix pauses fetching and services the group for as long as the payload waits, and fetching resumes at the next unread offset. A domain-offset reader keeps its assignment. Kafka's retention keeps what the ingestor has not read. |
+| `PULSAR TOPIC` | The consumer keeps its connection, and the broker stops sending once the receiver queue's flow permits are spent. |
+| `RABBITMQ QUEUE` | The connection keeps its heartbeats. In an acknowledged mode the prefetch bounds what the broker sends; in `MODE NO ACK` the client keeps receiving deliveries into a buffer without a bound, as it does whenever the ingestor falls behind. |
+| `MQTT TOPIC` | The connection keeps polling, and with it its keep-alive, while it reads up to 64 publishes ahead in `MODE NO ACK`. Once those fill it stops reading, and a broker closes a connection that sends nothing for one and a half keep-alive intervals, so a wait longer than that ends the connection until the ingestor reconnects. |
+| `REDIS PUBSUB` | The dedicated reader keeps reading and probing until `subscription_buffer_messages` messages wait, then stops reading. Redis closes a subscriber whose output buffer passes its `client-output-buffer-limit`. |
+| `WEBSOCKETS CONNECTION` | The connection keeps reading, so the client answers the server's pings and writes its own on their cadence, and it parks the first data frame it reads. Once a frame is parked it reads nothing further, so a server that pings with a deadline shorter than the rest of the wait closes the connection until the ingestor reconnects. |
+
+A wait never delays a stop or a new quiesce beyond their own limits. A graceful stop, a shutdown
+drain and an ownership handoff wait for a payload that waits for a place, as for any other work in
+motion, because the payload counts as work its ingestor admitted. When the ingestor stops before
+the payload has its place, the payload is not delivered and its positions stay unconfirmed, so a
+transport that keeps positions presents it again: a Kafka offset is not committed, and a Pulsar or
+RabbitMQ acknowledgement is not sent. A transport that keeps no positions loses it with the rest of
+the ingestor's in-flight input; see [Shutdown And Recovery](shutdown.md#connector-contracts). A new
+quiesce decides on the payload again, as on input that arrives while quiesced: `BUFFER` retains it,
+`DROP` drops it and counts it in `nervix_ingestor_quiesce_dropped_total`, and a suspension, under
+which a payload the ingestor already handed over still dispatches, lets it wait on until the workers
+have room.
 
 ## Branch Semantics
 
 Ingestors are where external mixed flows enter branch-isolated processing. Every route independently
-constructs a concrete branch or becomes unbranched. The branch declaration owns the key schema,
-TTL, and optional LRU eviction policy:
+constructs a concrete branch or becomes unbranched. The parametrizer owns the key schema, TTL, and
+optional LRU eviction policy:
 
-- `CREATE BRANCH <branch> SCHEMA <schema> TTL <duration>` declares the branch key schema and lifetime
-- `BRANCHED BY <branch> SET field = expression, ...` constructs the route's key after output
+- `CREATE PARAMETRIZER <parametrizer> SCHEMA <schema> TTL <duration>` declares the branch key schema and lifetime
+- `BRANCHED BY <parametrizer> SET field = expression, ...` constructs the route's key after output
   finalization and route filtering
 - `MAX INSTANCES <n> EVICT LRU` may be added to cap active concrete branch instances and evict the least recently used branch when capacity is reached
 - `UNBRANCHED` produces an absent branch key; it is not encoded as an empty string or synthetic
   root identifier
-- the named branch defines both the branch identity and its key shape; downstream relays and branch-preserving processors must reference that same branch name
+- the parametrizer defines both the branch identity and its key shape; downstream relays and branch-preserving processors must reference that same parametrizer
 - decoded rows are appended to matching destination relays inside that group's branch
 - downstream normal processors keep the same group until a `REINGESTOR` or `EMITTER` boundary
 
@@ -655,12 +675,12 @@ Client-backed ingestors can use resource-mounted client config values for TLS ma
 Ingestors may declare an optional arrival filter and per-route construction clauses:
 
 ```plexus
-CREATE BRANCH by_tenant
+CREATE PARAMETRIZER by_tenant
   SCHEMA tenant_branch TTL 5m;
 
 CREATE IF NOT EXISTS HTTP ENDPOINT INGESTOR notifications_in
   FROM ingress MODE NO ACK
-  ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+  ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
   FILTER WHERE input.active
   TO notifications
     INHERIT ALL EXCEPT raw
@@ -724,7 +744,7 @@ General notes:
   `RABBITMQ QUEUE` AMQP timestamp after 2262-04-11 or a `KAFKA TOPIC` record timestamp before
   1677-09-21 or after 2262-04-11, is refused once `FILTER WHERE` keeps it, wherever a route or
   `TIMESTAMP AT` reads that field: every route's `ON MESSAGE ERROR` policy receives a message error
-  with code `validation` and operation `admit` that names `metadata.<field>` and describes the
+  with class `validation` and operation `admit` that names `metadata.<field>` and describes the
   value. The field never reads as null for it, and a field no program reads refuses nothing. An
   `SQS QUEUE` system attribute out of range fails the read instead, as its reference states
 - supported ingestors expose transport headers through `read_header(name)` and `read_headers(name)`;
@@ -990,7 +1010,7 @@ CREATE SCHEMA order_in (
   region STRING, order_id STRING, amount I64, card STRING SENSITIVE
 );
 CREATE SCHEMA region_key (region STRING);
-CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+CREATE PARAMETRIZER by_region SCHEMA region_key TTL 5m;
 
 CREATE CLIENT PRODUCER INGESTOR orders_in
   FROM SCHEMA order_in
@@ -1512,16 +1532,16 @@ polling and emitting alike:
 ### Kafka
 
 Kafka topic ingestors can construct [inherited branches](partitioning.md). With `OFFSET BY DOMAIN
-INSTANCES PER PARTITION`, each reader takes its group's external partitions and is placed with the
-matching branch partition. Consumer-group readers using a fixed instance count still inherit the
-native partition and route records to its owner.
+INSTANCES PER TRANSPORT PARTITION`, each reader takes its group's external partitions and is placed
+with the matching branch partition. Consumer-group readers using a fixed instance count still
+inherit the native partition and route records to its owner.
 
 <!-- connector-matrix:ingest-kafka-topic:start -->
 ```plexus,ignore
 CREATE KAFKA TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (OFFSET BY DOMAIN | OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST | OFFSET BY CONSUMER GROUP 'readers' START AT LATEST)
-  [INSTANCES 2 | INSTANCES PER PARTITION]
+  [INSTANCES 2 | INSTANCES PER TRANSPORT PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1536,10 +1556,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | KAFKA client |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER TRANSPORT PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Connector events | None declared. |
-| Instancing | per_partition |
+| Instancing | per_transport_partition |
 | External partitions | Enumerable; native coordinate from metadata.partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |
@@ -1548,9 +1568,9 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | replayable |
 | Acknowledgement confirmation | answered |
-| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |
+| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, holds back what fills it |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group offset commit: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign, pause, resume fetches and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause, resume and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>During a long read allowance hold, a consumer-group ingestor pauses fetching and services its group through the same control turn. Each job polls once. The driver can discard its own prefetched copies; the next admitted read resumes from its unread position. No record buffer is added.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause, resume and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>While the host holds the loop, during a long read allowance hold or while a payload waits for the node's extension workers, a consumer-group ingestor pauses fetching and services its group through the same control turn. Each job polls once. The driver can discard its own prefetched copies; the next admitted read resumes from its unread position. No record buffer is added.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
@@ -1754,9 +1774,10 @@ absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
 
 ### Pulsar
 
-Pulsar topic ingestors can construct [inherited branches](partitioning.md). `INSTANCES PER
-PARTITION` with `TYPE EXCLUSIVE` or `TYPE FAILOVER` consumes each group's explicit partition topics.
-Shared readers using a fixed count continue to route inherited keys to their branch owners.
+Pulsar topic ingestors can construct [inherited branches](partitioning.md). With `INSTANCES PER
+TRANSPORT PARTITION`, of any subscription type, each reader consumes only its group's partition
+topics and is placed with the matching branch partition. Readers using a fixed count continue to
+route inherited keys to their branch owners.
 
 <!-- connector-matrix:ingest-pulsar-topic:start -->
 ```plexus,ignore
@@ -1764,7 +1785,7 @@ CREATE PULSAR TOPIC INGESTOR <name>
   FROM <client> TOPIC 'orders'
   (SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST | SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST | SUBSCRIPTION 'readers' PROVISIONED)
   (TYPE SHARED | TYPE KEY_SHARED | TYPE FAILOVER | TYPE EXCLUSIVE)
-  [INSTANCES 2 | INSTANCES PER PARTITION]
+  [INSTANCES 2 | INSTANCES PER TRANSPORT PARTITION]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -1779,10 +1800,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | PULSAR client |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); `INSTANCES PER TRANSPORT PARTITION` (keyword choice); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Connector events | None declared. |
-| Instancing | per_partition |
+| Instancing | per_transport_partition |
 | External partitions | Enumerable; native coordinate from metadata.partition |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |
@@ -1879,14 +1900,16 @@ required, and a statement writes it after the subscription's owner:
 | --- | --- | --- |
 | `SHARED` | Every consumer takes messages, with no order across them. | Any number |
 | `KEY_SHARED` | Every consumer takes messages, and one consumer takes all of a key's, so a key keeps its publication order. Messages without a key all reach one consumer. | Any number |
-| `FAILOVER` | One consumer takes messages while the others stand by. When it leaves, a standby continues from what it has not acknowledged. | One, or inherited `PER PARTITION` |
-| `EXCLUSIVE` | The broker admits one consumer and refuses any other. | One, or inherited `PER PARTITION` |
+| `FAILOVER` | One consumer takes messages while the others stand by. When it leaves, a standby continues from what it has not acknowledged. | One, or `PER TRANSPORT PARTITION` |
+| `EXCLUSIVE` | The broker admits one consumer and refuses any other. | One, or `PER TRANSPORT PARTITION` |
 
 `FAILOVER` and `EXCLUSIVE` permit one fixed instance. More fixed instances are refused at `CREATE`
 and `ALTER`, as in
 `PULSAR subscription TYPE EXCLUSIVE reads through one consumer, so it refuses INSTANCES 2`.
-`INSTANCES PER PARTITION` instead requires inherited branches: each reader subscribes to the
-partition topics of its committed group, so each topic still has one active consumer.
+`INSTANCES PER TRANSPORT PARTITION` deals the topic's partition topics among the readers instead,
+for every type and whatever branch the ingestor builds: each reader subscribes only to the
+partition topics dealt to it, so each partition topic still has one consumer of the ingestor. See
+[Instancing](#instancing).
 A `FAILOVER` standby is another ingestor or application that
 joins the same subscription.
 
@@ -2035,7 +2058,7 @@ exchange to a queue or through a named exchange and a computed routing key.
 ```plexus,ignore
 CREATE RABBITMQ QUEUE INGESTOR <name>
   FROM <client> QUEUE 'orders'
-  [INSTANCES 2 | INSTANCES PER PARTITION]
+  [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -2050,10 +2073,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | RABBITMQ client |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |
 | Connector events | None declared. |
-| Instancing | per_partition |
+| Instancing | instances |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |
@@ -2091,7 +2114,7 @@ timestamp, a count of whole seconds since the Unix epoch, as that exact `DATETIM
 `TIMESTAMP AT metadata.timestamp` admits a message at the instant its producer wrote. A count no
 `DATETIME` holds, past 2262-04-11, such as milliseconds written where AMQP specifies seconds, refuses
 its message wherever the ingestor's route programs or its `TIMESTAMP AT` read `metadata.timestamp`,
-with code `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
+with class `validation` and operation `admit`, and refuses nothing in an ingestor that reads none.
 
 `read_header` and `read_headers` read the AMQP header table, separately from these basic properties.
 The declared model is `sorted_by_name` with exact names: one value per name, visited in ascending
@@ -2120,8 +2143,9 @@ a parallel read. Neither replaces consumer prefetch. These are consumer controls
 no delivery acknowledgements or rejections. RabbitMQ considers a delivery complete when it sends
 it, so connection loss, broker restart or a stopped consumer can lose a delivery the graph has not
 processed. Lapin's existing delivery queue has no bound in this mode; a publisher that outpaces the
-host can grow that queue. A payload the node's extension workers cannot admit is refused and
-counted. Use an acknowledged mode when the broker must retain unprocessed deliveries.
+host can grow that queue, and so does a payload that waits for the node's extension workers; see
+[When The Extension Workers Are Full](#when-the-extension-workers-are-full). Use an acknowledged
+mode when the broker must retain unprocessed deliveries.
 
 `ACK SEQUENTIAL` uses a prefetch of one. `ACK PARALLEL MAX n` uses a prefetch of `n` per instance,
 where `n` is in `1..=65535`, the range of AMQP's prefetch field. Each read gathers up to that count,
@@ -2340,7 +2364,7 @@ frame. Configure both bounds for the expected payload sizes.
 ```plexus,ignore
 CREATE MQTT TOPIC INGESTOR <name>
   FROM <client> TOPIC 'devices/+/orders'
-  [INSTANCES 2 | INSTANCES PER PARTITION]
+  [INSTANCES 2]
   (SESSION CLEAN | SESSION PERSISTENT)
   (QOS 0 | QOS 1 | QOS 2)
   MODE <mode>
@@ -2357,10 +2381,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | MQTT client |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |
-| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Connector events | None declared. |
-| Instancing | per_partition |
+| Instancing | instances |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |
@@ -2619,7 +2643,7 @@ to its subject as it receives a Core one, so either entity reads what either
 CREATE NATS SUBJECT INGESTOR <name>
   FROM <client> SUBJECT 'orders.created'
   (QUEUE GROUP 'workers')
-  (INSTANCES 2 | INSTANCES PER PARTITION)
+  (INSTANCES 2)
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -2634,10 +2658,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | NATS client |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |
 | Modes (complete bodies after MODE) | NO ACK |
-| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); required |
+| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |
 | Connector events | None declared. |
-| Instancing | per_partition |
+| Instancing | instances |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
@@ -2664,10 +2688,9 @@ Header reads retain the wire order, including interleaved repeated names, with e
 
 `NATS SUBJECT` ingestors use Core NATS queue subscriptions. `QUEUE GROUP` and `INSTANCES`
 are mandatory. `INSTANCES <n>` creates that many queue-group members across the cluster; use
-`INSTANCES 1` for one member. `INSTANCES PER PARTITION` creates one member for each partition index,
-placed with the corresponding partitions of its destination relays, under the
-[Instancing](#instancing) rules. Every member subscribes to the same subject and queue group;
-Core NATS chooses the member that receives each message.
+`INSTANCES 1` for one member. Every member subscribes to the same subject and queue group, and
+Core NATS chooses the member that receives each message. A subject has no partitions, so there is
+no partition form of `INSTANCES` here; see [Instancing](#instancing).
 
 The NATS client accepts one optional authentication key: `token`, `nkey_seed` for a user NKey
 seed, or `credentials_file` for a NATS user credentials file containing its JWT and signing seed.
@@ -2951,7 +2974,7 @@ diagnostic. These failures do not acknowledge a message; Syslog has no applicati
 ```plexus,ignore
 CREATE SQS QUEUE INGESTOR <name>
   FROM <client> QUEUE 'orders'
-  [INSTANCES 2 | INSTANCES PER PARTITION]
+  [INSTANCES 2]
   MODE <mode>
   ON QUIESCE <quiesce>
   DECODE USING <codec>
@@ -2966,10 +2989,10 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | SQS client |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |
 | Connector events | None declared. |
-| Instancing | per_partition |
+| Instancing | instances |
 | External partitions | No enumerable external partition set. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |
 | RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |
@@ -3357,15 +3380,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
-| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |
+| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>request bodies and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when full, immediately refuses the request for its sender to retry |
+| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete body arrival, client disconnect, or intake ending`<br>HTTP MODE NO ACK response under RESPOND AFTER RESUME: `resume, client disconnect, or intake ending` |
 | Driver limits | None declared. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -3397,15 +3420,15 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Connector events | None declared. |
 | Instancing | single |
 | External partitions | No enumerable external partition set. |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |
 | Payload facts | payload.bytes: U64 |
 | Every live node | yes |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |
-| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |
+| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>data frames and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when exceeded, closes only that peer's session<br>a data frame waiting for admission under RESPOND AFTER RESUME: at most 1 frame per connection; when exceeded, closes only that peer's session<br>a message read as the previous frame enters the graph: at most 1 message per connection; when full, holds back what fills it |
+| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete frame arrival, client disconnect, or intake ending` |
 | Driver limits | None declared. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -3433,10 +3456,9 @@ the other kind is refused when the statement is applied, with a message such as
 the same body.
 
 Both endpoint entities accept `MODE NO ACK` or `MODE ACK MAX <n> ACK TIMEOUT <duration>`.
-The ACK window is explicit: `MAX` is 1–65,535 outstanding payloads per ingestor on each node.
-An acknowledged endpoint requires `ON QUIESCE REJECT RETRY AFTER <duration>`. The sender owns
-retry; there is no endpoint `RETRY POLICY`, `ACK PARALLEL`, or `BATCH` clause. `BUFFER MAX SIZE`
-is available with `MODE NO ACK`. Transport headers are available through `read_header` and
+The ACK window is explicit: `MAX` is 1–65,535 outstanding requests per ingestor on each node,
+including buffered requests that still owe a reply. The sender owns retries. Transport headers
+are available through `read_header` and
 `read_headers`, and each entity declares the typed metadata of a request or a frame. Both ingestors
 execute on every cluster node and are excluded from placement members and placement completion.
 
@@ -3501,23 +3523,23 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
 | --- | --- | --- | --- |
 | 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
 | 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
-| 503 | `not_admitted` | `busy` | The response window or execution capacity is full. |
-| 503 | `not_admitted` | `suspended` | Intake is quiesced before admission. |
+| 503 | `not_admitted` | `busy` | The response window, pause buffer or execution capacity is full. |
+| 503 | `not_admitted` | `suspended` | Intake is quiesced, or the deadline or intake ended while the payload was still waiting to enter the graph. |
 | 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
-| 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired. |
-| 503 | `outcome_unknown` | `interrupted` | The exact intake stopped or ended while the response was held. |
+| 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired after admission. |
+| 503 | `outcome_unknown` | `interrupted` | Intake ended while admitted work still owed a response. |
 
 Every ACK response has a JSON object containing exactly `outcome` and `cause`, using the existing
 [client submission outcome vocabulary](client-io-architecture.md). For example, a local refusal
 is `{"outcome":"processing_failed","cause":"rejected"}`. Downstream rejection uses that same
 object with status 503. The response contains no payload or diagnostic details. Runtime events
 retain the ingestor's ordinary diagnostics.
-A 503 uses the declared retry delay, rounded up to whole seconds. A retry can duplicate output
-that already completed; timeout or interruption does not roll back admitted work.
+A 503 carries `Retry-After` when the quiesce mode declares a retry delay, rounded up to whole
+seconds. A retry can duplicate output that already completed.
 
-The physical ACK timeout starts when a complete payload obtains its window slot. It is positive
-and fits the supported physical deadline range. Downstream keepalive does not restart it. The
-window uses immediate admission: it never queues a request for a response slot. A window already
+The physical ACK timeout starts when the complete payload arrives, including during a pause. It
+is positive and fits the supported physical deadline range. A buffered ACK request claims a
+response slot immediately and holds it until its reply ends. A window already
 full at the HTTP head refuses before reading the body; dispatch checks capacity again after the
 body completes, so competing requests cannot overrun the window. HTTP request-head and body reads,
 input memory and WebSocket message and frame sizes follow the node's separately declared
@@ -3526,17 +3548,24 @@ input memory and WebSocket message and frame sizes follow the node's separately 
 In `MODE NO ACK`, admission still answers HTTP 202 without waiting for downstream acknowledgement.
 A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it also answers 202.
 WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
-still follow their protocol. With `BUFFER`, HTTP bodies that fit receive 202 and drain after resume.
-A full buffer rejects new intake without discarding bodies already accepted. If extension workers
-cannot unfold a fresh payload,
-HTTP answers 503 and a WebSocket closes with 1013; buffered payloads instead retain their place
-until workers can take them. See [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
+still follow their protocol. Under `RESPOND AFTER RESUME`, an unacknowledged HTTP request waits
+until resume, it disconnects, or the intake ends. A request still waiting when the domain stops
+receives HTTP 503 and its body is discarded. If extension workers cannot unfold a fresh HTTP body,
+HTTP answers 503; a fresh WebSocket frame waits for a place, its connection reading nothing further
+meanwhile, and buffered payloads retain their place until workers can take them. See
+[When The Extension Workers Are Full](#when-the-extension-workers-are-full) and
+[When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 
 Quiesce is enforced independently on every serving node. `REJECT` refuses new requests and
 WebSocket upgrades with 503. A stopped or absent intake refuses new requests too. A route shared
 by unacknowledged ingestors accepts when at least one accepts; it includes `Retry-After` only when
 all refusals supply a delay. When an acknowledged binding participates, success waits for its root;
 a failure after any binding admitted the input is not reported as `not_admitted`.
+
+Each acknowledged WebSocket connection can hold one frame during a pause, including during
+`ACCEPT DATA`. If it sends another data frame while its first is still buffered, Nervix closes that
+connection with 1013 and removes the waiting frame. Requests on other connections retain their
+place. A frame that resumes before the next frame arrives keeps its normal ordered reply.
 
 Each node counts every request and WebSocket data frame it receives once for each ingestor bound to
 the route, in `nervix_ingestor_endpoint_requests_total` under the outcome that ingestor reached:
@@ -3628,7 +3657,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
+| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>one data frame read while the host holds the ingestor's loop, which keeps the connection answering pings: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame, including one catch-up response window after a missed client ping: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
@@ -3979,18 +4008,28 @@ The following entities declare `INSTANCES`; presence and defaults follow the voc
 <!-- connector-matrix:instancing:start -->
 | Entity | Capability | INSTANCES |
 | --- | --- | --- |
-| KAFKA TOPIC | per_partition | optional; default 1 |
-| PULSAR TOPIC | per_partition | optional; default 1 |
-| MQTT TOPIC | per_partition | optional; default 1 |
-| NATS SUBJECT | per_partition | required |
-| RABBITMQ QUEUE | per_partition | optional; default 1 |
-| SQS QUEUE | per_partition | optional; default 1 |
+| KAFKA TOPIC | per_transport_partition | optional; default 1 |
+| PULSAR TOPIC | per_transport_partition | optional; default 1 |
+| MQTT TOPIC | instances | optional; default 1 |
+| NATS SUBJECT | instances | required |
+| RABBITMQ QUEUE | instances | optional; default 1 |
+| SQS QUEUE | instances | optional; default 1 |
 <!-- connector-matrix:instancing:end -->
 
-`Single`, `Instances`, and `PerPartition` are entity capabilities. A `Single` entity accepts no
-`INSTANCES` clause. `Instances` permits a fixed count; `PerPartition` also permits the partition
-form. The six broker entities in the table declare `PerPartition`. Polling, connection, listener,
-and client-producer entities declare `Single`.
+`Single`, `Instances`, and `PerTransportPartition` are entity capabilities. A `Single` entity
+accepts no `INSTANCES` clause. `Instances` permits a fixed count; `PerTransportPartition` also
+permits `INSTANCES PER TRANSPORT PARTITION`. KAFKA TOPIC and PULSAR TOPIC declare
+`PerTransportPartition`, because their transports keep partitions that Nervix observes. NATS
+SUBJECT, RABBITMQ QUEUE, SQS QUEUE and MQTT TOPIC declare `Instances`: their transports have no
+partitions, so their instances compete for the same subject, queue or topic. Polling, connection,
+listener, and client-producer entities declare `Single`.
+
+A transport without partitions is not followed even when an operator splits it into several
+queues, subjects, topics or channels and publishes each key to one of them. Such a layout is a
+convention of the broker configuration or the publishers that Nervix cannot observe: its count
+would only be declared, growth and a key routed to two shards would go unnoticed, and a change has
+no point at which state could move safely. Declare `INSTANCES <n>` and let the branch's
+`PARTITIONS n` divide the keys.
 
 `INSTANCES <n>` uses a positive 64-bit count (1 through 18,446,744,073,709,551,615). Before
 placement, Nervix refuses a count whose execution-unit entries cannot be addressed on the target.
@@ -4002,19 +4041,29 @@ require all its units to share an owner. Connector identities retain the global 
 moves; an owner never renumbers its local instances. Broker competition retains the transport's
 own subscription and delivery guarantees.
 
-`INSTANCES PER PARTITION` creates one instance per partition of the branch its routes construct.
-Every constructing route must target the same ordered key-field contract and partition count.
-Branch names and retention settings may differ. At least one route must construct a branch;
-additional unbranched routes do not define its partition structure. Instance `p` is colocated with
-partition `p` of every constructed relay. A branch with one partition places instance `0` with the
-relay's `Single` unit. The current form follows direct branch partitions; shard inheritance and
-topology epochs are separate features.
+`INSTANCES PER TRANSPORT PARTITION` creates one instance per Nervix partition of the branch its
+routes construct, and deals the transport's partitions among them: transport partition `k` is read
+by instance `k mod n`. Every constructing route must target the same ordered key-field contract and
+partition count. Branch names and retention settings may differ. At least one route must construct
+a branch; additional unbranched routes do not define its partition structure. Instance `p` is
+colocated with partition `p` of every constructed relay. A branch with one partition places
+instance `0` with the relay's `Single` unit and deals it every transport partition. Into an
+[inherited branch](partitioning.md), instance `p` reads exactly the transport partitions of branch
+partition `p`, so no record crosses a node. Into a branch that divides its keys by fingerprint
+(`PARTITIONS n`), a transport partition still carries keys of every branch partition, and a record
+travels once to its key's partition.
 
-For Kafka, `PER PARTITION` requires `OFFSET BY DOMAIN`. Each unit owns the offsets of the topic
-partitions dealt to its global index, and commits through the originator on that unit's primary.
-Changing a domain-offset ingestor's unit count preserves its recorded positions while running or
-stopped. Nervix drains the affected units and prepares their redistributed state on the new
-primaries and replicas before publishing the layout. A failed preparation retains the preceding
+For Pulsar, every subscription type deals partition topics this way: each instance subscribes only
+to the partition topics dealt to it, and an instance dealt none stays idle. Its instances wait,
+without reading, until the leader has observed the topic's partitions, and a later change of that
+count deals the partition topics again. An unpartitioned topic is one transport partition, read by
+instance `0`.
+
+For Kafka, `PER TRANSPORT PARTITION` requires `OFFSET BY DOMAIN`. Each unit owns the offsets of the
+topic partitions dealt to its global index, and commits through the originator on that unit's
+primary. Changing a domain-offset ingestor's unit count preserves its recorded positions while
+running or stopped. Nervix drains the affected units and prepares their redistributed state on the
+new primaries and replicas before publishing the layout. A failed preparation retains the preceding
 layout. Changing the broker topic's partition set with a fixed instance count retains its existing
 rebalance and checkpoint contract.
 

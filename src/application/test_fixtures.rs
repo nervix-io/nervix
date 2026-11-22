@@ -114,6 +114,18 @@ impl SessionServiceImpl {
             .await
             .result
     }
+
+    /// Starts `domain` through `START`, as a client starts it, and returns once the start
+    /// answered successfully.
+    #[cfg(feature = "testing")]
+    pub(in crate::application) async fn test_start_domain(&self, domain: &str) {
+        let mut subscriptions = SessionSubscriptions::new();
+        let started = self
+            .test_command(test_command_request("START;", domain), &mut subscriptions)
+            .await;
+        assert!(started.succeeded(), "the test domain starts: {started:?}");
+        subscriptions.stop_all().await;
+    }
 }
 
 pub(in crate::application) struct TestTlsFiles {
@@ -565,6 +577,7 @@ pub(in crate::application) fn placement_group(
 pub(in crate::application) async fn create_test_domain(consensus: &Proposer, raw: &str) {
     let domain = DomainName::parse(raw).expect("valid domain");
     let state = DomainState {
+        labels: nervix_models::EntityLabels::default(),
         id: domain,
         config: DomainConfig {
             pace: DomainPace::Paced {

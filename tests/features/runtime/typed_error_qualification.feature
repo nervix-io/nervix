@@ -106,8 +106,8 @@ Feature: Typed error qualification through public streams
       CREATE SCHEMA calculation (tenant STRING, id STRING);
       CREATE SCHEMA calculation_error (source_id STRING);
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
-      CREATE BRANCH by_other_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_other_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY calculations SCHEMA calculation BRANCHED BY by_tenant;
       CREATE RELAY calculation_results SCHEMA calculation BRANCHED BY by_tenant;
       CREATE RELAY calculation_errors SCHEMA calculation_error BRANCHED BY by_other_tenant;
@@ -247,7 +247,7 @@ Feature: Typed error qualification through public streams
         FROM WIRE SCHEMA calculation_wire
         TO SCHEMA calculation;
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY calculations SCHEMA calculation BRANCHED BY by_tenant;
       CREATE RELAY calculation_results SCHEMA calculation_result BRANCHED BY by_tenant;
       CREATE RELAY calculation_errors SCHEMA calculation_error BRANCHED BY by_tenant;
@@ -255,7 +255,7 @@ Feature: Typed error qualification through public streams
       CREATE HTTP ENDPOINT calculation_ingress ON edge PATH '/calculations';
       CREATE HTTP ENDPOINT INGESTOR calculation_ingestor
         FROM calculation_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING calculation_codec
         TO calculations
           INHERIT ALL
           BRANCHED BY by_tenant SET tenant = message.tenant
@@ -270,7 +270,7 @@ Feature: Typed error qualification through public streams
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO calculation_errors
           SET source_id = input.id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               affected_fields = error.fields;
       CREATE SUBSCRIPTION calculation_errors_subscription TO calculation_errors;

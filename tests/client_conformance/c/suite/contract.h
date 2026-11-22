@@ -37,6 +37,7 @@ SUITE_RELEASE(nx_node_inspection, nx_node_inspection_free)
 SUITE_RELEASE(nx_event, nx_event_release)
 SUITE_RELEASE(nx_clock_event, nx_clock_event_release)
 SUITE_RELEASE(nx_domain_clock, nx_domain_clock_release)
+SUITE_RELEASE(nx_notice, nx_notice_release)
 SUITE_RELEASE(nx_fields, nx_fields_free)
 SUITE_RELEASE(nx_producer, nx_producer_free)
 SUITE_RELEASE(nx_consumer, nx_consumer_free)
@@ -720,6 +721,10 @@ static void test_boundary_public_enumeration_domains(void) {
         NX_CLOCK_EVENT_INTERRUPTED, NX_CLOCK_EVENT_RESTORATION_FAILED);
     DOMAIN(nx_clock_state, NX_CLOCK_STOPPED, NX_CLOCK_UNINSTALLED, NX_CLOCK_UNPACED, NX_CLOCK_PACED);
     DOMAIN(nx_clock_end_reason, NX_CLOCK_END_DOMAIN_REMOVED);
+    DOMAIN(nx_notice_level, NX_NOTICE_LEVEL_INFO, NX_NOTICE_LEVEL_WARNING, NX_NOTICE_LEVEL_ERROR);
+    DOMAIN(nx_notice_kind, NX_NOTICE_KIND_MEMBERSHIP, NX_NOTICE_KIND_LEADERSHIP,
+        NX_NOTICE_KIND_CLUSTER_PARAMETERS, NX_NOTICE_KIND_RUNTIME, NX_NOTICE_KIND_CONTROL_PLANE,
+        NX_NOTICE_KIND_LICENSING);
     DOMAIN(nx_open_refusal, NX_OPEN_DOMAIN_NOT_FOUND, NX_OPEN_DOMAIN_STOPPED, NX_OPEN_ENDPOINT_NOT_FOUND,
         NX_OPEN_NOT_CLIENT_ENDPOINT, NX_OPEN_ENDPOINT_UNAVAILABLE, NX_OPEN_SCHEMA_MISMATCH,
         NX_OPEN_TOO_MANY_ENDPOINTS, NX_OPEN_SESSION_CAPACITY_EXHAUSTED,
@@ -745,6 +750,17 @@ static void test_boundary_public_enumeration_domains(void) {
         NX_SETTLEMENT_WRONG_CONSUMER, NX_SETTLEMENT_INVALID_REASON, NX_SETTLEMENT_CONSUMER_ENDED);
 }
 #undef DOMAIN
+
+/* A notice read with no session, or with nowhere to write its notice, is refused before it waits
+ * and hands out nothing; releasing NULL does nothing. */
+static void test_boundary_notice_reads_refuse_a_missing_session_or_result(void) {
+    nx_notice *notice = NULL;
+    suite_kind(nx_session_next_notice(NULL, suite_deadline(120000), &notice),
+               NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(notice == NULL);
+    suite_kind(nx_session_next_notice(NULL, NULL, NULL), NX_ERROR_INVALID_ARGUMENT);
+    nx_notice_release(NULL);
+}
 
 static void test_boundary_silent_peer_deadline(void) {
     struct suite_peer *peer = suite_peer_new(0);
@@ -1020,10 +1036,10 @@ static void test_b6_columns_use_size_queries_and_pointer_lengths(void) {
     uint32_t width = 1;
     suite_check(nx_schema_field_level(schema, NX_PART_ROWS, 8, 1, &type, &width));
     REQUIRE(type == NX_TYPE_STRING && width == 0);
-    const uint8_t *branch = NULL;
-    size_t branch_len = 0;
-    REQUIRE(nx_schema_branch(schema, &branch, &branch_len));
-    REQUIRE(suite_equal(branch, branch_len, "by_tenant"));
+    const uint8_t *parametrizer = NULL;
+    size_t parametrizer_len = 0;
+    REQUIRE(nx_schema_parametrizer(schema, &parametrizer, &parametrizer_len));
+    REQUIRE(suite_equal(parametrizer, parametrizer_len, "by_tenant"));
     bool nullable = false, sensitive = false;
     const uint8_t *name = NULL;
     size_t name_len = 0;
@@ -1143,7 +1159,7 @@ static void test_entity_labels_retain_exact_values_and_revision_views(void) {
     suite_drop(outcome); /* Retained metadata is independent of its outcome. */
     const uint8_t *text = NULL;
     size_t length = 0;
-    nx_entity_labels_domain(labels, &text, &length);
+    REQUIRE(nx_entity_labels_domain(labels, &text, &length));
     REQUIRE(suite_equal(text, length, suite_env("NERVIX_PROBE_DOMAIN")));
     nx_entity_labels_entity_kind(labels, &text, &length);
     REQUIRE(suite_equal(text, length, "SCHEMA"));
@@ -1189,6 +1205,35 @@ static void test_entity_labels_retain_exact_values_and_revision_views(void) {
     nx_entity_labels *absent = NULL;
     suite_kind(nx_outcome_entity_labels(created, &absent), NX_ERROR_INVALID_ARGUMENT);
     REQUIRE(absent == NULL);
+
+    suite_completed(session, "CREATE USER c_label_user WITH PASSWORD 'probe-password' LABELS { 'owner' = ' Δ ' };");
+    nx_outcome *account_outcome = suite_completed(session, "SHOW LABELS ON USER c_label_user FORMAT JSON;");
+    nx_entity_labels *account = NULL;
+    suite_check(nx_outcome_entity_labels(account_outcome, &account));
+    HOLD(nx_entity_labels, account);
+    suite_drop(account_outcome);
+    REQUIRE(!nx_entity_labels_domain(account, &text, &length));
+    nx_entity_labels_entity_kind(account, &text, &length);
+    REQUIRE(suite_equal(text, length, "USER"));
+    nx_entity_labels_entity_name(account, &text, &length);
+    REQUIRE(suite_equal(text, length, "c_label_user"));
+    suite_check(nx_entity_labels_entry(account, 0, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(key, key_length, "owner") && suite_equal(label_value, value_length, " Δ "));
+
+    suite_completed(session, "CREATE RESOURCE c_label_resource LABELS { 'empty' = '' };");
+    nx_outcome *resource_outcome = suite_completed(session, "DESCRIBE RESOURCE c_label_resource;");
+    nx_entity_labels *resource = NULL;
+    suite_check(nx_outcome_entity_labels(resource_outcome, &resource));
+    HOLD(nx_entity_labels, resource);
+    suite_drop(resource_outcome);
+    REQUIRE(nx_entity_labels_domain(resource, &text, &length));
+    REQUIRE(suite_equal(text, length, suite_env("NERVIX_PROBE_DOMAIN")));
+    nx_entity_labels_entity_kind(resource, &text, &length);
+    REQUIRE(suite_equal(text, length, "RESOURCE"));
+    nx_entity_labels_entity_name(resource, &text, &length);
+    REQUIRE(suite_equal(text, length, "c_label_resource"));
+    suite_check(nx_entity_labels_entry(resource, 0, &key, &key_length, &label_value, &value_length));
+    REQUIRE(suite_equal(key, key_length, "empty") && value_length == 0);
 }
 
 static void test_node_preview_retains_committed_facts(void) {
@@ -1239,7 +1284,7 @@ static void test_inspection_retains_typed_state_after_its_outcome_is_released(vo
         suite_drop(license_outcome);
         uint64_t license_branches = 0, license_rows = 0, license_bytes = 0;
         REQUIRE(nx_inspection_counts(license_inspection, &license_branches, &license_rows, &license_bytes));
-        REQUIRE(license_branches == 0 && license_rows == 3 && license_bytes > 0);
+        REQUIRE(license_branches == 0 && license_rows == 4 && license_bytes > 0);
         const uint8_t *license_json = NULL;
         size_t license_json_len = 0;
         nx_inspection_json(license_inspection, &license_json, &license_json_len);
@@ -1695,6 +1740,94 @@ static void test_b11_read_the_attached_clock_before_ticks_and_project_it(void) {
     suite_drop(session);
     REQUIRE(nx_domain_clock_state(held) == NX_CLOCK_PACED);
     suite_cross_thread(held, suite_release_nx_domain_clock);
+}
+
+/* Creates `<prefix>_in`, whose rows reach junction `<prefix>_scorer`, which fails every row it
+ * reads: its division always divides by zero, an error of class evaluation that its route's
+ * ON MESSAGE ERROR LOG reports as a runtime notice to every session of every node. */
+static void suite_failing_junction(nx_session *session, const char *prefix) {
+    char query[640];
+    int length = snprintf(query, sizeof query,
+        "CREATE RELAY %s_readings SCHEMA suite_row UNBRANCHED;", prefix);
+    REQUIRE(length > 0 && (size_t)length < sizeof query);
+    suite_completed(session, query);
+    length = snprintf(query, sizeof query,
+        "CREATE RELAY %s_ratios SCHEMA suite_row UNBRANCHED;", prefix);
+    REQUIRE(length > 0 && (size_t)length < sizeof query);
+    suite_completed(session, query);
+    length = snprintf(query, sizeof query,
+        "CREATE CLIENT PRODUCER INGESTOR %s_in FROM SCHEMA suite_row "
+        "MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND "
+        "TIMESTAMP NOW TO %s_readings INHERIT ALL UNBRANCHED "
+        "FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;", prefix, prefix);
+    REQUIRE(length > 0 && (size_t)length < sizeof query);
+    suite_completed(session, query);
+    length = snprintf(query, sizeof query,
+        "CREATE JUNCTION %s_scorer FROM %s_readings UNBRANCHED TO %s_ratios "
+        "INHERIT ALL SET amount = input.amount / (input.amount - input.amount) "
+        "FLUSH IMMEDIATE ON MESSAGE ERROR LOG;", prefix, prefix, prefix);
+    REQUIRE(length > 0 && (size_t)length < sizeof query);
+    suite_completed(session, query);
+}
+
+/* Submits one batch to `<prefix>_in` and settles it. The junction's route logged the failure of
+ * every row instead of acknowledging it, so the batch was admitted and its acknowledgement failed
+ * as rejected downstream. */
+static void suite_submit_failing(nx_producer *producer, uint32_t first) {
+    uint64_t submission = suite_submit(producer, suite_build(producer, first));
+    nx_submission_outcome *outcome = suite_rejoin(producer, submission);
+    REQUIRE(nx_submission_outcome_result(outcome) == NX_SUBMISSION_PROCESSING_FAILED);
+    nx_processing_failure failure = NX_FAILURE_ACK_TIMED_OUT;
+    suite_check(nx_submission_outcome_failure(outcome, &failure));
+    REQUIRE(failure == NX_FAILURE_REJECTED);
+    suite_drop(outcome);
+    suite_check(nx_producer_close(producer, suite_deadline(120000)));
+}
+
+/* The session is open before the batch is submitted: a session receives the notices published
+ * while it is open, and they end with it. */
+static void test_b17_runtime_notices_report_the_class_and_node_of_a_junction_error(void) {
+    nx_session *session = suite_connect(NULL, NULL);
+    suite_failing_junction(session, "c_notice");
+    suite_submit_failing(suite_producer(session, "c_notice_in"), 2101);
+    // ANCHOR: notices
+    nx_cancel *deadline = suite_deadline(120000);
+    nx_notice *found = NULL;
+    for (size_t attempt = 0; attempt < 64 && found == NULL; ++attempt) {
+        nx_notice *notice = NULL;
+        suite_check(nx_session_next_notice(session, deadline, &notice));
+        HOLD(nx_notice, notice);
+        const uint8_t *node = NULL;
+        size_t node_len = 0;
+        /* Route by kind, and select a runtime error by its typed fields, never by its text. */
+        if (nx_notice_kind_of(notice) == NX_NOTICE_KIND_RUNTIME &&
+            nx_notice_error(notice, NULL, NULL, NULL, NULL, &node, &node_len) &&
+            suite_equal(node, node_len, "c_notice_scorer")) {
+            found = notice;
+        } else {
+            suite_drop(notice);
+        }
+    }
+    REQUIRE(found != NULL);
+    nx_notice *held = nx_notice_retain(found); /* a reference of its own, to keep or hand over */
+    HOLD(nx_notice, held);
+    suite_drop(found);
+    const uint8_t *error_class = NULL, *node_kind = NULL, *node = NULL, *message = NULL;
+    size_t error_class_len = 0, node_kind_len = 0, node_len = 0, message_len = 0;
+    REQUIRE(nx_notice_error(held, &error_class, &error_class_len, &node_kind, &node_kind_len,
+                            &node, &node_len));
+    REQUIRE(nx_notice_level_of(held) == NX_NOTICE_LEVEL_ERROR);
+    REQUIRE(suite_equal(error_class, error_class_len, "evaluation"));
+    REQUIRE(suite_equal(node_kind, node_kind_len, "junction"));
+    REQUIRE(suite_equal(node, node_len, "c_notice_scorer"));
+    nx_notice_message(held, &message, &message_len); /* UTF-8 to display, borrowed from held */
+    // ANCHOR_END: notices
+    char expected[192];
+    int length = snprintf(expected, sizeof expected,
+        "junction 'c_notice_scorer' message error in domain '%s'", suite_env("NERVIX_PROBE_DOMAIN"));
+    REQUIRE(length > 0 && (size_t)length < sizeof expected);
+    REQUIRE(suite_contains(message, message_len, expected));
+    suite_cross_thread(held, suite_release_nx_notice); /* any thread releases a reference */
 }
 
 static void test_b12_exact_fields_and_typed_open_refusals(void) {
@@ -2172,6 +2305,7 @@ static void test_b1_an_upload_completes_again_under_its_identity_and_refuses_ano
 #define SUITE_CONTRACT_TESTS \
     {"boundary", "test_boundary_fields_and_arguments", test_boundary_fields_and_arguments}, \
     {"boundary", "test_boundary_public_enumeration_domains", test_boundary_public_enumeration_domains}, \
+    {"boundary", "test_boundary_notice_reads_refuse_a_missing_session_or_result", test_boundary_notice_reads_refuse_a_missing_session_or_result}, \
     {"boundary", "test_boundary_silent_peer_deadline", test_boundary_silent_peer_deadline}, \
     {"boundary", "test_boundary_connect_cancelled_from_another_thread", test_boundary_connect_cancelled_from_another_thread}, \
     {"cluster", "test_b1_prepare_once_and_recover_cancelled_execution", test_b1_prepare_once_and_recover_cancelled_execution}, \
@@ -2193,6 +2327,7 @@ static void test_b1_an_upload_completes_again_under_its_identity_and_refuses_ano
     {"cluster", "test_b10_restore_streams_the_archive_and_reports_its_steps", test_b10_restore_streams_the_archive_and_reports_its_steps}, \
     {"cluster", "test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive", test_b1_an_upload_completes_again_under_its_identity_and_refuses_another_archive}, \
     {"cluster", "test_b11_read_the_attached_clock_before_ticks_and_project_it", test_b11_read_the_attached_clock_before_ticks_and_project_it}, \
+    {"cluster", "test_b17_runtime_notices_report_the_class_and_node_of_a_junction_error", test_b17_runtime_notices_report_the_class_and_node_of_a_junction_error}, \
     {"cluster", "test_b12_exact_fields_and_typed_open_refusals", test_b12_exact_fields_and_typed_open_refusals}, \
     {"cluster", "test_b13_builders_copy_every_level_and_batches_keep_their_owners", test_b13_builders_copy_every_level_and_batches_keep_their_owners}, \
     {"cluster", "test_b14_take_or_release_each_submission_and_read_its_outcome_class", test_b14_take_or_release_each_submission_and_read_its_outcome_class}, \

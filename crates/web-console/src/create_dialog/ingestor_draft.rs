@@ -179,9 +179,9 @@ impl IngestorDraft {
 
     pub(super) fn select_branch(&mut self, node: &NodeRef) {
         if let Some(route) = self.active_route_mut() {
-            let current = route.branch.current_branch().cloned();
+            let current = route.branch.current_parametrizer().cloned();
             route.branch.select_branch(node);
-            if route.branch.current_branch() != current.as_ref()
+            if route.branch.current_parametrizer() != current.as_ref()
                 && let Some(relay) = &mut route.relay
             {
                 relay.invalidate();
@@ -327,7 +327,7 @@ mod tests {
         draft
             .source
             .select_reference(&node(ModelKind::Endpoint, "edge"));
-        draft.source.quiesce = Some(IngestQuiesceKind::EndpointBuffer);
+        draft.source.quiesce = Some(IngestQuiesceKind::EndpointBufferImmediate);
         draft.source.buffer_size = "1MiB".into();
         draft.source.overflow = Some(IngestQuiesceOverflow::DropOldest);
         draft.codec = Some(SelectedReference::chosen(

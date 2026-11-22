@@ -1,9 +1,10 @@
-//! Live unacknowledged payloads whose `ON INGESTION` unfolding the node's extension workers cannot
-//! take now.
+//! Payloads whose `ON INGESTION` unfolding the node's extension workers cannot take now, which wait
+//! for a place whatever their source.
 //!
 //! Layer: test harness.
 //! - **Owns.** Driving the production ingestor host's poll and batch intake into a full extension
-//!   class, and the delivery, refusal and accounting each ingestor's contract promises.
+//!   class, and the delivery, quiesce decisions, stop, transport service and work accounting of a
+//!   payload that waits.
 //! - **Depends on.** The production ingestor host, the endpoint ingestor fixture that installs the
 //!   domain, and a single-worker executor.
 //! - **Must not know.** Broker drivers or the ingestor loops that call the host.
@@ -26,8 +27,6 @@ use crate::runtime::ingestors::endpoint::tests::{start_endpoint_ingestor, unfold
 /// How a test host takes in what its ingestor hands it.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct HostIntake {
-    /// What an unacknowledged payload does when the extension workers have no room for it.
-    admission: QueueAdmission,
     /// Whether what the ingestor reads while quiesced passes through the quiesce control.
     buffered: bool,
     /// Whether the host flushes the ingest group after each payload it takes in, rather than
@@ -35,26 +34,15 @@ pub(super) struct HostIntake {
     flush_each_intake: bool,
 }
 
-/// The intake of an ingestor whose loop may be held while its payload waits for the extension
-/// workers.
+/// The intake of an ingestor whose input passes through its quiesce control, which flushes the
+/// ingest group after each payload.
 pub(super) const WAITING_INTAKE: HostIntake = HostIntake {
-    admission: QueueAdmission::WaitForPlace,
     buffered: true,
     flush_each_intake: true,
 };
 
-/// The intake of an ingestor whose transport a held loop would cost its connection or unbounded
-/// memory.
-const REFUSING_INTAKE: HostIntake = HostIntake {
-    admission: QueueAdmission::RefuseWhenFull,
-    buffered: true,
-    flush_each_intake: true,
-};
-
-/// The intake a paced ingestor's host has: its polls wait for the extension workers, and its loop,
-/// not each intake, flushes the ingest group.
+/// The intake a paced ingestor's host has: its loop, not each intake, flushes the ingest group.
 pub(super) const PACED_INTAKE: HostIntake = HostIntake {
-    admission: QueueAdmission::WaitForPlace,
     buffered: false,
     flush_each_intake: false,
 };
@@ -189,10 +177,23 @@ impl UnfoldingDomain {
             ),
             buffered_intake: intake.buffered,
             flush_each_intake: intake.flush_each_intake,
-            unacknowledged_admission: intake.admission,
             general_error_policy: plan.ingestor.general_error_policy.clone(),
             rate_limit,
         })
+    }
+
+    /// The work the fixture's ingestor unit has admitted in the node's quiesce accounting, which
+    /// a drain, an ownership handoff and a graceful stop wait for.
+    fn admitted_work(&self) -> usize {
+        self.runtime
+            .unit_quiesce_counters(
+                &self.domain,
+                NodeUnitRef::new(
+                    NodeRef::new(ModelKind::Ingestor, &self.ingestor),
+                    Unit::SINGLE,
+                ),
+            )
+            .admitted_work()
     }
 
     /// The quiesce control the fixture's running ingestor holds.
@@ -321,11 +322,11 @@ async fn a_poll_waits_for_the_extension_workers_when_the_node_cannot_unfold_it()
     fixture.finish().await;
 }
 
-/// An ingestor whose transport stays connected while its loop waits hands the host an unacknowledged
-/// batch it cannot present again, so when the extension workers cannot take the batch's
-/// unfolding, the batch waits for them instead of being refused and lost.
+/// An ingestor hands the host an unacknowledged batch it cannot present again, so when the
+/// extension workers cannot take the batch's unfolding, the batch waits for them instead of being
+/// refused and lost, and counts meanwhile as work its unit admitted.
 #[nervix_primitives::test]
-async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_ingestor_can_hold() {
+async fn an_unacknowledged_batch_waits_for_the_extension_workers() {
     let mut fixture = UnfoldingDomain::start().await;
     let mut errors = fixture.runtime.events().subscribe();
     let (_shutdown_tx, shutdown) = watch::channel(false);
@@ -359,9 +360,14 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_ingest
         errors.recv().now_or_never().is_none(),
         "a batch waiting for the extension workers is not reported as an ingestor error"
     );
+    assert_eq!(
+        fixture.admitted_work(),
+        1,
+        "the waiting batch is work its unit admitted, which a drain waits for"
+    );
 
     filled.release().await;
-    let (_host, intake) = nervix_primitives::time::timeout(Duration::from_secs(10), taken_in)
+    let (host, intake) = nervix_primitives::time::timeout(Duration::from_secs(10), taken_in)
         .await
         .expect("the batch is unfolded once the extension workers have room")
         .expect("the intake task does not panic");
@@ -369,6 +375,77 @@ async fn an_unacknowledged_batch_waits_for_the_extension_workers_when_its_ingest
         matches!(intake, Ok(())),
         "the unacknowledged batch is taken in: {intake:?}"
     );
+    assert_eq!(
+        fixture.delivered_user_ids(1).await,
+        vec![Some(RuntimeValue::I64(7))]
+    );
+    assert_eq!(fixture.admitted_work(), 0);
+    assert_eq!(host.interactions.unfolding_refused.get(), 0);
+    fixture.finish().await;
+}
+
+/// Session control of a transport the host keeps serviced while a payload waits. Each service the
+/// host starts publishes its deadline, then services until the host stops polling it.
+struct RecordingHold {
+    services: watch::Sender<Vec<Option<Instant>>>,
+}
+
+#[async_trait]
+impl IngestorReadHold for RecordingHold {
+    async fn maintain(&mut self, until: Option<Instant>) -> Report<IngestorError> {
+        self.services.send_modify(|services| services.push(until));
+        std::future::pending().await
+    }
+}
+
+/// A batch waiting for the extension workers holds its ingestor's loop, so the host keeps the
+/// transport's session serviced for as long as the batch waits, with no deadline, and takes the
+/// batch in once the workers have room.
+#[nervix_primitives::test]
+async fn the_host_services_the_transport_while_a_batch_waits_for_the_extension_workers() {
+    let mut fixture = UnfoldingDomain::start().await;
+    let (_shutdown_tx, shutdown) = watch::channel(false);
+    let quiesce = fixture.quiesce();
+    let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
+    let (services, mut serviced) = watch::channel(Vec::new());
+
+    let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
+    let taken_in = nervix_primitives::task::spawn(async move {
+        let mut hold = RecordingHold { services };
+        let payload = br#"{"user_id":7}"#.to_vec();
+        let intake = host
+            .intake_unacknowledged(
+                vec![IngestorIntakeMessage {
+                    payload: &payload,
+                    metadata: IngestMetadataRow::headers(
+                        &NoIngestHeaders,
+                        &nervix_connector::NoIngestMetadata(0),
+                    ),
+                }],
+                Some(&mut hold),
+            )
+            .await;
+        (host, intake)
+    });
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        serviced.wait_for(|services| !services.is_empty()),
+    )
+    .await
+    .expect("the host services the transport while the batch waits")
+    .expect("the hold publishes its services while the intake runs");
+    assert_eq!(
+        *serviced.borrow(),
+        vec![None],
+        "a batch waiting for the extension workers holds the transport with no deadline"
+    );
+
+    filled.release().await;
+    let (_host, intake) = nervix_primitives::time::timeout(Duration::from_secs(10), taken_in)
+        .await
+        .expect("the batch is unfolded once the extension workers have room")
+        .expect("the intake task does not panic");
+    assert!(matches!(intake, Ok(())), "{intake:?}");
     assert_eq!(
         fixture.delivered_user_ids(1).await,
         vec![Some(RuntimeValue::I64(7))]
@@ -411,44 +488,9 @@ pub(super) fn quiesce_control(
     Arc::new(IngestorQuiesceControl::new(mode, metrics, labels))
 }
 
-/// An ingestor whose transport a held loop would cost its connection or unbounded memory refuses an
-/// unacknowledged batch the extension workers cannot unfold now. The refusal is reported and
-/// counted, and the next batch is delivered once the workers have room.
-#[nervix_primitives::test]
-async fn an_unacknowledged_batch_is_refused_and_counted_when_its_ingestor_cannot_hold() {
-    let mut fixture = UnfoldingDomain::start().await;
-    let (_shutdown_tx, shutdown) = watch::channel(false);
-    let quiesce = fixture.quiesce();
-    let mut host = fixture.host(quiesce, shutdown, REFUSING_INTAKE).await;
-
-    let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
-    let refused = take_in_unacknowledged(&mut host, 7)
-        .await
-        .expect_err("a full extension class refuses the batch at once");
-    assert!(
-        format!("{refused:#}").contains("the node's bounded execution did not unfold the payload"),
-        "the failure names the unfolding the node did not admit: {refused:#}"
-    );
-    assert_eq!(host.interactions.unfolding_refused.get(), 1);
-    assert_eq!(
-        host.collector.len(),
-        0,
-        "the refused batch leaves no row behind"
-    );
-
-    filled.release().await;
-    let accepted = take_in_unacknowledged(&mut host, 8).await;
-    assert!(matches!(accepted, Ok(())), "{accepted:?}");
-    assert_eq!(host.interactions.unfolding_refused.get(), 1);
-    assert_eq!(
-        fixture.delivered_user_ids(1).await,
-        vec![Some(RuntimeValue::I64(8))]
-    );
-    fixture.finish().await;
-}
-
-/// The ingestor stopping ends a batch's wait for the extension workers at once, and the batch
-/// is dropped with the rest of its in-flight input instead of being counted as refused.
+/// The ingestor stopping ends a batch's wait for the extension workers at once, and the intake ends
+/// as stopped, so its loop leaves the batch's positions unconfirmed for a transport that keeps
+/// them to present again. Nothing of the batch stays behind, and nothing is counted as refused.
 #[nervix_primitives::test]
 async fn the_ingestor_stopping_ends_a_batch_waiting_for_the_extension_workers() {
     let mut fixture = UnfoldingDomain::start().await;
@@ -467,19 +509,21 @@ async fn the_ingestor_stopping_ends_a_batch_waiting_for_the_extension_workers() 
         .await
         .expect("the stop ends the wait while the extension class is still full")
         .expect("the intake task does not panic");
-    assert!(matches!(intake, Ok(())), "{intake:?}");
+    let stopped = intake.expect_err("the stop ends the intake");
+    assert!(stopped.current_context().stopped(), "{stopped:#}");
     assert_eq!(
         host.collector.len(),
         0,
-        "the dropped batch leaves no row behind"
+        "the undelivered batch leaves no row behind"
     );
     assert_eq!(host.interactions.unfolding_refused.get(), 0);
+    assert_eq!(fixture.admitted_work(), 0);
     filled.release().await;
     fixture.finish().await;
 }
 
-/// A poll waits for the extension workers the same way, and the ingestor stopping ends that wait
-/// at once.
+/// A poll waits for the extension workers the same way, and the ingestor stopping ends that wait,
+/// and the intake, at once.
 #[nervix_primitives::test]
 async fn the_ingestor_stopping_ends_a_poll_waiting_for_the_extension_workers() {
     let mut fixture = UnfoldingDomain::start().await;
@@ -498,11 +542,12 @@ async fn the_ingestor_stopping_ends_a_poll_waiting_for_the_extension_workers() {
         .await
         .expect("the stop ends the wait while the extension class is still full")
         .expect("the polling task does not panic");
-    assert!(matches!(intake, Ok(false)), "{intake:?}");
+    let stopped = intake.expect_err("the stop ends the intake");
+    assert!(stopped.current_context().stopped(), "{stopped:#}");
     assert_eq!(
         host.collector.len(),
         0,
-        "the dropped poll leaves no row behind"
+        "the undelivered poll leaves no row behind"
     );
     filled.release().await;
     fixture.finish().await;
@@ -623,38 +668,6 @@ async fn a_poll_waiting_for_the_extension_workers_waits_on_through_a_suspending_
     fixture.finish().await;
 }
 
-/// A refusing ingestor's payload read while a suspension is engaged still dispatches, and the
-/// extension workers refuse it as they refuse the ingestor's live payloads: it is reported and
-/// counted, and nothing of it stays behind.
-#[nervix_primitives::test]
-async fn a_refusing_sources_payload_read_while_suspended_is_refused_and_counted() {
-    let mut fixture = UnfoldingDomain::start().await;
-    let quiesce = quiesce_control(&fixture, IngestQuiesceMode::Suspend);
-    let (_shutdown_tx, shutdown) = watch::channel(false);
-    let mut host = fixture
-        .host(quiesce.clone(), shutdown, REFUSING_INTAKE)
-        .await;
-
-    quiesce.engage(IngestorQuiesceCause::EntityHold);
-    let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
-    let refused = take_in_unacknowledged(&mut host, 7)
-        .await
-        .expect_err("a full extension class refuses the payload at once");
-    assert!(
-        format!("{refused:#}").contains("the node's bounded execution did not unfold the payload"),
-        "the failure names the unfolding the node did not admit: {refused:#}"
-    );
-    assert_eq!(host.interactions.unfolding_refused.get(), 1);
-    assert_eq!(
-        host.collector.len(),
-        0,
-        "the refused payload leaves no row behind"
-    );
-    assert_eq!(quiesce.counters(), IngestorQuiesceCounters::default());
-    filled.release().await;
-    fixture.finish().await;
-}
-
 /// A new quiesce whose mode buffers what arrives takes over a poll waiting for the extension
 /// workers, and the poll drains from the buffer once the workers have room.
 #[nervix_primitives::test]
@@ -711,7 +724,6 @@ async fn a_batch_whose_ingestor_bypasses_the_quiesce_control_waits_on_through_a_
             quiesce.clone(),
             shutdown,
             HostIntake {
-                admission: QueueAdmission::WaitForPlace,
                 buffered: false,
                 flush_each_intake: true,
             },
@@ -759,36 +771,35 @@ async fn take_in_acknowledged(
     .await
 }
 
-/// An acknowledged batch the extension workers cannot unfold now fails, so its ingestor rejects it
-/// and presents it again; the refusal is not counted as a payload lost. Once the workers have room
-/// the batch is delivered and acknowledged.
+/// An acknowledged batch the extension workers cannot unfold now waits for them rather than being
+/// refused for its transport to present again, counting meanwhile as work its unit admitted, and
+/// is delivered and acknowledged once they have room. Nothing is counted as refused.
 #[nervix_primitives::test]
-async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_workers_are_full() {
+async fn an_acknowledged_batch_waits_for_the_extension_workers() {
     let mut fixture = UnfoldingDomain::start().await;
     let quiesce = fixture.quiesce();
     let (_shutdown_tx, shutdown) = watch::channel(false);
     let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
 
     let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
-    let refused = match take_in_acknowledged(&mut host, 7).await {
-        Ok(_) => panic!("a full extension class refuses an acknowledged batch at once"),
-        Err(refused) => refused,
-    };
-    assert!(
-        format!("{refused:#}").contains("the node's bounded execution did not unfold the payload"),
-        "the failure names the unfolding the node did not admit: {refused:#}"
-    );
+    let taken_in = nervix_primitives::task::spawn(async move {
+        let intake = take_in_acknowledged(&mut host, 7).await;
+        (host, intake)
+    });
+    fixture.reach_unfolding().await;
     assert_eq!(
-        host.interactions.unfolding_refused.get(),
-        1,
-        "the refused unfolding is counted even though its transport can present the batch again"
+        fixture.executor.snapshot().extension_cpu.refused,
+        0,
+        "the batch's unfolding waits for a place instead of being refused"
     );
+    assert_eq!(fixture.admitted_work(), 1);
 
     filled.release().await;
-    let mut acknowledgement = take_in_acknowledged(&mut host, 7)
+    let (host, intake) = nervix_primitives::time::timeout(Duration::from_secs(10), taken_in)
         .await
-        .expect("the extension workers have room for the batch presented again");
-    assert_eq!(host.interactions.unfolding_refused.get(), 1);
+        .expect("the batch is unfolded once the extension workers have room")
+        .expect("the intake task does not panic");
+    let mut acknowledgement = intake.expect("the acknowledged batch is taken in");
     assert_eq!(
         fixture.delivered_user_ids(1).await,
         vec![Some(RuntimeValue::I64(7))]
@@ -797,6 +808,89 @@ async fn an_acknowledged_batch_is_refused_for_redelivery_when_the_extension_work
         acknowledgement.wait(Duration::from_secs(10)).await,
         IngestorAcknowledgementOutcome::Acknowledged
     );
+    assert_eq!(host.interactions.unfolding_refused.get(), 0);
+    assert_eq!(fixture.admitted_work(), 0);
+    fixture.finish().await;
+}
+
+/// The ingestor stopping ends an acknowledged batch's wait for the extension workers at once, and
+/// the intake ends as stopped, so its loop leaves the batch's positions unconfirmed for its
+/// transport to present again.
+#[nervix_primitives::test]
+async fn the_ingestor_stopping_ends_an_acknowledged_batch_waiting_for_the_extension_workers() {
+    let mut fixture = UnfoldingDomain::start().await;
+    let quiesce = fixture.quiesce();
+    let (shutdown_tx, shutdown) = watch::channel(false);
+    let mut host = fixture.host(quiesce, shutdown, WAITING_INTAKE).await;
+
+    let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
+    let taken_in = nervix_primitives::task::spawn(async move {
+        let intake = take_in_acknowledged(&mut host, 7).await;
+        (host, intake)
+    });
+    fixture.reach_unfolding().await;
+    shutdown_tx.send_replace(true);
+    let (host, intake) = nervix_primitives::time::timeout(Duration::from_secs(10), taken_in)
+        .await
+        .expect("the stop ends the wait while the extension class is still full")
+        .expect("the intake task does not panic");
+    let stopped = match intake {
+        Ok(_) => panic!("the stop ends the intake before the batch is dispatched"),
+        Err(stopped) => stopped,
+    };
+    assert!(stopped.current_context().stopped(), "{stopped:#}");
+    assert_eq!(host.interactions.unfolding_refused.get(), 0);
+    assert_eq!(fixture.admitted_work(), 0);
+    filled.release().await;
+    fixture.finish().await;
+}
+
+/// A new quiesce whose mode buffers what arrives takes over an acknowledged batch waiting for the
+/// extension workers: the buffer retains its message, which leaves the batch nothing to wait on,
+/// and the message is delivered when the buffer drains after resume.
+#[nervix_primitives::test]
+async fn a_new_buffering_quiesce_takes_over_an_acknowledged_batch_waiting_for_the_extension_workers()
+ {
+    let mut fixture = UnfoldingDomain::start().await;
+    let quiesce = quiesce_control(
+        &fixture,
+        IngestQuiesceMode::Buffer {
+            max_size: "1MiB".to_string(),
+            overflow: IngestQuiesceOverflow::DropOldest,
+        },
+    );
+    let (_shutdown_tx, shutdown) = watch::channel(false);
+    let mut host = fixture
+        .host(quiesce.clone(), shutdown, WAITING_INTAKE)
+        .await;
+
+    let filled = FilledCpuClass::fill(&fixture.executor, CpuClass::Extension).await;
+    let taken_in = nervix_primitives::task::spawn(async move {
+        let intake = take_in_acknowledged(&mut host, 7).await;
+        (host, intake)
+    });
+    fixture.reach_unfolding().await;
+    quiesce.engage(IngestorQuiesceCause::EntityHold);
+    let (mut host, intake) = nervix_primitives::time::timeout(Duration::from_secs(10), taken_in)
+        .await
+        .expect("the new quiesce ends the wait while the extension class is still full")
+        .expect("the intake task does not panic");
+    let mut acknowledgement = intake.expect("the buffer takes the batch's message over");
+    assert_eq!(
+        acknowledgement.wait(Duration::from_secs(10)).await,
+        IngestorAcknowledgementOutcome::Acknowledged
+    );
+    assert_eq!(quiesce.counters().buffered_records, 1);
+
+    quiesce.release(IngestorQuiesceCause::EntityHold);
+    filled.release().await;
+    let drained = host.replay_buffered().await;
+    assert!(matches!(drained, Ok(true)), "{drained:?}");
+    assert_eq!(
+        fixture.delivered_user_ids(1).await,
+        vec![Some(RuntimeValue::I64(7))]
+    );
+    assert_eq!(quiesce.counters().buffered_records, 0);
     fixture.finish().await;
 }
 

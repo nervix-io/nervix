@@ -173,7 +173,7 @@ func rowSchemaLines(schema *session.RowSchema) ([]field, []field, []string, erro
 		lines = append(lines, parsed.line("FIELD"))
 	}
 	if branch := schema.Branch(nil); branch != nil {
-		lines = append(lines, "BRANCH "+string(branch.Branch()))
+		lines = append(lines, "PARAMETRIZER "+string(branch.Parametrizer()))
 		for index := 0; index < branch.FieldsLength(); index++ {
 			row := new(session.RowField)
 			branch.Fields(row, index)
@@ -1133,9 +1133,26 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 		if kind == nil {
 			return nil, errors.New("a notice has no kind")
 		}
-		return []string{fmt.Sprintf("EVENT NOTICE level=%s kind=%s message=%s",
+		reported := ""
+		if noticeError := notice.Error(nil); noticeError != nil {
+			class := noticeError.Class()
+			if class == nil {
+				return nil, errors.New("a notice error has no class")
+			}
+			node := noticeError.Node(nil)
+			if node == nil {
+				return nil, errors.New("a notice error has no node")
+			}
+			nodeKind := node.Kind()
+			if nodeKind == nil {
+				return nil, errors.New("a notice error's node has no kind")
+			}
+			reported = fmt.Sprintf(" error=%s node=%s/%s", session.EnumNamesErrorClass[*class],
+				session.EnumNamesModelKind[*nodeKind], node.Name())
+		}
+		return []string{fmt.Sprintf("EVENT NOTICE level=%s kind=%s message=%s%s",
 			session.EnumNamesNoticeLevel[*level], session.EnumNamesNoticeKind[*kind],
-			text(notice.Message()))}, nil
+			text(notice.Message()), reported)}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s message", message.BodyType())
 }
@@ -1443,8 +1460,66 @@ func wasmUnitLines(state *session.WasmUnitStateFacts) ([]string, error) {
 			}
 			lines = append(lines, fmt.Sprintf("STATE_WASM_RECOVERY branch=%s generation=%d rejection=%s request=%s outcome=%s", branch, recovery.Generation(), session.EnumNamesWasmSavedStateRejection[*rejection], recovery.Request(), session.EnumNamesWasmRecoveryOutcome[*outcome]))
 		}
+		if description := entry.Description(nil); description != nil {
+			if entry.Checkpoint(nil) == nil {
+				return nil, errors.New("a WASM guest-state description has no checkpoint beside it")
+			}
+			described, err := wasmDescriptionLines(branch, description)
+			if err != nil {
+				return nil, err
+			}
+			lines = append(lines, described...)
+		}
 	}
 	return lines, nil
+}
+
+// wasmDescriptionLines prints a guest-state description: its restored generation and revision,
+// then its sections with their fields, which are always sensitive, or its failed render's stage
+// and diagnostic.
+func wasmDescriptionLines(branch string, description *session.WasmGuestStateDescription) ([]string, error) {
+	restored := fmt.Sprintf("STATE_WASM_DESCRIPTION branch=%s generation=%d revision=%s", branch, description.Generation(), optionalNumber(description.Revision()))
+	switch description.RenderType() {
+	case session.WasmGuestStateRenderWasmGuestStateSections:
+		described := new(session.WasmGuestStateSections)
+		if err := union(description.Render, described); err != nil {
+			return nil, err
+		}
+		lines := []string{fmt.Sprintf("%s outcome=described sections=%d", restored, described.SectionsLength())}
+		for i := 0; i < described.SectionsLength(); i++ {
+			section := new(session.WasmGuestStateSection)
+			described.Sections(section, i)
+			lines = append(lines, fmt.Sprintf("STATE_WASM_SECTION branch=%s name=%s rows=%d fields=%d", branch, section.Name(), section.Rows(), section.FieldsLength()))
+			for j := 0; j < section.FieldsLength(); j++ {
+				row := new(session.RowField)
+				section.Fields(row, j)
+				decoded, err := readField(row)
+				if err != nil {
+					return nil, err
+				}
+				if !decoded.sensitive {
+					return nil, fmt.Errorf("guest section %s field %s is not sensitive", section.Name(), decoded.name)
+				}
+				lines = append(lines, decoded.line("STATE_WASM_FIELD"))
+			}
+		}
+		return lines, nil
+	case session.WasmGuestStateRenderWasmGuestStateRenderFailure:
+		failure := new(session.WasmGuestStateRenderFailure)
+		if err := union(description.Render, failure); err != nil {
+			return nil, err
+		}
+		stage := failure.Stage()
+		if stage == nil {
+			return nil, errors.New("a failed WASM render lacks its stage")
+		}
+		name, known := session.EnumNamesWasmGuestStateRenderStage[*stage]
+		if !known {
+			return nil, fmt.Errorf("undeclared WASM render stage %d", *stage)
+		}
+		return []string{fmt.Sprintf("%s outcome=failed stage=%s diagnostic=%s", restored, name, text(failure.Diagnostic()))}, nil
+	}
+	return nil, fmt.Errorf("unknown WASM guest-state render %d", description.RenderType())
 }
 
 func stateInspectionLines(state *session.StateInspection) ([]string, error) {
@@ -1452,9 +1527,13 @@ func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 	switch state.EntityType() {
 	case session.StateInspectionEntityDomainNodeInspectionEntity:
 		scope := new(session.DomainNodeInspectionEntity)
-		if err := union(state.Entity, scope); err != nil { return nil, err }
+		if err := union(state.Entity, scope); err != nil {
+			return nil, err
+		}
 		entity := scope.Node(nil)
-		if entity == nil || entity.Kind() == nil { return nil, errors.New("inspection lacks node identity") }
+		if entity == nil || entity.Kind() == nil {
+			return nil, errors.New("inspection lacks node identity")
+		}
 		lines = []string{fmt.Sprintf("STATE domain=%s kind=%s name=%s", scope.Domain(), session.EnumNamesModelKind[*entity.Kind()], entity.Name())}
 	case session.StateInspectionEntityClusterLicenseInspectionEntity:
 		lines = []string{"STATE scope=cluster_license kind=LICENSE"}
@@ -1574,18 +1653,57 @@ func stateInspectionLines(state *session.StateInspection) ([]string, error) {
 	return lines, nil
 }
 
+func entityLabelOwner(value *session.EntityLabelsInspection) (domain, kind, name string, err error) {
+	switch value.OwnerType() {
+	case session.EntityLabelOwnerModelLabelOwner:
+		owner := new(session.ModelLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		model := owner.Model(nil)
+		if model == nil || model.Kind() == nil {
+			return "", "", "", errors.New("labels lack the model identity")
+		}
+		return string(owner.Domain()), strings.ToLower(session.EnumNamesModelKind[*model.Kind()]), string(model.Name()), nil
+	case session.EntityLabelOwnerDomainLabelOwner:
+		owner := new(session.DomainLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		name := string(owner.Name())
+		return name, "domain", name, nil
+	case session.EntityLabelOwnerResourceLabelOwner:
+		owner := new(session.ResourceLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		return string(owner.Domain()), "resource", string(owner.Name()), nil
+	case session.EntityLabelOwnerUserLabelOwner:
+		owner := new(session.UserLabelOwner)
+		if err := union(value.Owner, owner); err != nil {
+			return "", "", "", err
+		}
+		return "none", "user", string(owner.Name()), nil
+	default:
+		return "", "", "", errors.New("labels have an undeclared owner")
+	}
+}
+
 func entityLabelLines(value *session.EntityLabelsInspection) ([]string, error) {
-	entity := value.Entity(nil)
+	domain, kind, name, err := entityLabelOwner(value)
+	if err != nil {
+		return nil, err
+	}
 	policy := value.Policy(nil)
-	if entity == nil || entity.Kind() == nil || policy == nil {
-		return nil, errors.New("labels lack identity or policy")
+	if policy == nil {
+		return nil, errors.New("labels lack captured policy")
 	}
 	limits := policy.Limits(nil)
 	if limits == nil {
 		return nil, errors.New("labels lack captured limits")
 	}
 	lines := []string{fmt.Sprintf("ENTITY_LABELS domain=%s kind=%s name=%s policy=%d limits=%d/%d/%d/%d",
-		value.Domain(), strings.ToLower(session.EnumNamesModelKind[*entity.Kind()]), entity.Name(), policy.Revision(),
+		domain, kind, name, policy.Revision(),
 		limits.Count(), limits.KeyBytes(), limits.ValueBytes(), limits.Bytes())}
 	switch value.ViewType() {
 	case session.EntityLabelViewCommittedEntityLabels:
@@ -1595,6 +1713,9 @@ func entityLabelLines(value *session.EntityLabelsInspection) ([]string, error) {
 		}
 		lines = append(lines, fmt.Sprintf("LABEL_VIEW committed revision=%d", view.Revision()))
 	case session.EntityLabelViewStagedEntityLabels:
+		if kind == "domain" || kind == "user" {
+			return nil, errors.New("administrative labels have no staged view")
+		}
 		view := new(session.StagedEntityLabels)
 		if err := union(value.View, view); err != nil {
 			return nil, err

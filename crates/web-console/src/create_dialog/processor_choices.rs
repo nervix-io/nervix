@@ -126,12 +126,12 @@ impl CreateSignals {
                 "Select a domain before choosing an input relay",
             ),
             NodeBranchDraft::Branched(_) => {
-                let Some(branch) = draft.branching.current_branch() else {
+                let Some(branch) = draft.branching.current_parametrizer() else {
                     return Err(prerequisites.unnamed);
                 };
                 self.processor_model_question(
                     ChoiceTarget::IngestBranchedRelay,
-                    NodeRef::new(ModelKind::Branch, branch),
+                    NodeRef::new(ModelKind::Parametrizer, branch),
                     "Select a domain before choosing an input relay",
                     20,
                 )
@@ -277,11 +277,12 @@ impl CreateSignals {
                 }
                 self.processor_first_input_question(&draft)
             }
-            ChoiceControl::ProcessorBranch | ChoiceControl::ProcessorRouteBranch => self
-                .domain_question(
-                    ChoiceTarget::Branch,
-                    "Select a domain before choosing a branch",
-                ),
+            ChoiceControl::ProcessorParametrizer | ChoiceControl::ProcessorRouteParametrizer => {
+                self.domain_question(
+                    ChoiceTarget::Parametrizer,
+                    "Select a domain before choosing a parametrizer",
+                )
+            }
             ChoiceControl::ProcessorStateRelay => {
                 let Some(input) = draft.current_first_input() else {
                     return Err("Choose an input relay before materialized state");
@@ -330,12 +331,12 @@ impl CreateSignals {
                         "Select a domain before choosing an output relay",
                     ),
                     RouteBranchDraft::Branched { .. } => {
-                        let Some(branch) = route.branch.current_branch() else {
+                        let Some(branch) = route.branch.current_parametrizer() else {
                             return Err("Choose the named route branch before its output relay");
                         };
                         self.processor_model_question(
                             ChoiceTarget::IngestBranchedRelay,
-                            NodeRef::new(ModelKind::Branch, branch),
+                            NodeRef::new(ModelKind::Parametrizer, branch),
                             "Select a domain before choosing an output relay",
                             20,
                         )
@@ -375,13 +376,13 @@ impl CreateSignals {
             ChoiceControl::ProcessorBranchField => {
                 let Some(branch) = draft
                     .active_route()
-                    .and_then(|route| route.branch.current_branch())
+                    .and_then(|route| route.branch.current_parametrizer())
                 else {
                     return Err("Choose a named route branch before its key fields");
                 };
                 self.processor_model_question(
                     ChoiceTarget::BranchField,
-                    NodeRef::new(ModelKind::Branch, branch),
+                    NodeRef::new(ModelKind::Parametrizer, branch),
                     "Select a domain before choosing a branch field",
                     100,
                 )
@@ -436,14 +437,14 @@ impl CreateSignals {
                     "Select a domain before choosing a materialized relay",
                 ),
                 NodeBranchDraft::Branched(_) => {
-                    let Some(branch) = draft.branching.current_branch() else {
+                    let Some(branch) = draft.branching.current_parametrizer() else {
                         return Err(
                             "Choose the named generator branch before its materialized relay"
                         );
                     };
                     self.processor_model_question(
                         ChoiceTarget::GeneratorMaterializedRelay,
-                        NodeRef::new(ModelKind::Branch, branch),
+                        NodeRef::new(ModelKind::Parametrizer, branch),
                         "Select a domain before choosing a materialized relay",
                         20,
                     )
@@ -514,15 +515,15 @@ impl CreateSignals {
                 )
             }
             ChoiceControl::ProcessorBranchKeyField => {
-                let Some(branch) = draft.branching.current_branch() else {
-                    return Err("Choose the named branch before its key fields");
+                let Some(branch) = draft.branching.current_parametrizer() else {
+                    return Err("Choose the parametrizer before its key fields");
                 };
                 if !draft.has_output_assignment() {
                     return Err("Add an output assignment before a field to assign");
                 }
                 self.processor_model_question(
                     ChoiceTarget::BranchField,
-                    NodeRef::new(ModelKind::Branch, branch),
+                    NodeRef::new(ModelKind::Parametrizer, branch),
                     "Select a domain before choosing a branch field",
                     100,
                 )
@@ -562,7 +563,7 @@ impl CreateSignals {
         if draft.family().declares_node_branch()
             && matches!(draft.branching, NodeBranchDraft::Branched(_))
         {
-            controls.push(ChoiceControl::ProcessorBranch);
+            controls.push(ChoiceControl::ProcessorParametrizer);
         }
         if let Some(state) = draft.active_state() {
             controls.push(ChoiceControl::ProcessorStateRelay);
@@ -613,7 +614,7 @@ impl CreateSignals {
                 controls.push(ChoiceControl::ProcessorInputField);
             }
             if matches!(route.branch, RouteBranchDraft::Branched { .. }) {
-                controls.push(ChoiceControl::ProcessorRouteBranch);
+                controls.push(ChoiceControl::ProcessorRouteParametrizer);
                 controls.push(ChoiceControl::ProcessorBranchField);
             }
             controls.push(ChoiceControl::ProcessorOutputField);

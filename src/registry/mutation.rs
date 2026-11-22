@@ -15,11 +15,11 @@
 use ahash::{HashMap, HashSet};
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AlterBranch, AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction,
-    AlterPlacement, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema,
-    AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect, ModelIndex,
-    ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion, ResourceName, StatePurge,
-    Statement,
+    AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction,
+    AlterParametrizer, AlterPlacement, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
+    AlterWireSchema, AvroType, CborType, DomainName, DomainSchedule, DropModel, JsonType, Model,
+    ModelChangeAspect, ModelIndex, ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion,
+    ResourceName, StatePurge, Statement,
 };
 use nervix_recovery::Discarded;
 use thiserror::Error;
@@ -37,7 +37,10 @@ use crate::registry::{
 #[derive(Debug, Clone)]
 pub(crate) enum RegistryMutation<Version = u64> {
     Create(Box<Model<Version>>),
-    Labels(nervix_models::MutateEntityLabels),
+    Labels {
+        entity: NodeRef,
+        mutation: nervix_models::EntityLabelMutation,
+    },
     AlterSchema(AlterSchema),
     AlterWireJsonSchema(AlterWireSchema<JsonType>),
     AlterWireCborSchema(AlterWireSchema<CborType>),
@@ -51,7 +54,7 @@ pub(crate) enum RegistryMutation<Version = u64> {
     AlterReingestor(AlterReingestor),
     AlterGenerator(AlterGenerator),
     AlterPlacement(AlterPlacement),
-    AlterBranch(AlterBranch),
+    AlterParametrizer(AlterParametrizer),
     Drop(DropModel),
 }
 
@@ -71,7 +74,13 @@ impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {
 
     fn try_from(statement: &Statement) -> Result<Self, Self::Error> {
         let mutation = match statement {
-            Statement::MutateEntityLabels(edit) => Self::Labels(edit.clone()),
+            Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
+                entity: nervix_models::EntityLabelTarget::Model(entity),
+                mutation,
+            }) => Self::Labels {
+                entity: entity.clone(),
+                mutation: mutation.clone(),
+            },
             Statement::Create(create) => Self::Create(create.body.clone()),
             Statement::AlterSchema(alter) => Self::AlterSchema(alter.clone()),
             Statement::AlterWireJsonSchema(alter) => Self::AlterWireJsonSchema(alter.clone()),
@@ -86,7 +95,7 @@ impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {
             Statement::AlterReingestor(alter) => Self::AlterReingestor(alter.clone()),
             Statement::AlterGenerator(alter) => Self::AlterGenerator(alter.clone()),
             Statement::AlterPlacement(alter) => Self::AlterPlacement(alter.clone()),
-            Statement::AlterBranch(alter) => Self::AlterBranch(alter.clone()),
+            Statement::AlterParametrizer(alter) => Self::AlterParametrizer(alter.clone()),
             Statement::Drop(drop) => Self::Drop(drop.clone()),
             _ => return Err(RegistryMutationConversionError),
         };
@@ -125,7 +134,7 @@ impl RegistryMutation<RequestedResourceVersion> {
             Self::Create(model) => {
                 RegistryMutation::Create(Box::new(model.try_map_resource_versions(pin)?))
             }
-            Self::Labels(edit) => RegistryMutation::Labels(edit),
+            Self::Labels { entity, mutation } => RegistryMutation::Labels { entity, mutation },
             Self::AlterSchema(alter) => RegistryMutation::AlterSchema(alter),
             Self::AlterWireJsonSchema(alter) => RegistryMutation::AlterWireJsonSchema(alter),
             Self::AlterWireCborSchema(alter) => RegistryMutation::AlterWireCborSchema(alter),
@@ -139,7 +148,7 @@ impl RegistryMutation<RequestedResourceVersion> {
             Self::AlterReingestor(alter) => RegistryMutation::AlterReingestor(alter),
             Self::AlterGenerator(alter) => RegistryMutation::AlterGenerator(alter),
             Self::AlterPlacement(alter) => RegistryMutation::AlterPlacement(alter),
-            Self::AlterBranch(alter) => RegistryMutation::AlterBranch(alter),
+            Self::AlterParametrizer(alter) => RegistryMutation::AlterParametrizer(alter),
             Self::Drop(drop) => RegistryMutation::Drop(drop),
         };
         Ok(pinned)
@@ -150,7 +159,7 @@ impl<Version: Clone> RegistryMutation<Version> {
     pub(in crate::registry) fn target_key(&self) -> NodeRef {
         match self {
             Self::Create(model) => model.node_ref(),
-            Self::Labels(edit) => edit.entity.clone(),
+            Self::Labels { entity, .. } => entity.clone(),
             Self::AlterSchema(alter) => NodeRef::new(ModelKind::Schema, alter.schema.clone()),
             Self::AlterWireJsonSchema(alter) => {
                 NodeRef::new(ModelKind::WireJsonSchema, alter.schema.clone())
@@ -180,7 +189,9 @@ impl<Version: Clone> RegistryMutation<Version> {
             Self::AlterPlacement(alter) => {
                 NodeRef::new(ModelKind::Placement, alter.placement.clone())
             }
-            Self::AlterBranch(alter) => NodeRef::new(ModelKind::Branch, alter.branch.clone()),
+            Self::AlterParametrizer(alter) => {
+                NodeRef::new(ModelKind::Parametrizer, alter.parametrizer.clone())
+            }
             Self::Drop(drop) => NodeRef::new(drop.kind, drop.name.clone()),
         }
     }
@@ -216,7 +227,7 @@ impl<Version: Clone> RegistryMutation<Version> {
     /// name the statement that caused it.
     fn apply_alteration(&self, model: &mut Model<Version>) {
         match (self, model) {
-            (Self::Labels(edit), model) => model.labels_mut().apply(&edit.mutation),
+            (Self::Labels { mutation, .. }, model) => model.labels_mut().apply(mutation),
             (Self::AlterSchema(alter), Model::Schema(schema)) => {
                 schema
                     .apply_alter(alter)
@@ -282,8 +293,8 @@ impl<Version: Clone> RegistryMutation<Version> {
                     .apply_alter(alter)
                     .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
-            (Self::AlterBranch(alter), Model::Branch(branch)) => {
-                branch
+            (Self::AlterParametrizer(alter), Model::Parametrizer(parametrizer)) => {
+                parametrizer
                     .apply_alter(alter)
                     .discarded(ALTERATIONS_ARE_VALIDATED_ON_THE_FINAL_MODELS);
             }
@@ -395,6 +406,32 @@ impl PlannedMutations {
         let mut changed = self.changed_models();
         changed.retain(|model| self.configuration_changes(&model.node_ref()));
         changed
+    }
+
+    /// Whether the batch changes nothing but metadata: it drops no Model, and every Model it
+    /// writes already exists with the execution configuration it keeps.
+    pub(crate) fn changes_only_metadata(&self) -> bool {
+        if !self.drops_in_batch.is_empty() {
+            return false;
+        }
+        for node in self.models_to_persist.keys() {
+            if self.configuration_changes(node) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `current` carrying the definitions this batch writes, with every unit where `current`
+    /// placed it, or `None` when `current` does not schedule a Model the batch writes.
+    pub(crate) fn definitions_in_place(&self, current: &DomainSchedule) -> Option<DomainSchedule> {
+        let mut schedule = current.clone();
+        for node in self.models_to_persist.keys() {
+            let candidate = self.domain_state.models.get(node)?;
+            let scheduled = schedule.nodes.get_mut(node)?;
+            *scheduled.config = candidate.clone();
+        }
+        Some(schedule)
     }
 
     /// Every model of one kind the batch would leave active, including the models it does not

@@ -19,7 +19,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE VHOST edge envelope-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{rabbitmq_addr}}' };
@@ -130,7 +130,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE VHOST edge persistent-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{envelope_broker_addr}}' };
@@ -205,7 +205,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       CREATE VHOST edge time-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT incoming ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR incoming FROM incoming MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE RABBITMQ CLIENT broker CONFIG { 'addr' = '{{rabbitmq_addr}}' };
@@ -214,7 +214,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
         ENCODE USING event_codec TIMESTAMP from_unix('nanosecond', input.seq)
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
-          SET seq = input.seq, error_code = error.code, operation = error.operation
+          SET seq = input.seq, error_code = error.class, operation = error.operation
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_subscription TO rejected_events;
       START;
@@ -233,8 +233,8 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":-1 | "error_code":"external" | "operation":"publish"
-      "seq":1 | "error_code":"external" | "operation":"publish"
+      "seq":-1 | "error_code":"refused" | "operation":"publish"
+      "seq":1 | "error_code":"refused" | "operation":"publish"
       """
     And RabbitMQ queue "time_{{test_id}}" yields this envelope message
       """

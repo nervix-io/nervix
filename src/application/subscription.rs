@@ -1391,14 +1391,19 @@ impl SessionServiceImpl {
         let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
         let branch = match &branching {
             nervix_models::ResolvedBranching::Unbranched => None,
-            nervix_models::ResolvedBranching::Branched { branch, schema, .. }
-            | nervix_models::ResolvedBranching::AwaitingTopology { branch, schema } => {
-                Some(SubscriptionBranchSchema {
-                    name: branch,
-                    schema: schema.as_ref(),
-                    fields: &branch_fields,
-                })
+            nervix_models::ResolvedBranching::Branched {
+                parametrizer,
+                schema,
+                ..
             }
+            | nervix_models::ResolvedBranching::AwaitingTopology {
+                parametrizer,
+                schema,
+            } => Some(SubscriptionBranchSchema {
+                name: parametrizer,
+                schema: schema.as_ref(),
+                fields: &branch_fields,
+            }),
         };
         let row_schema = match subscription_row_schema(&payload_schema, branch) {
             Ok(schema) => schema,
@@ -2072,7 +2077,7 @@ mod tests {
                     sensitive: false,
                 }],
             },
-            nervix_models::ResolvedBranchPartitions::ONE,
+            nervix_models::ResolvedParametrizerPartitions::ONE,
         );
         let binding = SubscriptionBinding {
             field: field.clone(),

@@ -28,8 +28,8 @@ mod events;
 pub use events::{ConnectorEvent, DeclaredEvents};
 
 use crate::{
-    ConnectorKind, DeadlineKey, DeclaredBounds, EmitterPublishingModeKind, IngestDeliveryKind,
-    ParseAsType,
+    ConnectorKind, DeadlineKey, DeclaredBounds, EmitterPublishingModeKind, EndpointPauseResponse,
+    IngestDeliveryKind, ParseAsType,
 };
 
 /// What completion and documentation say about the external names of one kind, which a
@@ -159,22 +159,35 @@ pub struct OptionDeclaration {
 }
 
 impl OptionDeclaration {
-    /// Independent consumers by count, or one consumer for each constructed branch partition.
+    /// Independent consumers by count, which compete for the same source: what an entity whose
+    /// transport keeps no partitions offers.
     pub const INSTANCES: Self = Self {
         keywords: "INSTANCES",
         presence: OptionPresence::Optional { default: Some("1") },
+        form: OptionForm::Choice(&[Self::INSTANCE_COUNT]),
+    };
+
+    /// Independent consumers by count, or one consumer for each constructed branch partition with
+    /// the transport's partitions dealt among them: what an entity whose transport keeps partitions
+    /// offers.
+    pub const TRANSPORT_PARTITION_INSTANCES: Self = Self {
+        keywords: "INSTANCES",
+        presence: OptionPresence::Optional { default: Some("1") },
         form: OptionForm::Choice(&[
+            Self::INSTANCE_COUNT,
             OptionChoice {
-                name: "<count>",
-                value: Some(OptionValue::Count),
-                example: "INSTANCES 2",
-            },
-            OptionChoice {
-                name: "PER PARTITION",
+                name: crate::IngestorInstances::PerTransportPartition.choice(),
                 value: None,
-                example: "INSTANCES PER PARTITION",
+                example: "INSTANCES PER TRANSPORT PARTITION",
             },
         ]),
+    };
+
+    /// `INSTANCES <count>`: a positive count of independent consumers.
+    const INSTANCE_COUNT: OptionChoice = OptionChoice {
+        name: "<count>",
+        value: Some(OptionValue::Count),
+        example: "INSTANCES 2",
     };
 
     /// `EVERY <duration>`: the domain-time cadence on which a polled ingestor reads.
@@ -493,6 +506,8 @@ pub enum RuntimeCapability {
     Event(ConnectorEvent),
     /// An ingestor delivering in one declared mode.
     Delivery(IngestDeliveryKind),
+    /// A request endpoint buffering data with its declared reply timing.
+    EndpointPause(EndpointPauseResponse),
     /// An emitter publishing in one declared mode.
     Publishing(EmitterPublishingModeKind),
     /// A statement writing an option that takes a value.
@@ -562,6 +577,7 @@ impl Display for RuntimeCapability {
         match self {
             Self::Event(event) => write!(f, "EVENT {event}"),
             Self::Delivery(kind) => write!(f, "MODE {}", kind.phrase()),
+            Self::EndpointPause(response) => write!(f, "ON QUIESCE BUFFER {}", response.phrase()),
             Self::Publishing(kind) => write!(f, "MODE {}", kind.label()),
             Self::Option { keywords } => f.write_str(keywords),
             Self::OptionChoice { keywords, choice } => write!(f, "{keywords} {choice}"),

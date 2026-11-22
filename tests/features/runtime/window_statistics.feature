@@ -12,13 +12,13 @@ Feature: Window statistics
       CREATE SCHEMA overflow_summary (tenant STRING, mean F64 OPTIONAL, variance F64 OPTIONAL, covariance F64 OPTIONAL, companion_mean F64 OPTIONAL);
       CREATE JAQ JSON CODEC overflow_codec TO SCHEMA overflow_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA overflow_branch_schema (tenant STRING);
-      CREATE BRANCH overflow_branch SCHEMA overflow_branch_schema TTL 5m;
+      CREATE PARAMETRIZER overflow_branch SCHEMA overflow_branch_schema TTL 5m;
       CREATE RELAY overflow_readings SCHEMA overflow_reading BRANCHED BY overflow_branch;
       CREATE RELAY overflow_summaries SCHEMA overflow_summary BRANCHED BY overflow_branch;
       CREATE VHOST edge overflow-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR overflow_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING overflow_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING overflow_codec
         TO overflow_readings INHERIT ALL BRANCHED BY overflow_branch SET tenant = message.tenant
         FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR overflow_window FROM overflow_readings WIDTH 17 MESSAGES STEP 17 MESSAGES
@@ -90,13 +90,13 @@ Feature: Window statistics
       CREATE SCHEMA run_summary (tenant STRING, total I64 OPTIONAL, samples I64, healthy_samples I64, lowest I64 OPTIONAL, highest I64 OPTIONAL, mean_reading F64 OPTIONAL, variance F64 OPTIONAL, median_bucket F64 OPTIONAL, nan_probe F64 OPTIONAL);
       CREATE JAQ JSON CODEC run_codec TO SCHEMA run_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA run_branch_schema (tenant STRING);
-      CREATE BRANCH run_branch SCHEMA run_branch_schema TTL 5m;
+      CREATE PARAMETRIZER run_branch SCHEMA run_branch_schema TTL 5m;
       CREATE RELAY run_readings SCHEMA run_reading BRANCHED BY run_branch;
       CREATE RELAY run_summaries SCHEMA run_summary BRANCHED BY run_branch;
       CREATE VHOST edge run-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/runs';
       CREATE HTTP ENDPOINT INGESTOR run_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING run_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING run_codec
         TO run_readings INHERIT ALL BRANCHED BY run_branch
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -181,14 +181,14 @@ Feature: Window statistics
         FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_reading_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_reading_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
       CREATE RELAY reading_statistics SCHEMA reading_statistics BRANCHED BY by_reading_tenant;
       CREATE VHOST edge statistics-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_reading_tenant
@@ -308,14 +308,14 @@ Feature: Window statistics
         FROM WIRE SCHEMA sparse_reading_wire
         TO SCHEMA sparse_reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_sparse_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_sparse_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY sparse_readings SCHEMA sparse_reading BRANCHED BY by_sparse_tenant;
       CREATE RELAY sparse_summaries SCHEMA sparse_summary BRANCHED BY by_sparse_tenant;
       CREATE VHOST edge sparse-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/sparse';
       CREATE HTTP ENDPOINT INGESTOR sparse_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sparse_reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sparse_reading_codec
         TO sparse_readings
         INHERIT ALL
         BRANCHED BY by_sparse_tenant
@@ -433,14 +433,14 @@ Feature: Window statistics
         FROM WIRE SCHEMA measurement_wire
         TO SCHEMA measurement;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_measurement_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_measurement_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY measurements SCHEMA measurement BRANCHED BY by_measurement_tenant;
       CREATE RELAY measurement_summaries SCHEMA measurement_summary BRANCHED BY by_measurement_tenant;
       CREATE VHOST edge outlier-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/measurements';
       CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING measurement_codec
         TO measurements
         INHERIT ALL
         BRANCHED BY by_measurement_tenant
@@ -518,7 +518,7 @@ Feature: Window statistics
         correlation F64 OPTIONAL
       );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_contract_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_contract_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tagged_readings SCHEMA tagged_reading BRANCHED BY by_contract_tenant;
       CREATE RELAY contract_summaries SCHEMA contract_summary BRANCHED BY by_contract_tenant;
       """
@@ -578,14 +578,14 @@ Feature: Window statistics
         FROM WIRE SCHEMA reading_wire
         TO SCHEMA reading;
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_restart_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_restart_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_restart_tenant;
       CREATE RELAY reading_summaries SCHEMA reading_summary BRANCHED BY by_restart_tenant;
       CREATE VHOST edge restart-statistics-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
       CREATE HTTP ENDPOINT INGESTOR reading_ingestor
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
         TO readings
         INHERIT ALL
         BRANCHED BY by_restart_tenant
@@ -682,7 +682,7 @@ Feature: Window statistics
         lowest_value I64
       );
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
-      CREATE IF NOT EXISTS BRANCH by_described_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_described_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY readings SCHEMA reading BRANCHED BY by_described_tenant;
       CREATE RELAY described_statistics SCHEMA described_statistics BRANCHED BY by_described_tenant;
       CREATE WINDOW PROCESSOR described_statistics FROM readings

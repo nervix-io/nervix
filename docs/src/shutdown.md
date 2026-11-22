@@ -137,8 +137,9 @@ Every other wait of a shutdown has a bound of its own:
 - The release of the cordon the moves set waits for what remains of the shutdown timeout, and for
   at least four Raft heartbeats, as [Releasing The Drain Cordon](#releasing-the-drain-cordon)
   describes.
-- Terminal teardown's final stops — the runtime, consensus, cluster membership, and the
-  interconnect — run to completion rather than being cut short, because stopping them is what
+- Terminal teardown's final stops — the installation of the committed state still under way, the
+  runtime, consensus, cluster membership, and the interconnect — run to completion rather than
+  being cut short, because stopping them is what
   releases the node's tasks, connections, and storage. The interconnect drains its transport within
   its request timeout. Closing the node's databases synchronizes their journals and blocks until
   their background workers have left, so the services that own them are dropped last, as one job on
@@ -381,6 +382,8 @@ during a resumable hold — a model alteration, a domain pause, or memory-pressu
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
+During a pause an endpoint can keep a request waiting for resume. A stop ends the wait and
+discards the body if it is still in the pause buffer.
 
 Endpoint ingestor close and terminal table clearing end each exact intake lifetime before withdrawing
 its binding. HTTP requests and WebSocket sessions that retained a route then see absent intake on
@@ -420,10 +423,12 @@ A raw quiesce buffer is not part of the save. Payloads that a `BUFFER` mode reta
 earlier hold are outside runtime graph work: a shutdown does not replay them, the save reports them
 as cut, and they are discarded and counted as dropped when the ingestor stops. A retained payload whose unfolding was still waiting
 for the extension workers stays in the buffer, so the stop ends that wait at once and discards it
-with the rest. A live payload an ingestor handed over without an acknowledgement, such as a paced
-poll, whose unfolding was still waiting for the extension workers is dropped when its ingestor
-stops; the stop ends that wait at once as well. Only work already admitted into the graph comes to
-rest.
+with the rest. A live payload an ingestor handed over, such as a batch it read, a paced poll or a
+WebSocket endpoint frame in `MODE NO ACK`, whose unfolding is still waiting for the extension
+workers is work its ingestor admitted, so the save waits for it like work already admitted into the
+graph. A payload the stop of its ingestor still finds waiting is not delivered and its positions
+stay unconfirmed: a transport that keeps positions presents it again, and one that keeps none loses
+it with the rest of its ingestor's in-flight input.
 
 ## Saving What The Node Holds
 
@@ -433,7 +438,10 @@ execution, which writes its final checkpoints, so what the node holds is on its 
 save ends. It has no limit of its own: it waits only for work in motion, which ends on its own, and
 never for held work. The node logs `closed local intake; saving what this node holds` with the
 number of domains it runs as the save begins, `the work in motion on this node rests` once it does,
-and `this node saved what it holds` at the end, each with the time it took.
+and `this node saved what it holds` at the end, each with the time it took. While it runs, the save
+holds the node's installation turn: it waits for an installation of the committed state already
+under way, and none begins until it ends, so no unit is installed or restarted while the save stops
+the node's executions.
 
 **Closing intake.** The stopping node closes its local ingestor intake at the start of the save.
 Kafka and other ingestors stop taking new input, and generators stop producing. A payload already
@@ -1105,8 +1113,13 @@ Terminal teardown begins once the moves end, whatever they came to.
 
 It stops the node's background tasks, giving each at most the configured cooperative task-stop
 grace, and waits for the service work the node ended when it began turning off to reach its next
-await. It then stops the runtime, consensus, cluster membership, and the interconnect in that
-order, and finally releases the node's storage.
+await. An installation of the committed state that one of those tasks, or a request handler, had
+begun is not cut short with it: it runs in a task of the runtime admission that holds the node's
+installation turn. Terminal teardown takes that turn and keeps it before it stops the runtime, so it
+first waits for the installation still under way and no other begins afterwards
+([Installation And Publication](./execution-plans.md#installation-and-publication)). It then stops
+the runtime, consensus, cluster membership, and the interconnect in that order, and finally releases
+the node's storage.
 
 Gossip is the last of these a node gives up. A node with a live peer keeps gossiping until two
 gossip intervals, 1 second at the default gossip interval, have passed since it advertised that it
@@ -1156,7 +1169,10 @@ emitter's retry, a reorderer or correlator until its time or its partner, or a w
 input fills it, never holds it open. During a stop, an emitter that a generation finds waiting for
 a retry completes the generation at once, and one whose publish fails during a generation hands the
 records to its retry schedule rather than retrying inline. Only then does the owner commit the
-domain stopped, and each node tears the domain down.
+domain stopped, and each node tears the domain down. The teardown is part of the node's installation
+of the stopped domain, whichever application installs it: the node's own reconciliation, or the
+handler of another node's request, such as a drain-status request. Once begun, it runs to its end
+even when that handler is dropped because its requester's deadline passed.
 
 A completed stop's teardown first lets a publish already on the wire run to its outcome, records
 what it is about to cut, and then ends the domain's tasks with the final snapshot writes described

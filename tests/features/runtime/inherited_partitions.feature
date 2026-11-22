@@ -12,24 +12,24 @@ Feature: Branches inherit their external producers' partitions
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
       """
     And these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant;
+      SHOW CREATE PARAMETRIZER by_tenant;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
       """
     When the cluster is restarted
     And these Plexus commands are executed on node "<reader>"
       """
-      SHOW CREATE BRANCH by_tenant;
+      SHOW CREATE PARAMETRIZER by_tenant;
       """
     Then the last command output contains
       """
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
       """
 
     Examples:
@@ -58,13 +58,13 @@ Feature: Branches inherit their external producers' partitions
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker
         CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'inherited_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -87,7 +87,7 @@ Feature: Branches inherit their external producers' partitions
     And the last cluster status lists <instances> instances of emitter "inherited_writer" on <owners> distinct owners
     And the last cluster status colocates every instance of emitter "inherited_writer" with the corresponding partition of relay "events"
     Then the current leader node is saved as placeholder "topology_reader"
-    And within "30s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "30s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       idle partitions: <idle>
       """
@@ -145,7 +145,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge inherited-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
@@ -154,7 +154,7 @@ Feature: Branches inherit their external producers' partitions
       """
       CREATE HTTP ENDPOINT INGESTOR refused
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -191,14 +191,14 @@ Feature: Branches inherit their external producers' partitions
       CREATE WIRE JSON SCHEMA positioned_wire MODE STRICT ( tenant string, seq integer, native_partition integer OPTIONAL );
       CREATE WIRE JSON CODEC positioned_codec FROM WIRE SCHEMA positioned_wire TO SCHEMA positioned_event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA positioned_event BRANCHED BY by_tenant;
       CREATE PULSAR CLIENT broker CONFIG { 'addr' = '{{pulsar_addr}}' };
       CREATE KAFKA CLIENT downstream CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE PULSAR TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'inherited_pulsar_{{test_id}}'
         SUBSCRIPTION 'inherited_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST
-        TYPE <subscription_type> INSTANCES PER PARTITION
+        TYPE <subscription_type> INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL SET native_partition = metadata.partition BRANCHED BY by_tenant SET tenant = message.tenant
@@ -262,7 +262,7 @@ Feature: Branches inherit their external producers' partitions
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS <partitioning>;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
@@ -302,7 +302,7 @@ Feature: Branches inherit their external producers' partitions
     When Kafka topic "growing_input_{{test_id}}" partition count is changed to 16
     Then the entity gate pause for domain "{{domain}}" is reached
     Then the current leader node is saved as placeholder "topology_reader"
-    And within "5s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "5s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: <partitions_before>
       external partitions: 12
@@ -314,7 +314,7 @@ Feature: Branches inherit their external producers' partitions
       {"tenant":"alpha","seq":1}
       """
     Then the current leader node is saved as placeholder "topology_reader"
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: <partitions_after>
       external partitions: 16
@@ -350,13 +350,13 @@ Feature: Branches inherit their external producers' partitions
     And within "30s" DESCRIBE INGESTOR "inherited_reader" metric "messages_total" "sent" relay "events" totals 6
 
     Examples:
-      | cluster_size | replicas | owners | partitioning | partitions_before | partitions_after | offset_mode                                                      | reader_instances | readers_after_growth | reader_owners |
-      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 1             |
-      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER PARTITION    | 16                   | 3             |
-      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
-      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                | 1                    | 1             |
-      | 1            | 0        | 1      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 1             |
-      | 3            | 1        | 3      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER PARTITION    | 4                    | 3             |
+      | cluster_size | replicas | owners | partitioning | partitions_before | partitions_after | offset_mode                                                      | reader_instances        | readers_after_growth | reader_owners |
+      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 1             |
+      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 16                   | 3             |
+      | 1            | 0        | 1      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |
+      | 3            | 1        | 3      | INHERITED    | 12                | 16               | OFFSET BY CONSUMER GROUP 'growing_{{test_id}}' START AT EARLIEST | 1                       | 1                    | 1             |
+      | 1            | 0        | 1      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 4                    | 1             |
+      | 3            | 1        | 3      | 4 INHERITED  | 4                 | 4                | OFFSET BY DOMAIN                                                 | PER TRANSPORT PARTITION | 4                    | 3             |
 
   # Growing the topic from 12 to 16 partitions regroups a reader's 12 units into 16, which a
   # planned handoff moves before the new epoch is committed. Every checkpoint read of that handoff
@@ -382,13 +382,13 @@ Feature: Branches inherit their external producers' partitions
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'growing_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -420,7 +420,7 @@ Feature: Branches inherit their external producers' partitions
       {"tenant":"alpha","seq":2}
       """
     Then the current leader node is saved as placeholder "topology_reader"
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 16
       external partitions: 16
@@ -464,12 +464,12 @@ Feature: Branches inherit their external producers' partitions
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'growing_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -496,7 +496,7 @@ Feature: Branches inherit their external producers' partitions
       | {"tenant":"alpha","seq":1} | none       | 7         |
       | {"tenant":"beta","seq":1}  | none       | 2         |
     And the current leader node is saved as placeholder "topology_reader"
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 12
       external partitions: 12
@@ -520,7 +520,7 @@ Feature: Branches inherit their external producers' partitions
       """
       {"tenant":"gamma","seq":1}
       """
-    Then within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    Then within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 16
       external partitions: 16
@@ -566,12 +566,12 @@ Feature: Branches inherit their external producers' partitions
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
       CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
       CREATE SCHEMA tenant_key ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4 INHERITED;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4 INHERITED;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
       CREATE KAFKA TOPIC INGESTOR inherited_reader
         FROM broker TOPIC 'regroup_input_{{test_id}}'
-        OFFSET BY DOMAIN INSTANCES PER PARTITION
+        OFFSET BY DOMAIN INSTANCES PER TRANSPORT PARTITION
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
@@ -599,10 +599,10 @@ Feature: Branches inherit their external producers' partitions
       | {"tenant":"beta","seq":1}  | none       | 2         |
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 6 INHERITED;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 6 INHERITED;
       """
     Then the current leader node is saved as placeholder "topology_reader"
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 6
       partition epoch: 2
@@ -629,12 +629,12 @@ Feature: Branches inherit their external producers' partitions
       | {"tenant":"beta","seq":2}  | none       | 2         |
     And the observed broker does not receive a payload within "500ms"
     And within "30s" DESCRIBE INGESTOR "inherited_reader" metric "messages_total" "sent" relay "events" totals 4
-    And within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" reports no partition transition
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" reports no partition transition
     When these Plexus commands are executed on the leader node
       """
-      ALTER BRANCH by_tenant SET PARTITIONS 4 INHERITED;
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 4 INHERITED;
       """
-    Then within "60s" DESCRIBE BRANCH "by_tenant" on node "{{topology_reader}}" contains
+    Then within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "{{topology_reader}}" contains
       """
       partitions: 4
       partition epoch: 3

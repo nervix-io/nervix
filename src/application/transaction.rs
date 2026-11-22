@@ -146,7 +146,7 @@ struct TransactionPlanningBasisInput<'a> {
     parameters: Option<&'a nervix_models::ClusterParameterRecord>,
     domain: &'a DomainState,
     models: Vec<&'a Model>,
-    resources: Vec<&'a ResourceName>,
+    resources: &'a BTreeMap<ResourceName, nervix_models::EntityLabels>,
     completed_resource_versions: Vec<&'a ResourceId>,
     schedule: Option<&'a DomainSchedule>,
     members: &'a [nervix_models::ClusterNodeName],
@@ -164,7 +164,7 @@ struct TransactionPlanningBasisInput<'a> {
 struct TransactionPlanningBasisSource<'a> {
     domain: &'a DomainState,
     models: &'a ModelIndex,
-    resources: &'a BTreeSet<ResourceName>,
+    resources: &'a BTreeMap<ResourceName, nervix_models::EntityLabels>,
     resource_uploads: &'a ResourceUploads,
     schedule: Option<&'a DomainSchedule>,
     authoritative_inputs: &'a DomainPlanningInputs,
@@ -186,7 +186,6 @@ fn transaction_planning_basis(
     } = source;
     let mut ordered_models = models.models().collect::<Vec<_>>();
     ordered_models.sort_by_key(|model| model.node_ref());
-    let resources = resources.iter().collect();
     let input = TransactionPlanningBasisInput {
         records: authoritative_inputs.topology().records(),
         parameters: authoritative_inputs.parameters(),
@@ -260,6 +259,11 @@ fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> S
 pub(in crate::application) enum TransactionCommitError {
     #[error("transaction consensus proposal failed")]
     Proposal,
+    #[error(
+        "START of domain '{domain}' in transaction '{id}' cannot place its units under the node \
+         rules this transaction changes; commit the change first, then START"
+    )]
+    StartNodeRules { id: String, domain: DomainName },
     #[error("transaction '{id}' is unknown")]
     UnknownTransaction { id: String },
     #[error("transaction '{id}' is still open")]
@@ -651,6 +655,8 @@ fn finished_transaction_attachment(
 
 pub(in crate::application) fn is_queueable_transaction_statement(statement: &Statement) -> bool {
     statement.is_model_mutation()
+        || matches!(statement, Statement::MutateEntityLabels(edit)
+            if matches!(edit.entity, nervix_models::EntityLabelTarget::Resource(_)))
         || matches!(
             statement,
             Statement::StartDomain(_)
@@ -662,6 +668,7 @@ pub(in crate::application) fn is_queueable_transaction_statement(statement: &Sta
 
 pub(in crate::application) fn transaction_statement_label(statement: &Statement) -> &'static str {
     match statement {
+        Statement::MutateEntityLabels(edit) => edit.mutation.statement_keyword(),
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::ActivateLicense(_) => "ACTIVATE LICENSE",
         Statement::RefreshLicense(_) => "REFRESH LICENSE",
@@ -700,7 +707,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribeClient(_)
         | Statement::DescribeJunction(_)
         | Statement::DescribeDeduplicator(_)
-        | Statement::DescribeBranch(_)
+        | Statement::DescribeParametrizer(_)
         | Statement::DescribeReingestor(_)
         | Statement::DescribeCorrelator(_)
         | Statement::DescribeReorderer(_)
@@ -1093,7 +1100,7 @@ impl SessionServiceImpl {
                 first_operation_index,
                 allow_incomplete_final_model_run,
                 control,
-                |_| (),
+                |_, _| (),
             )
             .await?;
         let domain_state = captured
@@ -1136,7 +1143,7 @@ impl SessionServiceImpl {
         first_operation_index: usize,
         allow_incomplete_final_model_run: bool,
         control: nervix_consensus::TransactionControlSnapshot,
-        inspect: impl FnOnce(&ModelIndex) -> T,
+        inspect: impl FnOnce(&ModelIndex, &BTreeMap<ResourceName, nervix_models::EntityLabels>) -> T,
     ) -> Result<(CapturedTransactionPlan, T), Report<TransactionPlanningError>> {
         let domain = control.planning_inputs.domain();
         let models = match control.planning_inputs.schedule() {
@@ -1175,18 +1182,12 @@ impl SessionServiceImpl {
                 domain: domain.clone(),
             })
         })?;
-        let resources = control
-            .resources
-            .next_version_by_resource
-            .iter()
-            .filter(|counter| counter.domain == *domain)
-            .map(|counter| counter.identifier.clone())
-            .collect::<BTreeSet<_>>();
+        let resources = control.planning_inputs.resources().catalog();
         let resource_uploads = control.resources.uploads.in_domain(domain);
         let basis = transaction_planning_basis(TransactionPlanningBasisSource {
             domain: &domain_state,
             models: &models,
-            resources: &resources,
+            resources,
             resource_uploads: &resource_uploads,
             schedule: control.planning_inputs.schedule(),
             authoritative_inputs: &control.planning_inputs,
@@ -1200,7 +1201,7 @@ impl SessionServiceImpl {
                 .values,
             domain: domain_state.clone(),
             models,
-            resources,
+            resources: resources.clone(),
             resource_uploads,
             schedule: control.planning_inputs.schedule().cloned(),
             basis,
@@ -1266,6 +1267,7 @@ impl SessionServiceImpl {
             } => *already_existed,
             PlannedTransactionStepKind::StartDomain { .. }
             | PlannedTransactionStepKind::StopDomain
+            | PlannedTransactionStepKind::EditResourceLabels { .. }
             | PlannedTransactionStepKind::ResetWasmState { .. } => false,
         };
         let impact = plan
@@ -1416,11 +1418,31 @@ impl SessionServiceImpl {
                     id: transaction.id.clone(),
                 })?;
         let mut resolved_starts = BTreeMap::new();
+        // The graph and schedule the latest model step of this transaction leaves, which a START
+        // after it starts. A START no model step precedes was placed against the committed state.
+        let mut changed = None;
         for step in captured.plan.steps() {
             nervix_primitives::task::consume_budget().await;
+            if let PlannedTransactionStepKind::Models { plan } = &step.kind {
+                changed = Some((
+                    plan.planned
+                        .as_ref()
+                        .and_then(crate::registry::PlannedMutations::candidate_graph),
+                    plan.schedule.clone(),
+                ));
+                continue;
+            }
             let PlannedTransactionStepKind::StartDomain { previous } = &step.kind else {
                 continue;
             };
+            if let Some((Some(graph), Some(schedule))) = &changed {
+                self.refuse_start_breaking_node_rules(&transaction.domain, graph, schedule)
+                    .await
+                    .change_context(TransactionCommitError::StartNodeRules {
+                        id: transaction.id.clone(),
+                        domain: transaction.domain.clone(),
+                    })?;
+            }
             let operation = step.impact.operations().first();
             let statement_index = step.impact.operations().first_index();
             let queued = transaction.statements.get(statement_index).ok_or_else(|| {
@@ -1675,6 +1697,13 @@ impl SessionServiceImpl {
         let Some(current) = self.inner.consensus.current_transaction(&id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
+        // A START of a stopped domain first places every unit its node rules constrain, and waits,
+        // holding the transaction's mutation lease, while some unit has no node they admit.
+        if let TransactionState::Open(_) = &current.state
+            && let Err(error) = self.place_units_for_start(&current).await
+        {
+            return self.start_placement_refusal(error).await;
+        }
         let started = match &current.state {
             TransactionState::Open(_) => match self.prepare_transaction_commit(&current).await {
                 Ok(prepared) => {
@@ -2257,6 +2286,7 @@ impl SessionServiceImpl {
         let (result, effect) = match planned_kind {
             PlannedTransactionStepKind::CreateResource {
                 resource,
+                labels,
                 already_existed,
             } => {
                 if already_existed {
@@ -2273,10 +2303,21 @@ impl SessionServiceImpl {
                         Some(TransactionStepEffect::CreateResourceCatalog {
                             inputs: Box::new(inputs),
                             identifier: resource,
+                            labels,
                         }),
                     )
                 }
             }
+            PlannedTransactionStepKind::EditResourceLabels { resource, labels } => (
+                command_ok(format!(
+                    "updated labels on RESOURCE {resource} in domain {domain_id}"
+                )),
+                Some(TransactionStepEffect::EditResourceLabels {
+                    inputs: Box::new(inputs),
+                    identifier: resource,
+                    labels,
+                }),
+            ),
             PlannedTransactionStepKind::StartDomain { .. } => {
                 let resolved = resolved_start
                     .verified("a restored START step retains its exact admitted clock decision");
@@ -2428,7 +2469,10 @@ impl SessionServiceImpl {
                 Some(applying)
                     if matches!(
                         applying.effect,
-                        Some(TransactionStepEffect::CreateResourceCatalog { .. }) | None
+                        Some(
+                            TransactionStepEffect::CreateResourceCatalog { .. }
+                                | TransactionStepEffect::EditResourceLabels { .. }
+                        ) | None
                     ) =>
                 {
                     None

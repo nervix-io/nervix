@@ -184,20 +184,25 @@ impl MongoDbClient {
             .try_reserve(MemoryClass::Management, bytes)
             .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
         executor
-            .run_storage(StorageClass::Filesystem, charge, move |_, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
-                let PreparedMongoDbClient { options, identity } = prepared;
-                // The native constructor synchronously reads CA/identity files and parses PEM.
-                let driver = DriverClient::with_options(options).change_context(
-                    EmitterOpenError::InvalidConfiguration { connector: MONGODB },
-                )?;
-                Ok(Self(Arc::new(MongoDbClientInner {
-                    driver,
-                    _identity: identity,
-                })))
-            })
+            .run_storage_with(
+                StorageClass::Filesystem,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                charge,
+                move |_, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
+                    let PreparedMongoDbClient { options, identity } = prepared;
+                    // The native constructor synchronously reads CA/identity files and parses PEM.
+                    let driver = DriverClient::with_options(options).change_context(
+                        EmitterOpenError::InvalidConfiguration { connector: MONGODB },
+                    )?;
+                    Ok(Self(Arc::new(MongoDbClientInner {
+                        driver,
+                        _identity: identity,
+                    })))
+                },
+            )
             .await
             .change_context(EmitterOpenError::Initialize { connector: MONGODB })?
     }
@@ -1375,7 +1380,7 @@ mod tests {
         error::{BulkWriteError, InsertManyError, WriteConcernError, WriteError},
         results::{DeleteResult, InsertOneResult, UpdateResult, VerboseBulkWriteResult},
     };
-    use nervix_models::{MessageErrorCode, MessageErrorOperation};
+    use nervix_models::{MessageErrorOperation, RejectedErrorClass};
     use nervix_primitives::sync::StdArc;
 
     use super::*;
@@ -1583,7 +1588,7 @@ mod tests {
                 row_index: 5,
             }
         );
-        assert_eq!(record.error.code, MessageErrorCode::Validation);
+        assert_eq!(record.error.class, RejectedErrorClass::Validation);
         assert_eq!(record.error.operation, MessageErrorOperation::Values);
         assert_eq!(
             record

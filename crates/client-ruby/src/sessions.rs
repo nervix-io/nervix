@@ -23,6 +23,7 @@ use url::Url;
 use crate::{
     clocks::{ClockEvent, DomainClock},
     enums, errors, gvl,
+    notices::Notice,
     schema::Schema,
     subscriptions::{Event, Subscription},
     values,
@@ -299,6 +300,13 @@ impl Session {
         let event = gvl::without_gvl(token, |cancel| session.next_clock_event(Some(cancel)))?;
         Ok(ClockEvent::new(event))
     }
+    fn next_notice(&self, args: &[Value]) -> Result<Notice, Error> {
+        let args = scan_args::<(), (), (), (), RHash, ()>(args)?;
+        let token = Cancel::keyword(args.keywords)?;
+        let session = self.held()?;
+        let notice = gvl::without_gvl(token, |cancel| session.next_notice(Some(cancel)))?;
+        Ok(Notice::new(notice))
+    }
     fn domain_clock(&self, domain: String) -> Result<Option<DomainClock>, Error> {
         let domain = DomainName::try_from(domain)
             .map_err(|error| errors::invalid("domain", &error.to_string()))?;
@@ -555,6 +563,7 @@ impl Session {
         session.define_method("execute", method!(Session::execute, -1))?;
         session.define_method("next_event", method!(Session::next_event, -1))?;
         session.define_method("next_clock_event", method!(Session::next_clock_event, -1))?;
+        session.define_method("next_notice", method!(Session::next_notice, -1))?;
         session.define_method("domain_clock", method!(Session::domain_clock, 1))?;
         session.define_method("suggest", method!(Session::suggest, -1))?;
         Ok(())

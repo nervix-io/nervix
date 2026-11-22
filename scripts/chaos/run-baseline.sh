@@ -2704,7 +2704,7 @@ fi
 domain_cli_command "${plexus_fixture}" \
     >"${artifact_dir}/public/configure-plexus.txt" 2>&1
 if [[ "${scenario}" == stateful ]]; then
-    domain_cli_command "CREATE BRANCH chaos_state_branch SCHEMA chaos_branch_key TTL 5m PARTITIONS ${stateful_partitions} MAX INSTANCES 16 EVICT LRU;" \
+    domain_cli_command "CREATE PARAMETRIZER chaos_state_branch SCHEMA chaos_branch_key TTL 5m PARTITIONS ${stateful_partitions} MAX INSTANCES 16 EVICT LRU;" \
         >"${artifact_dir}/public/configure-stateful-branch.txt" 2>&1
     update_manifest '.fixtures.stateful_partitions = $count' --argjson count "${stateful_partitions}"
     domain_cli_command "$(<"${script_dir}/fixtures/stateful.plexus")" \
@@ -2856,8 +2856,10 @@ if [[ "${scenario}" != "baseline" ]]; then
         source "${script_dir}/pause-resume-scenario.sh"
         run_pause_resume
     elif [[ "${scenario}" == "partition-recovery" ]]; then
-        # shellcheck source=partition-scenario.sh
-        source "${script_dir}/partition-scenario.sh"
+        # The recovery helpers source partition-scenario.sh and the label probe the follower case
+        # carries.
+        # shellcheck source=recovery-scenario.sh
+        source "${script_dir}/recovery-scenario.sh"
         run_partition_recovery
     elif [[ "${scenario}" == "degraded-links" ]]; then
         # shellcheck source=degraded-links-scenario.sh

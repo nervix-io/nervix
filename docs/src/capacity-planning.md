@@ -34,9 +34,9 @@ depth depends on arrivals during the system-owned 100 µs window. See the
 WASM code compilation is shared while mutable guest state is not. See
 [Module Sharing And Branch Memory](wasm-processor-guests.md#module-sharing-and-branch-memory).
 
-UDF-bearing expressions and JAQ transformations run on the node's extension workers, which
-nothing else uses. Heavy UDF or JAQ use and the number of concurrent paths that run them are
-extension sizing inputs. A native UDF that never returns permanently occupies one extension worker,
+UDF-bearing expressions, JAQ transformations and inferencer model runs use the node's extension
+workers, which nothing else uses. Heavy UDF, JAQ or model use and the number of concurrent paths
+that run them are extension sizing inputs. A native UDF that never returns permanently occupies one extension worker,
 and never a worker another class needs. See the
 [UDF watchdog consequences](udfs.md#nulls-errors-and-volatility).
 
@@ -51,8 +51,8 @@ saturating one cannot take the slots another is entitled to.
 | --- | --- | --- |
 | Control | 1 | Control-plane and consensus work: heartbeats, votes, acknowledgements, administrative replies |
 | Credentials | 1 | Password hashing and verification for users being created or authenticated |
-| Data | Share of remaining CPUs | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, ingest branch preparation and model inference |
-| Extension | Share of remaining CPUs | Operator-supplied code the node cannot bound: UDF-bearing expressions and JAQ transformations |
+| Data | Share of remaining CPUs | Per-message relay body encoding, decoding and validation, expressions over batches above 1,024 messages, and ingest branch preparation |
+| Extension | Share of remaining CPUs | Operator-supplied code the node cannot bound: UDF-bearing expressions, JAQ transformations and inferencer model runs |
 | Bulk | Share of remaining CPUs | Whole-transfer work: resource archives, large read results, and compiling UDFs, WASM modules, protobuf descriptors and ONNX models |
 | Consensus storage | 1, ordered | Consensus storage batches, applied in the order they were admitted |
 | Filesystem storage | 2 | Every other synchronous filesystem and database operation, including Iceberg's staged files |
@@ -84,15 +84,16 @@ share of admission; it is not guaranteed an idle thread. Apart from the classes,
 waits rather than computes uses the pool: a Kafka producer's final drain and partition
 inspection, which wait on the broker, and the one read of the resolver configuration at startup.
 Each class defaults to 64 pending jobs per worker, capped at 1,024; an explicit per-class queue
-can override this bound. A job beyond its queue is refused, and
-the work that submitted it reports the refusal as its own failure. The one exception is work the
-node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
-place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced ingestor handed over, and of a payload a NATS SUBJECT, ZeroMQ or Syslog ingestor read without
-an acknowledgement, and an Iceberg commit's read of the staged rows its emitter already accepted.
-Holding one of those ingestor loops pushes back into its transport, so a node whose
-extension workers stay full delays polls and lets those transports buffer or drop at their own
-bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
+can override this bound. A full queue never costs data: only a request whose caller still holds
+its input and waits on the answer, such as an HTTP endpoint body, a statement or an inspection, is
+refused, and its caller answers that the node is busy. Every other job waits for a place: the
+unfolding of every payload an ingestor handed over, acknowledged or not, of a poll a paced ingestor
+handed over and of a payload a quiesce buffer retained, an Iceberg commit's read of the staged rows
+its emitter already accepted, relay and subscription deliveries, the answer of an interconnect
+request whose handler already ran, checkpoints, consensus storage and lifecycle steps. Holding an
+ingestor loop pushes back into its transport, so a node whose extension workers stay full delays
+polls and reads, and lets each transport keep what it holds within its own bounds; see
+[When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
 Transient memory ceilings derive from the node's known memory. Management gets 1/128, commands
 and bulk each 1/32, relay 1/16, bulk receive windows 1/64, credentials 1/256, and restore metadata

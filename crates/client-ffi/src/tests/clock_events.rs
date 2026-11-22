@@ -59,7 +59,7 @@ use crate::{
 const DEADLINE: Duration = Duration::from_secs(30);
 
 /// The same bound, as the milliseconds a binding token takes.
-const DEADLINE_MILLIS: u64 = 30_000;
+pub(super) const DEADLINE_MILLIS: u64 = 30_000;
 
 pub(super) fn domain(name: &str) -> DomainName {
     DomainName::parse(name).assured("the test domain name is valid")
@@ -907,7 +907,7 @@ impl SharedSession {
 
 /// A token shared with the thread that waits on it.
 #[derive(Clone, Copy)]
-struct SharedToken(*mut Cancel);
+pub(super) struct SharedToken(pub(super) *mut Cancel);
 
 // SAFETY: a token may be triggered and waited on from any thread, which is what the header
 // promises.

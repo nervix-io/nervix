@@ -13,7 +13,9 @@ Nervix currently supports:
 - `CREATE UNPACED DOMAIN <id>;`
 - `CREATE DOMAIN <id>;`
 
-`CREATE DOMAIN <id>` is the short spelling for `CREATE UNPACED DOMAIN <id>`.
+`CREATE DOMAIN <id>` is the short spelling for `CREATE UNPACED DOMAIN <id>`. Each creation
+form accepts trailing [entity labels](entity-labels.md). `DESCRIBE DOMAIN` exposes them on
+the selected domain.
 
 Domain creation is never transaction content. A transaction is bound to one already-existing
 domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See
@@ -110,6 +112,17 @@ activation. Soft policies influence future decisions and preserve existing assig
 rule on a hop, ordinary scheduler heuristics apply. See [Placement Policies](placement.md) for
 unit classes, path-gated coverage, rank resolution and inspection.
 
+A node rule selects the cluster nodes a runtime node may run on, or should prefer, by their
+committed records:
+
+```plexus
+CREATE PLACEMENT eu_only DOMAIN WIDE REQUIRE NODES WHERE tag('zone') = 'eu';
+```
+
+A running domain refuses a change that would put an executing unit on a node its rules do not
+admit. A stopped domain accepts the rule, and its next `START` places every unit on an admitted
+node first. See [Node Rules](placement.md#node-rules).
+
 ## Start And Stop
 
 Domain lifecycle commands apply to the active domain:
@@ -187,7 +200,24 @@ cut, until the next `START`.
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned ingestor has completed
 startup. `STOP` returns once its stop ended and every node that ran the domain reported what its
-teardown cut, including when it is the last running domain. A graceful stop's teardown has every
+teardown cut, including when it is the last running domain.
+
+Before it commits, `START` places every unit of a stopped domain on a node its node rules admit,
+moving a unit stored elsewhere with its state. While some unit has no admitted node, `START` waits
+before committing anything, holding the domain's mutation lease so its other changes are refused,
+and continues once a node that satisfies the rules is live; see [When Node Rules Take
+Effect](placement.md#when-node-rules-take-effect).
+
+`START` commits the domain running before the cluster activates it, and nothing undoes that
+commit. Once every live node has prepared the revision, each node starts the domain's ingestors
+and takes input at once; `START` itself waits for the slowest live node to report the revision
+ready. A node that is not ready by the readiness deadline, the node-unavailability timeout plus
+the runtime readiness propagation bound, keeps `START` waiting: the leader applies the revision
+again and waits once more, while the domain runs on every node that started it. When applying the
+revision on the leader fails for another reason, such as an ingestor there that cannot reach its
+source, `START` answers with that failure, but the domain stays running and every node keeps
+applying the revision, so the ingestor joins once its source is reachable. A `START` that waits
+or fails stops nothing and cuts nothing; only `STOP` stops the domain. A graceful stop's teardown has every
 deduplicator and window branch write the state it published last, and the records of every
 materialized relay and the domain offsets of every Kafka ingestor written as they stood once the
 tasks that change them ended, so a backup taken as soon as `STOP` returns holds that state. A

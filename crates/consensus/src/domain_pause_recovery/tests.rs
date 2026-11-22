@@ -46,6 +46,7 @@ impl Fixture {
         state.domains.insert(
             domain.clone(),
             DomainState {
+                labels: nervix_models::EntityLabels::default(),
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,

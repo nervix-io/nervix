@@ -5,7 +5,9 @@ use bytes::Bytes;
 use error_stack::Report;
 use flatbuffers::FlatBufferBuilder;
 use meticulous::ResultExt as _;
-use nervix_models::{ParseAsType, SchemaField, TransactionInspection, TransactionLifecycle};
+use nervix_models::{
+    ParseAsType, SchemaField, SessionNestingDepth, TransactionInspection, TransactionLifecycle,
+};
 
 use super::{
     fixtures::{checked, frame_error, limits, name, position_of, request, settings, size},
@@ -20,9 +22,7 @@ use crate::{
     ServerNotice, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
     SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, UploadChunk, UploadDisposition,
     UploadFailure, UploadFrame, UploadMessage, UploadReply, UploadReplyFrame, UploadStart,
-    VerifiedFrame, WireEncodeError,
-    limits::{MAX_NESTING_DEPTH, MIN_NESTING_DEPTH},
-    wire,
+    VerifiedFrame, WireEncodeError, wire,
 };
 
 const MARKER: &str = "UTF8MARKER";
@@ -570,8 +570,8 @@ fn schema_nesting_is_bounded_by_the_limit() {
 fn the_deepest_admitted_nesting_verifies_decodes_and_conforms() {
     // The verifier, the decoders and conformance recurse once per level, so the deepest nesting
     // any limit admits must fit a test thread's stack in a debug build.
-    let limits = nesting_limits(MAX_NESTING_DEPTH);
-    let levels = (MAX_NESTING_DEPTH - 6) / 2;
+    let limits = nesting_limits(SessionNestingDepth::MAXIMUM);
+    let levels = (SessionNestingDepth::MAXIMUM - 6) / 2;
     let rows = nested_rows(levels, &limits).assured("the deepest admitted rows encode");
     let rows = VerifiedFrame::<ServerFrame>::verify(rows, &limits)
         .assured("the deepest admitted rows verify");
@@ -594,7 +594,7 @@ fn the_deepest_admitted_nesting_verifies_decodes_and_conforms() {
         .assured("the rows hold the nested list type");
     assert!(!format!("{:?}", rows.batch()).is_empty());
 
-    let reply = nested_schema_reply((MAX_NESTING_DEPTH - 8) / 2, false, &limits)
+    let reply = nested_schema_reply((SessionNestingDepth::MAXIMUM - 8) / 2, false, &limits)
         .assured("the deepest admitted schema encodes");
     let reply = VerifiedFrame::<ServerFrame>::verify(reply, &limits)
         .assured("the deepest admitted schema verifies");
@@ -729,6 +729,7 @@ fn request_identity_is_read_before_decoding() {
         level: NoticeLevel::Warning,
         kind: NoticeKind::ControlPlane,
         message: "no request".to_string(),
+        error: None,
     }
     .encode(&limits())
     .assured("a notice fits the default limits");
@@ -748,7 +749,7 @@ fn every_fixed_structure_fits_the_smallest_nesting_limit() {
     let shallow = checked(SessionLimitSettings {
         frame_bytes: size(64 * 1024 * 1024),
         transfer_bytes: size(64 * 1024 * 1024),
-        nesting_depth: size(MIN_NESTING_DEPTH),
+        nesting_depth: size(SessionNestingDepth::MINIMUM),
         ..settings()
     });
     let reply = Reply {

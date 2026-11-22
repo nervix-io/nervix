@@ -687,6 +687,18 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_runtime_readiness_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        domains: &std::collections::BTreeMap<DomainName, nervix_models::DomainState>,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_runtime_readiness_if_armed(node_id, domains)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_command_reference_lookup_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

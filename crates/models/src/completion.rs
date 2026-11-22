@@ -13,16 +13,33 @@
 )]
 
 use crate::{
-    BranchName, CodecWireFormat, CreateRelay, EmitterEntityKind, IngestorEntityKind,
-    IngestorReferenceKind, ModelKind, RelayBranching, RelayName, SchemaName, WireSchemaName,
+    BuiltinFunctionName, CodecWireFormat, CreateRelay, EmitterEntityKind, IngestorEntityKind,
+    IngestorReferenceKind, ModelKind, ParametrizerName, RelayBranching, RelayName, SchemaName,
+    WindowBound, WindowStateLimit, WireSchemaName,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinFunctionScope {
     Ordinary,
     NodeSelector,
     IngestorEntity(IngestorEntityKind),
     EmitterInvocation(EmitterEntityKind),
+    /// The value a window processor route's `SET` assigns, where the window's aggregates stand
+    /// beside the ordinary functions.
+    WindowRoute(WindowRouteValue),
+}
+
+/// What the builtins of a window route's `SET` value depend on: the bound its window declares,
+/// which decides the aggregates a route may call, and the builtin calls the position is written
+/// inside, since an aggregate's argument admits no aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WindowRouteValue {
+    /// The window's `WIDTH`.
+    pub width: WindowBound,
+    /// The window's `MAX STATE SIZE`, or that it declares none.
+    pub state_limit: WindowStateLimit,
+    /// The builtin calls whose arguments hold the position, outermost first.
+    pub enclosing_calls: Vec<BuiltinFunctionName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -93,10 +110,10 @@ pub enum RelayQuestion {
     EmitterError { inputs: Vec<RelayName> },
     /// A relay on exactly `branch`, or an unbranched one for `None`: the relay of an ingestor
     /// route on a chosen branch, and an ingestor's error relay, which is never branched.
-    OnBranch(Option<BranchName>),
+    OnBranch(Option<ParametrizerName>),
     /// A generator's materialized relay once the generator's branch is chosen: a relay with
     /// materialized state on exactly `branch`, or an unbranched one for `None`.
-    MaterializedOnBranch(Option<BranchName>),
+    MaterializedOnBranch(Option<ParametrizerName>),
     /// A generator's materialized relay where its statement names it, before the branch clause that
     /// the relay must then match: a relay with materialized state on any branching.
     GeneratorState,
@@ -165,9 +182,9 @@ pub enum RelayRule<'a> {
     /// [`RelayQuestion::EmitterError`] beside every configured input.
     EmitterError { inputs: Vec<&'a CreateRelay> },
     /// [`RelayQuestion::OnBranch`].
-    OnBranch(Option<&'a BranchName>),
+    OnBranch(Option<&'a ParametrizerName>),
     /// [`RelayQuestion::MaterializedOnBranch`].
-    MaterializedOnBranch(Option<&'a BranchName>),
+    MaterializedOnBranch(Option<&'a ParametrizerName>),
     /// [`RelayQuestion::GeneratorState`].
     GeneratorState,
 }
@@ -191,9 +208,10 @@ impl<'a> RelayRule<'a> {
             Self::EmitterError { inputs } => {
                 Self::shared_branching(inputs) == Some(&candidate.branching)
             }
-            Self::OnBranch(branch) => candidate.branching.branch() == *branch,
+            Self::OnBranch(branch) => candidate.branching.parametrizer() == *branch,
             Self::MaterializedOnBranch(branch) => {
-                candidate.materialized_state.is_some() && candidate.branching.branch() == *branch
+                candidate.materialized_state.is_some()
+                    && candidate.branching.parametrizer() == *branch
             }
             Self::GeneratorState => candidate.materialized_state.is_some(),
         }

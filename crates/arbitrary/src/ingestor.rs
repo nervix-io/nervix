@@ -204,17 +204,23 @@ impl Arbitrary<'_> {
         self.quiescing_as_supported(source)
     }
 
-    /// A small instancing declaration for generated graphs. Encoding boundary checks cover the
-    /// full count range without allocating its execution units.
+    /// A small instancing declaration of an entity whose transport keeps partitions, for generated
+    /// graphs. Encoding boundary checks cover the full count range without allocating its execution
+    /// units.
     pub fn ingestor_instances(&mut self) -> nervix_models::IngestorInstances {
         if self.entropy.flag() {
-            nervix_models::IngestorInstances::PerPartition
+            nervix_models::IngestorInstances::PerTransportPartition
         } else {
-            let count = self.entropy.pick([1u64, 2, 3, 4]);
-            nervix_models::IngestorInstances::Count(
-                std::num::NonZeroU64::new(count).assured("every declared count choice is positive"),
-            )
+            self.ingestor_instance_count()
         }
+    }
+
+    /// A fixed count of instances, what an entity whose transport keeps no partitions declares.
+    pub fn ingestor_instance_count(&mut self) -> nervix_models::IngestorInstances {
+        let count = self.entropy.pick([1u64, 2, 3, 4]);
+        nervix_models::IngestorInstances::Count(
+            std::num::NonZeroU64::new(count).assured("every declared count choice is positive"),
+        )
     }
 
     /// A Kafka topic, its offsets kept by a consumer group or by the domain.
@@ -228,13 +234,7 @@ impl Arbitrary<'_> {
             KafkaOffsetMode::Domain
         };
         let instances = match offset_mode {
-            KafkaOffsetMode::ConsumerGroup { .. } => {
-                let count = self.entropy.pick([1u64, 2, 3, 4]);
-                nervix_models::IngestorInstances::Count(
-                    std::num::NonZeroU64::new(count)
-                        .assured("every declared count choice is positive"),
-                )
-            }
+            KafkaOffsetMode::ConsumerGroup { .. } => self.ingestor_instance_count(),
             KafkaOffsetMode::Domain => self.ingestor_instances(),
         };
         let source = KafkaTopicIngestor {
@@ -262,8 +262,14 @@ impl Arbitrary<'_> {
             PulsarSubscriptionOwnership::Provisioned
         };
         let kind = self.pulsar_subscription_type();
+        // A type that reads through one consumer keeps one consumer per topic: one fixed instance,
+        // or the partition topics dealt among the instances.
         let instances = if kind.reads_through_one_consumer() {
-            nervix_models::IngestorInstances::Count(NonZeroU64::MIN)
+            if self.entropy.flag() {
+                nervix_models::IngestorInstances::PerTransportPartition
+            } else {
+                nervix_models::IngestorInstances::Count(NonZeroU64::MIN)
+            }
         } else {
             self.ingestor_instances()
         };
@@ -308,7 +314,7 @@ impl Arbitrary<'_> {
     pub fn mqtt_topic_source(&mut self) -> MqttTopicIngestor {
         let client = self.name();
         let topic = self.mqtt_topic_filter();
-        let instances = self.ingestor_instances();
+        let instances = self.ingestor_instance_count();
         let mode = self.mqtt_mode();
         let acknowledged = mode.is_ack();
         let session = if acknowledged {
@@ -342,7 +348,7 @@ impl Arbitrary<'_> {
             client: self.name(),
             subject: self.nats_subject_name(),
             queue_group: self.nats_queue_group_name(),
-            instances: self.ingestor_instances(),
+            instances: self.ingestor_instance_count(),
             mode: NatsIngestMode::NoAck,
             quiesce: IngestQuiesceMode::Suspend,
         };
@@ -367,7 +373,7 @@ impl Arbitrary<'_> {
         let source = RabbitMqQueueIngestor {
             client: self.name(),
             queue: self.rabbitmq_queue_name(),
-            instances: self.ingestor_instances(),
+            instances: self.ingestor_instance_count(),
             mode: self.rabbitmq_mode(),
             rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
@@ -431,7 +437,7 @@ impl Arbitrary<'_> {
         let source = SqsQueueIngestor {
             client: self.name(),
             queue: self.sqs_queue_name(),
-            instances: self.ingestor_instances(),
+            instances: self.ingestor_instance_count(),
             mode: self.sqs_mode(),
             rate_limits: RateLimits::NONE,
             quiesce: IngestQuiesceMode::Suspend,
@@ -541,7 +547,7 @@ impl Arbitrary<'_> {
     /// Any quiesce mode a statement can write.
     pub fn quiesce_mode(&mut self) -> IngestQuiesceMode {
         let candidates = self.quiesce_candidates();
-        let count = NonZeroUsize::new(candidates.len()).assured("five quiesce modes exist");
+        let count = NonZeroUsize::new(candidates.len()).assured("ingestors declare quiesce modes");
         let chosen = self.entropy.index(count);
         candidates[chosen].clone()
     }
@@ -579,31 +585,27 @@ impl Arbitrary<'_> {
             IngestQuiesceKind::Reject => IngestQuiesceMode::Reject {
                 retry_after: self.duration(),
             },
-            IngestQuiesceKind::EndpointBuffer => IngestQuiesceMode::EndpointBuffer {
+            IngestQuiesceKind::EndpointBufferImmediate
+            | IngestQuiesceKind::EndpointBufferAfterResume => IngestQuiesceMode::EndpointBuffer {
                 max_size: self.positive_byte_size(),
+                response: kind
+                    .endpoint_response()
+                    .assured("this is an endpoint buffer"),
             },
         }
     }
 
     /// Every quiesce mode, each with its own sizes and durations.
-    fn quiesce_candidates(&mut self) -> [IngestQuiesceMode; 5] {
+    fn quiesce_candidates(&mut self) -> [IngestQuiesceMode; 6] {
         [
-            IngestQuiesceMode::Suspend,
-            IngestQuiesceMode::Buffer {
-                max_size: self.positive_byte_size(),
-                overflow: self.entropy.pick([
-                    IngestQuiesceOverflow::DropOldest,
-                    IngestQuiesceOverflow::DropNewest,
-                ]),
-            },
-            IngestQuiesceMode::Drop,
-            IngestQuiesceMode::Reject {
-                retry_after: self.duration(),
-            },
-            IngestQuiesceMode::EndpointBuffer {
-                max_size: self.positive_byte_size(),
-            },
+            IngestQuiesceKind::Suspend,
+            IngestQuiesceKind::Buffer,
+            IngestQuiesceKind::Drop,
+            IngestQuiesceKind::Reject,
+            IngestQuiesceKind::EndpointBufferImmediate,
+            IngestQuiesceKind::EndpointBufferAfterResume,
         ]
+        .map(|kind| self.quiesce_mode_of(kind))
     }
 
     fn endpoint_mode(&mut self) -> EndpointIngestMode {

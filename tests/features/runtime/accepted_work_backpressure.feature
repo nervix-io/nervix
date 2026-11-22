@@ -19,7 +19,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge accepted-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR IGNORE;
       CREATE JUNCTION transform FROM accepted UNBRANCHED
@@ -83,7 +83,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge accepted-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR IGNORE;
       CREATE JUNCTION transform FROM accepted UNBRANCHED
@@ -137,7 +137,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge accepted-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR IGNORE;
       CREATE JUNCTION transform FROM accepted UNBRANCHED
@@ -218,7 +218,7 @@ Feature: Accepted work waits for internal worker room
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (tenant STRING, id STRING, value I64);
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE JAQ JSON CODEC event_codec TO SCHEMA event WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY accepted SCHEMA event BRANCHED BY tenants;
       CREATE RELAY unique_events SCHEMA event BRANCHED BY tenants;
@@ -229,7 +229,7 @@ Feature: Accepted work waits for internal worker room
       CREATE VHOST edge stateful-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TO accepted INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR IGNORE;
       CREATE DEDUPLICATOR unique_events FROM accepted DEDUPLICATE ON input.id MAX TIME 5m
@@ -342,13 +342,13 @@ Feature: Accepted work waits for internal worker room
       CREATE WIRE JSON SCHEMA features_wire MODE STRICT (tenant string, vector array);
       CREATE WIRE JSON CODEC features_codec FROM WIRE SCHEMA features_wire TO SCHEMA features;
       CREATE SCHEMA tenant_key (tenant STRING);
-      CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
+      CREATE PARAMETRIZER tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY features SCHEMA features BRANCHED BY tenants;
       CREATE RELAY scored SCHEMA scored BRANCHED BY tenants;
       CREATE VHOST edge model-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/features';
       CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING features_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING features_codec
         TO features INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR IGNORE;
       CREATE INFERENCER running FROM features

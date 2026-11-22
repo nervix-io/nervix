@@ -44,7 +44,7 @@ const fn creation_rank(kind: ModelKind) -> u8 {
         ModelKind::Client => 6,
         ModelKind::Vhost => 7,
         ModelKind::Endpoint => 8,
-        ModelKind::Branch => 9,
+        ModelKind::Parametrizer => 9,
         ModelKind::Udf => 10,
         ModelKind::Lookup => 11,
         ModelKind::Relay => 12,

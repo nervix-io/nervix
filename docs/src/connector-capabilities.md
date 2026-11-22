@@ -73,15 +73,15 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Connector events | None declared. |  |
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |  |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.method: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.query: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.host: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
+| Buffers | a request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>a request body: set by node setting `--http-body-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>the request input of every HTTP endpoint connection on the node together, read buffers included: set by node setting `--execution-intake-memory-bytes`; when full, immediately refuses the request for its sender to retry<br>unresolved requests under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>request bodies and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when full, immediately refuses the request for its sender to retry |  |
+| Network waits | a client's request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>a client's request body: node setting `--http-body-timeout`; at the bound, refuses the request as timed out<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete body arrival, client disconnect, or intake ending`<br>HTTP MODE NO ACK response under RESPOND AFTER RESUME: `resume, client disconnect, or intake ending` |  |
 | Driver limits | None declared. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
@@ -93,10 +93,10 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | KAFKA client |  |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
+| Options in statement order | `OFFSET BY DOMAIN` (keyword choice); `OFFSET BY CONSUMER GROUP 'readers' START AT EARLIEST` (string literal checked by kafka_consumer_group); `OFFSET BY CONSUMER GROUP 'readers' START AT LATEST` (string literal checked by kafka_consumer_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER TRANSPORT PARTITION` (keyword choice); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
-| Instancing | per_partition |  |
+| Instancing | per_transport_partition |  |
 | External partitions | Enumerable; native coordinate from metadata.partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
@@ -105,9 +105,9 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | no; scheduled owner |  |
 | Position class | replayable |  |
 | Acknowledgement confirmation | answered |  |
-| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |  |
+| Buffers | an inherited consumer group's unadmitted native partition position: at most 1 position per inherited group reader; when full, holds back what fills it<br>a record conversion report after a gathered prefix: at most 1 report per ingestor instance; when full, holds back what fills it<br>messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, holds back what fills it |  |
 | Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group offset commit: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign, pause, resume fetches and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |  |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause, resume and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>During a long read allowance hold, a consumer-group ingestor pauses fetching and services its group through the same control turn. Each job polls once. The driver can discard its own prefetched copies; the next admitted read resumes from its unread position. No record buffer is added.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. The ingestor supplies group.id, auto.offset.reset and enable.auto.commit, and disables enable.partition.eof and allow.auto.create.topics.<br>An inherited consumer-group reader disables automatic offset storage and stores only positions in its committed external partition set. It pauses and rewinds an unadmitted partition through connector control execution, retaining its position until that work finishes. The broker confirms that exact unread starting offset before the reader can retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader after a topology commit admits the partition.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the ingestor's one in-flight commit until the native call ends. Native subscribe, assign, pause, resume and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>While the host holds the loop, during a long read allowance hold or while a payload waits for the node's extension workers, a consumer-group ingestor pauses fetching and services its group through the same control turn. Each job polls once. The driver can discard its own prefetched copies; the next admitted read resumes from its unread position. No record buffer is added.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC ingest
@@ -118,10 +118,10 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
+| Options in statement order | `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT EARLIEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' OWNED BY INGESTOR START AT LATEST` (string literal checked by pulsar_subscription); `SUBSCRIPTION 'readers' PROVISIONED` (string literal checked by pulsar_subscription); required<br>`TYPE SHARED` (keyword choice); `TYPE KEY_SHARED` (keyword choice); `TYPE FAILOVER` (keyword choice); `TYPE EXCLUSIVE` (keyword choice); required<br>`INSTANCES 2` (positive count); `INSTANCES PER TRANSPORT PARTITION` (keyword choice); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
-| Instancing | per_partition |  |
+| Instancing | per_transport_partition |  |
 | External partitions | Enumerable; native coordinate from metadata.partition |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | RATE LIMIT | Accepted in `NO ACK`, `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
@@ -143,10 +143,10 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | MQTT client |  |
 | Locator and validation rule | TOPIC 'devices/+/orders' (mqtt_topic_filter) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2)<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s (requires SESSION PERSISTENT and QOS 1 or 2) |  |
-| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |  |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1<br>`SESSION CLEAN` (keyword choice); `SESSION PERSISTENT` (keyword choice); required<br>`QOS 0` (keyword choice); `QOS 1` (keyword choice); `QOS 2` (keyword choice); required |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
-| Instancing | per_partition |  |
+| Instancing | instances |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND (requires SESSION PERSISTENT and QOS 1 or 2)<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |  |
@@ -168,10 +168,10 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); required |  |
+| Options in statement order | `QUEUE GROUP 'workers'` (string literal checked by nats_queue_group); required<br>`INSTANCES 2` (positive count); required |  |
 | Headers | `read_header`, `read_headers`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
-| Instancing | per_partition |  |
+| Instancing | instances |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
@@ -218,10 +218,10 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
-| Instancing | per_partition |  |
+| Instancing | instances |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`; refused in `NO ACK`. |  |
@@ -318,10 +318,10 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 10 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
-| Options in statement order | `INSTANCES 2` (positive count); `INSTANCES PER PARTITION` (keyword choice); optional; default 1 |  |
+| Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Connector events | None declared. |  |
-| Instancing | per_partition |  |
+| Instancing | instances |  |
 | External partitions | No enumerable external partition set. |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
 | RATE LIMIT | Accepted in `ACK SEQUENTIAL`, `ACK PARALLEL`. |  |
@@ -355,7 +355,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
+| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>one data frame read while the host holds the ingestor's loop, which keeps the connection answering pings: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame, including one catch-up response window after a missed client ping: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
@@ -373,15 +373,15 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | Connector events | None declared. |  |
 | Instancing | single |  |
 | External partitions | No enumerable external partition set. |  |
-| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB |  |
+| Quiesce (complete bodies after ON QUIESCE) | REJECT RETRY AFTER 5s<br>BUFFER MAX SIZE 64MiB RESPOND IMMEDIATE<br>BUFFER MAX SIZE 64MiB RESPOND AFTER RESUME |  |
 | RATE LIMIT | Refused in every mode: the entity cannot hold its source back. |  |
 | Metadata | metadata.frame_type: STRING OPTIONAL<br>metadata.remote_addr: STRING OPTIONAL<br>metadata.path: STRING OPTIONAL<br>metadata.remote_ip: STRING OPTIONAL |  |
 | Payload facts | payload.bytes: U64 |  |
 | Every live node | yes |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT, or the exact intake lifetime ending` |  |
+| Buffers | the upgrade request head: set by node setting `--listener-header-bytes`; when exceeded, refuses the request as too large; the same request sent again is refused again<br>an incoming frame payload, per session: set by node setting `--websocket-frame-bytes`; when exceeded, closes only that peer's session<br>an incoming message assembled from frames, per session: set by node setting `--websocket-message-bytes`; when exceeded, closes only that peer's session<br>unresolved data frames under MODE ACK, per node and ingestor: set by MODE ACK MAX; when full, immediately refuses the request for its sender to retry<br>data frames and their metadata retained during a pause, per node and ingestor: set by ON QUIESCE BUFFER MAX SIZE; when exceeded, closes only that peer's session<br>a data frame waiting for admission under RESPOND AFTER RESUME: at most 1 frame per connection; when exceeded, closes only that peer's session<br>a message read as the previous frame enters the graph: at most 1 message per connection; when full, holds back what fills it |  |
+| Network waits | the upgrade request head: node setting `--listener-header-timeout`; at the bound, closes the connection without an answer<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: node setting `--listener-idle-timeout`; at the bound, closes that session after no read or write byte progress<br>graph acknowledgement under MODE ACK: `ACK TIMEOUT from complete frame arrival, client disconnect, or intake ending` |  |
 | Driver limits | None declared. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 

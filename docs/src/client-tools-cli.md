@@ -263,6 +263,15 @@ and constructions inside `ALTER`. After `metadata.`, an ingestor offers its decl
 fields. Suggestions come from the grammar at the cursor, so a duration or mode position does
 not offer expression functions.
 
+A window processor route's `SET` value also offers the collection aggregates its window admits,
+by the rule the window applies when it is created: `COLLECT_ARRAY` after `WIDTH <n> MESSAGES` with
+no duration, and `COLLECT_VEC` after a message `WIDTH` or a `MAX STATE SIZE`. They are offered
+beside the ordinary functions, so typing `COLLECT_` in
+`CREATE WINDOW PROCESSOR history FROM readings WIDTH 3 MESSAGES STEP 1 MESSAGES UNBRANCHED TO histories SET cpu_values = `
+offers both, and the route can still wrap one in a list function. Inside an aggregate's argument,
+in the route's `WHERE` and in every other processor's routes, expression positions keep the
+ordinary functions alone.
+
 Codec and relay names follow what the statement can accept, by the same rules the web console's
 forms apply to their choices. After `DECODE USING` only codecs that decode are offered, and after
 `ENCODE USING` only codecs that encode. A relay is offered where it agrees with the relays the

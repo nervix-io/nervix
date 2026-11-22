@@ -342,14 +342,14 @@ Feature: Graceful shutdown
         FROM WIRE SCHEMA transaction_wire
         TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
-      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
       CREATE VHOST edge follower-drain-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/follower-drain';
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -489,7 +489,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT shutdown_ack_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR shutdown_ack_ingestor
         FROM shutdown_ack_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shutdown_ack_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING shutdown_ack_codec
         TO shutdown_ack_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION shutdown_ack_route FROM shutdown_ack_input UNBRANCHED
@@ -560,7 +560,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_ingested
           INHERIT ALL
@@ -661,7 +661,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT held_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR held_ingestor
         FROM held_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_events
           INHERIT ALL
@@ -732,7 +732,7 @@ Feature: Graceful shutdown
         FROM WIRE SCHEMA shutdown_order_wire
         TO SCHEMA shutdown_order;
       CREATE SCHEMA shutdown_tenant ( tenant STRING );
-      CREATE BRANCH by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
+      CREATE PARAMETRIZER by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
       CREATE RELAY shutdown_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE RELAY shutdown_unique_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE KAFKA CLIENT shutdown_kafka CONFIG {
@@ -1010,7 +1010,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT eligible_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR eligible_ingestor
         FROM eligible_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING eligible_event_codec
         TO eligible_ingested
           INHERIT ALL
           UNBRANCHED
@@ -1422,7 +1422,7 @@ Feature: Graceful shutdown
         FROM WIRE SCHEMA tenant_total_wire
         TO SCHEMA tenant_total;
       CREATE SCHEMA generated_tenant ( tenant STRING );
-      CREATE BRANCH by_generated_tenant SCHEMA generated_tenant TTL 5m;
+      CREATE PARAMETRIZER by_generated_tenant SCHEMA generated_tenant TTL 5m;
       CREATE RELAY tenant_amounts SCHEMA tenant_amount BRANCHED BY by_generated_tenant
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY generated_totals SCHEMA tenant_total BRANCHED BY by_generated_tenant;
@@ -1430,7 +1430,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT tenant_amount_ingress ON edge PATH '/amounts';
       CREATE HTTP ENDPOINT INGESTOR tenant_amount_ingestor
         FROM tenant_amount_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tenant_amount_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING tenant_amount_codec
         TO tenant_amounts
           INHERIT ALL
           BRANCHED BY by_generated_tenant
@@ -1518,7 +1518,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT wait_state_ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR wait_state_ingestor
         FROM wait_state_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING wait_event_codec
         TO wait_state
           INHERIT ALL
           UNBRANCHED
@@ -1663,7 +1663,7 @@ Feature: Graceful shutdown
 
       CREATE IF NOT EXISTS SCHEMA transaction_id_branch ( transaction_id STRING );
 
-      CREATE IF NOT EXISTS BRANCH by_source_txns SCHEMA transaction_id_branch TTL 5m;
+      CREATE IF NOT EXISTS PARAMETRIZER by_source_txns SCHEMA transaction_id_branch TTL 5m;
 
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_source_txns;
 
@@ -1677,7 +1677,7 @@ Feature: Graceful shutdown
 
       CREATE HTTP ENDPOINT INGESTOR ingestor_txns
         FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
         BRANCHED BY by_source_txns

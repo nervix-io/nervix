@@ -44,9 +44,14 @@ runtime activation is still `APPLYING`; completion is recorded separately.
 Labels are owned by the entity in that candidate, including entities without configuration
 `ALTER`. Their edits participate in the same base-to-final diff, captured policy and conflict
 fences. A metadata-only aspect is control-plane-only and `DYNAMIC`: it contributes no pause,
-activation, rebuild, state purge, ownership move or forced flush. A mixed run keeps all effects
-of its actual configuration changes. `SHOW LABELS` in an open transaction reads the staged
-candidate and identifies its preview; it is a read and accepts no operation.
+activation, rebuild, state purge, ownership move or forced flush. A model run whose every change
+is metadata-only keeps the current schedule's placement instead of placing the domain again, so a
+unit whose owner is unavailable or cordoned stays where it is and the run plans no ownership move.
+A mixed run keeps all effects of its actual configuration changes, its placement included. A
+logical resource's label edit is an ordered, metadata-only catalog step. It needs no pause and
+leaves every version, binding and running task intact.
+`SHOW LABELS` on a Model or resource reads the staged candidate of the attached transaction and
+reports its preview identity. The read does not advance the queue.
 
 Queue admission replays the accepted prefix in this exact order. An unfinished *final* model run
 may be admitted with an `INCOMPLETE` candidate and planning diagnostics when a later operation in
@@ -111,6 +116,12 @@ on both sides of the change. [Data Plane](./data-plane.md) explains the runtime 
 protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model
 changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
 external system's behavior under a hold; it is distinct from the step's quiesce level.
+
+An endpoint ingestor can retain a complete request during a model alteration. With
+`RESPOND AFTER RESUME`, it keeps the response open and takes the retained body in when it resumes.
+Requests that leave or reach their acknowledgement deadline while waiting are removed. A stop
+ends waiting requests and discards their bodies. The quiesce setting in effect when the pause
+begins governs that pause. See [Quiesce Modes](ingestors.md#quiesce-modes).
 
 An entity drain's `node_work_items` includes unfinished force-flush obligations as well as
 admitted and parked data. One batch parked on `REQUIRED WAIT` therefore counts as one item after
@@ -179,7 +190,7 @@ ownership move in the report: a move of one partition of a partitioned relay nam
 rendered as `unit=partition:<p>` after its node, while a node with one unit names no unit. The
 transaction report folds those identities to their logical node when attributing ownership and its
 affected subgraph, so moving one partition gates its relay. A schedule rebuild can raise a narrower
-model change to `DOMAIN_PAUSE`. `ALTER BRANCH ... SET PARTITIONS` is a `BranchPartitions` change,
+model change to `DOMAIN_PAUSE`. `ALTER PARAMETRIZER ... SET PARTITIONS` is a `ParametrizerPartitions` change,
 which pauses only the entities its branch reaches: the schedule's next partition epoch replaces the
 branch's relays, the processors and generators it divides into partitions and every producer into
 and consumer of those relays in an `ENTITY_PAUSE` swap, and a stopped domain plans it as `DYNAMIC`;
@@ -227,7 +238,7 @@ installs. A transaction view composes steps in order, so an entity created and d
 steps can be transient even if absent from the transaction's final graph.
 
 Nodes have typed model-kind and name identities. Execution nodes additionally state whether their
-coverage is all executions, the unbranched execution, every key of one declared branch, or
+coverage is all executions, the unbranched execution, every key of one parametrizer, or
 selected concrete keys. Selected key values are represented by fingerprints; the report does not
 expose raw, potentially sensitive branch fields. Configuration-only nodes have no execution
 coverage. Relations distinguish configuration dependency, dataflow, message-error, correlation-

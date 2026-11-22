@@ -19,7 +19,7 @@ module RubySuite
       assert_instance_of NX::Subscription, handle
       assert_equal subscription, handle.name
       assert_operator handle.generation, :>, 0
-      assert_equal 'by_tenant', opened.schema.branch
+      assert_equal 'by_tenant', opened.schema.parametrizer
       assert_equal ['tenant'], opened.schema.key_fields.map(&:name)
       # ANCHOR_END: subscribe
       publish(201)

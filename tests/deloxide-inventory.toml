@@ -861,6 +861,7 @@ tags = [
   "@client_wire_tombstone_retention",
   "@client_wire_tombstone_recovery",
   "@deadlock_diagnostics",
+  "@endpoint_pause_websocket",
   "@restore_installation",
   "@password_credentials",
   "@client_ingestor_alter_drain",
@@ -1004,7 +1005,7 @@ tags = [
 ]
 target = "test:scenarios"
 
-# The ten endpoint ACK lifecycle examples have a separate bounded serial phase. They do not
+# The endpoint ACK lifecycle and pause examples have a separate bounded serial phase. They do not
 # consume the baseline lifecycle process's suite budget; both phases share the lane's unchanged
 # workload budget and retain the same teardown reserve.
 [[invocation]]
@@ -1012,7 +1013,10 @@ bound_seconds = 900
 concurrency = 1
 evidence = true
 id = "stress-endpoint-acknowledgement"
-inputs = ["tests/features/runtime/endpoint_acknowledgement.feature"]
+inputs = [
+  "tests/features/runtime/endpoint_acknowledgement.feature",
+  "tests/features/runtime/endpoint_quiesce_response.feature",
+]
 kind = "cucumber"
 package = "nervix-scenarios"
 selections = ["deloxide-stress"]
@@ -4344,6 +4348,10 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/restore.rs"
 workloads = [
+  "scenario.entity-label-publication-6",
+  "scenario.entity-label-publication-7",
+  "stress.entity-label-publication-6",
+  "stress.entity-label-publication-7",
   "scenario.password-credentials",
   "stress.password-credentials",
   "scenario.restore-generation",
@@ -4366,6 +4374,14 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.entity-label-publication-4",
+  "scenario.entity-label-publication-5",
+  "scenario.entity-label-publication-6",
+  "scenario.entity-label-publication-7",
+  "stress.entity-label-publication-4",
+  "stress.entity-label-publication-5",
+  "stress.entity-label-publication-6",
+  "stress.entity-label-publication-7",
   "scenario.inherited-kafka-readers",
   "stress.inherited-kafka-readers",
   "scenario.inherited-pulsar-readers",
@@ -4828,14 +4844,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4874,14 +4882,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4939,14 +4939,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -4989,14 +4981,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -5052,6 +5036,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.endpoint-pause-websocket",
+  "stress.endpoint-pause-websocket",
   "scenario.ingestor-instance-01",
   "stress.ingestor-instance-01",
   "scenario.ingestor-instance-02",
@@ -5070,14 +5056,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
   "scenario.websocket-declaration-buffer",
@@ -5360,14 +5338,6 @@ workloads = [
   "stress.ingestor-instance-08",
   "scenario.ingestor-instance-09",
   "stress.ingestor-instance-09",
-  "scenario.ingestor-instance-10",
-  "stress.ingestor-instance-10",
-  "scenario.ingestor-instance-11",
-  "stress.ingestor-instance-11",
-  "scenario.ingestor-instance-12",
-  "stress.ingestor-instance-12",
-  "scenario.ingestor-instance-13",
-  "stress.ingestor-instance-13",
   "scenario.ingestor-instance-14",
   "stress.ingestor-instance-14",
 
@@ -5649,6 +5619,33 @@ invariant = "Both text and binary frames retain their exact upgrade response hea
 invocation = "scenarios"
 scenario = "A buffered WebSockets connection preserves upgrade headers and frame types through a codec change"
 selections = ["deloxide", "deloxide-order"]
+
+[[owner]]
+path = "src/runtime/endpoint_pause.rs"
+workloads = [
+  "scenario.endpoint-pause-websocket",
+  "stress.endpoint-pause-websocket",
+]
+
+[[workload]]
+coverage = "One- and three-node WebSocket clients reach the tracked locks for frame wait observation, removal and ordered replay. The response race, connection I/O and elapsed time are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/endpoint_quiesce_response.feature"
+id = "scenario.endpoint-pause-websocket"
+invariant = "A second frame or disconnect ends only its client's buffered request. The other connection's request resumes and answers once."
+invocation = "scenarios"
+scenario = "A second WebSocket frame closes only its connection while the first is held"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: One- and three-node WebSocket clients reach the tracked locks for frame wait observation, removal and ordered replay. The response race, connection I/O and elapsed time are outside detector evidence."
+examples = 2
+feature = "tests/features/runtime/endpoint_quiesce_response.feature"
+id = "stress.endpoint-pause-websocket"
+invariant = "A second frame or disconnect ends only its client's buffered request. The other connection's request resumes and answers once."
+invocation = "stress-endpoint-acknowledgement"
+scenario = "A second WebSocket frame closes only its connection while the first is held"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Under scheduling stress: Public connection metadata retention and replay reaches tracked entity engagement and quiesce-buffer ownership. Socket waits and ping timer ordering remain outside the detector."
@@ -6354,102 +6351,22 @@ selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-10"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-10"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "MQTT partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-11"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-11"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "RabbitMQ partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-12"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-12"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "SQS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "scenario.ingestor-instance-13"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "scenarios"
-scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
-coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
-feature = "tests/features/runtime/ingestor_instances.feature"
-id = "stress.ingestor-instance-13"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
-invocation = "stress-scenarios"
-scenario = "NATS partition-following instances share their partition owners on <nodes> nodes"
-selections = ["deloxide-stress"]
-
-[[workload]]
-coverage = "Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
+examples = 4
 feature = "tests/features/runtime/ingestor_instances.feature"
 id = "scenario.ingestor-instance-14"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invariant = "Each global instance runs on its selected owner beside its relay partition, holds a consumer on exactly the partition topics dealt to it, and every record reaches its relay once."
 invocation = "scenarios"
-scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+scenario = "Pulsar <subscription_type> readers deal the partition topics of a hashed branch on <nodes> nodes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
 coverage = "Under scheduling stress: Real broker intake through exact-unit source start, scalar readiness and quiesce, branch runtime, ACK-root and checkpoint owners; drain/failover additionally reaches exact-unit gate and ownership installation. Asynchronous transport and registry discovery are untracked."
-examples = 2
+examples = 4
 feature = "tests/features/runtime/ingestor_instances.feature"
 id = "stress.ingestor-instance-14"
-invariant = "Each global instance runs on its selected owner, partition-bound instances share the matching relay owner, and a moved unit leaves sibling owners and intake lifetimes intact."
+invariant = "Each global instance runs on its selected owner beside its relay partition, holds a consumer on exactly the partition topics dealt to it, and every record reaches its relay once."
 invocation = "stress-scenarios"
-scenario = "Pulsar partition-following instances share their partition owners on <nodes> nodes"
+scenario = "Pulsar <subscription_type> readers deal the partition topics of a hashed branch on <nodes> nodes"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -7543,15 +7460,67 @@ scenario = "Restart and archive restore retain the captured label revision"
 selections = ["deloxide", "deloxide-order"]
 
 
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-4"
+invariant = "Resource operations publish in statement order, keep staged labels private, and discard reverted edits."
+invocation = "entity-label-publication"
+scenario = "Resource label edits publish with their transaction and disappear on revert"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-5"
+invariant = "Restart restores the exact named-owner maps and their typing from consensus storage."
+invocation = "entity-label-publication"
+scenario = "Domain, resource and user labels survive edits and a cluster restart"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-6"
+invariant = "A domain restore under a new name keeps its labels and the labels of the resource catalog it restores."
+invocation = "entity-label-publication"
+scenario = "A domain backup retains domain and catalog labels within its original scope"
+selections = ["deloxide", "deloxide-order"]
+
+
+[[workload]]
+coverage = "The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "scenario.entity-label-publication-7"
+invariant = "Cluster restore publishes user labels with their credentials as one record."
+invocation = "entity-label-publication"
+scenario = "A cluster backup restores user labels with the same sign-in"
+selections = ["deloxide", "deloxide-order"]
+
+
 [[owner]]
 path = "crates/consensus/src/entity_labels.rs"
 workloads = [
   "scenario.entity-label-publication-1",
   "scenario.entity-label-publication-2",
   "scenario.entity-label-publication-3",
+  "scenario.entity-label-publication-4",
+  "scenario.entity-label-publication-5",
+  "scenario.entity-label-publication-6",
+  "scenario.entity-label-publication-7",
   "stress.entity-label-publication-1",
   "stress.entity-label-publication-2",
   "stress.entity-label-publication-3",
+  "stress.entity-label-publication-4",
+  "stress.entity-label-publication-5",
+  "stress.entity-label-publication-6",
+  "stress.entity-label-publication-7",
 ]
 
 
@@ -7585,6 +7554,50 @@ id = "stress.entity-label-publication-3"
 invariant = "Exact labels, typed revision/policy coherence and retained execution/state survive the selected transaction or lifecycle operation without a tracked-lock cycle."
 invocation = "stress-entity-label-publication"
 scenario = "Restart and archive restore retain the captured label revision"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-4"
+invariant = "Resource operations publish in statement order, keep staged labels private, and discard reverted edits."
+invocation = "stress-entity-label-publication"
+scenario = "Resource label edits publish with their transaction and disappear on revert"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The selected commands also publish or reopen consensus state."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-5"
+invariant = "Restart restores the exact named-owner maps and their typing from consensus storage."
+invocation = "stress-entity-label-publication"
+scenario = "Domain, resource and user labels survive edits and a cluster restart"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-6"
+invariant = "A domain restore under a new name keeps its labels and the labels of the resource catalog it restores."
+invocation = "stress-entity-label-publication"
+scenario = "A domain backup retains domain and catalog labels within its original scope"
+selections = ["deloxide-stress", "deloxide-stress-restore"]
+
+
+[[workload]]
+coverage = "Under scheduling stress: The production label reader acquires the tracked applied-state publication lock. The backup and restore reach existing tracked consensus and restore owners."
+examples = 2
+feature = "tests/features/runtime/entity_labels.feature"
+id = "stress.entity-label-publication-7"
+invariant = "Cluster restore publishes user labels with their credentials as one record."
+invocation = "stress-entity-label-publication"
+scenario = "A cluster backup restores user labels with the same sign-in"
 selections = ["deloxide-stress", "deloxide-stress-restore"]
 
 

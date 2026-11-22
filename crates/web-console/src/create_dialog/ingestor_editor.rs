@@ -23,7 +23,9 @@ use super::{
     event_target_textarea_value, event_target_value,
     ingestor_draft::TimestampDraft,
     ingestor_route_editor::IngestorRouteEditor,
-    ingestor_source_draft::{IngestorEntityDraft, RateLimitDraft, RequestHeaderDraft},
+    ingestor_source_draft::{
+        IngestorEntityDraft, RateLimitDraft, RequestHeaderDraft, TRANSPORT_PARTITION_INSTANCES,
+    },
 };
 
 #[derive(Clone, Copy)]
@@ -48,8 +50,6 @@ enum IngestorField {
     AckTimeout,
     RetryBackoff,
     RetryMax,
-    BufferSize,
-    RetryAfter,
 }
 
 impl IngestorField {
@@ -75,8 +75,6 @@ impl IngestorField {
             Self::AckTimeout => "ACK timeout",
             Self::RetryBackoff => "Retry backoff",
             Self::RetryMax => "Maximum retry backoff",
-            Self::BufferSize => "Maximum buffer size",
-            Self::RetryAfter => "Retry after",
         }
     }
 
@@ -102,8 +100,6 @@ impl IngestorField {
             Self::AckTimeout => "create-ingestor-ack-timeout",
             Self::RetryBackoff => "create-ingestor-retry-backoff",
             Self::RetryMax => "create-ingestor-retry-max",
-            Self::BufferSize => "create-ingestor-buffer-size",
-            Self::RetryAfter => "create-ingestor-retry-after",
         }
     }
 
@@ -129,8 +125,6 @@ impl IngestorField {
             Self::AckTimeout => &source.ack_timeout,
             Self::RetryBackoff => &source.retry_backoff,
             Self::RetryMax => &source.retry_max,
-            Self::BufferSize => &source.buffer_size,
-            Self::RetryAfter => &source.retry_after,
         }
     }
 
@@ -156,8 +150,6 @@ impl IngestorField {
             Self::AckTimeout => &mut source.ack_timeout,
             Self::RetryBackoff => &mut source.retry_backoff,
             Self::RetryMax => &mut source.retry_max,
-            Self::BufferSize => &mut source.buffer_size,
-            Self::RetryAfter => &mut source.retry_after,
         } = value;
     }
 }
@@ -393,7 +385,7 @@ fn EntityOptionEditor(signals: CreateSignals, option: OptionDeclaration) -> impl
         _ => "create-ingestor-option",
     };
     view! {
-        <Show when=move || keywords != "INSTANCES" || signals.ingestor.get().source.chosen_option("INSTANCES") != Some("PER PARTITION") fallback=|| ()>
+        <Show when=move || keywords != "INSTANCES" || signals.ingestor.get().source.chosen_option("INSTANCES") != Some(TRANSPORT_PARTITION_INSTANCES) fallback=|| ()>
             <EntityValueEditor signals=signals keywords=keywords default=default />
         </Show>
         <Show when=move || !choices.is_empty() fallback=|| ()>
@@ -639,36 +631,90 @@ fn IngestorDeliveryEditor(signals: CreateSignals) -> impl IntoView {
         <Show when=move || signals.ingestor.get().source.offers_rate_limits() fallback=|| ()>
             <RateLimitsEditor signals=signals />
         </Show>
-        <Show when=move || !signals.ingestor.get().source.available_quiesce().is_empty() fallback=|| ()>
+        <IngestorQuiesceEditor
+            source=Signal::derive(move || signals.ingestor.get().source)
+            pending=Signal::derive(pending)
+            change=Callback::new(move |edit: QuiesceEdit| {
+                signals.ingestor.update(|draft| edit.apply(&mut draft.source));
+                signals.edit();
+            })
+        />
+    }
+    .into_any()
+}
+
+/// The editable fields of the same quiesce control in Create and Change pause settings.
+pub(super) enum QuiesceEdit {
+    Choose(IngestQuiesceKind),
+    BufferSize(String),
+    Overflow(IngestQuiesceOverflow),
+    RetryAfter(String),
+}
+
+impl QuiesceEdit {
+    pub(super) fn apply(self, source: &mut IngestorEntityDraft) {
+        match self {
+            Self::Choose(choice) => source.quiesce = Some(choice),
+            Self::BufferSize(value) => source.buffer_size = value,
+            Self::Overflow(value) => source.overflow = Some(value),
+            Self::RetryAfter(value) => source.retry_after = value,
+        }
+    }
+}
+
+#[component]
+pub(super) fn IngestorQuiesceEditor(
+    source: Signal<IngestorEntityDraft>,
+    pending: Signal<bool>,
+    change: Callback<QuiesceEdit>,
+) -> impl IntoView {
+    view! {
+        <Show when=move || !source.get().available_quiesce().is_empty() fallback=|| ()>
             <fieldset class="create-field create-ingestor-quiesce">
                 <legend>"On quiesce"</legend>
-                <For each=move || signals.ingestor.get().source.available_quiesce().to_vec()
+                <For each=move || source.get().available_quiesce()
                     key=|choice| *choice
                     children=move |choice| view! {
                         <button type="button" data-quiesce=choice.form_key()
-                            class:active=move || signals.ingestor.get().source.quiesce == Some(choice)
-                            disabled=move || pending() || !signals.ingestor.get().source.quiesce_enabled(choice)
-                            on:click=move |_| {
-                                signals.ingestor.update(|draft| draft.source.quiesce = Some(choice));
-                                signals.edit();
-                            }>{choice.keyword()}</button>
+                            class:active=move || source.get().quiesce == Some(choice)
+                            disabled=move || pending.get() || !source.get().quiesce_enabled(choice)
+                            on:click=move |_| change.run(QuiesceEdit::Choose(choice))
+                        >{choice.keyword()}</button>
                     } />
             </fieldset>
         </Show>
-        <Show when=move || matches!(signals.ingestor.get().source.quiesce, Some(IngestQuiesceKind::Buffer | IngestQuiesceKind::EndpointBuffer)) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::BufferSize />
-            <Show when=move || !signals.ingestor.get().source.reads_endpoint() fallback=|| ()>
+        <Show when=move || matches!(source.get().quiesce, Some(IngestQuiesceKind::Buffer | IngestQuiesceKind::EndpointBufferImmediate | IngestQuiesceKind::EndpointBufferAfterResume)) fallback=|| ()>
+            <label class="create-field">
+                <span>"Maximum buffer size"</span>
+                <input class="create-ingestor-buffer-size" type="text" autocomplete="off"
+                    prop:value=move || source.get().buffer_size
+                    disabled=move || pending.get()
+                    on:input=move |event| change.run(QuiesceEdit::BufferSize(event_target_value(&event))) />
+            </label>
+            <Show when=move || !source.get().reads_endpoint() fallback=|| ()>
                 <fieldset class="create-field create-ingestor-overflow">
                     <legend>"On overflow"</legend>
-                    <button type="button" data-overflow="oldest" class:active=move || signals.ingestor.get().source.overflow == Some(IngestQuiesceOverflow::DropOldest)
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.source.overflow = Some(IngestQuiesceOverflow::DropOldest)); signals.edit(); }>"DROP OLDEST"</button>
-                    <button type="button" data-overflow="newest" class:active=move || signals.ingestor.get().source.overflow == Some(IngestQuiesceOverflow::DropNewest)
-                        disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.source.overflow = Some(IngestQuiesceOverflow::DropNewest)); signals.edit(); }>"DROP NEWEST"</button>
+                    <button type="button" data-overflow="oldest"
+                        class:active=move || source.get().overflow == Some(IngestQuiesceOverflow::DropOldest)
+                        disabled=move || pending.get()
+                        on:click=move |_| change.run(QuiesceEdit::Overflow(IngestQuiesceOverflow::DropOldest))
+                    >"DROP OLDEST"</button>
+                    <button type="button" data-overflow="newest"
+                        class:active=move || source.get().overflow == Some(IngestQuiesceOverflow::DropNewest)
+                        disabled=move || pending.get()
+                        on:click=move |_| change.run(QuiesceEdit::Overflow(IngestQuiesceOverflow::DropNewest))
+                    >"DROP NEWEST"</button>
                 </fieldset>
             </Show>
         </Show>
-        <Show when=move || signals.ingestor.get().source.quiesce == Some(IngestQuiesceKind::Reject) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::RetryAfter />
+        <Show when=move || source.get().quiesce == Some(IngestQuiesceKind::Reject) fallback=|| ()>
+            <label class="create-field">
+                <span>"Retry after"</span>
+                <input class="create-ingestor-retry-after" type="text" autocomplete="off"
+                    prop:value=move || source.get().retry_after
+                    disabled=move || pending.get()
+                    on:input=move |event| change.run(QuiesceEdit::RetryAfter(event_target_value(&event))) />
+            </label>
         </Show>
     }
     .into_any()

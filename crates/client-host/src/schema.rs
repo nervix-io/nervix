@@ -2,7 +2,7 @@
 //!
 //! - **Owns.** The field types and parts a host reads, the levels of a field's type from the
 //!   field down to its innermost element, and reading a row schema's fields, their levels and its
-//!   branch.
+//!   parametrizer.
 //! - **Depends on.** The wire contract's row schema and the vocabulary's field types.
 //! - **Must not know.** Where the schema came from.
 //!
@@ -204,9 +204,11 @@ impl Schema {
         })
     }
 
-    pub fn branch(&self) -> Option<&str> {
+    /// The name of the parametrizer a branched relay's rows belong to, or `None` for an unbranched
+    /// relay or an endpoint.
+    pub fn parametrizer(&self) -> Option<&str> {
         match &self.schema.branch {
-            Some(branch) => Some(branch.branch().as_str()),
+            Some(branch) => Some(branch.parametrizer().as_str()),
             None => None,
         }
     }

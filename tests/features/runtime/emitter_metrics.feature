@@ -20,13 +20,13 @@ Feature: Emitter metrics
         FROM WIRE SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_emitter_metrics_source SCHEMA user_id_branch TTL 5m;
+        CREATE IF NOT EXISTS PARAMETRIZER by_emitter_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_emitter_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE HTTP ENDPOINT emitter_metrics_ingress ON edge PATH '/emitter-metrics';
         CREATE HTTP ENDPOINT INGESTOR emitter_metrics_ingestor
         FROM emitter_metrics_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_emitter_metrics_source
@@ -471,7 +471,7 @@ Feature: Emitter metrics
       CREATE HTTP REQUEST EMITTER rejected_out FROM events
         TO api METHOD 'POST' PATH '/events' MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
         WITHOUT BODY FLUSH IMMEDIATE
-        ON MESSAGE ERROR SEND TO rejected_events SET seq = input.seq, code = error.code
+        ON MESSAGE ERROR SEND TO rejected_events SET seq = input.seq, code = error.class
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejections TO rejected_events;
       START;
@@ -484,7 +484,7 @@ Feature: Emitter metrics
       | 2   |
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":1 | "code":"external"
+      "seq":1 | "code":"refused"
       """
     And HTTP receiver "rejections" eventually receives at least 2 requests
     And within "30s" DESCRIBE EMITTER "rejected_out" on the leader node contains
@@ -495,7 +495,7 @@ Feature: Emitter metrics
     And node "{{rejection_owner}}" observability metric "nervix_emitter_records_rejected_total" with labels eventually equals 1
       """
       emitter="rejected_out"
-      code="external"
+      code="refused"
       """
     And node "{{rejection_owner}}" observability metric "nervix_emitter_records_failed_total" with labels eventually equals 0
       """
@@ -508,7 +508,7 @@ Feature: Emitter metrics
     And HTTP receiver "rejections" has captured exactly 2 requests
     And DESCRIBE EMITTER "rejected_out" from every node contains
       """
-      nervix_emitter_records_rejected_total{domain="{{domain}}",emitter="rejected_out",physical_node_id="{{rejection_owner}}",instance="-",connector="HTTP",entity="REQUEST",code="external"} total=1
+      nervix_emitter_records_rejected_total{domain="{{domain}}",emitter="rejected_out",physical_node_id="{{rejection_owner}}",instance="-",connector="HTTP",entity="REQUEST",code="refused"} total=1
       """
 
     Examples:
@@ -537,7 +537,7 @@ Feature: Emitter metrics
       CREATE VHOST edge retry-replace-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR events_in FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
         TIMESTAMP NOW TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT api CONFIG {

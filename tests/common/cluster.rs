@@ -303,6 +303,23 @@ async fn database_opens(path: PathBuf) -> io::Result<()> {
     .map_err(io::Error::other)?
 }
 
+/// The sample lines of `metric_name` in `body` that carry every one of `label_fragments`.
+fn observability_metric_lines(
+    body: &str,
+    metric_name: &str,
+    label_fragments: &[String],
+) -> Vec<String> {
+    body.lines()
+        .filter(|line| !line.starts_with('#') && line_starts_with_metric(line, metric_name))
+        .filter(|line| {
+            label_fragments
+                .iter()
+                .all(|fragment| line.contains(fragment.as_str()))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 fn observability_metric_has_value(
     body: &str,
     metric_name: &str,
@@ -2161,6 +2178,7 @@ impl Cluster {
                     &addressed_node,
                     Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
                         message: "interconnect identity probe".to_string(),
+                        error: None,
                     })),
                 )
                 .await
@@ -2175,6 +2193,7 @@ impl Cluster {
                         &peer_node_id,
                         Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
                             message: "interconnect credential probe".to_string(),
+                            error: None,
                         })),
                     )
                     .await
@@ -2639,6 +2658,47 @@ impl Cluster {
                 return Ok(());
             }
         }
+    }
+
+    /// The member id of Kafka consumer group `group` once the group is stable with exactly one
+    /// member. The broker gives a consumer a new member id whenever its client joins the group
+    /// again, so an unchanged id shows the same consumer kept its membership in between.
+    pub(crate) async fn kafka_consumer_group_stable_member(
+        &self,
+        group: &str,
+    ) -> io::Result<String> {
+        let inspect = || {
+            let dependencies = self.dependencies.clone();
+            let group = group.to_owned();
+            async move {
+                nervix_primitives::task::spawn_blocking(move || {
+                    inspect_kafka_consumer_group(&dependencies, &group, |info| {
+                        let members = info.members().iter().map(|member| member.id().to_owned());
+                        (info.state().to_owned(), members.collect::<Vec<_>>())
+                    })
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+        };
+        let (_, members) = PhaseDeadline::after(STATUS_WAIT_BUDGET)
+            .poll_until(
+                POLL_INTERVAL,
+                |_| inspect(),
+                |(state, members)| state == "Stable" && members.len() == 1,
+            )
+            .await
+            .map_err(|observed| {
+                io::Error::other(format!(
+                    "Kafka consumer group '{group}' did not become stable with one member: \
+                     {observed:?}"
+                ))
+            })?;
+        let mut members = members.into_iter();
+        let member = members
+            .next()
+            .verified("the poll ends only once the group has exactly one member");
+        Ok(member)
     }
 
     /// Whether the Kafka broker knows `topic`. The metadata request names the topic from a
@@ -4327,6 +4387,70 @@ impl Cluster {
         }
         if let Some((status, body)) = last_response {
             message.push_str(&format!("\nlast response: status={status} body={body:?}"));
+        }
+        if let Some(err) = last_error {
+            message.push_str(&format!("\nlast error: {err}"));
+        }
+        Err(io::Error::other(message))
+    }
+
+    /// Wait until no series of `metric_name` carries every one of `label_fragments`, which is how a
+    /// scenario reads a gauge its exporter removes.
+    pub(crate) async fn wait_for_observability_metric_absent(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        label_fragments: &[String],
+        wait: Option<Duration>,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let url = format!("http://{}/metrics", handle.spec.observability_addr());
+        let client = reqwest::Client::new();
+        let mut last_matching_lines = Vec::new();
+        let mut last_error = None;
+        let deadline = Instant::now() + wait.unwrap_or(STATUS_WAIT_BUDGET);
+
+        while Instant::now() < deadline {
+            nervix_primitives::task::consume_budget().await;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let response = timeout(remaining, async {
+                let response = client.get(&url).send().await?;
+                let status = response.status().as_u16();
+                response.text().await.map(|body| (status, body))
+            })
+            .await;
+            match response {
+                Ok(Ok((200, body))) => {
+                    last_matching_lines =
+                        observability_metric_lines(&body, metric_name, label_fragments);
+                    if last_matching_lines.is_empty() {
+                        return Ok(());
+                    }
+                }
+                Ok(Ok((status, _))) => {
+                    last_error = Some(io::Error::other(format!("status {status}")));
+                }
+                Ok(Err(error)) => {
+                    last_error = Some(io::Error::other(error));
+                }
+                Err(_) => break,
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            sleep(POLL_INTERVAL.min(remaining)).await;
+        }
+
+        let mut message = format!(
+            "timed out waiting for node '{node_id}' at {url} to stop reporting observability \
+             metric '{metric_name}' with labels {label_fragments:?}"
+        );
+        if !last_matching_lines.is_empty() {
+            message.push_str(&format!("\nlast matching lines: {last_matching_lines:?}"));
         }
         if let Some(err) = last_error {
             message.push_str(&format!("\nlast error: {err}"));

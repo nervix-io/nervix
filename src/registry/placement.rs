@@ -2,9 +2,9 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** Resolving a rule's members, the pairs and corridors it claims, the require groups
-//!   it binds together, and the plan a caller reads back.
-//! - **Depends on.** The active graph and the Models the rules name.
+//! - **Owns.** Resolving a rule's members, the pairs and corridors a colocation rule claims, the
+//!   require groups it binds together, and the plan a caller reads back, node rules included.
+//! - **Depends on.** The active graph, the Models the rules name and the node rule decision.
 //! - **Must not know.** Which cluster member a plan ends up assigning.
 
 #![cfg_attr(
@@ -23,21 +23,24 @@ use error_stack::Report;
 use meticulous::OptionExt;
 use nervix_models::{
     CreatePlacement, DomainName, Model, ModelIndex, ModelKind, ModelName, NodeRef, NodeUnitRef,
-    PlacementName, PlacementPolicy, PlacementScope, RelayName,
+    PlacementName, PlacementPolicy, PlacementRule, PlacementScope, RelayName,
 };
 use petgraph::{Direction, graph::DiGraph, prelude::NodeIndex, visit::EdgeRef};
 
 use crate::registry::{
     error::RegistryError,
     graph::{ActiveGraph, ActiveNode, EdgeKind},
+    node_rules::{NodeRulePlan, NodeRules},
     unit_placement::{HopClass, UnitCorrespondence, UnitPlacementGroups},
     validation::materialized_state::model_materialized_state_dependencies,
 };
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlacementPlan {
+    /// The colocation rules.
     pub(crate) rules: Vec<PlacementRulePlan>,
     pub(crate) effective_pairs: Vec<PlacementEffectivePair>,
     pub(crate) require_groups: Vec<PlacementRequireGroupPlan>,
+    pub(crate) node_rules: Vec<NodeRulePlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +111,10 @@ impl PlacementPair {
 
 #[derive(Debug, Clone)]
 struct PlacementRuleAnalysis {
-    model: CreatePlacement,
+    name: PlacementName,
+    scope: PlacementScope,
+    policy: PlacementPolicy,
+    rank: Option<NonZeroU64>,
     endpoint_pairs: Vec<PlacementEndpointAnalysis>,
     claimed_pairs: HashSet<PlacementPair>,
 }
@@ -137,11 +143,13 @@ pub(in crate::registry) struct ResolvedPlacementPair {
 
 #[derive(Debug, Clone, Default)]
 pub(in crate::registry) struct PlacementAnalysis {
+    /// The colocation rules.
     rules: Vec<PlacementRuleAnalysis>,
     explicit_pairs: HashMap<PlacementPair, ResolvedPlacementPair>,
     /// Retained so a relocation corridor can be covered between endpoints no placement rule
     /// names, using the same path-gated coverage the rules use.
     pub(in crate::registry) topology: PlacementTopology,
+    node_rules: NodeRules,
 }
 
 #[derive(Debug, Clone)]
@@ -157,14 +165,20 @@ impl PlacementAnalysis {
         graph: &mut DiGraph<ActiveNode, EdgeKind>,
     ) -> Result<Self, Report<RegistryError>> {
         let topology = PlacementTopology::build(models, indices, graph);
-        let mut placement_models = models
-            .models()
-            .filter_map(|model| match model {
-                Model::Placement(placement) => Some(placement.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+        let mut placement_models = Vec::new();
+        let mut node_rule_models = Vec::new();
+        for model in models.models() {
+            let Model::Placement(placement) = model else {
+                continue;
+            };
+            if placement.is_node_rule() {
+                node_rule_models.push(placement.clone());
+            } else {
+                placement_models.push(placement.clone());
+            }
+        }
         placement_models.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+        let node_rules = NodeRules::build(domain, node_rule_models, models, indices, graph)?;
 
         let direct_pairs = topology.direct_pairs();
         let mut rules = Vec::with_capacity(placement_models.len());
@@ -177,9 +191,12 @@ impl PlacementAnalysis {
                 .get(&NodeRef::new(ModelKind::Placement, placement.name.clone()))
                 .copied()
                 .verified("the pass above added a graph node for every placement");
+            let PlacementRule::Colocation { scope, policy } = &placement.rule else {
+                continue;
+            };
             let mut endpoint_pairs = Vec::new();
             let mut claimed_pairs = HashSet::default();
-            match &placement.scope {
+            match scope {
                 PlacementScope::DomainWide => claimed_pairs.extend(direct_pairs.iter().cloned()),
                 PlacementScope::Corridor { from, to } => {
                     let from = resolve_placement_members(domain, &placement, from, models)?;
@@ -221,12 +238,15 @@ impl PlacementAnalysis {
                     .or_default()
                     .push(PlacementClaim {
                         rule: placement.name.clone(),
-                        policy: placement.policy,
+                        policy: *policy,
                         rank: placement.rank,
                     });
             }
             rules.push(PlacementRuleAnalysis {
-                model: placement,
+                name: placement.name.clone(),
+                scope: scope.clone(),
+                policy: *policy,
+                rank: placement.rank,
                 endpoint_pairs,
                 claimed_pairs,
             });
@@ -300,7 +320,13 @@ impl PlacementAnalysis {
             rules,
             explicit_pairs,
             topology,
+            node_rules,
         })
+    }
+
+    /// The node rules, which decide where each covered runtime node's units may run.
+    pub(in crate::registry) const fn node_rules(&self) -> &NodeRules {
+        &self.node_rules
     }
 
     /// Refresh only unit correspondence after observation resolves an inherited count. Model
@@ -361,7 +387,7 @@ impl PlacementAnalysis {
                         PlacementRuleClaimPlan {
                             left,
                             right,
-                            effective: resolved.winning_rules.contains(&rule.model.name),
+                            effective: resolved.winning_rules.contains(&rule.name),
                             effective_policy: resolved.policy,
                             class: resolved.correspondence.class,
                             winning_rules: resolved.winning_rules.clone(),
@@ -370,10 +396,10 @@ impl PlacementAnalysis {
                     .collect::<Vec<_>>();
                 claims.sort_by(placement_rule_claim_cmp);
                 PlacementRulePlan {
-                    name: ModelName::from(&rule.model.name),
-                    scope: rule.model.scope.clone(),
-                    policy: rule.model.policy,
-                    rank: rule.model.rank,
+                    name: ModelName::from(&rule.name),
+                    scope: rule.scope.clone(),
+                    policy: rule.policy,
+                    rank: rule.rank,
                     endpoint_pairs: rule
                         .endpoint_pairs
                         .iter()
@@ -404,6 +430,7 @@ impl PlacementAnalysis {
             rules,
             effective_pairs,
             require_groups,
+            node_rules: self.node_rules.plans(),
         }
     }
 }
@@ -453,10 +480,12 @@ fn hop_correspondence(
     UnitCorrespondence::decide(left, right)
 }
 
+/// A member a rule names: the runtime node it covers, and the Model a drop of which the rule
+/// blocks.
 #[derive(Debug, Clone)]
-struct ResolvedPlacementMember {
-    runtime: NodeRef,
-    pin: NodeRef,
+pub(in crate::registry) struct ResolvedPlacementMember {
+    pub(in crate::registry) runtime: NodeRef,
+    pub(in crate::registry) pin: NodeRef,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -692,7 +721,7 @@ impl PlacementTopology {
     }
 }
 
-fn resolve_placement_members(
+pub(in crate::registry) fn resolve_placement_members(
     domain: &DomainName,
     placement: &CreatePlacement,
     members: &[ModelName],
@@ -819,7 +848,7 @@ impl PlacementMemberEligibility {
             | ModelKind::Codec
             | ModelKind::Client
             | ModelKind::Vhost
-            | ModelKind::Branch
+            | ModelKind::Parametrizer
             | ModelKind::Endpoint
             | ModelKind::SignalingProtocol
             | ModelKind::Placement
@@ -852,7 +881,7 @@ pub(crate) fn placement_members<'a, Version: 'a>(
     members
 }
 
-fn is_placement_runtime_model(model: &Model) -> bool {
+pub(in crate::registry) fn is_placement_runtime_model(model: &Model) -> bool {
     PlacementMemberEligibility::of(model) == PlacementMemberEligibility::Eligible
 }
 
@@ -867,7 +896,8 @@ fn placement_materialized_relays(model: &Model) -> Vec<&RelayName> {
     relays
 }
 
-fn placement_rank_key(rank: Option<NonZeroU64>) -> (u8, u64) {
+/// Orders ranks by strength: explicit ranks ascending, then the unranked tier.
+pub(in crate::registry) fn placement_rank_key(rank: Option<NonZeroU64>) -> (u8, u64) {
     match rank {
         Some(rank) => (0, rank.get()),
         None => (1, 0),
@@ -1048,7 +1078,7 @@ mod tests {
     fn placement_inspection_keeps_partition_bonds_aligned_and_deduplicates_a_fiber() {
         use std::collections::BTreeSet;
 
-        use nervix_models::{BranchPartitions, UnitKind};
+        use nervix_models::{ParametrizerPartitions, UnitKind};
 
         for target in ["p99", "emit"] {
             let path = temp_db_path();
@@ -1056,8 +1086,8 @@ mod tests {
             let domain = DomainName::parse("partition_bonds").assured("valid domain");
             let mut models = full_graph_batch();
             for model in &mut models {
-                if let Model::Branch(branch) = model {
-                    branch.partitions = BranchPartitions::Direct(nonzero!(2u16));
+                if let Model::Parametrizer(parametrizer) = model {
+                    parametrizer.partitions = ParametrizerPartitions::Direct(nonzero!(2u16));
                 }
             }
             models.push(placement(
@@ -1310,6 +1340,7 @@ mod tests {
             mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         }));
         endpoint_models.extend([
@@ -1403,6 +1434,7 @@ mod tests {
             mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
+                response: nervix_models::EndpointPauseResponse::Immediate,
             },
         }));
         let listener = Model::Ingestor(listener);
@@ -1572,7 +1604,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                 ]),

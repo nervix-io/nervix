@@ -22,9 +22,9 @@ use arrow_schema::Schema;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AckMode, Assignment, BranchName, CodecName, CreateIngestor, CreateReingestor, ErrorPolicies,
-    Expression, FlushPolicy, GeneralErrorPolicy, IngestorName, MessageErrorOperation,
-    MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, NodeUnitRef, OutputBranch,
+    AckMode, Assignment, CodecName, CreateIngestor, CreateReingestor, ErrorPolicies, Expression,
+    FlushPolicy, GeneralErrorPolicy, IngestorName, MessageErrorOperation, MessageErrorPolicy,
+    Model, ModelKind, ModelName, NodeRef, NodeUnitRef, OutputBranch, ParametrizerName,
     ProcessorOutput, ReingestorName, RelayName, ResolvedBranching, RouteConstruction,
     ScheduledNodes, SchemaName, Unit,
 };
@@ -333,7 +333,7 @@ impl<'a> EntrypointOwner<'a> {
 /// relay retains its branches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RouteBranchRetention {
-    pub(crate) branch: BranchName,
+    pub(crate) parametrizer: ParametrizerName,
     /// How long a branch stays without traffic before it expires.
     pub(crate) ttl: Duration,
     /// How many branches the relay keeps before it evicts one, when its branch declaration bounds
@@ -343,13 +343,13 @@ pub(crate) struct RouteBranchRetention {
 
 impl RouteBranchRetention {
     /// How `relay`, which is branched by `branch`, retains the branches of that declaration.
-    fn of(relay: &PlannedRelay, branch: &BranchName) -> Self {
+    fn of(relay: &PlannedRelay, parametrizer: &ParametrizerName) -> Self {
         let ttl = relay
             .retention
             .branch_ttl
             .assured("the activation plan retains the branches of every branched relay for a TTL");
         Self {
-            branch: branch.clone(),
+            parametrizer: parametrizer.clone(),
             ttl,
             max_instances: relay.retention.branch_capacity,
         }
@@ -473,20 +473,20 @@ impl EntrypointRouteContext<'_> {
             }
             (
                 OutputBranch::BranchedBy {
-                    branch,
+                    parametrizer,
                     assignments,
                 },
                 ResolvedBranching::Branched {
-                    branch: relay_branch,
+                    parametrizer: relay_branch,
                     schema: branch_schema,
                     ..
                 }
                 | ResolvedBranching::AwaitingTopology {
-                    branch: relay_branch,
+                    parametrizer: relay_branch,
                     schema: branch_schema,
                 },
-            ) if branch == relay_branch => {
-                let retention = RouteBranchRetention::of(relay, branch);
+            ) if parametrizer == relay_branch => {
+                let retention = RouteBranchRetention::of(relay, parametrizer);
                 let branch_schema = compile_schema(branch_schema).arrow_schema();
                 let program = LoweredBranchConstruction::new(
                     assignments,
@@ -546,7 +546,7 @@ impl EntrypointPlans {
         nodes: &ScheduledNodes,
         activation: &DomainActivationPlan,
         topology: &nervix_models::PartitionTopology,
-        epochs: &BTreeMap<BranchName, nervix_models::BranchPartitionEpoch>,
+        epochs: &BTreeMap<ParametrizerName, nervix_models::ParametrizerPartitionEpoch>,
     ) -> Result<Self, Report<EntrypointPlanError>> {
         let routes = EntrypointRouteContext { activation };
         let mut plans = Self::default();
@@ -611,12 +611,14 @@ impl EntrypointPlans {
                                             },
                                         ));
                                     };
-                                    let epoch = match epochs.get(&retention.branch) {
+                                    let epoch = match epochs.get(&retention.parametrizer) {
                                         Some(epoch) => epoch.number,
                                         None => nervix_models::PartitionEpochNumber::FIRST,
                                     };
-                                    let partitions =
-                                        topology.branches.get(&retention.branch).copied();
+                                    let partitions = topology
+                                        .parametrizers
+                                        .get(&retention.parametrizer)
+                                        .copied();
                                     PlannedRouteBranch::Inherited(Box::new(
                                         PlannedInheritedBranch {
                                             retention,
@@ -655,7 +657,7 @@ impl EntrypointPlans {
                                 ) => {
                                     source.assignment = Some(
                                         if ingestor.input.instances()
-                                            == Some(nervix_models::IngestorInstances::PerPartition)
+                                            == Some(nervix_models::IngestorInstances::PerTransportPartition)
                                         {
                                             nervix_models::ExternalPartitionRead::Assigned(
                                                 nervix_models::ExternalPartitionAssignment {
@@ -737,15 +739,16 @@ mod tests {
     use std::num::NonZeroU64;
 
     use nervix_models::{
-        AssignmentTarget, AssignmentTargetScope, BranchEviction, CreateBranch, FieldReference,
-        FieldScope, ProcessorInputs, ProcessorOutputs,
+        AssignmentTarget, AssignmentTargetScope, CreateParametrizer, FieldReference, FieldScope,
+        ParametrizerEviction, ProcessorInputs, ProcessorOutputs,
     };
 
     use super::*;
     use crate::registry::test_fixtures::{
-        branch_for_relay, branch_name_for_relay, branch_schema, client_model, codec, ingestor,
-        ingestor_statement, ingestor_with_params, named, planned_entrypoints, reingestor, relay,
-        relay_branched_by_relay_branch, schema, unplaced_schedule, wire_schema, with_inherit_all,
+        branch_for_relay, branch_schema, client_model, codec, ingestor, ingestor_statement,
+        ingestor_with_params, named, parametrizer_name_for_relay, planned_entrypoints, reingestor,
+        relay, relay_branched_by_relay_branch, schema, unplaced_schedule, wire_schema,
+        with_inherit_all,
     };
 
     /// A payload relay the ingestor fills and a relay branched by its `value` field.
@@ -773,7 +776,7 @@ mod tests {
 
     fn by_value_retention() -> RouteBranchRetention {
         RouteBranchRetention {
-            branch: branch_name_for_relay("by_value"),
+            parametrizer: parametrizer_name_for_relay("by_value"),
             ttl: Duration::from_secs(300),
             max_instances: None,
         }
@@ -846,14 +849,14 @@ mod tests {
     #[test]
     fn a_branched_route_keeps_the_eviction_bound_of_its_relay_branch() {
         let mut models = domain_models();
-        models.retain(|model| !matches!(model, Model::Branch(_)));
-        models.push(Model::Branch(CreateBranch {
+        models.retain(|model| !matches!(model, Model::Parametrizer(_)));
+        models.push(Model::Parametrizer(CreateParametrizer {
             labels: Default::default(),
-            name: branch_name_for_relay("by_value"),
+            name: parametrizer_name_for_relay("by_value"),
             schema: named("value_key"),
             ttl: "90s".to_string(),
-            partitions: nervix_models::BranchPartitions::ONE,
-            eviction: Some(BranchEviction::Lru {
+            partitions: nervix_models::ParametrizerPartitions::ONE,
+            eviction: Some(ParametrizerEviction::Lru {
                 max_instances: NonZeroU64::new(8)
                     .assured("the fixture's branch capacity is a nonzero literal"),
             }),
@@ -878,7 +881,7 @@ mod tests {
         assert_eq!(
             route.branch.retention(),
             Some(&RouteBranchRetention {
-                branch: branch_name_for_relay("by_value"),
+                parametrizer: parametrizer_name_for_relay("by_value"),
                 ttl: Duration::from_secs(90),
                 max_instances: NonZeroUsize::new(8),
             })

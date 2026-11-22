@@ -774,7 +774,7 @@ impl SessionServiceImpl {
                     .assured("the committed count fits a supported target"),
                 inputs.schedule(),
                 self.inner.runtime.scheduler_mode(),
-                planning.capabilities(),
+                planning.records(),
             );
             #[cfg(not(feature = "testing"))]
             let schedule = graph.schedule_for_domain(
@@ -783,7 +783,7 @@ impl SessionServiceImpl {
                 usize::try_from(self.cluster_parameters().replica_count())
                     .assured("the committed count fits a supported target"),
                 inputs.schedule(),
-                planning.capabilities(),
+                planning.records(),
             );
             let mut schedule = match schedule {
                 Ok(schedule) => schedule,
@@ -1065,7 +1065,7 @@ impl SessionServiceImpl {
                         .assured("the committed count fits a supported target"),
                     inputs.schedule(),
                     self.inner.runtime.scheduler_mode(),
-                    planning.capabilities(),
+                    planning.records(),
                 );
                 #[cfg(not(feature = "testing"))]
                 let desired = graph.schedule_for_domain(
@@ -1074,7 +1074,7 @@ impl SessionServiceImpl {
                     usize::try_from(self.cluster_parameters().replica_count())
                         .assured("the committed count fits a supported target"),
                     inputs.schedule(),
-                    planning.capabilities(),
+                    planning.records(),
                 );
                 let desired = match desired {
                     Ok(desired) => desired,
@@ -1168,12 +1168,29 @@ impl SessionServiceImpl {
                         (failed_domain == &domain).then_some(label.clone())
                     })
                     .collect::<BTreeSet<_>>();
+                let targets = match UnitTargets::of_graph(
+                    &graph,
+                    &domain,
+                    planning.records(),
+                    replacement_node_set.clone(),
+                ) {
+                    Ok(targets) => targets,
+                    Err(error) => {
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
+                        failed_domains.insert(domain.clone());
+                        outcomes.push(format!(
+                            "- domain={domain} owner={node_id} failed: {error:#}"
+                        ));
+                        handled_this_iteration = true;
+                        break;
+                    }
+                };
                 let Some(drain_move) = Self::move_next_scheduled_node_for_drain_excluding(
                     &mut next,
                     &desired,
                     &node_id,
                     &live_voter_set,
-                    &replacement_node_set,
+                    &targets,
                     &excluded,
                 ) else {
                     continue;
@@ -1463,8 +1480,19 @@ impl SessionServiceImpl {
     }
 
     /// Saves everything this stopping node holds, and reports what the save cut.
+    ///
+    /// The save holds this node's installation turn while it runs. An installation of the
+    /// committed state would install or restart units while the save stops this node's
+    /// executions, so the save waits for the one under way, and none begins until the save ends;
+    /// terminal teardown then ends the wait of any that asked meanwhile.
     async fn save_local_node_for_shutdown(&self) {
+        let installation_turn = self
+            .inner
+            .runtime_admission
+            .begin_installation(&self.inner.drain_support_shutdown)
+            .await;
         let report = self.inner.runtime.save_local_node().await;
+        drop(installation_turn);
         for (domain, cuts) in &report.cuts {
             for cut in cuts {
                 Self::report_shutdown_cut(domain, cut);
@@ -2011,14 +2039,14 @@ impl SessionServiceImpl {
         desired: &nervix_models::DomainSchedule,
         node_id: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
-        target_nodes: &BTreeSet<ClusterNodeName>,
+        targets: &UnitTargets,
     ) -> Option<DrainMove> {
         Self::move_next_scheduled_node_for_drain_excluding(
             schedule,
             desired,
             node_id,
             live_nodes,
-            target_nodes,
+            targets,
             &BTreeSet::new(),
         )
     }
@@ -2056,7 +2084,7 @@ impl SessionServiceImpl {
         desired: &nervix_models::DomainSchedule,
         node_id: &ClusterNodeName,
         live_nodes: &BTreeSet<ClusterNodeName>,
-        target_nodes: &BTreeSet<ClusterNodeName>,
+        targets: &UnitTargets,
         // Failed units are keyed by their human-readable label, which is a node id for a single
         // node and a bracketed member list for a placement group, so this stays a string set.
         excluded: &BTreeSet<String>,
@@ -2104,7 +2132,7 @@ impl SessionServiceImpl {
                     group,
                     node_id,
                     live_nodes,
-                    target_nodes,
+                    &targets.of_members(&group.members),
                     AssignmentRelocation::Planned,
                 );
             }
@@ -2151,13 +2179,14 @@ impl SessionServiceImpl {
                 }
 
                 let node = &mut schedule.nodes[node_index];
+                let unit_targets = targets.of_node(&node.identity());
                 return Self::relocate_scheduled_unit_assignment(
                     node,
                     unit,
                     desired_node,
                     node_id,
                     live_nodes,
-                    target_nodes,
+                    unit_targets,
                     AssignmentRelocation::Planned,
                 );
             }
@@ -2489,9 +2518,10 @@ impl SessionServiceImpl {
         schedule: &mut nervix_models::DomainSchedule,
         desired: Option<&nervix_models::DomainSchedule>,
         live_nodes: &BTreeSet<ClusterNodeName>,
-        target_nodes: &BTreeSet<ClusterNodeName>,
+        targets: &UnitTargets,
     ) -> Vec<DrainMove> {
         let mut moves = Vec::new();
+        let target_nodes = targets.schedulable();
         if target_nodes.is_empty() {
             return moves;
         }
@@ -2499,10 +2529,11 @@ impl SessionServiceImpl {
         let generated_desired = desired.is_none().then(|| {
             let mut generated = schedule.clone();
             for node in generated.nodes.values_mut() {
+                let node_targets = targets.of_node(&node.identity());
                 for unit in node.units.values_mut() {
                     let replica_slots = unit.assigned_nodes.len().max(1);
                     unit.assigned_nodes =
-                        target_nodes.iter().take(replica_slots).cloned().collect();
+                        node_targets.iter().take(replica_slots).cloned().collect();
                     unit.primary_node = unit.assigned_nodes.first().cloned();
                 }
             }
@@ -2570,7 +2601,7 @@ impl SessionServiceImpl {
                 desired_group,
                 &unavailable_node_id,
                 live_nodes,
-                target_nodes,
+                &targets.of_members(&group.members),
                 AssignmentRelocation::Failure,
             ) {
                 moves.push(failover_move);
@@ -2596,6 +2627,7 @@ impl SessionServiceImpl {
                         .collect::<Vec<_>>(),
                     None => Vec::new(),
                 };
+                let unit_targets = targets.of_node(&node.identity());
                 for unavailable_node_id in unavailable_node_ids {
                     if let Some(failover_move) = Self::relocate_scheduled_unit_assignment(
                         node,
@@ -2603,7 +2635,7 @@ impl SessionServiceImpl {
                         desired_node,
                         &unavailable_node_id,
                         live_nodes,
-                        target_nodes,
+                        unit_targets,
                         AssignmentRelocation::Failure,
                     ) {
                         moves.push(failover_move);
@@ -2796,6 +2828,65 @@ impl SessionServiceImpl {
 
     fn scheduled_node_should_follow_desired_assignment(node: &ScheduledNode) -> bool {
         node.config.executes_on_every_cluster_node()
+    }
+}
+
+/// The cluster nodes a unit may move to on a failover or a drain: every schedulable node, narrowed
+/// for each runtime node a node rule constrains to the ones its winning requirements admit.
+pub(in crate::application) struct UnitTargets {
+    schedulable: BTreeSet<ClusterNodeName>,
+    constrained: std::collections::BTreeMap<nervix_models::NodeRef, BTreeSet<ClusterNodeName>>,
+}
+
+impl UnitTargets {
+    /// Targets for a schedule no node rule constrains.
+    pub(in crate::application) fn unconstrained(schedulable: BTreeSet<ClusterNodeName>) -> Self {
+        Self {
+            schedulable,
+            constrained: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Targets narrowed by the node rules of `graph`, judged by the committed `records`.
+    pub(in crate::application) fn of_graph(
+        graph: &crate::registry::ActiveGraph,
+        domain: &DomainName,
+        records: &std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord>,
+        schedulable: BTreeSet<ClusterNodeName>,
+    ) -> error_stack::Result<Self, crate::registry::RegistryError> {
+        let constrained = graph.node_rule_targets(domain, records, &schedulable)?;
+        Ok(Self {
+            schedulable,
+            constrained,
+        })
+    }
+
+    pub(in crate::application) fn schedulable(&self) -> &BTreeSet<ClusterNodeName> {
+        &self.schedulable
+    }
+
+    /// Where a unit of `node` may move.
+    pub(in crate::application) fn of_node(
+        &self,
+        node: &nervix_models::NodeRef,
+    ) -> &BTreeSet<ClusterNodeName> {
+        match self.constrained.get(node) {
+            Some(admitted) => admitted,
+            None => &self.schedulable,
+        }
+    }
+
+    /// Where a hard colocation group may move: the nodes every member may move to.
+    pub(in crate::application) fn of_members(
+        &self,
+        members: &[NodeUnitRef],
+    ) -> BTreeSet<ClusterNodeName> {
+        let mut targets = self.schedulable.clone();
+        for member in members {
+            let admitted = self.of_node(&member.node);
+            targets.retain(|node| admitted.contains(node));
+        }
+        targets
     }
 }
 

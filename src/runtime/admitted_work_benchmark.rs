@@ -219,6 +219,7 @@ impl TransformedEncodingBenchmark {
         let lifecycle = DomainClockLifecycle::new(domain.clone());
         lifecycle.synchronize(
             &DomainState {
+                labels: nervix_models::EntityLabels::default(),
                 id: domain.clone(),
                 config: DomainConfig {
                     pace: DomainPace::Unpaced,
