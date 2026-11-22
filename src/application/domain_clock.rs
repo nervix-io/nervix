@@ -1048,10 +1048,12 @@ mod tests {
                     .await
                     .assured("the clock failure is queued before its observation deadline")
                     .assured("each clock failure publishes its report");
+            // A clock failure is no classified error of a graph node.
             assert_eq!(
-                event,
+                event.message,
                 format!("domain clock {operation} for 'orders' failed: {chain}")
             );
+            assert_eq!(event.error, None);
             assert_eq!(logs.next(message).fields["error"], chain);
         }
     }

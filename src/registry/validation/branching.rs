@@ -50,10 +50,10 @@ pub(in crate::registry) fn validate_branch_model(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
-    branch: &CreateParametrizer,
+    parametrizer: &CreateParametrizer,
 ) -> Result<(), Report<RegistryError>> {
-    parse_branch_ttl(domain, identifier, &branch.ttl)?;
-    ensure_branch_schema_exists(domain, identifier, models, branch)
+    parse_branch_ttl(domain, identifier, &parametrizer.ttl)?;
+    ensure_branch_schema_exists(domain, identifier, models, parametrizer)
 }
 
 fn parse_branch_ttl(
@@ -74,16 +74,17 @@ fn ensure_branch_schema_exists(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
-    branch: &CreateParametrizer,
+    parametrizer: &CreateParametrizer,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(Model::Schema(schema)) =
-        models.get(&NodeRef::new(ModelKind::Schema, branch.schema.clone()))
-    else {
+    let Some(Model::Schema(schema)) = models.get(&NodeRef::new(
+        ModelKind::Schema,
+        parametrizer.schema.clone(),
+    )) else {
         return Err(Report::new(RegistryError::MissingReference {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             expected_kind: ModelKind::Schema.as_str(),
-            reference: branch.schema.as_str().to_string(),
+            reference: parametrizer.schema.as_str().to_string(),
         }));
     };
 
@@ -785,7 +786,7 @@ impl ProcessorBranchingCheck<'_> {
                 domain: self.domain.as_str().to_string(),
                 identifier: self.identifier.as_str().to_string(),
                 reason: format!(
-                    "{} '{}' branch name '{}' does not match relay '{}' branch name '{}'",
+                    "{} '{}' parametrizer '{}' does not match relay '{}' parametrizer '{}'",
                     self.model_kind,
                     self.identifier.as_str(),
                     format_branch_name(declared.parametrizer()),
@@ -965,7 +966,7 @@ pub(in crate::registry) fn branch_model<'a>(
     models: &'a ModelIndex,
     parametrizer_ref: &ParametrizerName,
 ) -> Result<&'a CreateParametrizer, Report<RegistryError>> {
-    let Some(Model::Parametrizer(branch)) = models.get(&NodeRef::new(
+    let Some(Model::Parametrizer(parametrizer)) = models.get(&NodeRef::new(
         ModelKind::Parametrizer,
         parametrizer_ref.clone(),
     )) else {
@@ -976,7 +977,7 @@ pub(in crate::registry) fn branch_model<'a>(
             reference: parametrizer_ref.as_str().to_string(),
         }));
     };
-    Ok(branch)
+    Ok(parametrizer)
 }
 
 fn schema_model<'a>(
@@ -1180,7 +1181,7 @@ mod tests {
     #[test]
     fn branch_schema_rejects_nested_bytes_with_field_identity() {
         let domain = named::<DomainName>("binary_domain");
-        let branch = CreateParametrizer {
+        let parametrizer = CreateParametrizer {
             labels: Default::default(),
             name: named("by_blob"),
             schema: named("binary_branch_schema"),
@@ -1197,8 +1198,12 @@ mod tests {
                 },
             )],
         )]);
-        let result =
-            validate_branch_model(&domain, &ModelName::from(&branch.name), &models, &branch);
+        let result = validate_branch_model(
+            &domain,
+            &ModelName::from(&parametrizer.name),
+            &models,
+            &parametrizer,
+        );
         let Err(error) = result else {
             panic!("a BYTES element cannot become part of a branch key");
         };
@@ -1678,7 +1683,7 @@ mod tests {
         ));
         assert!(
             format!("{err}").contains(
-                "branch name 'branch_b' does not match relay 'input' branch name 'branch_a'"
+                "parametrizer 'branch_b' does not match relay 'input' parametrizer 'branch_a'"
             ),
             "unexpected error: {err}"
         );
@@ -1735,8 +1740,8 @@ mod tests {
         ));
         assert!(
             format!("{err}").contains(
-                "generator 'generate' branch name 'branch_b' does not match relay 'input' branch \
-                 name 'branch_a'"
+                "generator 'generate' parametrizer 'branch_b' does not match relay 'input' \
+                 parametrizer 'branch_a'"
             ),
             "unexpected error: {err}"
         );
@@ -2110,7 +2115,7 @@ mod tests {
                 &[ClusterNodeName::parse("node-1").expect("valid name")],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name")
                 ]),
             )

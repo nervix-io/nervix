@@ -49,3 +49,22 @@ Feature: Capability-derived execution capacity
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: A node given a management memory budget below one consensus vote refuses to start on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-<cluster_size>" is stopped
+    And node-<cluster_size> starts with execution-management-memory-bytes = 128KiB
+    When node "node-<cluster_size>" attempts to start
+    Then node "node-<cluster_size>" refused to start because "the management memory budget of 131072 bytes cannot hold its largest consensus vote or metadata write of 262144 bytes"
+    Given node-<cluster_size> starts with execution-management-memory-bytes = 256KiB
+    When node "node-<cluster_size>" is started
+    Then node "node-<cluster_size>" eventually observes a stable leader
+    And node "node-<cluster_size>" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 262144
+      """
+      nervix_execution_memory_capacity_bytes{class="management"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -55,6 +55,7 @@ mod failure;
 mod fields;
 mod inspection;
 mod node_inspection;
+mod notice;
 pub use entity_labels::{EntityLabelViewKind, EntityLabelsInspection};
 pub use node_inspection::NodeInspection;
 mod outcome;
@@ -78,6 +79,7 @@ pub use endpoint::{
 pub use event::{CellState, EndReason, Event, EventKind, RestorationCause};
 pub use failure::{Failure, FailureKind};
 pub use fields::Fields;
+pub use notice::{Notice, NoticeKind, NoticeLevel};
 pub use outcome::{Disposition, Outcome, RestoreSummary, UploadFailure};
 pub use producer::{Admission, Producer};
 pub use schema::{FieldType, Part, Schema, TypeKind, TypeLevels};

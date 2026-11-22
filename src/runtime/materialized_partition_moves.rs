@@ -612,6 +612,11 @@ impl MaterializedPartitionMoves {
                 let Some(record) = state.read().record(&request.key) else {
                     return Ok(PartitionClaimOutcome::NotHeld);
                 };
+                runtime
+                    .inner
+                    .fault_injection
+                    .pause_materialized_row_release_if_armed(&self.domain, &self.entity)
+                    .await;
                 let released = runtime.released_row(&record.row).await.map_err(|error| {
                     RemoteOperationFailure::failed(subject(), format!("{error:#}"))
                 })?;
@@ -738,6 +743,10 @@ impl Runtime {
                 }));
             }
         };
+        self.inner
+            .fault_injection
+            .pause_materialized_row_take_if_armed(&subject.domain, &subject.entity)
+            .await;
         let branch = Some(key.clone());
         let row = self
             .take_released_row(schema, released)

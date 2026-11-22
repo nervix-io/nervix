@@ -120,6 +120,7 @@ const FREE_FORM_FILLERS: &[(&str, &str)] = &[
     ("fifo_group_expression", "'nx_group'"),
     ("inherit_targets", "ALL"),
     ("invocations", "nx_udf()"),
+    ("node_selector_expression", "node.name = 'nx_node'"),
     ("ref:expression_invocation", "nx_udf()"),
     ("ref:expression_target", "nx_out = 1"),
     ("ref:expression_udf", "nx_udf()"),

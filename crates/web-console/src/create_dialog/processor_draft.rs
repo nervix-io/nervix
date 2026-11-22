@@ -442,8 +442,8 @@ impl NodeBranchDraft {
             Self::Unselected => Err(Report::new(ProcessorDraftError::Branching { family })),
             Self::Unbranched => Ok(BranchSelection::Unbranched),
             Self::Branched(None) => Err(Report::new(ProcessorDraftError::Branch { family })),
-            Self::Branched(Some(branch)) => Ok(BranchSelection::BranchedBy {
-                parametrizer: branch
+            Self::Branched(Some(parametrizer)) => Ok(BranchSelection::BranchedBy {
+                parametrizer: parametrizer
                     .current_name()
                     .ok_or_else(|| Report::new(ProcessorDraftError::BranchChanged))?
                     .clone(),

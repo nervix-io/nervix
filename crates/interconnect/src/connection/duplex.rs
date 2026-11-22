@@ -37,7 +37,7 @@ use futures_util::{Stream, StreamExt as _};
 use h2::{Reason, RecvStream, SendStream, server};
 use http::{Method, Request, Response, StatusCode, Version};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{ChargedBytes, Executor, MemoryClass, Reservation};
+use nervix_execution::{ChargedBytes, Executor, MemoryClass, QueueAdmission, Reservation};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     sync::{
@@ -392,6 +392,17 @@ impl DuplexSendProgress {
 /// names the memory budget that charges the message, the CPU class that does the work off the async
 /// workers, and the payload limit an encoding may not grow past. Both ends of a stream hold this
 /// codec, so what one end encodes is exactly what the other decodes.
+///
+/// The messages of a stream take a place on the CPU class differently, so the opening has its own
+/// pair of operations. The opening message is a request: the initiator still holds it and waits on
+/// its answer, so a class whose queue is full refuses it at once, the initiator opens the stream
+/// again, and a burst beyond the class keeps no charge. Every frame after it waits for a place on
+/// a full class instead, in both directions. A stream's frames include answers, a delivery, a
+/// settlement or a durable append, and frames nobody answers, such as heartbeats, and one codec
+/// decodes each frame before it knows its kind; a refusal would end the stream and make its peers
+/// repeat work it already holds. Whoever holds a waiting encoding or decoding bounds the wait by
+/// the stream's own lifetime: the responder stops waiting once the initiator resets the stream,
+/// and the initiator once it drops its sender or receiver.
 #[derive(Clone)]
 pub struct DuplexCodec {
     executor: Executor,
@@ -413,14 +424,74 @@ impl DuplexCodec {
         }
     }
 
-    /// Encodes one message within the class's payload limit. An encoding that would grow past the
-    /// limit fails instead of being sent.
-    pub fn encode<T: RkyvMessage>(
+    /// Encodes the opening message of a stream, within the class's payload limit. A class whose
+    /// queue is full refuses it at once, because the initiator still holds it and can open the
+    /// stream again. An encoding that would grow past the limit fails instead of being sent.
+    pub fn encode_opening<T: RkyvMessage>(
         &self,
         message: T,
     ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
+        self.encode(message, QueueAdmission::RefuseWhenFull)
+    }
+
+    /// Validates and decodes the opening message of a stream. A class whose queue is full refuses
+    /// it at once and it keeps no charge, because the initiator still holds it and opens again.
+    pub fn decode_opening<T: RkyvMessage>(
+        &self,
+        payload: Vec<u8>,
+    ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
+        self.decode(payload, QueueAdmission::RefuseWhenFull)
+    }
+
+    /// Encodes one item an initiator submits, within the class's payload limit. A class whose queue
+    /// is full holds the encoding back until a place frees; the initiator ends the wait by dropping
+    /// its sender. An encoding that would grow past the limit fails instead of being sent.
+    pub fn encode_item<T: RkyvMessage>(
+        &self,
+        message: T,
+    ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
+        self.encode(message, QueueAdmission::WaitForPlace)
+    }
+
+    /// Validates and decodes one item an initiator submitted. A class whose queue is full holds
+    /// the decoding back until a place frees; the responder ends the wait by dropping the stream's
+    /// items once the stream ends.
+    pub fn decode_item<T: RkyvMessage>(
+        &self,
+        payload: Vec<u8>,
+    ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
+        self.decode(payload, QueueAdmission::WaitForPlace)
+    }
+
+    /// Encodes one answer a responder produced, within the class's payload limit. The answer
+    /// carries work the responder already did, so a class whose queue is full holds the encoding
+    /// back until a place frees; the responder ends the wait by dropping it once the initiator
+    /// resets the stream. An encoding that would grow past the limit fails instead of being sent.
+    pub fn encode_answer<T: RkyvMessage>(
+        &self,
+        message: T,
+    ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
+        self.encode(message, QueueAdmission::WaitForPlace)
+    }
+
+    /// Validates and decodes one answer a responder produced. The answer carries work the responder
+    /// already did, so a class whose queue is full holds the decoding back until a place frees; the
+    /// initiator ends the wait by dropping it with its receiver.
+    pub fn decode_answer<T: RkyvMessage>(
+        &self,
+        payload: Vec<u8>,
+    ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
+        self.decode(payload, QueueAdmission::WaitForPlace)
+    }
+
+    fn encode<T: RkyvMessage>(
+        &self,
+        message: T,
+        admission: QueueAdmission,
+    ) -> impl Future<Output = Result<EncodedMessage, Report<TransportError>>> + Send + use<T> {
         let limit = self.class.payload_limit(&self.executor);
-        let encoding = message.encode_rkyv(self.executor.clone(), self.class, limit);
+        let encoding =
+            message.encode_rkyv_with(self.executor.clone(), self.class, limit, admission);
         async move {
             let (bytes, charge) = encoding.await?;
             Ok(EncodedMessage { bytes, charge })
@@ -430,11 +501,12 @@ impl DuplexCodec {
     /// Validates one encoded message within the decoder's depth bound and decodes it, handing it
     /// over with the charge that covers it. The decoding borrows nothing, so a receive may keep it
     /// across the calls that finish it.
-    pub fn decode<T: RkyvMessage>(
+    fn decode<T: RkyvMessage>(
         &self,
         payload: Vec<u8>,
+        admission: QueueAdmission,
     ) -> impl Future<Output = Result<ChargedItem<T>, Report<TransportError>>> + Send + use<T> {
-        let decoding = T::decode_rkyv(self.executor.clone(), self.class, payload);
+        let decoding = T::decode_rkyv_with(self.executor.clone(), self.class, admission, payload);
         async move {
             let (item, charge) = decoding.await?;
             Ok(ChargedItem { item, charge })
@@ -459,7 +531,7 @@ impl<M: InterconnectDuplexRequest> DuplexSender<M> {
     pub async fn send(&mut self, item: M::Item) -> Result<u64, Report<RequestError>> {
         let encoded = self
             .codec
-            .encode(item)
+            .encode_item(item)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let frame = ChargedBytes::from_owned(encoded.bytes, encoded.charge);
@@ -515,7 +587,7 @@ impl<M: InterconnectDuplexRequest> DuplexReceiver<M> {
             let Some(frame) = frame else {
                 return Ok(None);
             };
-            let decoding = self.codec.decode::<M::Response>(frame);
+            let decoding = self.codec.decode_answer::<M::Response>(frame);
             self.decoding = Some(Box::pin(decoding));
         }
         let decoding = self
@@ -580,7 +652,7 @@ impl<T: RkyvMessage> DuplexItems<T> {
             let Some(frame) = frame else {
                 return Ok(None);
             };
-            let decoding = self.codec.decode::<T>(frame);
+            let decoding = self.codec.decode_item::<T>(frame);
             self.decoding = Some(Box::pin(decoding));
         }
         let decoding = self
@@ -841,8 +913,21 @@ impl TransportState {
                 .map_err(TransportError::from)?,
             self.options.progress_timeout,
         );
-        while let Some(frame) = responses.next().await {
+        loop {
             nervix_primitives::task::consume_budget().await;
+            // An answer whose encoding waits for a place on a full class keeps that wait inside
+            // `responses`. Once the initiator resets the stream no answer can reach it, so the
+            // reset ends the wait: the answers are dropped and return their places and charges.
+            let frame = nervix_primitives::select! {
+                frame = responses.next() => frame,
+                reset = poll_fn(|context| writer.stream.poll_reset(context)) => {
+                    reset.map_err(TransportError::from)?;
+                    return Ok(());
+                }
+            };
+            let Some(frame) = frame else {
+                break;
+            };
             let frame = match frame {
                 Ok(frame) => frame,
                 Err(error) => {

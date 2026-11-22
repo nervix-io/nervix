@@ -487,7 +487,7 @@ fn synchronized_domain_schedule_persists_models_for_restart() {
             &[ClusterNodeName::parse("node-1").expect("valid name")],
             0,
             None,
-            &crate::registry::uniform_capabilities(&[
+            &crate::registry::uniform_records(&[
                 ClusterNodeName::parse("node-1").expect("valid name")
             ]),
         )

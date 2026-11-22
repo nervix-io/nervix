@@ -15,6 +15,7 @@
 use std::time::Duration;
 
 use meticulous::ResultExt as _;
+use nervix_models::RejectedErrorClass;
 use nervix_primitives::sync::Arc;
 use prometheus::{Counter, CounterVec, IntCounter, IntCounterVec, Opts, Registry};
 use strum::AsRefStr;
@@ -35,27 +36,6 @@ const POOL_SECONDS: &str = "nervix_emitter_pool_wait_seconds_total";
 const CONFIRMATION_TIMEOUTS: &str = "nervix_emitter_confirmation_timeouts_total";
 const FINISHES: &str = "nervix_emitter_finishes_total";
 const UNSENT: &str = "nervix_emitter_unsent_records_total";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
-#[strum(serialize_all = "lowercase")]
-pub(crate) enum EmitterRejectionCode {
-    External,
-    Oversize,
-    Invalid,
-    Encode,
-}
-
-impl EmitterRejectionCode {
-    const ALL: [Self; 4] = [Self::External, Self::Oversize, Self::Invalid, Self::Encode];
-    const fn index(self) -> usize {
-        match self {
-            Self::External => 0,
-            Self::Oversize => 1,
-            Self::Invalid => 2,
-            Self::Encode => 3,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, AsRefStr)]
 #[strum(serialize_all = "lowercase")]
@@ -244,8 +224,8 @@ impl OutcomeFamilies {
     )]
     pub(super) fn emitter(&self, values: &[&str; 6]) -> OutcomeMetrics {
         OutcomeMetrics {
-            rejected: EmitterRejectionCode::ALL
-                .map(|code| Self::child(&self.rejected, values, code.as_ref())),
+            rejected: RejectedErrorClass::ALL
+                .map(|class| Self::child(&self.rejected, values, class.as_ref())),
             failed: self.failed.with_label_values(values),
             retried: self.retried.with_label_values(values),
             retries: EmitterRetryCause::ALL
@@ -276,7 +256,8 @@ impl OutcomeFamilies {
 
 #[derive(Debug)]
 pub(super) struct OutcomeMetrics {
-    rejected: [IntCounter; 4],
+    /// One rejection counter for every class of the `REJECTED` group, the `code` label's values.
+    rejected: [IntCounter; RejectedErrorClass::ALL.len()],
     failed: IntCounter,
     retried: IntCounter,
     retries: [IntCounter; 3],
@@ -300,11 +281,11 @@ impl OutcomeMetrics {
         )
     )]
     pub(super) fn describe_lines(&self, selector: &str, lines: &mut Vec<String>) {
-        for code in EmitterRejectionCode::ALL {
+        for class in RejectedErrorClass::ALL {
             lines.push(format!(
                 "{REJECTED}{{{selector},code=\"{}\"}} total={}",
-                code.as_ref(),
-                self.rejected[code.index()].get()
+                class.as_ref(),
+                self.rejected[class.index()].get()
             ));
         }
         for cause in EmitterRetryCause::ALL {
@@ -378,7 +359,7 @@ impl EmitterInteractionMetrics {
     pub(crate) fn record_outcomes(&self) -> EmitterRecordOutcomes<'_> {
         EmitterRecordOutcomes {
             metrics: &self.series.outcomes,
-            rejected: [0; 4],
+            rejected: [0; RejectedErrorClass::ALL.len()],
             failed: 0,
         }
     }
@@ -417,13 +398,14 @@ impl EmitterInteractionMetrics {
 #[must_use]
 pub(crate) struct EmitterRecordOutcomes<'a> {
     metrics: &'a OutcomeMetrics,
-    rejected: [u64; 4],
+    rejected: [u64; RejectedErrorClass::ALL.len()],
     failed: u64,
 }
 
 impl EmitterRecordOutcomes<'_> {
-    pub(crate) fn reject(&mut self, code: EmitterRejectionCode) {
-        self.rejected[code.index()] += 1;
+    /// Counts one rejected source row under the class of its message error.
+    pub(crate) fn reject(&mut self, class: RejectedErrorClass) {
+        self.rejected[class.index()] += 1;
     }
     pub(crate) fn fail(&mut self) {
         self.failed += 1;

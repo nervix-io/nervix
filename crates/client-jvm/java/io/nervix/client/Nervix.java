@@ -149,6 +149,22 @@ public final class Nervix {
         public int code() { return code; }
         static ClockEndReason of(int code) { return decode(values(), code); }
     }
+    /** How urgently a server notice asks for an operator's attention. */
+    public enum NoticeLevel implements Coded {
+        INFO(1), WARNING(2), ERROR(3);
+        private final int code;
+        NoticeLevel(int code) { this.code = code; }
+        public int code() { return code; }
+        static NoticeLevel of(int code) { return decode(values(), code); }
+    }
+    /** What a server notice reports; route notices by kind, never by their text. */
+    public enum NoticeKind implements Coded {
+        MEMBERSHIP(1), LEADERSHIP(2), CLUSTER_PARAMETERS(3), RUNTIME(4), CONTROL_PLANE(5), LICENSING(6);
+        private final int code;
+        NoticeKind(int code) { this.code = code; }
+        public int code() { return code; }
+        static NoticeKind of(int code) { return decode(values(), code); }
+    }
     public enum EndpointState implements Coded {
         ACTIVE(1), INTERRUPTED(2), RESTORING(3), REOPEN_REQUIRED(4), CLOSED(5);
         private final int code;
@@ -532,6 +548,32 @@ public final class Nervix {
         public long end() { return end; }
         public String replacement() { return replacement; }
     }
+    /**
+     * A server notice, a plain value that owns nothing native. Its message is display text: route by kind.
+     * A RUNTIME notice that reports a classified error of a graph node carries that error's class and
+     * producing node; the three error fields are null together on every other notice.
+     */
+    public static final class Notice {
+        private final NoticeLevel level;
+        private final NoticeKind kind;
+        private final String message;
+        private final String errorClass;
+        private final String errorNodeKind;
+        private final String errorNode;
+        Notice(int level, int kind, String message, String errorClass, String errorNodeKind, String errorNode) {
+            this.level = NoticeLevel.of(level); this.kind = NoticeKind.of(kind); this.message = message;
+            this.errorClass = errorClass; this.errorNodeKind = errorNodeKind; this.errorNode = errorNode;
+        }
+        public NoticeLevel level() { return level; }
+        public NoticeKind kind() { return kind; }
+        public String message() { return message; }
+        /** The reported error's canonical lower-case class name, such as "evaluation", or null. */
+        public String errorClass() { return errorClass; }
+        /** The producing node's model kind as its snake_case name, such as "junction", or null. */
+        public String errorNodeKind() { return errorNodeKind; }
+        /** The producing node's name, or null. */
+        public String errorNode() { return errorNode; }
+    }
     public static final class Cancel extends Handle {
         public Cancel() { super(Native.cancelNew()); }
         private Cancel(long pointer) { super(pointer); }
@@ -614,6 +656,12 @@ public final class Nervix {
         public ClockEvent nextClockEvent(Cancel cancel) {
             try (var session = lease(); var cancellation = token(cancel)) {
                 return new ClockEvent(Native.nextClockEvent(session.pointer, cancellation.pointer));
+            }
+        }
+        /** Waits for the next server notice; the notices of a session end with it. */
+        public Notice nextNotice(Cancel cancel) {
+            try (var session = lease(); var cancellation = token(cancel)) {
+                return (Notice) Native.nextNotice(session.pointer, cancellation.pointer);
             }
         }
         public DomainClock domainClock(String domain) {

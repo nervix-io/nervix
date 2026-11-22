@@ -129,8 +129,7 @@ impl DomainState {
         let mut has_inherited_partitions = false;
 
         for (key, model) in models {
-            has_inherited_partitions |=
-                matches!(model, Model::Parametrizer(branch) if branch.partitions.is_inherited());
+            has_inherited_partitions |= matches!(model, Model::Parametrizer(parametrizer) if parametrizer.partitions.is_inherited());
             let resolved_branching = match model {
                 Model::Relay(relay) => Some(resolved_branch_selection(
                     domain,
@@ -190,17 +189,17 @@ impl DomainState {
                 .verified("the pass above added a graph node for every model in this map");
 
             if let Some(branched_by) = model_branch_selection(model)
-                && let Some(branch_ref) = branched_by.parametrizer_ref()
+                && let Some(parametrizer_ref) = branched_by.parametrizer_ref()
             {
-                let branch = expect_kind(
+                let parametrizer = expect_kind(
                     domain,
                     identifier,
                     models,
                     &indices,
-                    branch_ref,
+                    parametrizer_ref,
                     ModelKind::Parametrizer,
                 )?;
-                graph.add_edge(branch, source, EdgeKind::RequiredBy);
+                graph.add_edge(parametrizer, source, EdgeKind::RequiredBy);
             }
             match model {
                 Model::Ingestor(ingestor) => add_output_branch_dependency_edges(
@@ -257,17 +256,17 @@ impl DomainState {
                 Model::Schema(schema) => {
                     ensure_schema_has_fields(domain, identifier, &schema.fields, "schema")?;
                 }
-                Model::Parametrizer(branch) => {
+                Model::Parametrizer(parametrizer) => {
                     let branch_schema = expect_kind(
                         domain,
                         identifier,
                         models,
                         &indices,
-                        &branch.schema,
+                        &parametrizer.schema,
                         ModelKind::Schema,
                     )?;
                     graph.add_edge(branch_schema, source, EdgeKind::RequiredBy);
-                    validate_branch_model(domain, identifier, models, branch)?;
+                    validate_branch_model(domain, identifier, models, parametrizer)?;
                 }
                 Model::WireJsonSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
@@ -823,16 +822,16 @@ impl DomainState {
                         ModelKind::Schema,
                     )?;
                     graph.add_edge(schema, source, EdgeKind::RequiredBy);
-                    if let Some(branch_ref) = stream.branching.parametrizer() {
-                        let branch = expect_kind(
+                    if let Some(parametrizer_ref) = stream.branching.parametrizer() {
+                        let parametrizer = expect_kind(
                             domain,
                             identifier,
                             models,
                             &indices,
-                            branch_ref,
+                            parametrizer_ref,
                             ModelKind::Parametrizer,
                         )?;
-                        graph.add_edge(branch, source, EdgeKind::RequiredBy);
+                        graph.add_edge(parametrizer, source, EdgeKind::RequiredBy);
                     }
                 }
                 Model::Reingestor(reingestor) => {
@@ -864,10 +863,10 @@ impl DomainState {
                         .assured("validated reingestor inputs have at least one relay");
                     let mut input_parametrizations = HashMap::new();
                     for &(relay, _) in &input_schemas {
-                        if let Some(branch) =
+                        if let Some(parametrizer) =
                             relay_declared_branch(domain, identifier, models, relay)?
                         {
-                            input_parametrizations.entry(branch).or_insert(relay);
+                            input_parametrizations.entry(parametrizer).or_insert(relay);
                         }
                     }
                     let branch_schema = relay_declared_branch_schema(

@@ -165,7 +165,7 @@ run_former_owner_restart() {
             || continue
         outcome="$(configuration_change "${case_dir}" "chaos_owner_move_${kind}" "${leader_host}" chaos_baseline \
             "RELOCATE ${kind^^} $(former_owner_entity "${kind}") ONTO NODE ${owner_node} IGNORE PREFERENCES;" \
-            "relocated 1 of 1 runtime node(s) onto node '${owner_node}'" relocation)"
+            "relocated 1 of 1 execution unit(s) onto node '${owner_node}'" relocation)"
         [[ "${outcome}" == acknowledged ]] \
             || recovery_fail product "relocating the ${kind} onto ${owner_node} was ${outcome}"
     done
@@ -275,7 +275,7 @@ run_former_owner_restart() {
         outcome="$(configuration_change "${case_dir}" "chaos_owner_schedule_${kind}" "${survivor_leader_host}" \
             chaos_baseline \
             "RELOCATE ${kind^^} $(former_owner_entity "${kind}") ONTO NODE ${target} IGNORE PREFERENCES;" \
-            "relocated 1 of 1 runtime node(s) onto node '${target}'" relocation)"
+            "relocated 1 of 1 execution unit(s) onto node '${target}'" relocation)"
         [[ "${outcome}" == acknowledged ]] \
             || recovery_fail product "changing the ${kind} schedule while ${owner_host} was down was ${outcome}"
         current_schedule["${kind}"]="${target}"

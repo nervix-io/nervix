@@ -186,6 +186,7 @@ pub enum Identifier {
     Colocation,
     Separation,
     Neutral,
+    Any,
     User,
     Password,
     Period,

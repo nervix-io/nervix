@@ -53,7 +53,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code
+              error_code = error.class
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
       START;
@@ -81,8 +81,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
     And within "10s" Kafka consumer group "retried_group_{{test_id}}" next offset for topic "retried_in_{{test_id}}" partition 0 is "at least 1"
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      "seq":3 | "error_code":"validation"
-      "seq":6 | "error_code":"validation"
+      "seq":3 | "error_code":"limit"
+      "seq":6 | "error_code":"limit"
       """
     And the relay subscription does not receive a payload within "1s"
 
@@ -213,7 +213,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
@@ -227,8 +227,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":3 | "error_code":"external" | "operation":"publish"
-      "seq":4 | "error_code":"external" | "operation":"publish"
+      "seq":3 | "error_code":"refused" | "operation":"publish"
+      "seq":4 | "error_code":"refused" | "operation":"publish"
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -282,7 +282,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
         } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
-          SET error_code = error.code,
+          SET error_code = error.class,
               source_user_id = input.user_id
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
@@ -298,7 +298,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
       """
     Then within "10s" the relay subscription receives a payload
       """
-      "error_code":"external","source_user_id":2
+      "error_code":"refused","source_user_id":2
       """
     And the MongoDB collection eventually holds exactly these documents
       """

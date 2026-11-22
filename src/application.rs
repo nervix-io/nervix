@@ -123,10 +123,7 @@ use public_listener::{PublicListener, PublicListenerKind};
 use scheduling::StartupVoterObservations;
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
-use session_service::{
-    ApplicationBound, RuntimeStateApplication, SessionEvents, SessionServiceInner,
-    apply_current_cluster_runtime_state,
-};
+use session_service::{ApplicationBound, SessionEvents, SessionServiceInner};
 use startup::ApplicationStartup;
 use subscription::{SubscriptionInterests, SubscriptionSampler};
 use tls::{
@@ -207,6 +204,7 @@ mod listener_io;
 mod listener_settings;
 mod partition_topology;
 pub use listener_settings::{ListenerOverrides, ListenerSettings, ListenerSettingsError};
+mod node_rule_observation;
 mod public_listener;
 mod relocation;
 mod resource;
@@ -217,6 +215,7 @@ mod schedule_planning;
 mod scheduling;
 mod service_tasks;
 mod session;
+mod start_placement;
 #[cfg(test)]
 pub(crate) use session::{ClockDeliveryOrder, NextClockFrame};
 mod session_service;
@@ -1235,7 +1234,6 @@ impl Application {
             _ = shutdown_coordinator.requested() => Ok(()),
             result = Box::pin(async {
         let registry = service.inner.registry.clone();
-        let certificates = service.inner.https_certificates.clone();
         #[cfg(feature = "testing")]
         fault_injection.pause_initial_cluster_parameters_if_armed(&node_id).await;
         let record = loop {
@@ -1329,6 +1327,8 @@ impl Application {
             let mut startup_voter_observations = StartupVoterObservations::new(voter_observation_grace);
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
+            let mut node_rule_observation =
+                crate::application::node_rule_observation::NodeRuleObservation::default();
             loop {
                 nervix_primitives::task::consume_budget().await;
                 // A pass waits on consensus writes and on requests to peers, and neither completes
@@ -1448,6 +1448,9 @@ impl Application {
                             }
                         }
                     }
+                    service_for_reconcile
+                        .observe_node_rule_units(&mut node_rule_observation)
+                        .await;
                     loop {
                         nervix_primitives::task::consume_budget().await;
                         let Ok(automatic_schedule_input) =
@@ -1529,7 +1532,7 @@ impl Application {
                                     && topology.records().get(node).is_some_and(|committed| live_node_incarnations.get(node) == Some(&committed.record.identity().incarnation()))
                             })
                             .collect::<Vec<_>>();
-                        let scheduling_capabilities = topology.records().iter().filter(|(node, committed)| live_node_incarnations.get(*node) == Some(&committed.record.identity().incarnation())).map(|(node, committed)| (node.clone(), *committed.record.capabilities())).collect::<BTreeMap<_, _>>();
+                        let scheduling_records = topology.records().iter().filter(|(node, committed)| live_node_incarnations.get(*node) == Some(&committed.record.identity().incarnation())).map(|(node, committed)| (node.clone(), committed.clone())).collect::<BTreeMap<_, _>>();
                         let current_schedule = &automatic_schedule_input.runtime_state().schedule;
                         let live_voter_set = live_voters.iter().cloned().collect::<BTreeSet<_>>();
                         let schedulable_node_set = schedulable_node_ids
@@ -1557,7 +1560,7 @@ impl Application {
                                 &mut failover_schedule,
                                 None,
                                 &live_voter_set,
-                                &schedulable_node_set,
+                                &crate::application::scheduling::UnitTargets::unconstrained(schedulable_node_set.clone()),
                             );
                             if failover_moves.is_empty() {
                                 continue;
@@ -1611,18 +1614,27 @@ impl Application {
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     current_domain,
                                     scheduler_mode,
-                                 &scheduling_capabilities,);
+                                 &scheduling_records,);
                                 #[cfg(not(feature = "testing"))]
                                 let schedule = graph.schedule_for_domain(
                                     &domain,
                                     &schedulable_node_ids,
                                     usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     current_domain,
-                                    &scheduling_capabilities,
+                                    &scheduling_records,
                                 );
                                 let mut schedule = match schedule {
                                     Ok(schedule) => schedule,
                                     Err(error) => { warn!(domain = domain.as_str(), error = %format_args!("{error:#}"), "failed to resolve partition topology"); continue; }
+                                };
+                                let targets = match crate::application::scheduling::UnitTargets::of_graph(
+                                    &graph,
+                                    &domain,
+                                    &scheduling_records,
+                                    schedulable_node_set.clone(),
+                                ) {
+                                    Ok(targets) => targets,
+                                    Err(error) => { warn!(domain = domain.as_str(), error = %format_args!("{error:#}"), "failed to judge the domain's node rules"); continue; }
                                 };
                                 let mut failover_existing = current_domain.cloned();
                                 if let Some(existing) = &mut failover_existing {
@@ -1631,7 +1643,7 @@ impl Application {
                                             existing,
                                             Some(&schedule),
                                             &live_voter_set,
-                                            &schedulable_node_set,
+                                            &targets,
                                         );
                                     for failover_move in &failover_moves {
                                         if let Some(replica) = failover_move.promoted_replica.as_ref() {
@@ -1844,45 +1856,32 @@ impl Application {
         ));
 
         let parameter_events = events.clone();
-        let certificates_for_schedule = certificates.clone();
-        let runtime_for_schedule = runtime.clone();
-        let registry_for_schedule = registry.clone();
         let schedule_rx = consensus.observer().subscribe_schedule();
         let domains_rx = consensus.observer().subscribe_domains();
         let consensus_for_schedule = consensus.observer();
         let cluster_for_schedule = cluster.clone();
-        let interconnect_for_schedule = interconnect.clone();
-        let progress_for_schedule = application_progress.clone();
         let schedule_shutdown = shutdown.clone();
-        let schedule_runtime_admission = runtime_admission.clone();
+        // The service holds this node's runtime, registry, certificates, transport, progress,
+        // admission and drain-support token, the handles every application installs with.
+        let schedule_service = service.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
-            let application = RuntimeStateApplication {
-                runtime: &runtime_for_schedule,
-                https_certificates: &certificates_for_schedule,
-                cluster: &cluster_for_schedule,
-                interconnect: &interconnect_for_schedule,
-                registry: &registry_for_schedule,
-                consensus: &consensus_for_schedule,
-                progress: &progress_for_schedule,
-                admission: &schedule_runtime_admission,
-                shutdown: &schedule_shutdown,
-            };
             runtime_reconciliation::RuntimeReconciliation::new(
                 schedule_rx,
                 domains_rx,
-                schedule_shutdown.clone(),
-                schedule_runtime_admission.retry_interval(),
+                schedule_shutdown,
+                schedule_service.inner.runtime_admission.retry_interval(),
             )
             .run(None, |mut announced_parameters| {
                 let events = &parameter_events;
                 let cluster = &cluster_for_schedule;
                 let consensus = &consensus_for_schedule;
+                let service = &schedule_service;
                 async move {
-                    let outcome = apply_current_cluster_runtime_state(
-                        application,
-                        ApplicationBound::ClusterBudget,
-                    )
-                    .await;
+                    #[cfg(feature = "testing")]
+                    service.hold_background_reconciliation_if_armed().await;
+                    let outcome = service
+                        .apply_current_cluster_state_within(ApplicationBound::ClusterBudget)
+                        .await;
                     if outcome.is_ok() {
                         cluster_parameters::announce_parameter_installation(
                             events,
@@ -2542,7 +2541,7 @@ impl Application {
                 nervix_primitives::select! {
                     _ = runtime_event_shutdown.cancelled() => break,
                     received = runtime_event_rx.recv() => match received {
-                        Ok(RuntimeEvent::Error(message)) => {
+                        Ok(RuntimeEvent::Error(event)) => {
                             let mut node_ids =
                                 runtime_event_service.inner.cluster.live_node_ids().await;
                             node_ids.sort();
@@ -2557,7 +2556,8 @@ impl Application {
                                         &node_id,
                                         ControlEnvelope::RuntimeErrorEvent(
                                             RemoteRuntimeErrorEvent {
-                                                message: message.clone(),
+                                                message: event.message.clone(),
+                                                error: event.error.clone(),
                                             },
                                         ),
                                     )
@@ -2746,7 +2746,7 @@ impl Application {
                                 service_for_interconnect
                                     .inner
                                     .events
-                                    .report_error(NoticeKind::Runtime, event.message);
+                                    .report_runtime_error(event.message, event.error);
                             }
                         }
                     }
@@ -2862,6 +2862,11 @@ impl Application {
         }
         let service_tasks_outcome = service.inner.service_tasks.shut_down(deadline).await;
         terminal_teardown_outcome = terminal_teardown_outcome.combine(service_tasks_outcome);
+        // An installation of the committed state that one of those tasks, or a request handler,
+        // began still runs in a task of the runtime admission, which holds the installation turn
+        // until the installation ends. Taking the turn waits for the last one, and keeping it means
+        // none begins afterwards, so the runtime never stops in the middle of an installation.
+        runtime_admission.finish_installations().await;
         // The services below own this node's remaining tasks, connections, and storage, and
         // stopping them is what releases those, so each stop runs to completion rather than being
         // abandoned at the deadline. A server process whose deadline passes meanwhile is ended by

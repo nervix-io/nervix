@@ -107,12 +107,12 @@ impl IngestorUnits {
         let identifier = ModelName::from(&ingestor.name);
         let mut structure = None;
         let mut relays = BTreeSet::new();
-        let mut branches = BTreeSet::new();
+        let mut parametrizers = BTreeSet::new();
         for route in ingestor.output_routes.outputs() {
-            let Some(branch) = route
+            let Some(parametrizer) = route
                 .branch
                 .as_ref()
-                .and_then(|branch| branch.parametrizer())
+                .and_then(|branching| branching.parametrizer())
             else {
                 continue;
             };
@@ -121,11 +121,11 @@ impl IngestorUnits {
                 &identifier,
                 models,
                 &BranchSelection::BranchedBy {
-                    parametrizer: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                 },
             )?;
             let fields = resolved.fields().to_vec();
-            let declaration = branch_model(domain, &identifier, models, branch)?.partitions;
+            let declaration = branch_model(domain, &identifier, models, parametrizer)?.partitions;
             if let Some((expected_fields, expected_declaration, _)) = &structure {
                 if *expected_fields != fields || *expected_declaration != declaration {
                     return Err(refusal(IngestorInstancingError::DifferentStructure {
@@ -139,7 +139,7 @@ impl IngestorUnits {
                     resolved.partitions().map(|value| value.count()),
                 ));
             }
-            branches.insert(branch.clone());
+            parametrizers.insert(parametrizer.clone());
             relays.insert(route.relay.clone());
         }
         let Some((_, _, count)) = structure else {
@@ -148,7 +148,7 @@ impl IngestorUnits {
         Ok(Self::PerTransportPartition {
             count,
             relays: relays.into_iter().collect(),
-            parametrizers: branches.into_iter().collect(),
+            parametrizers: parametrizers.into_iter().collect(),
         })
     }
 
@@ -172,8 +172,8 @@ impl IngestorUnits {
         };
         let mut observed = None;
         let mut complete = true;
-        for branch in parametrizers {
-            let Some(layout) = topology.parametrizers.get(branch) else {
+        for parametrizer in parametrizers {
+            let Some(layout) = topology.parametrizers.get(parametrizer) else {
                 complete = false;
                 break;
             };

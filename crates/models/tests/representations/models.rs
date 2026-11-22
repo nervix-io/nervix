@@ -38,7 +38,7 @@ fn archived_model_corpus_reaches_resumed_restore() {
 }
 
 #[test]
-fn placement_scopes_and_exact_relocation_selectors_keep_their_archived_values() {
+fn placement_rules_and_exact_relocation_selectors_keep_their_archived_values() {
     use std::num::NonZeroU64;
 
     use nervix_models::{
@@ -75,9 +75,56 @@ fn placement_scopes_and_exact_relocation_selectors_keep_their_archived_values() 
         }
     }
 
+    let selector = nervix_models::Expression::Binary {
+        operator: nervix_models::BinaryOperator::Equal,
+        left: Box::new(nervix_models::Expression::Call {
+            function: nervix_models::BuiltinFunctionName::parse(nervix_models::NODE_TAG_FUNCTION)
+                .assured("tag is a builtin function name"),
+            arguments: vec![nervix_models::Expression::Literal(
+                nervix_models::Literal::String("zone".to_owned()),
+            )],
+        }),
+        right: Box::new(nervix_models::Expression::Literal(
+            nervix_models::Literal::String("eu".to_owned()),
+        )),
+    };
+    for policy in [
+        nervix_models::NodePolicy::Require(selector.clone()),
+        nervix_models::NodePolicy::Prefer(selector.clone()),
+        nervix_models::NodePolicy::Any,
+    ] {
+        for scope in [
+            nervix_models::NodeRuleScope::Members(vec![
+                "scorer".try_into().assured("valid name"),
+                "enrich".try_into().assured("valid name"),
+            ]),
+            nervix_models::NodeRuleScope::DomainWide,
+        ] {
+            for rank in [None, NonZeroU64::new(u64::MAX)] {
+                let placement = CreatePlacement::node_rule(
+                    "node_rule".try_into().assured("valid name"),
+                    scope.clone(),
+                    policy.clone(),
+                    rank,
+                )
+                .assured("a node rule over a nonempty member list or the domain");
+                let model: Model = Model::Placement(placement);
+                assert_eq!(crate::archive_round_trip!(&model, Model), model);
+            }
+        }
+    }
+
     let alter = Statement::AlterPlacement(AlterPlacement {
         placement: "corridor".try_into().assured("valid name"),
-        operations: vec![AlterPlacementOperation::SetDomainWide],
+        operations: vec![
+            AlterPlacementOperation::SetDomainWide,
+            AlterPlacementOperation::SetNodePolicy {
+                policy: nervix_models::NodePolicy::Require(selector),
+            },
+            AlterPlacementOperation::SetNodeMembers {
+                members: vec!["scorer".try_into().assured("valid name")],
+            },
+        ],
     });
     assert_eq!(crate::archive_round_trip!(&alter, Statement), alter);
 

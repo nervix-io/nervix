@@ -113,8 +113,13 @@ CREATE [IF NOT EXISTS] RELAY <name> SCHEMA <schema> [CAPACITY <n>]
 
 CREATE [IF NOT EXISTS] PLACEMENT <name>
   FROM <runtime_node> [, <runtime_node> ...]
-  TO <runtime_node> [, <runtime_node> ...]
+  TO <runtime_node> [, <runtime_node> ...] | DOMAIN WIDE
   REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION
+  [RANK <n>];
+
+CREATE [IF NOT EXISTS] PLACEMENT <name>
+  FOR <runtime_node> [, <runtime_node> ...] | DOMAIN WIDE
+  REQUIRE NODES WHERE <selector>|PREFER NODES WHERE <selector>|ANY NODE
   [RANK <n>];
 ```
 
@@ -235,9 +240,12 @@ ALTER GENERATOR <name>
 
 ALTER PLACEMENT <placement>
   SET POLICY REQUIRE COLOCATION|PREFER COLOCATION|NEUTRAL|SUGGEST SEPARATION |
+  SET POLICY REQUIRE NODES WHERE <selector>|PREFER NODES WHERE <selector>|ANY NODE |
   SET RANK <n> |
   DROP RANK |
   SET FROM <runtime_node> [, ...] TO <runtime_node> [, ...] |
+  SET FOR <runtime_node> [, ...] |
+  SET DOMAIN WIDE |
   RENAME TO <name>
   [, ...];
 
@@ -322,8 +330,12 @@ behavior.
 
 Named placement rules claim directed corridors or use `DOMAIN WIDE` to cover every eligible hop.
 Ordinary rank precedence selects each hop's policy, and validation checks that policy against its
-unit correspondence. Unclaimed hops use ordinary scheduler heuristics. See
-[Placement Policies](placement.md) for policies, execution units and lifecycle commands.
+unit correspondence. Unclaimed hops use ordinary scheduler heuristics. A node rule's `FOR` members,
+or `DOMAIN WIDE`, run only on the cluster nodes its `REQUIRE NODES WHERE` selector admits, favor
+the ones a `PREFER NODES WHERE` selector admits, or are freed by `ANY NODE`; a colocation operation
+on a node rule, or a node operation on a colocation rule, is refused. See
+[Placement Policies](placement.md) for policies, execution units, node rules and lifecycle
+commands.
 
 Multiple Plexus statements in one request must be wrapped in an explicit
 transaction. `BEGIN` creates a replicated transaction and returns its id,
@@ -729,7 +741,7 @@ Every `TO` route on an ingestor or relay-consuming processor must declare its me
 ```plexus,ignore
 ON MESSAGE ERROR IGNORE | LOG | SEND TO error_stream
 SET error_reference = error.reference,
-    error_code = error.code,
+    error_class = error.class,
     source_id = input.id,
     attempted_total = partial_output.total
 ```

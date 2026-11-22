@@ -187,7 +187,7 @@ Feature: Emitter payload measurements
         MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
         INHERIT ALL BATCH MAX MESSAGES 3 MAX SIZE 1B FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
-          SET seq = input.seq, error_code = error.code, operation = error.operation
+          SET seq = input.seq, error_code = error.class, operation = error.operation
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_subscription TO rejected_events;
       START;
@@ -207,9 +207,9 @@ Feature: Emitter payload measurements
     Then batch "oversize" completes
     And within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":1 | "error_code":"validation" | "operation":"encode"
-      "seq":2 | "error_code":"validation" | "operation":"encode"
-      "seq":3 | "error_code":"validation" | "operation":"encode"
+      "seq":1 | "error_code":"limit" | "operation":"encode"
+      "seq":2 | "error_code":"limit" | "operation":"encode"
+      "seq":3 | "error_code":"limit" | "operation":"encode"
       """
     When these Plexus commands are executed on the leader node
       """

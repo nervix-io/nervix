@@ -50,7 +50,7 @@ CREATE CLIENT PRODUCER INGESTOR simulated_readings
         timestamp_source = 'at'
     BRANCHED BY by_sensor SET sensor = message.sensor
     FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.code, error_message = error.message
+    ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id, occurred_at = input.occurred_at, error_code = error.class, error_message = error.message
   ON GENERAL ERROR LOG;
 ```
 
@@ -282,7 +282,7 @@ the driver advances to another tick and keeps the requested submission count.
 skew before the oldest center the window retains. Submitted to `simulated_readings`, which reads
 `TIMESTAMP AT occurred_at`, that reading is rejected: its batch still completes, because the error
 route acknowledges the reading once its notice is published, and the rejection consumer records the
-notice with code `validation`. Submitted to `live_readings` with `--timestamps now`, the same
+notice with class `validation`. Submitted to `live_readings` with `--timestamps now`, the same
 reading is admitted, stamped with the domain time it arrived at, and its `occurred_at` travels
 through unchanged.
 

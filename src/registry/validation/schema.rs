@@ -12,10 +12,7 @@
     nervix::layer(decisions, reason = "owns the decisions boundary declared above")
 )]
 
-use arrow_schema::{
-    DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
-    TimeUnit as ArrowTimeUnit,
-};
+use arrow_schema::{Field as ArrowField, Schema as ArrowSchema};
 use error_stack::Report;
 use nervix_models::{
     CreateSchema, CreateWireSchema, DomainName, ModelIndex, ModelKind, ModelName, SchemaField,
@@ -275,30 +272,6 @@ pub(in crate::registry) fn all_optional_binding_for_internal_schema(
         )),
     )
     .with_sensitivity(schema_sensitivity_for_internal_schema(schema))
-}
-
-pub(in crate::registry) fn structured_message_error_arrow_schema() -> StdArc<ArrowSchema> {
-    StdArc::new(ArrowSchema::new(vec![
-        ArrowField::new("reference", ArrowDataType::Utf8, false),
-        ArrowField::new("code", ArrowDataType::Utf8, false),
-        ArrowField::new("message", ArrowDataType::Utf8, false),
-        ArrowField::new("operation", ArrowDataType::Utf8, false),
-        ArrowField::new("operation_index", ArrowDataType::UInt32, true),
-        ArrowField::new(
-            "fields",
-            ArrowDataType::List(StdArc::new(ArrowField::new(
-                "item",
-                ArrowDataType::Utf8,
-                false,
-            ))),
-            false,
-        ),
-        ArrowField::new(
-            "occurred_at",
-            ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into())),
-            false,
-        ),
-    ]))
 }
 
 #[cfg(test)]
