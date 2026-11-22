@@ -129,6 +129,12 @@ staging. A second storage operation waits for the Bulk turn without taking the r
 permits. Commands and Bulk turns do not serialize each other. Both return their memory before
 passing the turn; cancellation while waiting retains neither a turn nor a memory queue place.
 
+Vote and committed-marker reads and writes, the log state read, the retention boundary scan and the
+store's idle barrier are management work. Each reserves four management events from the
+Management class, 256 KiB with the fixed 64 KiB event, and takes no turn. A node refuses to start
+with a Management budget smaller than this working set, so no reservation of these operations can
+exceed its whole class ([Node Settings](node-settings.md#execution-capabilities)).
+
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
 later leader may discard it. In either case, the client had not yet received an applied response.
@@ -725,6 +731,7 @@ does not expose flags for them:
 | Follower decoded resident window | 4 batches per live append stream |
 | Commands memory budget | 24 MiB per node |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
+| Vote or metadata storage | 256 KiB working reservation from the Management class |
 | Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
