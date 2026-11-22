@@ -7,7 +7,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     CreateEndpoint, CreateLookup, CreateParametrizer, CreatePlacement, CreateRelay,
     CreateSignalingProtocol, CreateVhost, EndpointKind, MaterializedRelayState, ModelName,
-    ParametrizerEviction, ParametrizerPartitions, PlacementPolicy, RelayBranching,
+    NodeRuleScope, ParametrizerEviction, ParametrizerPartitions, PlacementPolicy, RelayBranching,
     RequestedResourceVersion, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, VhostTlsResource,
 };
@@ -271,30 +271,51 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A domain-wide placement or a corridor with non-empty, distinct endpoint lists.
+    /// A colocation rule, domain-wide or over a corridor with non-empty, distinct endpoint lists,
+    /// or a node rule, domain-wide or over non-empty, distinct members, with any of its policies.
     ///
     /// `ALTER PLACEMENT` sets the same groups, and reads a comma before a bare operation keyword as
     /// the next operation, so in the Plexus domain no member is named like one.
     pub fn create_placement(&mut self) -> CreatePlacement {
         let name = self.name();
-        let from = self.distinct_names_refusing::<ModelName>(1, ITEMS, &ALTER_OPERATION_WORDS);
-        let to = self.distinct_names_refusing::<ModelName>(1, ITEMS, &ALTER_OPERATION_WORDS);
-        let policy = self.entropy.pick([
-            PlacementPolicy::RequireColocation,
-            PlacementPolicy::PreferColocation,
-            PlacementPolicy::Neutral,
-            PlacementPolicy::SuggestSeparation,
-        ]);
         let rank = if self.entropy.flag() {
             Some(self.positive_u64())
         } else {
             None
         };
-        if self.entropy.flag() {
-            CreatePlacement::domain_wide(name, policy, rank)
-        } else {
-            CreatePlacement::new(name, from, to, policy, rank)
-                .verified("both member lists are non-empty and hold each member once")
+        match self.entropy.byte() % 4 {
+            0 => CreatePlacement::domain_wide(name, self.colocation_policy(), rank),
+            1 => {
+                let from = self.placement_members();
+                let to = self.placement_members();
+                CreatePlacement::new(name, from, to, self.colocation_policy(), rank)
+                    .verified("both member lists are non-empty and hold each member once")
+            }
+            2 => {
+                let members = self.placement_members();
+                let policy = self.node_policy();
+                CreatePlacement::node_rule(name, NodeRuleScope::Members(members), policy, rank)
+                    .verified("the member list is non-empty and holds each member once")
+            }
+            _ => {
+                let policy = self.node_policy();
+                CreatePlacement::node_rule(name, NodeRuleScope::DomainWide, policy, rank)
+                    .assured("a domain-wide node rule names no member list to validate")
+            }
         }
+    }
+
+    /// Distinct placement members, none named like an `ALTER` operation keyword.
+    pub(crate) fn placement_members(&mut self) -> Vec<ModelName> {
+        self.distinct_names_refusing::<ModelName>(1, ITEMS, &ALTER_OPERATION_WORDS)
+    }
+
+    fn colocation_policy(&mut self) -> PlacementPolicy {
+        self.entropy.pick([
+            PlacementPolicy::RequireColocation,
+            PlacementPolicy::PreferColocation,
+            PlacementPolicy::Neutral,
+            PlacementPolicy::SuggestSeparation,
+        ])
     }
 }

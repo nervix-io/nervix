@@ -354,8 +354,8 @@ pub use partition_topology::{
     PartitionTopology, PartitionTopologySnapshot, SourcePartitionObservation,
 };
 pub use placement::{
-    AlterPlacement, AlterPlacementError, AlterPlacementOperation, CreatePlacement, PlacementPolicy,
-    PlacementScope,
+    AlterPlacement, AlterPlacementError, AlterPlacementOperation, CreatePlacement, NodePolicy,
+    NodeRuleScope, PlacementPolicy, PlacementRule, PlacementScope,
 };
 pub use prerequisites::{
     ConsensusFloors, DescribedPrerequisite, FingerprintTextError, NodePrerequisites, Prerequisite,

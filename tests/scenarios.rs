@@ -27113,6 +27113,32 @@ fn scheduled_node_placement_from_status<'a>(
     })
 }
 
+/// Every whitespace-separated field of the first `SHOW CLUSTER STATUS` schedule line naming the
+/// unit of `kind` `name` in `domain`.
+fn scheduled_node_status_fields<'a>(
+    status: &'a str,
+    domain: &str,
+    kind: &str,
+    name: &str,
+) -> Option<Vec<&'a str>> {
+    let domain_field = format!("domain={domain}");
+    let kind_field = format!("kind={kind}");
+    let name_field = format!("name={name}");
+    for line in status.lines().map(str::trim) {
+        let Some(line) = line.strip_prefix("- ") else {
+            continue;
+        };
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.contains(&domain_field.as_str())
+            && fields.contains(&kind_field.as_str())
+            && fields.contains(&name_field.as_str())
+        {
+            return Some(fields);
+        }
+    }
+    None
+}
+
 fn scheduled_placements_for_domain(status: &str, domain: &str) -> Vec<SavedHealthyPlacement> {
     let mut placements = Vec::new();
     for line in status.lines() {
@@ -28344,6 +28370,96 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
     }
 }
 
+/// Waits until the named cluster node owns the scheduled unit, for a scenario that knows which
+/// node a rule admits.
+#[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} owner \
+            {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_owner(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    expected: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let expected = expand_placeholders(world, &expected);
+    let placement = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} owner to equal '{expected}'. last \
+             output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|(owner, _)| owner == expected)
+                {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        placement.pause(Duration::from_millis(100)).await;
+    }
+}
+
+/// Waits until the scheduled unit's `SHOW CLUSTER STATUS` line carries one exact field, such as
+/// the `violates=` or `waiting_for=` report of a node rule.
+#[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} with \
+            {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    field: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let field = expand_placeholders(world, &field);
+    let observation = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !observation.has_passed(),
+            "timed out waiting for scheduled {kind} {name} to report '{field}'. last output: \
+             {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, observation).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                let reported = scheduled_node_status_fields(&output, &world.domain, &kind, &name)
+                    .is_some_and(|fields| fields.contains(&field.as_str()));
+                if reported {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        observation.pause(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(
     expr = "within {string} node {string} eventually reports scheduled {string} {string} replicas \
             without placeholder {string}"
@@ -28451,6 +28567,28 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
     world
         .wait_for_observability_metric_value(&node_id, &metric_name, expected_value, None, step)
         .await;
+}
+
+#[then(expr = "node {string} observability metric {string} with labels is eventually absent")]
+async fn then_node_observability_metric_with_labels_is_eventually_absent(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    metric_name: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let metric_name = expand_placeholders(world, &metric_name);
+    let label_fragments = docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| expand_placeholders(world, line))
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .wait_for_observability_metric_absent(&node_id, &metric_name, &label_fragments, None)
+        .await
+        .expect("observability endpoint kept reporting the removed metric");
 }
 
 #[then(expr = "cluster observability metric {string} with labels eventually totals {int}")]

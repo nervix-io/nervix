@@ -122,7 +122,7 @@ fn an_emitter_without_instances_and_one_over_a_single_partition_run_as_their_sin
             &nodes,
             0,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     assert_eq!(
@@ -204,7 +204,7 @@ fn a_counted_emitter_over_an_unpartitioned_input_serves_it_from_its_first_instan
             &nodes,
             0,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     assert_eq!(
@@ -234,7 +234,7 @@ fn counted_instances_prefer_the_owner_of_a_partition_they_serve() {
             &nodes,
             0,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     let relay = &schedule.nodes[&relay_ref("events")];
@@ -324,7 +324,7 @@ fn per_partition_groups_bind_each_instance_to_its_partition_of_every_input() {
             &nodes,
             1,
             None,
-            &crate::registry::uniform_capabilities(&nodes),
+            &crate::registry::uniform_records(&nodes),
         )
         .assured("the fixture topology resolves");
     for index in 0..4 {
