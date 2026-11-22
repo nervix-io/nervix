@@ -81,8 +81,8 @@ pub(crate) fn host_bytes<'a>(data: &'a Bound<'_, PyAny>) -> PyResult<Cow<'a, [u8
 }
 
 /// The Python value of a cell: an `int`, `float`, `bool`, `str` or `bytes` for a scalar, the
-/// nanoseconds since the Unix epoch for a `DATETIME`, a `list` for a list, `None` for a null, and
-/// a `Redacted` for a value the server withheld.
+/// nanoseconds since the Unix epoch for a `DATETIME`, the signed nanoseconds of a `DURATION`, a
+/// `list` for a list, `None` for a null, and a `Redacted` for a value the server withheld.
 pub(crate) fn cell<'py>(py: Python<'py>, cell: CellView<'_>) -> PyResult<Bound<'py, PyAny>> {
     match cell {
         CellView::Null => Ok(py.None().into_bound(py)),
@@ -101,6 +101,7 @@ pub(crate) fn cell<'py>(py: Python<'py>, cell: CellView<'_>) -> PyResult<Bound<'
         CellView::String(value) => value.into_bound_py_any(py),
         CellView::Bytes(value) => Ok(PyBytes::new(py, value).into_any()),
         CellView::Datetime(value) => value.unix_nanos().into_bound_py_any(py),
+        CellView::Duration(value) => value.nanoseconds().into_bound_py_any(py),
         CellView::List(items) => {
             let mut values = Vec::with_capacity(items.len());
             for item in items.iter() {

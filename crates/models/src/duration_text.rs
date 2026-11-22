@@ -118,19 +118,69 @@ impl SpanBound {
         Some(())
     }
 
-    /// Nanoseconds in one of `unit`, as the grammar spells its units.
+    /// Nanoseconds in one of `unit`, as the grammar spells its units, and a year for a spelling
+    /// it does not know.
     fn unit_nanos(unit: &str) -> u128 {
-        match unit {
-            "nanos" | "nsec" | "ns" => 1,
-            "usec" | "us" | "µs" => 1_000,
-            "millis" | "msec" | "ms" => 1_000_000,
-            "seconds" | "second" | "secs" | "sec" | "s" => 1_000_000_000,
-            "minutes" | "minute" | "min" | "mins" | "m" => 60_000_000_000,
-            "hours" | "hour" | "hr" | "hrs" | "h" => 3_600_000_000_000,
-            "days" | "day" | "d" => 86_400_000_000_000,
-            "weeks" | "week" | "wk" | "wks" | "w" => 604_800_000_000_000,
-            "months" | "month" | "M" => 2_630_016_000_000_000,
-            _ => YEAR_NANOS,
+        match DurationTextUnit::from_spelling(unit) {
+            Some(unit) => unit.nanos(),
+            None => YEAR_NANOS,
+        }
+    }
+}
+
+/// A unit of duration text, as the grammar spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationTextUnit {
+    Nanosecond,
+    Microsecond,
+    Millisecond,
+    Second,
+    Minute,
+    Hour,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl DurationTextUnit {
+    /// The unit `spelling` names, exactly as `humantime` 2.4 spells its units, or none.
+    pub fn from_spelling(spelling: &str) -> Option<Self> {
+        let unit = match spelling {
+            "nanos" | "nsec" | "ns" => Self::Nanosecond,
+            "usec" | "us" | "µs" => Self::Microsecond,
+            "millis" | "msec" | "ms" => Self::Millisecond,
+            "seconds" | "second" | "secs" | "sec" | "s" => Self::Second,
+            "minutes" | "minute" | "min" | "mins" | "m" => Self::Minute,
+            "hours" | "hour" | "hr" | "hrs" | "h" => Self::Hour,
+            "days" | "day" | "d" => Self::Day,
+            "weeks" | "week" | "wk" | "wks" | "w" => Self::Week,
+            "months" | "month" | "M" => Self::Month,
+            "years" | "year" | "yr" | "yrs" | "y" => Self::Year,
+            _ => return None,
+        };
+        Some(unit)
+    }
+
+    /// Whether every one of this unit is as long as every other. The grammar reads a month as
+    /// 30.44 days and a year as 365.25, lengths no calendar month or year has.
+    pub const fn has_fixed_length(self) -> bool {
+        !matches!(self, Self::Month | Self::Year)
+    }
+
+    /// Nanoseconds in one of this unit, as the grammar counts it.
+    const fn nanos(self) -> u128 {
+        match self {
+            Self::Nanosecond => 1,
+            Self::Microsecond => 1_000,
+            Self::Millisecond => 1_000_000,
+            Self::Second => 1_000_000_000,
+            Self::Minute => 60_000_000_000,
+            Self::Hour => 3_600_000_000_000,
+            Self::Day => 86_400_000_000_000,
+            Self::Week => 604_800_000_000_000,
+            Self::Month => 2_630_016_000_000_000,
+            Self::Year => YEAR_NANOS,
         }
     }
 }

@@ -514,6 +514,10 @@ It also fences the licensing stop gate: the stop cause a `StopDomain` command ca
 record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
 transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
 
+The fingerprint also covers the `DURATION` type: the Models that declare it or write a duration
+literal, and the duration values branch keys, relay payloads, materialized records and other
+runtime values carry between nodes as signed nanoseconds.
+
 The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, inferencer state page, listener-capability, licensing stop-gate, licensing transition, node-record and inherited partition-topology contract; metadata-only edits preserve the execution and state identities those reports observe.
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of

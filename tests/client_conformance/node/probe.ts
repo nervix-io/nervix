@@ -441,6 +441,8 @@ function renderValue(cell: wire.Cell): string {
       return `bytes:${hex(member(value(new wire.BytesCell()).valueArray()))}`;
     case wire.CellValue.DatetimeCell:
       return `datetime:${wide(value(new wire.DatetimeCell()).unixNanos())}`;
+    case wire.CellValue.DurationCell:
+      return `duration:${wide(value(new wire.DurationCell()).nanoseconds())}`;
     case wire.CellValue.ListCell: {
       const list = value(new wire.ListCell());
       const elements: string[] = [];

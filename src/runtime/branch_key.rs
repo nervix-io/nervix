@@ -405,14 +405,14 @@ impl BranchKey {
     }
 
     /// A runtime value of any kind a branch field holds: integers of every width, booleans, text, a
-    /// datetime anywhere a timestamp reaches with a whole-minute offset as RFC 3339 writes one,
-    /// finite floats of any bit pattern, signed zeros and subnormals included, and arrays and lists
-    /// nested `depth` levels at most. The VM turns a non-finite float result into a row error, so
+    /// datetime anywhere a timestamp reaches with a whole-minute offset as RFC 3339 writes one, a
+    /// duration of any signed count of nanoseconds, finite floats of any bit pattern, signed zeros
+    /// and subnormals included, and arrays and lists nested `depth` levels at most. The VM turns a non-finite float result into a row error, so
     /// no branch is keyed by one.
     fn generated_value(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>, depth: u8) -> RuntimeValue {
         use meticulous::{OptionExt as _, ResultExt as _};
 
-        let kinds = if depth == 0 { 13 } else { 15 };
+        let kinds = if depth == 0 { 14 } else { 16 };
         match arbitrary.entropy().byte() % kinds {
             0 => RuntimeValue::String(arbitrary.string()),
             1 => RuntimeValue::Bool(arbitrary.entropy().flag()),
@@ -472,7 +472,10 @@ impl BranchKey {
                 };
                 RuntimeValue::F64(OrderedFloat(value))
             }
-            13 => {
+            13 => RuntimeValue::Duration(nervix_models::DurationValue::from_nanoseconds(
+                arbitrary.entropy().any_i64(),
+            )),
+            14 => {
                 let next = depth
                     .checked_sub(1)
                     .verified("a nested kind is drawn above depth zero");

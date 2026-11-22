@@ -30,8 +30,9 @@ use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrowNativeTypeOp, BooleanArray, Float64Array, Int64Array, PrimitiveArray, StringArray,
     types::{
-        ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
-        TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        ArrowPrimitiveType, DurationNanosecondType, Float32Type, Float64Type, Int8Type, Int16Type,
+        Int32Type, Int64Type, TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type,
+        UInt64Type,
     },
 };
 use arrow_buffer::NullBuffer;
@@ -433,6 +434,9 @@ fn extreme_positions(
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
             primitive_extremes::<TimestampNanosecondType>(list, extremum)
+        }
+        DataType::Duration(TimeUnit::Nanosecond) => {
+            primitive_extremes::<DurationNanosecondType>(list, extremum)
         }
         _ => with_numeric_element!(
             list,

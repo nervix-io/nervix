@@ -94,6 +94,9 @@ pub enum JsonTargetDefect {
     /// A type no JSON value holds.
     #[error("{0}, which no JSON value is; read the text as STRING and convert it explicitly")]
     NoJsonValue(ParseAsType),
+    /// A `DURATION`, which no JSON value is and no conversion reads from text.
+    #[error("DURATION, which no JSON value is")]
+    NoJsonDuration,
     /// A fixed `ARRAY` wider than an Arrow fixed-size list holds.
     #[error("an ARRAY of length {0}, which exceeds 2147483647")]
     ArrayTooWide(NonZeroU32),
@@ -129,6 +132,7 @@ impl TryFrom<&ParseAsType> for JsonTarget {
             ParseAsType::Datetime | ParseAsType::Bytes => {
                 return Err(JsonTargetDefect::NoJsonValue(declared.clone()));
             }
+            ParseAsType::Duration => return Err(JsonTargetDefect::NoJsonDuration),
         };
         Ok(target)
     }

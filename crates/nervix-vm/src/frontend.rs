@@ -1428,6 +1428,7 @@ fn lower_expression_with_span(
             ModelLiteral::F64(value) => Literal::Float64(value.value()),
             ModelLiteral::Bool(value) => Literal::Bool(*value),
             ModelLiteral::String(value) => Literal::String(value.clone()),
+            ModelLiteral::Duration(value) => Literal::Duration(value.nanoseconds()),
             ModelLiteral::Null => Literal::Null,
         }),
         ModelExpression::Field(reference) => {

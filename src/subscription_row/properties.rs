@@ -13,9 +13,10 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DurationNanosecondArray, FixedSizeListArray,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
+    RecordBatch, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
 };
 use arrow_buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_schema::{Field, Schema};
@@ -25,7 +26,7 @@ use nervix_client_wire::{
     CellView, Reply, ReplyBody, ReplyDelivery, ServerEvent, ServerMessage, SessionLimits,
     SubscribeDisposition, SubscribeOutcome, SubscriptionHandle,
 };
-use nervix_models::{ParseAsType, SchemaField, Timestamp};
+use nervix_models::{DurationValue, ParseAsType, SchemaField, Timestamp};
 use nervix_primitives::sync::StdArc;
 
 use super::{SubscriptionRowEncodingError, SubscriptionRowOpening, SubscriptionRowSelection};
@@ -118,6 +119,7 @@ impl ArrowCase {
         column!(StringArray, String, text.as_str(), "");
         column!(BinaryArray, Bytes, binary.as_slice(), &[][..]);
         column!(TimestampNanosecondArray, Datetime, signed, 0);
+        column!(DurationNanosecondArray, Duration, signed, 0);
         let list_item = StdArc::new(Field::new("item", arrow_schema::DataType::Int64, false));
         let list_values: ArrayRef =
             StdArc::new(Int64Array::from(vec![signed, 0, i64::MAX, i64::MIN]));
@@ -416,6 +418,13 @@ fn assert_arrow_cell(array: &dyn Array, row: usize, cell: CellView<'_>) {
         assert_eq!(
             cell,
             CellView::Datetime(Timestamp::from_unix_nanos(array.value(row)))
+        );
+        return;
+    }
+    if let Some(array) = array.as_any().downcast_ref::<DurationNanosecondArray>() {
+        assert_eq!(
+            cell,
+            CellView::Duration(DurationValue::from_nanoseconds(array.value(row)))
         );
         return;
     }
