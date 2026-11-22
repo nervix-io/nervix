@@ -845,8 +845,7 @@ pub(super) async fn decode_window_processor_snapshot(
     else {
         return Ok(None);
     };
-    let decoded =
-        decode_window_processor_layout(payload, executor, schemas, layout).await?;
+    let decoded = decode_window_processor_layout(payload, executor, schemas, layout).await?;
     Ok(Some(decoded.snapshot))
 }
 
