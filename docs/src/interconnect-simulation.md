@@ -66,6 +66,7 @@ them substitutes for another.
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
 | `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Queue slots, admission order, and charge ownership of the Turmoil CPU strategy |
+| `crates/execution/src/workers.rs`, `HeldWorker` | Harness | The test-only owner hold that keeps a class's worker active without parking a thread, so every execution check that fills a class also completes on the simulated scheduler |
 | `crates/primitives/src/tests/simulated_host.rs` | Harness | The boundary's own check that sockets, name lookup, timers, and admitted CPU jobs belong to the simulated host whose task uses them |
 | `justfile` and the `turmoil` job in `.github/workflows/check.yaml` | Tooling | The recipes, budgets, validation, and CI artifact |
 
@@ -167,6 +168,14 @@ Turmoil can vary the order of tasks around a job, but not instructions inside it
 need Shuttle or real threads. Storage jobs still run on a real blocking thread and are outside the
 simulated path. Only bounded executor probes and interconnect codec jobs are approved for the
 simulation; storage jobs, external drivers, and unbounded CPU work are not.
+
+Because a CPU job's body is one scheduling step, a CPU job never waits for another task in this
+build: a job that blocked until a test released it would stop the only thread that release can run
+on, and the suite would spend its whole budget on that test. Every unit test of `nervix-execution`
+runs in this build, as the `execution` invocation of `just test-turmoil`. A check that needs a
+class's worker occupied therefore holds it with the pool's test-only owner hold, `HeldWorker`, which
+marks the worker active without parking a thread and gives it back through the same transition as a
+job that ends. A storage job may still block, since it keeps its real blocking thread.
 
 ### Time
 
