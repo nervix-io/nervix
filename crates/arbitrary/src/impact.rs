@@ -604,14 +604,12 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// An execution node rebuilt for its configuration, its ownership or a recovery.
+    /// An execution node rebuilt for its configuration or its ownership.
     fn rebuild_impact(&mut self, operations: TransactionOperationRange) -> RebuildImpact {
         let node = self.execution_node_coverage();
-        let reason = self.entropy.pick([
-            RebuildReason::Configuration,
-            RebuildReason::Ownership,
-            RebuildReason::Recovery,
-        ]);
+        let reason = self
+            .entropy
+            .pick([RebuildReason::Configuration, RebuildReason::Ownership]);
         let attribution = self.impact_attribution(operations);
         RebuildImpact {
             node,
@@ -1452,7 +1450,7 @@ mod tests {
     const BYTES: usize = 8192;
 
     /// Every variant, family and shape the generators promise to reach, as [`Walk`] names them.
-    const EXPECTED: [&str; 107] = [
+    const EXPECTED: [&str; 106] = [
         "TransactionImpactReport::empty",
         "TransactionOperationRange::single",
         "TransactionOperationRange::several",
@@ -1520,7 +1518,6 @@ mod tests {
         "ActivationAction::RefreshHttpsListener",
         "RebuildReason::Configuration",
         "RebuildReason::Ownership",
-        "RebuildReason::Recovery",
         "StatePurge::DeduplicatorKeyspace",
         "StatePurge::ReordererBuffer",
         "StatePurge::WindowAccumulator",
@@ -1906,7 +1903,6 @@ mod tests {
                 match rebuild.reason {
                     RebuildReason::Configuration => self.see("RebuildReason::Configuration"),
                     RebuildReason::Ownership => self.see("RebuildReason::Ownership"),
-                    RebuildReason::Recovery => self.see("RebuildReason::Recovery"),
                 }
                 self.execution(&rebuild.node);
                 self.attribution(&rebuild.attribution, within);

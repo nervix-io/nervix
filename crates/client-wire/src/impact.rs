@@ -71,7 +71,6 @@ wire_enum!(ALL_ACTIVATION_ACTIONS: ActivationAction => wire::ActivationAction {
 wire_enum!(ALL_REBUILD_REASONS: RebuildReason => wire::RebuildReason {
     Configuration,
     Ownership,
-    Recovery,
 });
 
 wire_enum!(ALL_STATE_PURGES: StatePurge => wire::StatePurge {

@@ -237,6 +237,17 @@ impl DomainRouting {
         self.published.store(self.current.clone());
     }
 
+    /// The revision readers see, which lifecycle code may since have staged changes against.
+    pub(super) fn published_snapshot(&self) -> StdArc<DomainRoutingSnapshot> {
+        self.published.load_full()
+    }
+
+    /// Drops every change staged since the last publication, as a failed entity swap does: the
+    /// staged revision is the published one again.
+    pub(super) fn discard_staged(&mut self) {
+        self.current = self.published.load_full();
+    }
+
     pub(super) fn deactivate(&mut self) {
         self.passive_only = true;
         self.publish();
