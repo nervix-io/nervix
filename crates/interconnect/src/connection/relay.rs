@@ -55,6 +55,14 @@ impl RelaySendProgress {
     }
 }
 
+/// Whether a relay exchange's answer left this node.
+enum RelayAnswer {
+    /// The answer was handed to the sender's stream.
+    Sent,
+    /// The sender reset the exchange while the answer waited for a place, so it never left.
+    Ended,
+}
+
 impl TransportState {
     pub(crate) async fn cancel_relay(
         &self,
@@ -195,11 +203,19 @@ impl TransportState {
                 },
             )
             .await?;
-        let response = wire::decode_rkyv::<RelayAdmissionResponse>(
+        // The status is the receiver's verdict on the attempt, and a cancellation it answers is
+        // already applied, so a full control queue holds the answer back rather than losing it,
+        // until the query's own deadline.
+        let response = wire::decode_answer::<RelayAdmissionResponse>(
             &self.executor,
             MemoryClass::Management,
             CpuClass::Control,
             response,
+            AnswerDeadline {
+                peer: node_id,
+                at: deadline,
+                timeout: timeout_duration,
+            },
         )
         .await?
         .into_value();
@@ -324,11 +340,19 @@ impl TransportState {
                 return Err(error);
             }
         };
-        let grant = wire::decode_rkyv::<RelayGrantResponse>(
+        // The receiver has already decided the grant, and a grant it issued holds its relay memory
+        // until this delivery uses or cancels it, so a full control queue holds the answer back
+        // rather than leaving the grant to be reconciled, until the delivery's own deadline.
+        let grant = wire::decode_answer::<RelayGrantResponse>(
             &self.executor,
             MemoryClass::Management,
             CpuClass::Control,
             grant_response,
+            AnswerDeadline {
+                peer: node_id,
+                at: deadline,
+                timeout: timeout_duration,
+            },
         )
         .await?
         .into_value();
@@ -559,15 +583,19 @@ impl TransportState {
         .await?
         .into_value();
         if request.sender_epoch != peer_epoch || request.receiver_epoch != self.process_epoch {
-            return self
-                .send_relay_admission_response(respond, RelayAdmissionStatus::Indeterminate)
-                .await;
+            self.send_relay_admission_response(respond, RelayAdmissionStatus::Indeterminate)
+                .await?;
+            return Ok(());
         }
         let attempt = self.relay_attempt_key(peer_node_id, request.sender_epoch, request.delivery);
         let (status, record_to_retire) = relay_owner.control(&attempt, cancel);
-        self.send_relay_admission_response(respond, status.clone())
+        let answered = self
+            .send_relay_admission_response(respond, status.clone())
             .await?;
-        if let Some(record) = record_to_retire
+        // A terminal status the sender never received stays answerable, so the query it repeats
+        // finds the same status rather than an attempt this node already forgot.
+        if let RelayAnswer::Sent = answered
+            && let Some(record) = record_to_retire
             && status.is_terminal()
         {
             self.retire_relay_record(&record, status);
@@ -577,10 +605,12 @@ impl TransportState {
 
     async fn send_relay_admission_response(
         &self,
-        respond: server::SendResponse<Bytes>,
+        mut respond: server::SendResponse<Bytes>,
         status: RelayAdmissionStatus,
-    ) -> Result<(), Report<TransportError>> {
-        let response = wire::encode_rkyv(
+    ) -> Result<RelayAnswer, Report<TransportError>> {
+        // The status is this node's verdict on the attempt, and a cancellation is already applied,
+        // so a full control queue holds the answer back; the sender's reset ends the wait.
+        let response = wire::encode_answer(
             &self.executor,
             MemoryClass::Management,
             CpuClass::Control,
@@ -589,8 +619,12 @@ impl TransportState {
                 receiver_epoch: self.process_epoch,
                 status,
             },
+            exchange_reset(&mut respond),
         )
         .await?;
+        let AnswerEncoding::Encoded(response) = response else {
+            return Ok(RelayAnswer::Ended);
+        };
         send_response(
             respond,
             StatusCode::OK,
@@ -598,7 +632,7 @@ impl TransportState {
             self.options.progress_timeout,
         )
         .await?;
-        Ok(())
+        Ok(RelayAnswer::Sent)
     }
 
     /// Answer a grant request this node does not issue with its typed refusal, and count it.
@@ -615,10 +649,14 @@ impl TransportState {
 
     async fn send_relay_grant_response(
         &self,
-        respond: server::SendResponse<Bytes>,
+        mut respond: server::SendResponse<Bytes>,
         disposition: RelayGrantDisposition,
     ) -> Result<(), Report<TransportError>> {
-        let response = wire::encode_rkyv(
+        // The disposition is already decided, and a grant it carries already holds its relay
+        // memory, so a full control queue holds the answer back rather than leaving the grant to
+        // be reconciled. The sender's reset ends the wait; a grant whose answer it never received
+        // is then reconciled exactly as one whose answer was lost.
+        let response = wire::encode_answer(
             &self.executor,
             MemoryClass::Management,
             CpuClass::Control,
@@ -627,8 +665,12 @@ impl TransportState {
                 receiver_epoch: self.process_epoch,
                 disposition,
             },
+            exchange_reset(&mut respond),
         )
         .await?;
+        let AnswerEncoding::Encoded(response) = response else {
+            return Ok(());
+        };
         send_response(
             respond,
             StatusCode::OK,

@@ -634,7 +634,9 @@ fresh challenge and single-use signed stream ticket; credentials stay out of the
 or `trust` hint schedules a coalesced refresh through the ordinary verification and Raft path;
 duplicate and stale notification identifiers do not schedule another refresh. Hints grant no
 permission. An in-flight refresh can satisfy a sync's reported revisions before another request
-starts.
+starts. A response the cluster refuses satisfies nothing: a sync that reports a newer decision
+than the committed one still schedules a refresh, and the cluster commits the service's next
+verified decision, never the refused copy.
 Notification gaps and later changes still reconcile, and explicit refresh commands still run.
 Reconnects retain `Last-Event-ID` within the current activation and leader tenure;
 a new leader reconciles from its committed revisions. Leadership loss, shutdown or a changed
@@ -963,7 +965,7 @@ Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are
 | Pool | Memory fraction | Minimum working set |
 | --- | --- | --- |
 | `intake` | 1/16 | 128 MiB |
-| `management` | 1/128 | 64 KiB |
+| `management` | 1/128 | 256 KiB, one consensus vote or metadata write |
 | `commands` | 1/32 | 24 MiB |
 | `relay` | 1/16 | Enough for its two admitted operations |
 | `state-read` | Resolved relay capacity | Enough for its two admitted operations |
@@ -977,6 +979,12 @@ Derived pools are capped at the 32-bit byte-permit representation. Explicit valu
 silently reduced. With unknown memory, defaults are respectively 128, 8, 24, 192, 192, 192, 32, 16,
 2,048 and 19 MiB. Credentials keeps room for mounted NATS files; PBKDF2's operation charge stays
 64 bytes and its creation policy remains the committed `PASSWORD_ITERATIONS` parameter.
+
+The management pool must hold its largest operation, one consensus vote or metadata write. The
+consensus store reserves four management events for each, 256 KiB with the fixed 64 KiB event (see
+[Consensus Storage And Replication](consensus-storage-and-replication.md#storage-working-sets)).
+A smaller explicit `--execution-management-memory-bytes` refuses startup before any store opens,
+and the refusal names both values. A derived management pool never falls below this working set.
 
 `--execution-relay-encoded-bytes` and `--execution-relay-decoded-bytes` default to one sixth of the
 relay pool, capped at 32 MiB each; `--execution-relay-scratch-bytes` defaults to one twelfth,

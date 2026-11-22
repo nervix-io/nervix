@@ -357,8 +357,10 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX PARAM ACK` archive signature identifies the current Model layout, including
-the `parametrizer` kind text of the declared entity that defines a parametrization, that union, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
+The registry's `NERVIX NODE RULE` archive signature identifies the current Model layout, including
+the `parametrizer` kind text of the declared entity that defines a parametrization, that union, a
+placement's colocation or node rule with its `FOR` members or domain-wide scope and its
+`REQUIRE NODES`, `PREFER NODES` or `ANY NODE` policy and selector, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
 encoding, a Pulsar subscription's required type and an owned subscription's required start position,
 a Kafka consumer group's required start position, the direct, automatic inherited or grouped inherited partitions of a parametrizer,
 typed ingestor instancing, Sentry platform, an ingestor's `TIMESTAMP AT metadata.<field>` source,
@@ -379,9 +381,9 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_traces_` keyspaces and `ClusterState`
-metadata encoding 45 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
-domain, resource and user labels, each node's trace export capabilities, node selector statements and the partition count of every resolved
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_traces_` keyspaces and `ClusterState`
+metadata encoding 46 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+domain, resource and user labels, node selector statements, placement node rules, each node's trace export capabilities and the partition count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes

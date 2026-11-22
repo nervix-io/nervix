@@ -63,12 +63,21 @@ pub struct StreamObservation {
     pub last_event: Option<u64>,
 }
 
+/// One initial `sync` the service sent: the stream ticket it answered, the revisions it reported,
+/// and how many verified licensing requests the service had recorded when it built them.
+#[derive(Clone, Debug)]
+pub struct SyncObservation {
+    pub request_id: Uuid,
+    pub state: NotificationState,
+    pub recorded_requests: usize,
+}
+
 pub(super) struct Notifications {
     wake: watch::Sender<()>,
     epoch: u64,
     mode: StreamMode,
     duplicate: bool,
-    sync_sent: u64,
+    syncs: Vec<SyncObservation>,
     hints_sent: u64,
     consumed: BTreeSet<Uuid>,
     observations: Vec<StreamObservation>,
@@ -82,7 +91,7 @@ impl Default for Notifications {
             epoch: 0,
             mode: StreamMode::Normal,
             duplicate: false,
-            sync_sent: 0,
+            syncs: Vec::new(),
             hints_sent: 0,
             consumed: BTreeSet::new(),
             observations: Vec::new(),
@@ -129,7 +138,14 @@ impl Model {
     }
     pub fn notification_stream_ready(&self) -> bool {
         self.active_notification_streams() == 1
-            && (self.notifications.mode == StreamMode::Blocked || self.notifications.sync_sent > 0)
+            && (self.notifications.mode == StreamMode::Blocked
+                || !self.notifications.syncs.is_empty())
+    }
+    pub fn notification_syncs(&self) -> Vec<SyncObservation> {
+        self.notifications.syncs.clone()
+    }
+    pub fn notification_hints_sent(&self) -> u64 {
+        self.notifications.hints_sent
     }
     pub fn duplicate_hints_were_sent(&self) -> bool {
         !self.notifications.duplicate || self.notifications.hints_sent >= 2
@@ -211,6 +227,7 @@ impl Model {
         });
         self.notifications.active.fetch_add(1, Ordering::Relaxed);
         Ok(Admission {
+            request_id: common.request_id,
             epoch: self.notifications.epoch,
             updates: self.notifications.wake.subscribe(),
             active: Active(self.notifications.active.clone()),
@@ -225,6 +242,7 @@ impl Drop for Active {
     }
 }
 struct Admission {
+    request_id: Uuid,
     epoch: u64,
     updates: watch::Receiver<()>,
     active: Active,
@@ -278,11 +296,13 @@ impl Session {
                             state.conditions_revision = 0;
                             state.trust_serial = 0;
                         }
-                        model.notifications.sync_sent = model
-                            .notifications
-                            .sync_sent
-                            .checked_add(1)
-                            .assured("bounded fixture sync count");
+                        // At most one per admitted stream, whose single-use tickets are bounded.
+                        let recorded_requests = model.requests.len();
+                        model.notifications.syncs.push(SyncObservation {
+                            request_id: self.admission.request_id,
+                            state: state.clone(),
+                            recorded_requests,
+                        });
                         return Some(event(Notification::Sync(state)));
                     }
                     if mode != StreamMode::Withhold
@@ -467,6 +487,62 @@ mod tests {
                 .open_stream(id, &HeaderMap::new())
                 .is_err_and(|error| error.current_context().0 == ProblemKind::SignatureInvalid)
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn the_first_sync_records_its_ticket_revisions_and_preceding_requests() {
+        let (mut model, signer, id) = activated().await;
+        let cluster = model.activations[&id].binding.cluster_uid;
+        let ticket = StreamTicket {
+            common: common(&mut model, cluster).await,
+            activation_id: id,
+            state: CommittedState {
+                applied_decision_revision: 1,
+                applied_conditions_revision: 1,
+                licensing_time: model.now,
+            },
+        };
+        let compact = signer.sign(&ticket, limits()).assured("signed ticket");
+        let mut headers = HeaderMap::new();
+        headers.typed_insert(Authorization::bearer(&compact).assured("signed token"));
+        let admission = model
+            .open_stream(id, &headers)
+            .assured("bound fresh ticket opens");
+        assert!(model.notification_syncs().is_empty());
+        let mut session = Session {
+            model: Arc::new(nervix_primitives::sync::Mutex::new(model)),
+            id,
+            admission,
+            stop: nervix_primitives::sync::CancellationToken::new(),
+            last: None,
+            repeat: None,
+        };
+        assert!(session.next().await.is_some(), "the session sends its sync");
+        let model = session.model.lock().await;
+        let syncs = model.notification_syncs();
+        assert_eq!(syncs.len(), 1);
+        assert_eq!(syncs[0].request_id, ticket.common.request_id);
+        assert_eq!(
+            syncs[0].state,
+            model
+                .notification_state(id)
+                .assured("the activation is held")
+        );
+        assert_eq!(
+            syncs[0].recorded_requests, 1,
+            "only the activation's creation preceded the sync"
+        );
+        let held = model.held_decision(id).assured("the activation is held");
+        assert_eq!(
+            syncs[0].state.decision_revision, held.decision_revision,
+            "the sync reports the decision the service holds"
+        );
+        assert_eq!(
+            model.notification_hints_sent(),
+            0,
+            "a first sync is not a decision hint"
+        );
+        assert!(model.notification_stream_ready());
     }
 
     #[nervix_primitives::test]

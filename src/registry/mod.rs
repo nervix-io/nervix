@@ -34,6 +34,7 @@ mod ingestor_units;
 mod message_error_plan;
 mod mutation;
 mod node_capacity;
+mod node_rules;
 pub(crate) mod node_selector;
 mod partition_epochs;
 mod partition_topology;
@@ -47,7 +48,7 @@ mod restore_plan;
 mod schedule_delta;
 mod scheduler;
 #[cfg(test)]
-pub(crate) use scheduler::uniform_capabilities;
+pub(crate) use scheduler::uniform_records;
 mod unit_placement;
 pub(crate) use scheduler::{DomainSchedulingInputs, assign_server_listener_nodes};
 mod storage;
@@ -106,6 +107,10 @@ pub(crate) use message_error_plan::{
     MessageErrorCompileSchemas, MessageErrorRouteKey, MessageErrorRouteSpecs,
 };
 pub(crate) use mutation::{PlannedMutations, RegistryMutation};
+pub(crate) use node_rules::{
+    NodeRuleBreaches, NodeRuleJudgement, NodeRuleMemberPlan, NodeRulePlan, NodeRuleUnitCounts,
+    ScheduleActivity, UnitRuleState,
+};
 pub(crate) use partition_topology::{
     KafkaPartitionSourcePlan, PartitionSourcePlan, PartitionSourceSpec, PulsarPartitionSourcePlan,
     decide as decide_partition_topology, source_specs as partition_source_specs,

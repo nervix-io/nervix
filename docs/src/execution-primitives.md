@@ -468,13 +468,18 @@ lock or reference count. VM execution still owns its class and charge decisions.
 preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
 Request work, whose caller still holds its input and waits on the answer, keeps its immediate
 refusal through the refusing `run_cpu` and `run_storage`, including client batch decoding,
-statement constants, subscription predicates, state inspection, an HTTP endpoint body and the
-frames of a request one node sends another. Every other job states `QueueAdmission::WaitForPlace`
-and waits: the unfolding of every payload an ingestor handed over, acknowledged or not, relay and
-subscription carriage, the answer of an interconnect request whose handler already ran,
-checkpoints and state captures, compilation for a committed change, lifecycle steps, and the
-consensus storage worker's jobs, which `submit_storage` admits in order. A wait ends in a refusal
-only once the executor admits no more work.
+statement constants, subscription predicates, a state inspection read on its owner, an HTTP endpoint
+body and the request frames one node sends another: a typed request, a stream opening, a connection
+hello, and a relay query or grant request. Every other job states `QueueAdmission::WaitForPlace` and
+waits: the unfolding of every payload an ingestor handed over, acknowledged or not, relay and
+subscription carriage, every answer frame one node sends another once its handler ran (a typed
+response, a duplex answer, a byte stream's answer such as a state inspection page, a connection
+answer, a relay status or grant answer, and an ack resolution), every frame a duplex stream carries
+after its opening, checkpoints and state captures, compilation for a committed change, lifecycle
+steps, and the consensus storage worker's jobs, which `submit_storage` admits in order. A wait ends
+in a refusal only once the executor admits no more work. [Traffic And Resource
+Isolation](./interconnect.md#traffic-and-resource-isolation) decides each protocol's frames and what
+ends their waits.
 
 An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
 job. Every inferencer does this before moving its branch's native session into the job that runs
@@ -493,7 +498,10 @@ submission returns only after its job has been selected. Each callback catches i
 returns `JobPanicked` to its caller, records its completed service and leaves successors runnable.
 The worker publishes its next selection or its idle transition before delivering the completed
 result. Existing per-class admission, refusal, completion, queue-time and work-time counters retain
-their meanings; work time measures callbacks, excluding dispatch and queue waits.
+their meanings; work time measures callbacks, excluding dispatch and queue waits. A class also
+reports how many `WaitForPlace` jobs wait for a place in its full queue: a job takes a free place
+exactly as a refusing job does, counts as waiting only once it finds the queue full, and stops
+counting when it takes a place, the pool closes or its caller drops the wait.
 
 Worker state distinguishes a selected callback, a callback executing and an idle worker. Runtime
 teardown that drops a worker between callbacks, or before its blocking task starts, returns its
