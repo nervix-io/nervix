@@ -521,8 +521,8 @@ Feature: SQS emission
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      "tenant":"alpha" | "sequence":2 | "error_code":"refused" | "operation":"publish" | ordering group expression failed with division_by_zero
-      "tenant":"beta" | "sequence":2 | "error_code":"refused" | "operation":"publish" | ordering group expression failed with division_by_zero
+      "tenant":"alpha" | "sequence":2 | "error_code":"evaluation" | "operation":"publish" | ordering group expression failed with division_by_zero
+      "tenant":"beta" | "sequence":2 | "error_code":"evaluation" | "operation":"publish" | ordering group expression failed with division_by_zero
       """
 
     Examples:
