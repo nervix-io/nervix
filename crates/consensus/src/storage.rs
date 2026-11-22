@@ -96,17 +96,14 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_rebuildreasons_logs";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_rebuildreasons_logs";
 const KEYSPACE_META: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_rebuildreasons_meta";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_rebuildreasons_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_rebuildreasons_state";
-const KEYSPACE_SNAPSHOT: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_rebuildreasons_snapshots";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_rebuildreasons_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_rebuildreasons_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
-/// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
-const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
 /// The budget one storage operation is charged against. Storage writes votes and metadata as
 /// management work, log entries and normalized state as commands, and snapshot sections as bulk
@@ -127,14 +124,11 @@ impl StorageCharge {
         }
     }
 
-    /// The working memory one operation of this kind reserves.
+    /// The working memory one operation of this kind reserves. A management operation reserves
+    /// the working set the executor validated its management budget against.
     fn working_bytes(self, executor: &Executor) -> io::Result<u64> {
         let bytes = match self {
-            Self::Management => executor
-                .limits()
-                .management_event_bytes
-                .as_u64()
-                .checked_mul(STORAGE_RESERVATION_MULTIPLIER),
+            Self::Management => executor.limits().management_storage_working_bytes(),
             Self::Bulk => executor.limits().snapshot_section_working_bytes(),
             Self::Commands => executor.limits().command_state_storage_working_bytes(),
         };
@@ -236,7 +230,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 44,
+    ClusterState = 45,
 }
 
 #[derive(Debug)]

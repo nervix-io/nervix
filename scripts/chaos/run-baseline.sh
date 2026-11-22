@@ -2870,8 +2870,10 @@ if [[ "${scenario}" != "baseline" ]]; then
         source "${script_dir}/pause-resume-scenario.sh"
         run_pause_resume
     elif [[ "${scenario}" == "partition-recovery" ]]; then
-        # shellcheck source=partition-scenario.sh
-        source "${script_dir}/partition-scenario.sh"
+        # The recovery helpers source partition-scenario.sh and the label probe the follower case
+        # carries.
+        # shellcheck source=recovery-scenario.sh
+        source "${script_dir}/recovery-scenario.sh"
         run_partition_recovery
     elif [[ "${scenario}" == "degraded-links" ]]; then
         # shellcheck source=degraded-links-scenario.sh

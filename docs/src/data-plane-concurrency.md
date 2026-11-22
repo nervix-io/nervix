@@ -502,6 +502,24 @@ executes these production decoders with a queued budget reservation and an occup
 checks the independent input charge after the outer envelope ends, cancels the queued decode and
 requires a fresh complete decode with every charge returned. It makes no memory-ordering claim.
 
+An answer frame one node sends another waits for a place on its CPU class instead of being refused.
+`wire::encode_answer` races the encoding's wait against the end of the exchange it answers, and
+`wire::decode_answer` bounds the decoding by its request's deadline; a duplex responder races its
+answer stream against the initiator's reset, and a duplex receiver keeps its decoding until it is
+dropped. A duplex stream holds every frame after its opening back the same way, in both directions,
+for as long as the stream lives. Ending a wait drops the job, which returns its place in line and
+its charge, or cancels it from the worker FIFO if it already holds a place; a job already on its
+worker finishes its bounded work first and then gives back its worker and charge.
+The registered Shuttle check
+`wire::admission_tests::shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place`
+executes the production encoder on a bulk class of one worker and one place held full. While the
+class stays full, only the end of the exchange can end the wait, so an encoder that ignored it
+deadlocks the check. A freed place racing the next exchange's end then yields either the whole
+answer or the end, with nothing refused, and once the last job exits every job is off its worker and
+every charge returned. It makes no memory-ordering claim. Deloxide does not observe these
+asynchronous semaphore waits, and the queued cancellation they can cause goes through the existing
+worker FIFO owner.
+
 `RESUME` changes the domain to running at its archived lifecycle in the consensus effect that
 records complete publication and releases the installation gate. No atomic field or memory
 ordering in the capture epoch, assignment protocol or relay revision changed. Existing Loom
@@ -3605,6 +3623,25 @@ the licensing request is never withdrawn, and a withdrawal or a request that lan
 changes nothing. The owner's choice between clauses that act together is a pure function its unit
 tests cover; the per-node drain views and reports cross the network in the Turmoil stop case of
 [Deterministic Interconnect Simulation](./interconnect-simulation.md#scenario-matrix).
+
+A node's runtime installations and activations run under the runtime admission's one installation
+turn. `RuntimeAdmission::begin_installation` waits for the turn as an owned guard, and
+`InstallationTurn::run` hands the section to a task that keeps the guard until the section ends.
+The caller only waits for that task, so a caller that goes away cuts nothing short: a request
+handler the interconnect server drops, or a task shutdown ends. Once drain support has ended,
+terminal teardown takes the turn through `finish_installations` and keeps it. Keeping it matters: a
+caller can check the shutdown just before drain support ends and ask for the turn only after
+teardown has taken it, and a turn given back would let that caller begin a section while the runtime
+stops. The check found exactly that schedule while `finish_installations` still released the turn.
+`shuttle_an_installation_whose_caller_goes_away_ends_before_the_next_turn_and_the_runtime_stop` in
+`src/application/runtime_admission_shuttle_tests.rs` explores two callers racing that teardown, one
+of which goes away at any moment while it waits for the turn or for its section. Every section that
+began ends, two sections never overlap, none begins after the runtime stopped, and the runtime stops
+only after the last section ended. This is a control-plane ordering check without a memory-ordering
+claim. The turn is an async mutex, outside Deloxide's tracked-lock detection. The owner test in
+`src/application/session_service/tests/abandoned_installation.rs` and the public
+`@abandoned_installation` scenario cover the stopped domain's teardown that a dropped drain-status
+request handler began.
 
 Consensus storage admits each Commands or Bulk working set through independent class-specific
 turns before asking its memory class, and a working set returns its bytes before its turn passes.

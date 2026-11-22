@@ -2,9 +2,11 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** The assignment policy: how many slots a model needs, the order candidates are
-//!   ranked in, upstream locality, and the deterministic test mode that replaces all of it.
-//! - **Depends on.** The active graph it reads and the placement plan that constrains it.
+//! - **Owns.** The assignment policy: how many slots a model needs, which cluster nodes a unit's
+//!   node rules admit, the order candidates are ranked in, upstream locality, and the
+//!   deterministic test mode that replaces the ranking but keeps the admission.
+//! - **Depends on.** The active graph it reads, the placement plan that constrains it and the
+//!   committed record of every candidate node.
 //! - **Must not know.** How an assignment is applied or executed.
 
 #![cfg_attr(
@@ -17,8 +19,10 @@ use std::{cmp::Reverse, collections::BTreeMap};
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use error_stack::Report;
 use meticulous::OptionExt;
+#[cfg(test)]
+use nervix_models::NodeCapabilities;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, Model, ModelKind, NodeCapabilities, NodeRef,
+    ClusterNodeName, CommittedNodeRecord, DomainName, DomainSchedule, Model, ModelKind, NodeRef,
     NodeUnitRef, PartitionTopology, PlacementGroupSchedule, PlacementPolicy, ScheduledNode,
     ScheduledNodes, SchemaFingerprint, Unit,
 };
@@ -29,6 +33,7 @@ use sorted_vec::SortedSet;
 use crate::registry::{
     RegistryError,
     graph::{ActiveGraph, ActiveNode, EdgeKind, is_schedulable_model, schedulable_depth},
+    node_rules::{NodeRuleMatches, NodeRules},
     partition_epochs::PartitionEpochs,
     placement::{PlacementPair, PlacementTopology, ResolvedPlacementPair},
 };
@@ -60,14 +65,19 @@ pub(crate) struct DomainSchedulingInputs<'a> {
     pub cluster_nodes: &'a [ClusterNodeName],
     pub replica_count: usize,
     pub existing: Option<&'a DomainSchedule>,
-    pub capabilities: &'a BTreeMap<ClusterNodeName, NodeCapabilities>,
+    /// The committed record of every live node the plan may read, which supplies both the
+    /// capacity claim the load tier weighs and the facts node rules select by.
+    pub records: &'a BTreeMap<ClusterNodeName, CommittedNodeRecord>,
 }
 
-/// How well one cluster node suits the entity being placed. The field order is the order the
-/// candidates are ranked in: placement policy first, then operator preference, then the lightest
-/// load, then how far the node sits from the round-robin cursor, with the node name breaking ties.
+/// How well one cluster node suits the entity being placed. Only a node every winning node rule
+/// requirement admits is a candidate at all. The field order is the order the candidates are
+/// ranked in: node preferences first, then the colocation policy, then upstream locality, then the
+/// lightest load, then how far the node sits from the round-robin cursor, with the node name
+/// breaking ties.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct AssignmentCandidate {
+    node_preference: usize,
     placement_order: isize,
     preferred_order: usize,
     unit_primaries: Reverse<Ratio<u128>>,
@@ -203,6 +213,8 @@ struct AssignmentPlanner<'a> {
     capacities: &'a super::node_capacity::CapacityWeights,
     graph: &'a DiGraph<ActiveNode, EdgeKind>,
     cluster_nodes: &'a [ClusterNodeName],
+    node_rules: &'a NodeRules,
+    node_matches: &'a NodeRuleMatches,
     assigned_by_key: &'a HashMap<NodeRef, Vec<ClusterNodeName>>,
     assigned_by_unit: &'a HashMap<NodeUnitRef, ClusterNodeName>,
     placement_pairs: &'a HashMap<PlacementPair, ResolvedPlacementPair>,
@@ -218,6 +230,8 @@ struct RandomAssignmentPlanner<'a> {
     cluster_nodes: &'a [ClusterNodeName],
     assignment_slots: usize,
     domain_seed: [u8; 32],
+    node_rules: &'a NodeRules,
+    node_matches: &'a NodeRuleMatches,
 }
 
 #[cfg(feature = "testing")]
@@ -227,6 +241,8 @@ impl<'a> RandomAssignmentPlanner<'a> {
         domain: &DomainName,
         cluster_nodes: &'a [ClusterNodeName],
         assignment_slots: usize,
+        node_rules: &'a NodeRules,
+        node_matches: &'a NodeRuleMatches,
     ) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"nervix/test-random-scheduler/domain");
@@ -236,7 +252,38 @@ impl<'a> RandomAssignmentPlanner<'a> {
             cluster_nodes,
             assignment_slots,
             domain_seed: *hasher.finalize().as_bytes(),
+            node_rules,
+            node_matches,
         }
+    }
+
+    /// Keeps the shuffled nodes the node rules of `subjects` admit, ranks the ones they prefer
+    /// first without otherwise disturbing the shuffle, and fills the assignment slots from them.
+    fn admitted<'n>(
+        &self,
+        mut nodes: Vec<ClusterNodeName>,
+        subjects: impl IntoIterator<Item = &'n NodeRef> + Clone,
+    ) -> Vec<ClusterNodeName> {
+        if let Some(admitted) = self
+            .node_rules
+            .admitted_by_all(self.node_matches, subjects.clone())
+        {
+            nodes.retain(|node| admitted.contains(node));
+        }
+        nodes.sort_by_cached_key(|node| {
+            let mut score = 0usize;
+            for subject in subjects.clone() {
+                score = score
+                    .checked_add(
+                        self.node_rules
+                            .preference_score(self.node_matches, subject, node),
+                    )
+                    .assured("a score counts rules held in memory");
+            }
+            Reverse(score)
+        });
+        nodes.truncate(self.assignment_slots);
+        nodes
     }
 
     /// Non-security BLAKE3: distributes controlled test assignments, not security decisions.
@@ -270,8 +317,7 @@ impl<'a> RandomAssignmentPlanner<'a> {
     fn assignment(&self, members: &[NodeRef]) -> Vec<ClusterNodeName> {
         let mut nodes = self.cluster_nodes.to_vec();
         fastrand::Rng::with_seed(self.assignment_seed_for(members)).shuffle(&mut nodes);
-        nodes.truncate(self.assignment_slots);
-        nodes
+        self.admitted(nodes, members.iter())
     }
 
     /// Deals one stable global unit index over a deterministically shuffled node order.
@@ -283,8 +329,19 @@ impl<'a> RandomAssignmentPlanner<'a> {
             let shift = position % nodes.len();
             nodes.rotate_left(shift);
         }
-        nodes.truncate(self.assignment_slots);
-        nodes
+        self.admitted(nodes, std::iter::once(entity))
+    }
+
+    /// Deals one unit of a hard colocation group over the shuffled order its members share, so
+    /// every member lands where each member's node rules admit it.
+    fn group_assignment(&self, members: &[NodeRef], position: usize) -> Vec<ClusterNodeName> {
+        let mut order = self.cluster_nodes.to_vec();
+        fastrand::Rng::with_seed(self.assignment_seed_for(members)).shuffle(&mut order);
+        if !order.is_empty() {
+            let shift = position % order.len();
+            order.rotate_left(shift);
+        }
+        self.admitted(order, members.iter())
     }
 
     fn for_model(&self, key: &NodeRef, model: &Model) -> Vec<ClusterNodeName> {
@@ -302,16 +359,28 @@ impl<'a> RandomAssignmentPlanner<'a> {
 }
 
 impl AssignmentPlanner<'_> {
-    fn ranked_assignment(
+    /// Ranks the nodes the node rules of every runtime node in `subjects` admit and fills the
+    /// assignment slots from the best of them. A unit nothing admits gets no node.
+    fn ranked_assignment<'n>(
         &mut self,
         preferred_order: &HashMap<ClusterNodeName, usize>,
         placement_order: &HashMap<ClusterNodeName, isize>,
+        subjects: impl IntoIterator<Item = &'n NodeRef> + Clone,
     ) -> Vec<ClusterNodeName> {
+        let admitted = self
+            .node_rules
+            .admitted_by_all(self.node_matches, subjects.clone());
         let mut ordered_nodes = self
             .cluster_nodes
             .iter()
             .enumerate()
+            .filter(|(_, node_id)| {
+                admitted
+                    .as_ref()
+                    .is_none_or(|admitted| admitted.contains(*node_id))
+            })
             .map(|(position, node_id)| AssignmentCandidate {
+                node_preference: self.node_preference(subjects.clone(), node_id),
                 placement_order: placement_order.get(node_id).copied().unwrap_or(0),
                 preferred_order: preferred_order.get(node_id).copied().unwrap_or(0),
                 unit_primaries: Reverse(self.capacities.load(
@@ -338,6 +407,24 @@ impl AssignmentPlanner<'_> {
             .take(self.assignment_slots)
             .map(|candidate| candidate.node_id)
             .collect()
+    }
+
+    /// How many winning `PREFER` selectors of the runtime nodes in `subjects` admit `node`.
+    fn node_preference<'n>(
+        &self,
+        subjects: impl IntoIterator<Item = &'n NodeRef>,
+        node: &ClusterNodeName,
+    ) -> usize {
+        let mut score = 0usize;
+        for subject in subjects {
+            score = score
+                .checked_add(
+                    self.node_rules
+                        .preference_score(self.node_matches, subject, node),
+                )
+                .assured("a score counts rules held in memory");
+        }
+        score
     }
 
     fn for_group(
@@ -382,7 +469,11 @@ impl AssignmentPlanner<'_> {
                 *placement_order.entry(node_id).or_insert(0) += score;
             }
         }
-        self.ranked_assignment(&preferred_order, &placement_order)
+        let subjects = members
+            .iter()
+            .map(|member| &member.node)
+            .collect::<std::collections::BTreeSet<_>>();
+        self.ranked_assignment(&preferred_order, &placement_order, subjects)
     }
 
     fn for_model(
@@ -421,7 +512,7 @@ impl AssignmentPlanner<'_> {
                     self.placement_topology,
                     self.assigned_by_unit,
                 );
-                self.ranked_assignment(&preferred_order, &placement_order)
+                self.ranked_assignment(&preferred_order, &placement_order, std::iter::once(key))
             }
             _ => Vec::new(),
         }
@@ -557,7 +648,7 @@ impl ActiveGraph {
         cluster_nodes: &[ClusterNodeName],
         replica_count: usize,
         existing: Option<&DomainSchedule>,
-        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
+        records: &BTreeMap<ClusterNodeName, CommittedNodeRecord>,
     ) -> Result<DomainSchedule, Report<RegistryError>> {
         #[cfg(feature = "testing")]
         {
@@ -567,18 +658,12 @@ impl ActiveGraph {
                 replica_count,
                 existing,
                 SchedulerMode::Sticky,
-                capabilities,
+                records,
             )
         }
         #[cfg(not(feature = "testing"))]
         {
-            self.schedule_for_domain_inner(
-                domain,
-                cluster_nodes,
-                replica_count,
-                existing,
-                capabilities,
-            )
+            self.schedule_for_domain_inner(domain, cluster_nodes, replica_count, existing, records)
         }
     }
 
@@ -590,7 +675,7 @@ impl ActiveGraph {
         replica_count: usize,
         existing: Option<&DomainSchedule>,
         scheduler_mode: SchedulerMode,
-        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
+        records: &BTreeMap<ClusterNodeName, CommittedNodeRecord>,
     ) -> Result<DomainSchedule, Report<RegistryError>> {
         self.schedule_for_domain_inner(
             domain,
@@ -598,7 +683,7 @@ impl ActiveGraph {
             replica_count,
             existing,
             scheduler_mode,
-            capabilities,
+            records,
         )
     }
 
@@ -609,7 +694,7 @@ impl ActiveGraph {
         replica_count: usize,
         existing: Option<&DomainSchedule>,
         #[cfg(feature = "testing")] scheduler_mode: SchedulerMode,
-        capabilities: &BTreeMap<ClusterNodeName, NodeCapabilities>,
+        records: &BTreeMap<ClusterNodeName, CommittedNodeRecord>,
     ) -> Result<DomainSchedule, Report<RegistryError>> {
         let empty = PartitionTopology::default();
         let topology = match existing {
@@ -622,7 +707,7 @@ impl ActiveGraph {
                 cluster_nodes,
                 replica_count,
                 existing,
-                capabilities,
+                records,
             },
             #[cfg(feature = "testing")]
             scheduler_mode,
@@ -670,6 +755,12 @@ impl ActiveGraph {
                 &graph.branches_with_keyed_state(),
             ),
         };
+        let candidates = candidate_records(inputs.cluster_nodes, inputs.records);
+        let node_matches = if graph.placement.node_rules().is_empty() {
+            NodeRuleMatches::default()
+        } else {
+            graph.placement.node_rules().evaluate(domain, &candidates)?
+        };
         Ok(graph.schedule_resolved_for_domain(
             inputs,
             #[cfg(feature = "testing")]
@@ -677,6 +768,7 @@ impl ActiveGraph {
             topology,
             epochs,
             restored.is_some(),
+            &node_matches,
         ))
     }
 
@@ -687,23 +779,29 @@ impl ActiveGraph {
         topology: &PartitionTopology,
         epochs: PartitionEpochs,
         restored: bool,
+        node_matches: &NodeRuleMatches,
     ) -> DomainSchedule {
         let DomainSchedulingInputs {
             domain,
             cluster_nodes,
             replica_count,
             existing,
-            capabilities,
+            records,
         } = inputs;
         let cluster_nodes = SortedSet::from_unsorted(
             cluster_nodes
                 .iter()
-                .filter(|node| capabilities.contains_key(*node))
+                .filter(|node| records.contains_key(*node))
                 .cloned()
                 .collect(),
         )
         .into_vec();
-        let capacities = super::node_capacity::CapacityWeights::new(&cluster_nodes, capabilities);
+        let capabilities = records
+            .iter()
+            .map(|(node, committed)| (node.clone(), *committed.record.capabilities()))
+            .collect::<BTreeMap<_, _>>();
+        let capacities = super::node_capacity::CapacityWeights::new(&cluster_nodes, &capabilities);
+        let node_rules = self.placement.node_rules();
         let placement = self.placement.effective();
         let unit_groups = super::unit_placement::UnitPlacementGroups::decide(self, &placement);
         let assignment_slots = replica_count
@@ -716,6 +814,8 @@ impl ActiveGraph {
                 domain,
                 &cluster_nodes,
                 assignment_slots,
+                node_rules,
+                node_matches,
             ))
         } else {
             None
@@ -778,6 +878,8 @@ impl ActiveGraph {
                         capacities: &capacities,
                         graph: &self.graph,
                         cluster_nodes: &cluster_nodes,
+                        node_rules,
+                        node_matches,
                         assigned_by_key: &assigned_by_key,
                         assigned_by_unit: &assigned_by_unit,
                         placement_pairs: &placement.pairs,
@@ -797,15 +899,7 @@ impl ActiveGraph {
                             .collect::<Vec<_>>();
                         #[cfg(feature = "testing")]
                         if let Some(random) = &random_assignment_planner {
-                            let mut order = random.cluster_nodes.to_vec();
-                            fastrand::Rng::with_seed(random.assignment_seed_for(&members))
-                                .shuffle(&mut order);
-                            if !order.is_empty() {
-                                let shift = position % order.len();
-                                order.rotate_left(shift);
-                            }
-                            order.truncate(assignment_slots);
-                            order
+                            random.group_assignment(&members, position)
                         } else {
                             planner.for_group(&unit_groups.groups[group], &index_by_key)
                         }
@@ -859,10 +953,18 @@ impl ActiveGraph {
                         if let Some(random) = &random_assignment_planner {
                             random.unit_assignment(&key, position)
                         } else {
-                            planner.ranked_assignment(&unit_affinity, &placement_order)
+                            planner.ranked_assignment(
+                                &unit_affinity,
+                                &placement_order,
+                                std::iter::once(&key),
+                            )
                         }
                         #[cfg(not(feature = "testing"))]
-                        planner.ranked_assignment(&unit_affinity, &placement_order)
+                        planner.ranked_assignment(
+                            &unit_affinity,
+                            &placement_order,
+                            std::iter::once(&key),
+                        )
                     } else {
                         #[cfg(feature = "testing")]
                         if let Some(random) = &random_assignment_planner {
@@ -882,6 +984,23 @@ impl ActiveGraph {
                     if let Some(group) = group_index {
                         group_assignments.insert(group, nodes.clone());
                     }
+                    nodes
+                };
+                // A unit no candidate's record satisfies keeps its last assignment, which the data
+                // plane treats as an unavailable owner, and is reported waiting until a node
+                // qualifies. A unit nothing constrains keeps today's empty assignment.
+                let constrained = match group_index {
+                    Some(group) => node_rules
+                        .admitted_by_all(
+                            node_matches,
+                            unit_groups.groups[group].iter().map(|member| &member.node),
+                        )
+                        .is_some(),
+                    None => node_rules.admitted(node_matches, &key).is_some(),
+                };
+                let nodes = if nodes.is_empty() && constrained {
+                    last_assignment(existing, &member)
+                } else {
                     nodes
                 };
                 if let Some(primary) = nodes.first() {
@@ -942,12 +1061,87 @@ impl ActiveGraph {
     }
 }
 
+/// Where `existing` last placed `member`, primary first; empty for a unit it never placed.
+fn last_assignment(
+    existing: Option<&DomainSchedule>,
+    member: &NodeUnitRef,
+) -> Vec<ClusterNodeName> {
+    let Some(node) = existing.and_then(|schedule| schedule.nodes.get(&member.node)) else {
+        return Vec::new();
+    };
+    let Some(unit) = node.unit(member.unit) else {
+        return Vec::new();
+    };
+    let mut nodes = Vec::with_capacity(unit.assigned_nodes.len());
+    if let Some(primary) = &unit.primary_node {
+        nodes.push(primary.clone());
+    }
+    for assigned in &unit.assigned_nodes {
+        if Some(assigned) != unit.primary_node.as_ref() {
+            nodes.push(assigned.clone());
+        }
+    }
+    nodes
+}
+
+/// The committed records among `records` of the nodes in `cluster_nodes`, the candidates a node
+/// rule's selector is evaluated over.
+fn candidate_records(
+    cluster_nodes: &[ClusterNodeName],
+    records: &BTreeMap<ClusterNodeName, CommittedNodeRecord>,
+) -> BTreeMap<ClusterNodeName, CommittedNodeRecord> {
+    let mut candidates = BTreeMap::new();
+    for node in cluster_nodes {
+        if let Some(record) = records.get(node) {
+            candidates.insert(node.clone(), record.clone());
+        }
+    }
+    candidates
+}
+
+/// Uniform current records for decision fixtures that exercise neither hardware weighting nor
+/// node rules: every node claims the same capacity, detects nothing and carries no tags.
+#[cfg(test)]
+pub(crate) fn uniform_records(
+    nodes: &[ClusterNodeName],
+) -> BTreeMap<ClusterNodeName, CommittedNodeRecord> {
+    let capabilities = uniform_capabilities();
+    nodes
+        .iter()
+        .map(|node| (node.clone(), committed_record(node, capabilities, &[])))
+        .collect()
+}
+
+/// A committed record of `node` with `capabilities`, no detected device or runtime, and `tags`.
+#[cfg(test)]
+pub(crate) fn committed_record(
+    node: &ClusterNodeName,
+    capabilities: NodeCapabilities,
+    tags: &[&str],
+) -> CommittedNodeRecord {
+    use meticulous::ResultExt as _;
+
+    let mut record = nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+        .committed_node_record();
+    let incarnation = record.record.identity().incarnation();
+    record.record.claim.identity =
+        nervix_models::ClusterNodeIdentity::new(node.clone(), incarnation);
+    record.record.claim.capabilities = capabilities;
+    record.record.properties.cpu_model =
+        nervix_models::Detected::Undetected(nervix_models::UndetectedReason::NotReported);
+    record.record.properties.gpus = nervix_models::GpuInventory::NoDevice;
+    record.record.properties.onnx = nervix_models::OnnxRuntimeDetection::Undetected(
+        nervix_models::UndetectedReason::LibraryUnavailable,
+    );
+    record.record.tags = nervix_models::NodeTags::from_assignments(tags.iter().copied())
+        .assured("a fixture names valid tags");
+    record
+}
+
 /// Uniform current claims for decision fixtures that do not exercise hardware weighting.
 #[cfg(test)]
-pub(crate) fn uniform_capabilities(
-    nodes: &[ClusterNodeName],
-) -> BTreeMap<ClusterNodeName, NodeCapabilities> {
-    let capabilities = NodeCapabilities {
+pub(crate) fn uniform_capabilities() -> NodeCapabilities {
+    NodeCapabilities {
         runtime: nervix_models::DataPlaneSettings::default().capabilities(),
         shutdown: nervix_models::ShutdownSettings::default().capabilities(),
         interconnect: nervix_interconnect::TransportSettings::default().capabilities(),
@@ -978,11 +1172,7 @@ pub(crate) fn uniform_capabilities(
         cpu_count: Some(std::num::NonZeroU64::MIN),
         memory_bytes: Some(std::num::NonZeroU64::MIN),
         receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
-    };
-    nodes
-        .iter()
-        .map(|node| (node.clone(), capabilities))
-        .collect()
+    }
 }
 
 #[cfg(test)]
@@ -1004,10 +1194,10 @@ mod tests {
             .expect("partitioned graph");
         let graph = registry.active_graph(&domain).expect("active graph");
         let nodes = three_nodes();
-        let mut capabilities = uniform_capabilities(&nodes);
+        let mut capabilities = uniform_records(&nodes);
         let large = capabilities.get_mut(&nodes[1]).expect("middle node claim");
-        large.cpu_count = std::num::NonZeroU64::new(2);
-        large.memory_bytes = std::num::NonZeroU64::new(2);
+        large.record.claim.capabilities.cpu_count = std::num::NonZeroU64::new(2);
+        large.record.claim.capabilities.memory_bytes = std::num::NonZeroU64::new(2);
         let schedule = graph
             .schedule_for_domain(&domain, &nodes, 0, None, &capabilities)
             .assured("the fixture topology resolves");
@@ -1097,7 +1287,7 @@ mod tests {
                 0,
                 None,
                 SchedulerMode::Random,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                     ClusterNodeName::parse("node-3").expect("valid name"),
@@ -1162,7 +1352,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                 ]),
@@ -1244,7 +1434,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                 ]),
@@ -1362,7 +1552,7 @@ mod tests {
                 &three_nodes(),
                 1,
                 None,
-                &crate::registry::uniform_capabilities(&three_nodes()),
+                &crate::registry::uniform_records(&three_nodes()),
             )
             .assured("the fixture topology resolves");
         let upstream = scheduled_node(&schedule, ModelKind::Relay, "events");
@@ -1400,7 +1590,7 @@ mod tests {
                 &nodes,
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&nodes),
+                &crate::registry::uniform_records(&nodes),
             )
             .assured("the fixture topology resolves");
 
@@ -1447,7 +1637,7 @@ mod tests {
                 &nodes,
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&nodes),
+                &crate::registry::uniform_records(&nodes),
             )
             .assured("the fixture topology resolves");
         assert_eq!(again, schedule, "the same inputs place the same partitions");
@@ -1473,7 +1663,7 @@ mod tests {
                 &three_nodes(),
                 1,
                 None,
-                &crate::registry::uniform_capabilities(&three_nodes()),
+                &crate::registry::uniform_records(&three_nodes()),
             )
             .assured("the fixture topology resolves");
 
@@ -1526,7 +1716,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                 ]),
@@ -1572,7 +1762,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                     ClusterNodeName::parse("node-3").expect("valid name"),
@@ -1626,7 +1816,15 @@ mod tests {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ];
-        let planner = super::RandomAssignmentPlanner::new(&domain, &cluster_nodes, 1);
+        let node_rules = crate::registry::node_rules::NodeRules::default();
+        let node_matches = crate::registry::node_rules::NodeRuleMatches::default();
+        let planner = super::RandomAssignmentPlanner::new(
+            &domain,
+            &cluster_nodes,
+            1,
+            &node_rules,
+            &node_matches,
+        );
 
         assert_eq!(
             planner.assignment_seed_for(std::slice::from_ref(&member)),
@@ -1669,7 +1867,7 @@ mod tests {
                 0,
                 None,
                 SchedulerMode::Random,
-                &crate::registry::uniform_capabilities(&cluster_nodes),
+                &crate::registry::uniform_records(&cluster_nodes),
             )
             .assured("the fixture topology resolves");
         for _ in 0..32 {
@@ -1681,7 +1879,7 @@ mod tests {
                         0,
                         None,
                         SchedulerMode::Random,
-                        &crate::registry::uniform_capabilities(&cluster_nodes),
+                        &crate::registry::uniform_records(&cluster_nodes),
                     )
                     .assured("the fixture topology resolves"),
                 expected,
@@ -1734,7 +1932,7 @@ mod tests {
                 &cluster_nodes,
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&cluster_nodes),
+                &crate::registry::uniform_records(&cluster_nodes),
             )
             .assured("the fixture topology resolves");
         let ingestor = scheduled_node(&schedule, ModelKind::Ingestor, "ing");
@@ -1774,7 +1972,7 @@ mod tests {
                     0,
                     None,
                     SchedulerMode::Random,
-                    &crate::registry::uniform_capabilities(&cluster_nodes),
+                    &crate::registry::uniform_records(&cluster_nodes),
                 )
                 .assured("the fixture topology resolves");
             let ingestor =
@@ -1849,7 +2047,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                 ]),
@@ -1949,7 +2147,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                     ClusterNodeName::parse("node-3").expect("valid name"),
@@ -1976,7 +2174,7 @@ mod tests {
                     &eligible,
                     0,
                     None,
-                    &crate::registry::uniform_capabilities(&eligible),
+                    &crate::registry::uniform_records(&eligible),
                 )
                 .assured("the fixture topology resolves");
             super::assign_server_listener_nodes(&mut schedule, &live_nodes);
@@ -2065,7 +2263,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-2").expect("valid name"),
                     ClusterNodeName::parse("node-3").expect("valid name"),
@@ -2081,7 +2279,7 @@ mod tests {
                 ],
                 0,
                 None,
-                &crate::registry::uniform_capabilities(&[
+                &crate::registry::uniform_records(&[
                     ClusterNodeName::parse("node-1").expect("valid name"),
                     ClusterNodeName::parse("node-3").expect("valid name"),
                 ]),

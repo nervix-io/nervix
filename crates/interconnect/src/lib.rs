@@ -1641,6 +1641,8 @@ pub enum TlsConfigError {
 }
 
 #[cfg(test)]
+mod answer_admission_tests;
+#[cfg(test)]
 mod tests;
 
 mod state_inspection;

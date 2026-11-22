@@ -44,9 +44,12 @@ runtime activation is still `APPLYING`; completion is recorded separately.
 Labels are owned by the entity in that candidate, including entities without configuration
 `ALTER`. Their edits participate in the same base-to-final diff, captured policy and conflict
 fences. A metadata-only aspect is control-plane-only and `DYNAMIC`: it contributes no pause,
-activation, rebuild, state purge, ownership move or forced flush. A mixed run keeps all effects
-of its actual configuration changes. A logical resource's label edit is an ordered, metadata-only
-catalog step. It needs no pause and leaves every version, binding and running task intact.
+activation, rebuild, state purge, ownership move or forced flush. A model run whose every change
+is metadata-only keeps the current schedule's placement instead of placing the domain again, so a
+unit whose owner is unavailable or cordoned stays where it is and the run plans no ownership move.
+A mixed run keeps all effects of its actual configuration changes, its placement included. A
+logical resource's label edit is an ordered, metadata-only catalog step. It needs no pause and
+leaves every version, binding and running task intact.
 `SHOW LABELS` on a Model or resource reads the staged candidate of the attached transaction and
 reports its preview identity. The read does not advance the queue.
 

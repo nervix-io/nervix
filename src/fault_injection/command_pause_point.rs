@@ -41,6 +41,8 @@ pub(super) enum CommandPausePoint {
     Admission(ClusterNodeName),
     ClientInspectionAdmission(DomainName),
     RuntimeInstallation(ClusterNodeName),
+    BackgroundReconciliation(ClusterNodeName),
+    DomainTeardown(DomainName),
     InitialClusterParameters(ClusterNodeName),
     ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
