@@ -37,7 +37,7 @@ Feature: Stateful inferencer acknowledgements
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
@@ -110,7 +110,7 @@ Feature: Stateful inferencer acknowledgements
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' DENSE TENSOR<F32>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] }
@@ -212,7 +212,7 @@ Feature: Stateful inferencer acknowledgements
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2] INITIAL ZEROS }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }

@@ -802,6 +802,7 @@ mod tests {
             resource: named("inference"),
             resource_version: 17,
             file: "models/running_sum.onnx".into(),
+            working_memory: nervix_models::InferencerWorkingMemory::Released,
             inputs: vec![InferencerTensorMapping {
                 tensor: "features".into(),
                 schema: schema(2),

@@ -258,7 +258,8 @@ current connection, retry and deadline limits.
   `integer`, `float`, `boolean`, `text`, `bytes`, or `array`, where `bytes` carries native CBOR byte
   strings; AVRO fields `boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or
   `array<item>`. `DATETIME` binds a JSON or AVRO `string` or a CBOR `text` with `ENCODE field AS
-  RFC3339`, and AVRO `int` and `long` bind only `I32` and `I64`.
+  RFC3339`, and AVRO `int` and `long` bind only `I32` and `I64`. No wire type binds a `DURATION`:
+  a codec, of any family, whose schema holds one is refused when it is created.
 - AVRO arrays declare their item type, `array<item>`, nested exactly as deep as the internal
   `ARRAY`/`VEC` layers, and the item binds the innermost element as a scalar field would. JSON and
   CBOR arrays stay bare; a `DATETIME` element in any format and a `BYTES` element carried as text

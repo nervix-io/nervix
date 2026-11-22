@@ -88,6 +88,27 @@ mod tests {
     }
 
     #[test]
+    fn a_duration_binding_is_written_as_a_duration_literal() {
+        let tokens = to_tokens("DESCRIBE RELAY waits WHERE (window = 1h 30m, tenant = 'acme');");
+        let parsed = parse_describe_stream_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(
+            parsed.bindings[0].value,
+            SubscriptionLiteral::Duration(nervix_models::DurationValue::from_nanoseconds(
+                5_400_000_000_000
+            ))
+        );
+        assert_eq!(
+            parsed.bindings[1].value,
+            SubscriptionLiteral::String("acme".to_string())
+        );
+        let month = to_tokens("DESCRIBE RELAY waits WHERE (window = 1M);");
+        assert!(
+            parse_describe_stream_tokens(&month).is_err(),
+            "a month has no fixed length"
+        );
+    }
+
+    #[test]
     fn parses_describe_stream_without_bindings() {
         let tokens = to_tokens("DESCRIBE RELAY notifications;");
         let parsed = parse_describe_stream_tokens(&tokens).expect("parse should succeed");

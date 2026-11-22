@@ -11,17 +11,18 @@ use nervix_models::{
     ClientProducerAdmission, ClientProducerDescription, ClientProducerGrant, ClientProducerLimits,
     ClientProducerPolicy, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
     DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
-    DomainClockState, DomainTimeRate, ExecutionStepImpactReport, ExecutionStepOutcome,
-    ForceFlushImpact, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind,
-    ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage, ImpactPlanningBasis,
-    ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge, ModelChangeAspect, ModelKind,
-    ModelName, NodeRef, OperationImpactReason, OperationImpactReport, OwnershipMoveImpact,
-    PacedDomainClock, ParseAsType, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph,
-    QuiescenceOutcome, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, SchemaField, StatePurge,
-    StateResetImpact, Timestamp, TransactionImpactReport, TransactionInspectionTarget,
-    TransactionLifecycle, TransactionOperation, TransactionOperationAdmission,
-    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    DomainClockState, DomainTimeRate, DurationValue,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
+    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, PacedDomainClock, ParseAsType, PauseRequirement,
+    PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
+    RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
+    SchemaField, StatePurge, StateResetImpact, Timestamp, TransactionImpactReport,
+    TransactionInspectionTarget, TransactionLifecycle, TransactionOperation,
+    TransactionOperationAdmission, TransactionOperationRange, TransactionPosition,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 use url::Url;
 
@@ -924,6 +925,7 @@ pub(crate) fn row_schema() -> RowSchema {
                     element: Box::new(array(ParseAsType::U8, 2)),
                 },
             ),
+            field("wait", ParseAsType::Duration),
         ],
         branch: Some(
             RowBranch::new(
@@ -985,6 +987,7 @@ fn write_minimum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<W
         Ok(())
     })?;
     cells.push_list(|_| Ok(()))?;
+    cells.push_duration(DurationValue::MIN)?;
     Ok(())
 }
 
@@ -1024,6 +1027,7 @@ fn write_maximum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<W
             Ok(())
         })
     })?;
+    cells.push_duration(DurationValue::MAX)?;
     Ok(())
 }
 

@@ -428,7 +428,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         ON GENERAL ERROR LOG;
       CREATE INFERENCER select_values FROM banded_values
         USING RESOURCE inference VERSION 1
-        FILE 'models/scalar_identity.onnx'
+        FILE 'models/scalar_identity.onnx' WORKING MEMORY RELEASED
         INPUTS {
           "value" <tensor_type>[] = CASE
             WHEN input.band IN ('low', 'mid')
@@ -585,7 +585,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these Plexus commands fail with "function 'clamp' requires numeric, STRING or DATETIME input, found Boolean"
+    And these Plexus commands fail with "function 'clamp' requires numeric, STRING, DATETIME or DURATION input, found Boolean"
       """
       CREATE JUNCTION boolean_clamp
         FROM samples

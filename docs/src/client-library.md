@@ -738,7 +738,7 @@ Execute `SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 10 FORMAT J
 Read `outcome.state`, match `StateInspectionResult::Page` or `Rejected`, then visit units, sections
 and `frame.batch()` using each section's schema. `counts` describe the complete selected cut;
 `continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
-datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
+datetime and duration nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
 
 `SHOW WASM PROCESSOR guest STATE FOR ALL BRANCHES LIMIT 10;` fills the same envelope with typed WASM
 guest-state facts instead of row sections: the page's `wasm_binding` holds the pinned module, and

@@ -516,6 +516,10 @@ a domain included, and the `stopped` admission refusal state. It fences the doma
 command commits on its own, with the start revision its execution records, and transaction commit
 plans and step effects that carry no lifecycle step.
 
+The fingerprint also covers the `DURATION` type: the Models that declare it or write a duration
+literal, and the duration values branch keys, relay payloads, materialized records and other
+runtime values carry between nodes as signed nanoseconds.
+
 The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, inferencer state page, listener-capability, licensing stop-gate, licensing transition, node-record and inherited partition-topology contract; metadata-only edits preserve the execution and state identities those reports observe.
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
@@ -531,8 +535,11 @@ The current fingerprint includes the conditional orphaned model-pause recovery c
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 It also covers the node record announcement: the `consensus.announce_node_record` request and the
 Raft command that commit a node's capacity claim, detected properties and tags as one record.
+That claim carries the size of the volume holding the node's database directory, and a parameter
+conflict can carry the typed refusal of a resource quota above an admitted node's volume.
 The subscription-interest visibility request includes the advertisement version, and its current
-wire fingerprint fences that request shape during connection setup.
+wire fingerprint fences that request shape during connection setup. The fingerprint also covers
+the opening of a client consumer stream with the largest delivery chunk its serving node announces.
 
 The fingerprint also fences typed PBKDF2-HMAC-SHA-512 credentials in consensus commands and the persisted uniform verification-work count in snapshot metadata. Cost validation occurs during decoding before any authentication work is admitted.
 
@@ -557,7 +564,8 @@ descriptors, so checkpoint identity and inspection operations advance as one wir
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the `parametrizer`
-Model kind, the typed `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
+Model kind, an inferencer's required `WORKING MEMORY` policy, the typed `payload` expression scope,
+typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and
@@ -1263,49 +1271,76 @@ Decoded metadata keeps its memory charge until its last borrower releases it.
 With incoming queue capacity `Q`, each peer holds at most `Q` grants, attempts, active channels and
 admission records, and at most `2Q` outbound attempts and admission correlations. These bound the
 work in flight. The channel watermarks that keep a channel's position and last outcome after its
-work resolved have a budget of their own: at most 8,192 per peer, independent of `Q`. One retained
-watermark takes about 180 bytes, so the budget holds at most about 1.4 MiB per peer and 90 MiB
-across the 64-peer limit, and it keeps a full ten minutes of watermarks while two nodes open fewer
-than about 13 new channels a second between them.
+work resolved are part of what that channel's deliveries need, so no count bounds them and nothing
+forgets one to make room. Each is charged to the receiver's relay memory class for as long as it is
+retained: about 180 bytes for its entries in the peer's channel table and expiry order, plus the
+text of a rejection reason it keeps. The grant of a delivery reserves that charge together with the
+delivery's own grant reservation, so a relay memory class without room refuses the grant as a
+capacity refusal, and the sender holds the delivery back and asks again, as
+[Held Deliveries](#held-deliveries) describes. The outcome the delivery records takes that charge
+when its channel has no watermark yet, and returns it when the channel's watermark already holds
+one. A cancellation that fences a position the receiver never granted reserves the same charge;
+while the class has no room for it, the cancellation is answered `Unknown` and its sender asks
+again. When the class has no room for a rejection reason's text, the watermark keeps the rejection
+without it: the outcome is what reconciling the channel needs, and its reason only explains it.
+[Capacity Planning](./capacity-planning.md) describes sizing the relay memory class for the channels
+a graph keeps between two nodes.
 
-A full watermark budget never refuses a channel. Before it records the watermark of another
-channel, the owner forgets the least recently recorded or consulted watermark of a channel with no
-batch outstanding, and raises the peer's retired-channel floor to that channel's incarnation. The
-budget exceeds `Q` and a channel has at most one batch outstanding, so a full budget always holds
-such a watermark, and a channel keeps its watermark while it has a batch outstanding. A sender
-process creates its channel
-incarnations in increasing order, so every channel the owner forgot has an incarnation at or below
-the floor, and a channel the sender opens afterwards is above it. A request for a channel the owner
-holds neither a watermark nor an attempt for, and whose incarnation is at or below the floor, is
-answered as an earlier position of a retained channel would be: its grant is refused as retired, and
-status and cancellation return `Retired`. A delayed or repeated request for a forgotten delivery
-identity is therefore never admitted again, however late it arrives, and its sender learns that the
-outcome is no longer known there. A channel opened just before one that was forgotten can be
-refused the same way; its sender handles that as any retired delivery and reopens the channel under
-a fresh incarnation. The floor and every retained watermark end with the peer's bound process epoch.
+A watermark is forgotten only once its retention has passed since it was last recorded or consulted,
+and never while its channel has a batch outstanding. Its retention is twice the longest
+`REMOTE_RELAY_TOTAL_TIMEOUT` among the deliveries whose outcomes it recorded, so it outlasts every
+request a sender can still make about one of them. Forgetting a channel raises the retired-channel
+floor of that retention to the channel's incarnation. A sender process creates its channel
+incarnations in increasing order, so every channel the owner forgot lies at or below the floor of
+its retention, and a channel the sender opens afterwards lies above every floor. Each request
+carries the timing its delivery captured. A request for a channel the owner holds neither a
+watermark nor an attempt for, whose incarnation lies at or below the floor of a retention at least
+as long as its own delivery's, is answered as an earlier position of a retained channel would be:
+its grant is refused as retired, and status and cancellation return `Retired`. A delayed or repeated
+request for a forgotten delivery identity concerns a delivery its channel recorded, so it is never
+admitted again, however late it arrives, and its sender learns that the outcome is no longer known
+there. A channel its sender opened before a forgotten one, and that the owner never saw, is refused
+the same way only when its delivery captured no longer a budget: such a delivery ended, with a
+margin of its own budget, before the forgotten channel's retention passed, and its sender handles
+the refusal as any retired delivery and reopens the channel under a fresh incarnation. One whose
+delivery captured a longer budget, as a delivery that started before an `ALTER CLUSTER SET` lowered
+it did, can still be held back by backpressure and is admitted. Each floor is charged to the relay
+memory class, 32 bytes, and stays only while no floor of a longer retention lies at or above it,
+so an owner keeps one floor in steady operation and one more for each budget whose channels it
+forgot below a newer channel of a shorter one. The floors and every retained watermark end with the
+peer's bound process epoch.
 
 A receiver that has never opened a channel refuses a nonzero continuation as `channel_unopened`,
 before reserving a body. After a quick owner restart, the runtime keeps that definitely unadmitted
 payload and its ACKs under its existing channel gate, opens a fresh channel at sequence zero and
 retries within the original admission deadline. A prior interrupted send makes its outcome
 uncertain and forbids this retry; a retained channel still requires its exact next position, and a
-forgotten channel still returns `Retired`.
+forgotten channel still returns `Retired`, unless the continuation captured a longer budget than
+every delivery that channel recorded. No floor covers such a continuation, which was never granted,
+so it is refused as `channel_unopened` and reopened the same way.
 
-Lost terminal replies remain reconcilable while their watermark is retained. A sixty-second sweep
-reclaims attempts, outbound correlations and channel watermarks after ten minutes without progress
-or reconciliation; live admission reports renew retained records. The sweep forgets a watermark the
-same way, raising the floor, and passes over the watermark of a channel with a batch outstanding.
-Because a sender rotates a channel after five minutes without a batch, a sweep can leave a live
-channel's next request at or below the floor with no watermark retained for it only when that request
-arrives more than five minutes after its sender created it, long after the sender stopped waiting for
-its answer.
-`nervix_interconnect_relay_channel_watermarks` shows how many watermarks a node retains, and
-`nervix_interconnect_relay_channel_watermarks_evicted_total` counts the ones forgotten to make room
-for another channel; a count that keeps rising means a peer opens more channels within ten minutes
-than the budget holds. Authentication before gossip membership permits discovery, while relay
-operations wait for live membership. An owner still awaiting membership ends after ten minutes and
-closes its bound intake connections. Routing publication has at most the configured peer limit;
-normal frame and ACK operations use retained owners rather than a node-wide shared-map guard.
+Lost terminal replies remain reconcilable while their watermark is retained. Every attempt and
+outbound correlation keeps the retention of its own delivery: twice the
+`REMOTE_RELAY_TOTAL_TIMEOUT` that delivery captured, ten minutes at the default five. A channel
+watermark keeps the longest retention among the deliveries it recorded. The receiver learns each
+budget from the timing its sender captured, never from its own committed value, so a delivery that
+started before an `ALTER CLUSTER SET` keeps the retention it started with, a delivery that starts
+after it takes the new one, and a channel opened after it is kept for the new one alone. Live
+admission reports renew a retained attempt, and a grant, status or cancellation request that
+consults a watermark starts its retention again. A sweep reclaims each item once its own retention
+has passed without progress or reconciliation, and passes at one tenth of the shortest retention it
+must honour: the committed one and that of every item it retains, sixty seconds at the defaults. A
+delivery or cancellation that brings a shorter retention wakes it. The sweep forgets a watermark the
+same way, raising the floor of its retention, and passes over the watermark of a channel with a
+batch outstanding. A sender rotates a channel once it has carried no batch for the smallest total
+admission budget its deliveries on that incarnation captured, at most half the retention of the
+channel's watermark, so the sweep forgets a live channel's watermark only well after its sender
+stopped using that incarnation. `nervix_interconnect_relay_channel_watermarks` shows how many watermarks a
+node retains. Authentication before gossip membership permits discovery, while relay operations
+wait for live membership. An owner still awaiting membership ends after twice the installed
+committed `REMOTE_RELAY_TOTAL_TIMEOUT`, ten minutes by default, and closes its bound intake
+connections. Routing publication has at most the configured peer limit; normal frame and ACK
+operations use retained owners rather than a node-wide shared-map guard.
 
 ### Held Deliveries
 
@@ -1395,18 +1430,20 @@ the same identity with different content is rejected.
 After a connection loss, the sender first reconciles with the same receiver process. If the body was
 already received or the batch was admitted, the receiver returns that known state and the sender
 does not resend the body. Sequence watermarks reject reordering and duplicate enqueue. A receiver
-keeps a channel's watermark while a batch granted on that channel is unresolved, and for ten minutes
-after the watermark was last recorded or consulted by a grant, status, or cancellation request, so
-ordinary reconnects can still reconcile. A sender channel that has carried no batch for five minutes,
-counted from when it opened or from its last batch, opens a fresh incarnation for its next batch. That
-rotation is shorter than the retention, so a channel its sender resumes still finds its watermark, and no
-batch carries an incarnation opened more than five minutes before it. A consultation
+keeps a channel's watermark while a batch granted on that channel is unresolved, and for the
+channel's retention after the watermark was last recorded or consulted by a grant, status, or
+cancellation request, so ordinary reconnects can still reconcile. That retention is twice the
+longest total admission budget among the deliveries whose outcomes the watermark recorded, ten
+minutes at the defaults. A sender channel that has carried no batch for the smallest total admission budget its
+deliveries on that incarnation captured, five minutes at the defaults, counted from when it opened
+or from its last batch, opens a fresh incarnation for its next batch. That rotation is shorter than
+the retention, so a channel its sender resumes still finds its watermark, and no batch carries an
+incarnation opened longer before it than its own delivery's total admission budget. A consultation
 refreshes retention under that peer's protocol guard, together with its sequence decision.
-Independent peers have independent guards. When a peer opens more channels than its watermark
-budget holds, the least recently used watermarks go first, as
-[Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes. A sender
-that then resumes or reconciles a forgotten channel is answered `Retired`, treats the delivery as
-indeterminate, and reopens the channel under a fresh incarnation.
+Independent peers have independent guards. A watermark is forgotten only once its retention has
+passed, as [Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes;
+a sender whose late request reaches a channel forgotten that way is answered `Retired`, treats the
+delivery as indeterminate, and reopens the channel under a fresh incarnation.
 
 A delivery has something to reconcile only once one of its sends started an exchange: a send
 records that start immediately before it registers the delivery's outbound attempt and sends the
@@ -1458,12 +1495,13 @@ channel for a key. A sibling producer can finish a delivery in flight and keep s
 that channel. The producer-side channel is retired when its last producer ends. Channels used by
 the relay itself follow the relay owner's branch lifetime, which also covers work the owner has
 already admitted. When a retired channel's key appears again, it opens a fresh incarnation at
-sequence zero. An ended channel's watermark stays on its receiver for the retention that
-[Ordering, Retry, And Reconciliation](#ordering-retry-and-reconciliation) describes, or until the
-peer's watermark budget needs its position for another channel. A burst of ended channels therefore
-never refuses the peer's new channels: a thousand branches that expire after a pause and then
-return open a thousand new channels, and the watermarks of the channels that ended make room for
-them.
+sequence zero. An ended channel's watermark stays on its receiver, charged to its relay memory, for
+the retention that [Ordering, Retry, And Reconciliation](#ordering-retry-and-reconciliation)
+describes. A burst of returning branches costs no channel its position: a thousand branches that
+expire after a pause and then return open a thousand new channels, and their grants each reserve a
+watermark's charge. While the relay memory class has no room for them, their senders hold the
+deliveries back until the watermarks of the channels that ended expire or other relay work returns
+room.
 
 A committed forced ownership change also retires changing relay routes' preceding channel
 generation before the local graph installer waits for dispatch quiescence. The sender interrupts
@@ -2169,8 +2207,28 @@ not come from submitted Arrow fields or the link's peer name.
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other
-relay-pool operation. A frame is bounded by the relay pool's payload limit of 32 MiB, which the
-largest batch a session admits, 4 MiB less its submission envelope, fits with room to spare.
+relay-pool operation.
+
+Every frame stays within what both nodes carry. The serving node encodes it within its own relay
+encoded limit (`--execution-relay-encoded-bytes`), and the owning node accepts it within its
+committed relay batch bound (`--interconnect-relay-batch-bytes`), the receive bound of its
+capability record. A frame above either would end the link and every producer on it, so the
+largest batch a forwarded producer may submit never exceeds either bound less the envelope of a
+`Submit` frame, which the frame's archived layout fixes:
+
+- The serving node asks in `Open` for the largest batch its session's frame admits, or what its
+  own relay encoded limit carries if that is less.
+- The owning node grants at most what its committed relay batch bound carries, and never more
+  than the producer's credit.
+- The serving node answers a batch above the grant at once as `NotAdmitted` with
+  `InvalidBatch(TooLarge)`, the answer the owning node gives a batch above a grant it receives,
+  and never forwards it. The producer stays open, and so does the link.
+- A node whose bound cannot carry the envelope and one byte of batch beside it refuses the open as
+  `NodeCapacityExhausted`.
+
+A producer on the node that executes its ingestor crosses no link, so neither bound limits its
+batches: its session's frame and its credit do, and decoding holds a batch to the node's relay
+decoded limit.
 
 Two registered properties hold the link's frames to the stream's codec.
 `client-producer-link-frames` generates the opening message, every frame of the serving node and
@@ -2221,17 +2279,25 @@ node. The link adds no reservation of its own beyond the transport's per-frame c
 When a session opens a consumer of a `TO CLIENT` emitter executing on another node, the serving
 node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
 shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
-schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
-own resolved consumer node budget and attaches to its local emitter endpoint before replying `Opened`
-with the endpoint description or `Refused` with a typed cause. The serving node has already
-reserved the same grant against its session and node budgets.
+schema fields, granted credit and the largest delivery chunk the serving node takes in one frame.
+The owner checks the peer identity, reserves the grant in its own resolved consumer node budget
+and attaches to its local emitter endpoint before replying `Opened` with the endpoint description
+or `Refused` with a typed cause. The serving node has already reserved the same grant against its
+session and node budgets.
 
 The owner sends each attempt's identity, fresh ACK reference, source relay, opaque branch
-fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes.
-It splits those bytes into ordered chunks of at most 1 MiB, each charged by the relay pool and
-well within its 32 MiB payload limit.
-The serving node checks the announced length against the grant and reassembles one delivery before
-answering a client read. It sends `Settle` frames with a stream-local correlation key and receives
+fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes,
+which it splits into ordered chunks charged by the relay pool. Every chunk frame stays within what
+both nodes carry, as a producer link's frames do. A chunk is at most 1 MiB, never more than the
+serving node announced, and never more than the owner's own relay encoded limit carries beside a
+`DeliveryChunk` frame's envelope, which the frame's archived layout fixes. The serving node
+announces 1 MiB, or less when its committed relay batch bound carries less beside that envelope.
+A serving node whose bound cannot carry the envelope and one byte refuses the consumer as
+`NodeCapacityExhausted` without opening a stream. An owner whose limit cannot answers `Refused`
+with `NodeBudgetFull`, which the client also sees as `NodeCapacityExhausted`.
+The serving node checks the announced length against the grant, refuses a chunk larger than it
+announced as a break of the stream contract, and reassembles one delivery before answering a
+client read. It sends `Settle` frames with a stream-local correlation key and receives
 one typed result for each; an independent writer keeps settlement and heartbeat sends from
 blocking response reads. The opening request and the owner's first answer announce their
 respective heartbeat intervals. Each receiver tolerates five of the peer's intervals without
@@ -2762,10 +2828,13 @@ Its default of zero consumes no random draws and preserves the current retry sch
 
 Liveness uses the running committed unavailability policy. Existing connections receive an
 update through the primitive watch channel; an outstanding ping stays outstanding while its
-remaining deadline changes. Relay retention and sweeping derive from the host's admission bound,
-and grant, cancellation and progress-send budgets derive from the configured request/progress
-budgets. Admission lifetime, row acknowledgements, cancellation choice and watermark ordering
-retain their existing owners and guarantees.
+remaining deadline changes. Relay retention derives from the total admission budget each delivery
+captured, and from the installed committed `REMOTE_RELAY_TOTAL_TIMEOUT` for an owner still awaiting
+membership and for the sweep's cadence; installing a revision wakes the sweep. Grant and
+progress-send budgets derive from the configured request/progress budgets, and a sender asks a
+receiver to cancel an abandoned delivery for at most the smaller of three request budgets and that
+delivery's retention. Admission lifetime, row acknowledgements, cancellation choice and watermark
+ordering retain their existing owners and guarantees.
 ## Processor State Page Operation
 
 `read_processor_state_page` is the process-targeted Bulk stream request, on the Snapshot subquota,
@@ -2819,8 +2888,13 @@ Relay metadata carries one captured acknowledgement timing group per delivery. A
 reports use its alive interval and dispatch budget. Each send is also capped by the host's existing
 progress-control allowance: one tenth of its request budget, no longer than its body-progress
 budget. This keeps management capacity from lingering after short control work ends. The captured
-group adds 96 bytes to serialized relay metadata, included in its exact reservation. Channel
-retention covers the largest accepted total admission budget of the current peer incarnation. The current wire fingerprint
+group adds 96 bytes to serialized relay metadata, included in its exact reservation. A status or
+cancellation request carries the same group for the delivery it names, so a cancellation that
+fences a position the receiver never granted keeps that delivery's retention, and every grant,
+status or cancellation meets only the retired-channel floors of retentions at least as long as the
+one its group gives. Each retained attempt and outbound correlation keeps twice the total admission
+budget of its delivery, and a channel watermark twice the longest budget among the deliveries it
+recorded. The current wire fingerprint
 also identifies runtime and shutdown capability claims. See
 [Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) for live updates and the
 relationship checks applied before publication and at receipt.

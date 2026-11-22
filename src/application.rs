@@ -454,7 +454,6 @@ impl Application {
             client_endpoints,
             memory_pressure,
             restore_staging_max_bytes,
-            database_volume,
         } = match preflight {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -699,15 +698,18 @@ impl Application {
         };
         if allow_bootstrap
             && consensus.observer().cluster_parameters().is_none()
-            && let Err(error) =
-                preflight::validate_resource_volume(&parameter_seeds, database_volume, &db_path)
-                    .and_then(|()| {
-                        preflight::validate_runtime_budget(
-                            &parameter_seeds,
-                            &node_id,
-                            capabilities.shutdown,
-                        )
-                    })
+            && let Err(error) = preflight::validate_resource_volume(
+                &parameter_seeds,
+                capabilities.database_volume_bytes,
+                &db_path,
+            )
+            .and_then(|()| {
+                preflight::validate_runtime_budget(
+                    &parameter_seeds,
+                    &node_id,
+                    capabilities.shutdown,
+                )
+            })
         {
             startup.consensus = Some(consensus);
             startup.terminate().await;
@@ -1245,8 +1247,12 @@ impl Application {
                 consensus.observer().cluster_parameters()
             };
             if let Some(record) = record {
-                preflight::validate_resource_volume(&record.values, database_volume, &db_path)
-                    .change_context(AppError::Preflight)?;
+                preflight::validate_resource_volume(
+                    &record.values,
+                    capabilities.database_volume_bytes,
+                    &db_path,
+                )
+                .change_context(AppError::Preflight)?;
                 preflight::validate_runtime_budget(&record.values, &node_id, capabilities.shutdown)
                     .change_context(AppError::Preflight)?;
                 break record;

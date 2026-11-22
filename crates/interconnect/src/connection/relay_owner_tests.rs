@@ -20,7 +20,6 @@ struct PeerFixture {
     items: StdArc<Semaphore>,
     terminals: StdArc<Semaphore>,
     executor: Executor,
-    observations: Arc<TransportObservations>,
 }
 
 struct RetainedAttempt {
@@ -37,23 +36,31 @@ struct ReservedAttempt {
 fn a_continued_channel_on_a_fresh_receiver_is_definitely_unopened() {
     let fixture = PeerFixture::new(2);
     assert_eq!(
-        fixture.owner.grant_position(&PeerFixture::attempt(1, 2)),
+        fixture
+            .owner
+            .grant_position(&PeerFixture::attempt(1, 2), default_retention()),
         RelayGrantPosition::Unopened,
         "a restarted receiver cannot wait for earlier positions its process never held"
     );
     assert_eq!(
-        fixture.owner.grant_position(&PeerFixture::attempt(2, 0)),
+        fixture
+            .owner
+            .grant_position(&PeerFixture::attempt(2, 0), default_retention()),
         RelayGrantPosition::Next,
         "the sender can open a new channel at zero"
     );
     fixture.deliver(2, 0, 1);
     assert_eq!(
-        fixture.owner.grant_position(&PeerFixture::attempt(2, 2)),
+        fixture
+            .owner
+            .grant_position(&PeerFixture::attempt(2, 2), default_retention()),
         RelayGrantPosition::OutOfOrder,
         "a retained channel still refuses a skipped position"
     );
     assert_eq!(
-        fixture.owner.grant_position(&PeerFixture::attempt(2, 1)),
+        fixture
+            .owner
+            .grant_position(&PeerFixture::attempt(2, 1), default_retention()),
         RelayGrantPosition::Next,
         "the retained channel takes only its next position"
     );
@@ -65,40 +72,62 @@ fn an_admitted_attempt_keeps_its_channel_open_before_its_outcome_returns() {
     let record = fixture.register(1, 1);
     let _returning = fixture.admit_with_outcome_in_flight(&record, 1);
     assert_eq!(
-        fixture.owner.grant_position(&PeerFixture::attempt(1, 2)),
+        fixture
+            .owner
+            .grant_position(&PeerFixture::attempt(1, 2), default_retention()),
         RelayGrantPosition::OutOfOrder,
         "an admitted attempt keeps the channel known before its watermark is recorded"
     );
     assert_eq!(
-        fixture.owner.grant_position(&PeerFixture::attempt(1, 1)),
+        fixture
+            .owner
+            .grant_position(&PeerFixture::attempt(1, 1), default_retention()),
         RelayGrantPosition::Next,
         "only the immediately following position can retire the retained attempt"
     );
 }
 
+/// A validated timing whose total admission budget is 50 milliseconds, so what its deliveries
+/// leave behind is retained for 100 milliseconds, far shorter than under the default timing.
+fn short_timing() -> nervix_models::RemoteAckTiming {
+    let timing = nervix_models::RemoteAckTiming {
+        remote_ack_alive_interval: Duration::from_millis(1),
+        remote_ack_dispatch_timeout: Duration::from_millis(1),
+        remote_ack_silence_timeout: Duration::from_millis(10),
+        remote_ack_sweep_interval: Duration::from_millis(1),
+        remote_relay_total_timeout: Duration::from_millis(50),
+        remote_relay_instantiation_wait: Duration::from_millis(5),
+    };
+    timing.validate().assured("the short cohort is coherent");
+    timing
+}
+
+/// The retention of the default timing's deliveries.
+fn default_retention() -> RelayChannelRetention {
+    RelayChannelRetention::captured_by(nervix_models::RemoteAckTiming::default())
+}
+
+/// The instant `retention` after now, when what was recorded before it is past its retention.
+fn after(retention: RelayChannelRetention) -> Instant {
+    Instant::now()
+        .checked_add(retention.duration())
+        .assured("a fixture retention fits the monotonic clock")
+}
+
 impl PeerFixture {
-    /// A peer that holds `capacity` attempts and twice as many channel watermarks.
+    /// A peer that holds `capacity` attempts at once.
     fn new(capacity: usize) -> Self {
-        let watermarks = capacity
-            .checked_mul(2)
-            .assured("fixture capacities are a handful of positions");
-        Self::with_capacity(RelayPeerCapacity {
-            retention: crate::RelayRetentionSettings::default().retention(),
-            attempts: capacity,
-            watermarks,
-        })
+        Self::with_capacity(RelayPeerCapacity { attempts: capacity })
     }
 
     fn with_capacity(capacity: RelayPeerCapacity) -> Self {
-        let observations = Arc::new(TransportObservations::default());
-        let owner = StdArc::new(RelayPeerOwner::new(capacity, observations.clone()));
+        let owner = StdArc::new(RelayPeerOwner::new(capacity));
         assert!(owner.bind_epoch(101, 1, true));
         Self {
             owner,
             items: StdArc::new(Semaphore::new(capacity.attempts)),
             terminals: StdArc::new(Semaphore::new(capacity.attempts)),
             executor: Executor::default(),
-            observations,
         }
     }
 
@@ -189,6 +218,7 @@ impl PeerFixture {
                         .try_acquire_owned()
                         .assured("the fixture has a free terminal outcome"),
                 }),
+                note: Some(self.watermark_charge()),
                 last_progress: Instant::now(),
             }),
             cancellation: CancellationToken::new(),
@@ -219,9 +249,36 @@ impl PeerFixture {
         record
     }
 
+    /// One channel watermark's charge, as a grant reserves it from the fixture's relay memory.
+    fn watermark_charge(&self) -> Reservation {
+        self.executor
+            .try_reserve(
+                MemoryClass::Relay,
+                RelayChannelWatermarks::watermark_charge(),
+            )
+            .assured("the fixture's relay memory holds a watermark's charge")
+    }
+
     /// Admit `channel`'s batch at `sequence` and retire it, as a delivery that completed would.
     fn deliver(&self, channel: u8, sequence: u64, grant_id: u64) {
-        let ReservedAttempt { record, grant } = self.reserve(channel, sequence, grant_id, 101);
+        self.deliver_with_timing(
+            channel,
+            sequence,
+            grant_id,
+            nervix_models::RemoteAckTiming::default(),
+        );
+    }
+
+    /// Admit `channel`'s batch at `sequence`, delivered under `timing`, and retire it.
+    fn deliver_with_timing(
+        &self,
+        channel: u8,
+        sequence: u64,
+        grant_id: u64,
+        timing: nervix_models::RemoteAckTiming,
+    ) {
+        let ReservedAttempt { record, grant } =
+            self.reserve_with_timing(channel, sequence, grant_id, 101, timing);
         assert!(
             matches!(
                 self.owner.register(grant_id, grant),
@@ -260,16 +317,96 @@ impl PeerFixture {
             .assured("the terminal outcome names the delivery's exact admission")
     }
 
-    /// How the owner answers a grant request repeated for `channel` at `sequence`.
+    /// How the owner answers a grant request repeated for `channel` at `sequence`, delivered under
+    /// the default timing.
     fn regrant(&self, channel: u8, sequence: u64, grant_id: u64) -> RelayGrantRegistration {
-        let ReservedAttempt { record: _, grant } = self.reserve(channel, sequence, grant_id, 101);
+        self.regrant_with_timing(
+            channel,
+            sequence,
+            grant_id,
+            nervix_models::RemoteAckTiming::default(),
+        )
+    }
+
+    /// How the owner answers a grant request repeated for `channel` at `sequence`, delivered under
+    /// `timing`.
+    fn regrant_with_timing(
+        &self,
+        channel: u8,
+        sequence: u64,
+        grant_id: u64,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> RelayGrantRegistration {
+        let ReservedAttempt { record: _, grant } =
+            self.reserve_with_timing(channel, sequence, grant_id, 101, timing);
         self.owner.register(grant_id, grant)
     }
 
-    fn evicted(&self) -> u64 {
-        self.observations
-            .counters()
-            .relay_channel_watermarks_evicted
+    /// How the owner answers a status request for `attempt` delivered under the default timing.
+    fn status(&self, attempt: &RelayAttemptKey) -> RelayAdmissionStatus {
+        self.status_with_timing(attempt, nervix_models::RemoteAckTiming::default())
+    }
+
+    /// How the owner answers a status request for `attempt`, whose delivery captured `timing`.
+    fn status_with_timing(
+        &self,
+        attempt: &RelayAttemptKey,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> RelayAdmissionStatus {
+        self.owner
+            .control(
+                attempt,
+                RelayChannelRetention::captured_by(timing),
+                RelayControl::Status,
+            )
+            .status
+    }
+
+    /// How the owner answers a cancellation of `attempt`, whose delivery captured `timing`, that
+    /// reserved its fence's charge as the receiver's handler does.
+    fn cancel_with_timing(
+        &self,
+        attempt: &RelayAttemptKey,
+        timing: nervix_models::RemoteAckTiming,
+    ) -> RelayControlAnswer {
+        self.owner.control(
+            attempt,
+            RelayChannelRetention::captured_by(timing),
+            RelayControl::Cancel {
+                fence: Some(self.watermark_charge()),
+            },
+        )
+    }
+
+    /// How the owner answers a cancellation of `attempt` delivered under the default timing.
+    fn cancel(&self, attempt: &RelayAttemptKey) -> RelayAdmissionStatus {
+        self.cancel_with_timing(attempt, nervix_models::RemoteAckTiming::default())
+            .status
+    }
+
+    /// Assert that the relay memory the owner's watermarks are charged for is exactly what their
+    /// entries and the rejection reasons they keep take.
+    fn assert_watermarks_charged(&self) {
+        let state = self.owner.state.lock();
+        assert_eq!(
+            state.watermarks.charged_bytes(),
+            state.watermarks.charge_owed(),
+            "the watermarks are charged exactly what they hold"
+        );
+    }
+
+    /// Sweep the owner at `now` under the default committed retention.
+    fn sweep(&self, now: Instant) -> Option<RelayChannelRetention> {
+        self.owner.sweep(now, default_retention())
+    }
+
+    /// The relay memory the owner's retired-channel floors are charged for, which they keep until
+    /// the peer binds another process epoch or ends.
+    fn floor_bytes(&self) -> u64 {
+        let state = self.owner.state.lock();
+        let floors =
+            u64::try_from(state.watermarks.floors().len()).assured("a fixture keeps a few floors");
+        floors * RelayChannelWatermarks::floor_charge()
     }
 }
 
@@ -362,19 +499,24 @@ fn remote_relay_frame_cost_with_another_peers_guard_held() {
             drop(record);
             assert_eq!(fixture.items.available_permits(), 1);
             assert_eq!(fixture.terminals.available_permits(), 1);
-            assert_eq!(fixture.executor.snapshot().relay_memory.reserved_bytes, 0);
+            // Only the channel's one watermark stays charged.
+            assert_eq!(
+                fixture.executor.snapshot().relay_memory.reserved_bytes,
+                RelayChannelWatermarks::watermark_charge()
+            );
             timings.push(frame_start.elapsed().as_nanos());
         }
         let elapsed = start.elapsed();
         let timings = SortedVec::from_unsorted(timings);
         println!(
             "remote-relay-independent-peer blocked_guard_held=true frames={} ns_per_frame={} \
-             p50_ns={} p95_ns={} p99_ns={} retained_attempts=0 retained_relay_bytes=0",
+             p50_ns={} p95_ns={} p99_ns={} retained_attempts=0 retained_relay_bytes={}",
             timings.len(),
             elapsed.as_nanos() / u128::try_from(timings.len()).assured("bounded frame count"),
             timings[timings.len() / 2],
             timings[timings.len() * 95 / 100],
             timings[timings.len() * 99 / 100],
+            fixture.executor.snapshot().relay_memory.reserved_bytes,
         );
         fixture.owner.end();
     });
@@ -402,7 +544,7 @@ fn cancellation_before_a_grant_and_lost_terminal_replies_retain_channel_order() 
     let fixture = PeerFixture::new(2);
     let ReservedAttempt { record, grant } = fixture.reserve(1, 0, 1, 101);
     assert_eq!(
-        fixture.owner.control(&record.attempt, true).0,
+        fixture.cancel(&record.attempt),
         RelayAdmissionStatus::Cancelled
     );
     assert!(matches!(
@@ -435,14 +577,14 @@ fn cancellation_before_a_grant_and_lost_terminal_replies_retain_channel_order() 
     );
     record.mark_admitted();
     assert_eq!(
-        fixture.owner.control(&record.attempt, true).0,
+        fixture.cancel(&record.attempt),
         RelayAdmissionStatus::Admitted
     );
     fixture
         .owner
         .retire(&record, RelayAdmissionStatus::Admitted);
     assert_eq!(
-        fixture.owner.control(&record.attempt, false).0,
+        fixture.status(&record.attempt),
         RelayAdmissionStatus::Admitted
     );
     assert_eq!(fixture.items.available_permits(), 2);
@@ -457,10 +599,7 @@ fn cancellation_before_a_grant_and_lost_terminal_replies_retain_channel_order() 
     drop(duplicate);
     let mut superseded = record.attempt.clone();
     superseded.sequence = 0;
-    assert_eq!(
-        fixture.owner.control(&superseded, false).0,
-        RelayAdmissionStatus::Retired
-    );
+    assert_eq!(fixture.status(&superseded), RelayAdmissionStatus::Retired);
 }
 
 /// A receiver retires an attempt once the delivery of its terminal outcome returns, but its sender
@@ -488,7 +627,7 @@ fn the_next_grant_takes_its_position_before_the_outcome_of_the_one_before_return
     assert_eq!(fixture.items.available_permits(), 1);
     assert_eq!(fixture.terminals.available_permits(), 1);
     assert_eq!(
-        fixture.owner.control(&first.attempt, false).0,
+        fixture.status(&first.attempt),
         RelayAdmissionStatus::Admitted
     );
 
@@ -496,7 +635,7 @@ fn the_next_grant_takes_its_position_before_the_outcome_of_the_one_before_return
     assert_eq!(fixture.owner.snapshot().attempts, 1);
     assert_eq!(fixture.items.available_permits(), 1);
     assert_eq!(
-        fixture.owner.control(&first.attempt, false).0,
+        fixture.status(&first.attempt),
         RelayAdmissionStatus::Admitted
     );
 
@@ -505,7 +644,7 @@ fn the_next_grant_takes_its_position_before_the_outcome_of_the_one_before_return
         .owner
         .retire(&second, RelayAdmissionStatus::Admitted);
     assert_eq!(
-        fixture.owner.control(&first.attempt, false).0,
+        fixture.status(&first.attempt),
         RelayAdmissionStatus::Retired
     );
     fixture.deliver(1, 2, 3);
@@ -522,7 +661,7 @@ fn a_cancellation_fences_the_next_position_before_the_outcome_of_the_one_before_
     let first = fixture.register(1, 1);
     let delivering = fixture.admit_with_outcome_in_flight(&first, 1);
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 1), true).0,
+        fixture.cancel(&PeerFixture::attempt(1, 1)),
         RelayAdmissionStatus::Cancelled
     );
     assert_eq!(fixture.owner.snapshot().attempts, 0);
@@ -534,7 +673,7 @@ fn a_cancellation_fences_the_next_position_before_the_outcome_of_the_one_before_
         RelayGrantRegistration::Retired(RelayGrantDisposition::Cancelled)
     ));
     assert_eq!(
-        fixture.owner.control(&first.attempt, false).0,
+        fixture.status(&first.attempt),
         RelayAdmissionStatus::Retired
     );
     fixture.deliver(1, 2, 3);
@@ -542,19 +681,14 @@ fn a_cancellation_fences_the_next_position_before_the_outcome_of_the_one_before_
 }
 
 /// Retiring a resolved attempt for its channel's next grant or cancellation records the attempt's
-/// outcome as any retirement does, so a full watermark budget forgets its least recently used
-/// watermark for it and counts that, on the registration and the cancellation path alike.
+/// outcome as any retirement does: its channel's watermark keeps it, charged to relay memory, on the
+/// registration and the cancellation path alike, and no other channel's watermark gives way to it.
 #[test]
-fn retiring_a_resolved_attempt_for_the_next_position_counts_a_forgotten_watermark() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 2,
-        watermarks: 3,
-    });
+fn retiring_a_resolved_attempt_for_the_next_position_records_its_outcome() {
+    let fixture = PeerFixture::new(2);
     fixture.deliver(1, 0, 1);
     fixture.deliver(2, 0, 2);
     fixture.deliver(3, 0, 3);
-    assert_eq!(fixture.evicted(), 0);
 
     let granted = fixture.register(4, 4);
     let _granted_delivery = fixture.admit_with_outcome_in_flight(&granted, 4);
@@ -563,24 +697,31 @@ fn retiring_a_resolved_attempt_for_the_next_position_counts_a_forgotten_watermar
         fixture.owner.register(5, grant),
         RelayGrantRegistration::Registered { .. }
     ));
-    assert_eq!(fixture.evicted(), 1);
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 0), false).0,
-        RelayAdmissionStatus::Retired
+        fixture.status(&PeerFixture::attempt(4, 0)),
+        RelayAdmissionStatus::Admitted
+    );
+    assert_eq!(
+        fixture.status(&PeerFixture::attempt(1, 0)),
+        RelayAdmissionStatus::Admitted
     );
 
     let cancelled = fixture.register(5, 6);
     let _cancelled_delivery = fixture.admit_with_outcome_in_flight(&cancelled, 6);
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(5, 1), true).0,
+        fixture.cancel(&PeerFixture::attempt(5, 1)),
         RelayAdmissionStatus::Cancelled
     );
-    assert_eq!(fixture.evicted(), 2);
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(5, 2), false).0,
+        fixture.status(&PeerFixture::attempt(5, 1)),
+        RelayAdmissionStatus::Cancelled
+    );
+    assert_eq!(
+        fixture.status(&PeerFixture::attempt(5, 2)),
         RelayAdmissionStatus::Unknown
     );
-    assert_eq!(fixture.owner.snapshot().watermarks, 3);
+    assert_eq!(fixture.owner.snapshot().watermarks, 5);
+    fixture.assert_watermarks_charged();
 }
 
 /// Only the next position retires a resolved attempt. A grant for it while the attempt before is
@@ -603,12 +744,12 @@ fn an_unresolved_or_skipped_predecessor_keeps_its_attempt() {
         RelayGrantRegistration::InvalidSequence
     ));
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 2), true).0,
+        fixture.cancel(&PeerFixture::attempt(1, 2)),
         RelayAdmissionStatus::Unknown
     );
     assert_eq!(fixture.owner.snapshot().attempts, 1);
     assert_eq!(
-        fixture.owner.control(&first.attempt, false).0,
+        fixture.status(&first.attempt),
         RelayAdmissionStatus::Admitted
     );
 }
@@ -646,10 +787,7 @@ fn grant_expiry_and_idle_reconciliation_reclaim_every_protocol_collection() {
         )
         .assured("the fixture has outbound room");
     assert_eq!(fixture.owner.outbound_epoch(&key), Some(101));
-    let expiry = Instant::now()
-        .checked_add(crate::RelayRetentionSettings::default().retention())
-        .assured("the fixture retention fits");
-    fixture.owner.sweep(expiry);
+    fixture.sweep(after(default_retention()));
     assert_eq!(fixture.owner.snapshot().attempts, 0);
     assert_eq!(fixture.owner.outbound_epoch(&key), None);
     assert_eq!(fixture.items.available_permits(), 2);
@@ -657,12 +795,8 @@ fn grant_expiry_and_idle_reconciliation_reclaim_every_protocol_collection() {
 
 #[test]
 fn discovery_can_bind_before_membership_but_relay_work_waits_for_the_live_run() {
-    let capacity = RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 2,
-    };
-    let owner = RelayPeerOwner::new(capacity, Arc::new(TransportObservations::default()));
+    let capacity = RelayPeerCapacity { attempts: 1 };
+    let owner = RelayPeerOwner::new(capacity);
     assert!(owner.bind_epoch(101, 1, false));
     assert!(!owner.accepts_epoch(101));
     assert!(owner.awaiting_membership());
@@ -672,13 +806,22 @@ fn discovery_can_bind_before_membership_but_relay_work_waits_for_the_live_run() 
     owner.activate();
     assert!(!owner.accepts_epoch(101));
 
-    let unobserved = RelayPeerOwner::new(capacity, Arc::new(TransportObservations::default()));
+    // An owner still awaiting membership ends once the committed retention has passed since it
+    // was created, the committed retention whatever it is.
+    let committed = RelayChannelRetention::captured_by(short_timing());
+    let unobserved = RelayPeerOwner::new(capacity);
     assert!(unobserved.bind_epoch(102, 2, false));
+    let before = unobserved
+        .created_at
+        .checked_add(committed.duration() - Duration::from_nanos(1))
+        .assured("the fixture membership grace fits");
+    unobserved.sweep(before, committed);
+    assert!(!unobserved.closed.is_cancelled());
     let expiry = unobserved
         .created_at
-        .checked_add(crate::RelayRetentionSettings::default().retention())
+        .checked_add(committed.duration())
         .assured("the fixture membership grace fits");
-    unobserved.sweep(expiry);
+    unobserved.sweep(expiry, committed);
     assert!(unobserved.closed.is_cancelled());
     assert!(!unobserved.bind_epoch(102, 3, true));
 }
@@ -812,7 +955,7 @@ fn a_retained_record_cannot_retire_a_replacement_and_progress_renews_its_lifetim
         "an admitted attempt schedules no progress report"
     );
     let now = Instant::now();
-    fixture.owner.sweep(now);
+    fixture.sweep(now);
     assert_eq!(fixture.owner.snapshot().attempts, 1);
     let terminal = fixture
         .owner
@@ -846,12 +989,17 @@ fn shuttle_a_claimed_body_racing_cancellation_keeps_one_reconcilable_verdict() {
         });
         let cancelling = fixture.owner.clone();
         let attempt = record.attempt.clone();
+        let fence = fixture.watermark_charge();
         let cancel = thread::spawn(move || {
-            let (status, record) = cancelling.control(&attempt, true);
-            if let Some(record) = record {
-                cancelling.retire(&record, status.clone());
+            let answer = cancelling.control(
+                &attempt,
+                default_retention(),
+                RelayControl::Cancel { fence: Some(fence) },
+            );
+            if let Some(record) = answer.record {
+                cancelling.retire(&record, answer.status.clone());
             }
-            status
+            answer.status
         });
         let received = body.join().assured("the body claimant joined");
         let cancelled = cancel.join().assured("the cancellation participant joined");
@@ -861,7 +1009,7 @@ fn shuttle_a_claimed_body_racing_cancellation_keeps_one_reconcilable_verdict() {
         } else {
             assert_eq!(cancelled, RelayAdmissionStatus::Cancelled);
         }
-        assert_eq!(fixture.owner.control(&record.attempt, false).0, cancelled);
+        assert_eq!(fixture.status(&record.attempt), cancelled);
         assert_eq!(fixture.items.available_permits(), 1);
         assert_eq!(fixture.terminals.available_permits(), 1);
     });
@@ -1007,11 +1155,17 @@ fn bolero_relay_owner_sequences_preserve_verdicts_and_bounded_capacity() {
                     assert_eq!(&record.status(), expected);
                 }
                 assert!(fixture.owner.snapshot().attempts <= 2);
-                assert!(fixture.owner.state.lock().watermarks.len() <= 4);
+                fixture.assert_watermarks_charged();
             }
             fixture.owner.end();
             assert_eq!(fixture.items.available_permits(), 2);
             assert_eq!(fixture.terminals.available_permits(), 2);
+            drop(retained);
+            assert_eq!(
+                fixture.executor.snapshot().relay_memory.reserved_bytes,
+                0,
+                "an ended owner and its released attempts return all relay memory"
+            );
         });
 }
 
@@ -1064,7 +1218,9 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
     check_interleavings(|| {
         let fixture = StdArc::new(PeerFixture::new(1));
         assert_eq!(
-            fixture.owner.grant_position(&PeerFixture::attempt(1, 1)),
+            fixture
+                .owner
+                .grant_position(&PeerFixture::attempt(1, 1), default_retention()),
             RelayGrantPosition::Unopened,
             "a new receiver asks for a channel opening before any continuation"
         );
@@ -1077,12 +1233,16 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
         let granting = StdArc::clone(&fixture);
         let granted = thread::spawn(move || {
             assert_eq!(
-                granting.owner.grant_position(&PeerFixture::attempt(1, 2)),
+                granting
+                    .owner
+                    .grant_position(&PeerFixture::attempt(1, 2), default_retention()),
                 RelayGrantPosition::OutOfOrder,
                 "a skipped position stays out of order before or after the outcome returns"
             );
             assert_eq!(
-                granting.owner.grant_position(&PeerFixture::attempt(1, 1)),
+                granting
+                    .owner
+                    .grant_position(&PeerFixture::attempt(1, 1), default_retention()),
                 RelayGrantPosition::Next,
                 "the next grant takes its position whether or not the outcome before it returned"
             );
@@ -1103,7 +1263,7 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
         ));
         assert_eq!(fixture.owner.snapshot().attempts, 1);
         assert_eq!(
-            fixture.owner.control(&first.attempt, false).0,
+            fixture.status(&first.attempt),
             RelayAdmissionStatus::Admitted
         );
         next.record.mark_admitted();
@@ -1111,7 +1271,7 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
             .owner
             .retire(&next.record, RelayAdmissionStatus::Admitted);
         assert_eq!(
-            fixture.owner.control(&first.attempt, false).0,
+            fixture.status(&first.attempt),
             RelayAdmissionStatus::Retired
         );
         assert_eq!(fixture.items.available_permits(), 1);
@@ -1120,55 +1280,121 @@ fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_pos
     });
 }
 
-/// A full watermark budget forgets the least recently used watermark, so the peer's next channel is
-/// admitted however many of its channels have turned over.
+/// A peer's owner keeps the watermark of every channel it admitted however many channels have
+/// turned over, each charged to relay memory, so no channel is forgotten to make room for another.
 #[test]
-fn a_peer_keeps_admitting_new_channels_after_more_than_its_watermark_budget_turned_over() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 2,
-    });
+fn a_peer_keeps_every_channel_watermark_however_many_channels_turned_over() {
+    let fixture = PeerFixture::new(1);
     for channel in 1..=5 {
         fixture.deliver(channel, 0, u64::from(channel));
     }
-    assert_eq!(fixture.owner.snapshot().watermarks, 2);
-    assert_eq!(fixture.evicted(), 3);
+    assert_eq!(fixture.owner.snapshot().watermarks, 5);
+    for channel in 1..=5 {
+        assert_eq!(
+            fixture.status(&PeerFixture::attempt(channel, 0)),
+            RelayAdmissionStatus::Admitted
+        );
+    }
+    assert_eq!(
+        fixture.executor.snapshot().relay_memory.reserved_bytes,
+        5 * RelayChannelWatermarks::watermark_charge()
+    );
+    fixture.assert_watermarks_charged();
     assert_eq!(fixture.items.available_permits(), 1);
     assert_eq!(fixture.terminals.available_permits(), 1);
+    fixture.owner.end();
+    assert_eq!(fixture.executor.snapshot().relay_memory.reserved_bytes, 0);
 }
 
-/// A delayed or repeated request for a forgotten delivery identity is answered as retired by the
-/// grant, status and cancellation paths and is never admitted again, while a retained channel keeps
-/// its outcome and a channel opened afterwards is admitted.
+/// A delivery on a channel whose watermark the owner already retains returns the charge its grant
+/// reserved once its outcome is recorded, since the channel's watermark already holds one.
+#[test]
+fn a_continued_channel_keeps_one_watermark_charge() {
+    let fixture = PeerFixture::new(1);
+    for sequence in 0..4 {
+        fixture.deliver(1, sequence, sequence + 1);
+    }
+    assert_eq!(fixture.owner.snapshot().watermarks, 1);
+    assert_eq!(
+        fixture.executor.snapshot().relay_memory.reserved_bytes,
+        RelayChannelWatermarks::watermark_charge()
+    );
+    fixture.assert_watermarks_charged();
+}
+
+/// A rejection's reason is charged with the watermark that keeps it, and its charge returns when a
+/// later outcome replaces it.
+#[test]
+fn a_rejection_reason_is_charged_with_its_watermark() {
+    let reason = "refused by the receiving runtime";
+    let fixture = PeerFixture::new(1);
+    let record = fixture.register(1, 1);
+    let claimed = fixture
+        .owner
+        .claim_grant(1, 101, 201, Instant::now())
+        .assured("the delivery's body claims its exact grant");
+    assert!(record.mark_body_received());
+    drop(claimed);
+    let rejected = fixture
+        .owner
+        .completed_admission(
+            &record.admission_key,
+            &RemoteAckOutcome::NoAck(reason.to_string()),
+        )
+        .assured("the terminal outcome names the delivery's exact admission");
+    fixture.owner.retire(&rejected, rejected.status());
+    drop(rejected);
+    drop(record);
+    let reason_bytes = u64::try_from(reason.len()).assured("a fixture reason length fits u64");
+    assert_eq!(
+        fixture.executor.snapshot().relay_memory.reserved_bytes,
+        RelayChannelWatermarks::watermark_charge() + reason_bytes
+    );
+    assert_eq!(
+        fixture.status(&PeerFixture::attempt(1, 0)),
+        RelayAdmissionStatus::Rejected(reason.to_string())
+    );
+    fixture.assert_watermarks_charged();
+    fixture.deliver(1, 1, 2);
+    assert_eq!(
+        fixture.executor.snapshot().relay_memory.reserved_bytes,
+        RelayChannelWatermarks::watermark_charge()
+    );
+    fixture.assert_watermarks_charged();
+}
+
+/// A watermark is forgotten once its own retention has passed: a delayed or repeated request for a
+/// forgotten delivery identity is answered as retired by the grant, status and cancellation paths
+/// and is never admitted again, while a channel kept for a longer retention keeps its outcome and a
+/// channel opened afterwards is admitted.
 #[test]
 fn a_forgotten_channel_is_answered_retired_and_never_admitted_again() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 2,
-    });
-    fixture.deliver(1, 0, 1);
+    let fixture = PeerFixture::new(1);
+    fixture.deliver_with_timing(1, 0, 1, short_timing());
     fixture.deliver(2, 0, 2);
     fixture.deliver(3, 0, 3);
+    fixture.sweep(after(RelayChannelRetention::captured_by(short_timing())));
+    assert_eq!(fixture.owner.snapshot().watermarks, 2);
     assert!(matches!(
-        fixture.regrant(1, 0, 4),
+        fixture.regrant_with_timing(1, 0, 4, short_timing()),
         RelayGrantRegistration::Retired(RelayGrantDisposition::Retired)
     ));
     assert!(matches!(
-        fixture.regrant(1, 1, 5),
+        fixture.regrant_with_timing(1, 1, 5, short_timing()),
         RelayGrantRegistration::Retired(RelayGrantDisposition::Retired)
     ));
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 0), false).0,
+        fixture.status_with_timing(&PeerFixture::attempt(1, 0), short_timing()),
         RelayAdmissionStatus::Retired
     );
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 0), true).0,
+        fixture
+            .cancel_with_timing(&PeerFixture::attempt(1, 0), short_timing())
+            .status,
         RelayAdmissionStatus::Retired
     );
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(2, 0), false).0,
+        fixture.status(&PeerFixture::attempt(2, 0)),
         RelayAdmissionStatus::Admitted
     );
     assert!(matches!(
@@ -1177,127 +1403,172 @@ fn a_forgotten_channel_is_answered_retired_and_never_admitted_again() {
     ));
     fixture.deliver(4, 0, 7);
     assert_eq!(fixture.owner.snapshot().attempts, 0);
+    fixture.assert_watermarks_charged();
 }
 
-/// A consultation keeps a watermark: the one recorded or consulted least recently goes first, and
-/// a retained channel keeps answering even below the floor that forgetting another one raised.
+/// Each watermark keeps the longest retention among the deliveries it recorded. The sweep forgets
+/// one recorded under a short total admission budget once that budget's retention has passed, keeps
+/// one recorded under the default budget, and reports the shortest retention it still retains; a
+/// later delivery under the short budget leaves a channel's watermark the default retention, and a
+/// later delivery under the default budget gives a short channel's watermark the default one.
 #[test]
-fn the_least_recently_consulted_watermark_is_forgotten_first() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 2,
-    });
-    fixture.deliver(1, 0, 1);
+fn each_watermark_keeps_the_longest_retention_its_deliveries_captured() {
+    let fixture = PeerFixture::new(1);
+    let short = RelayChannelRetention::captured_by(short_timing());
+    fixture.deliver_with_timing(1, 0, 1, short_timing());
     fixture.deliver(2, 0, 2);
+    assert_eq!(fixture.sweep(Instant::now()), Some(short));
+    assert_eq!(fixture.sweep(after(short)), Some(default_retention()));
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 0), false).0,
-        RelayAdmissionStatus::Admitted
-    );
-    fixture.deliver(3, 0, 3);
-    assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 0), false).0,
-        RelayAdmissionStatus::Admitted
-    );
-    assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(2, 0), false).0,
+        fixture.status_with_timing(&PeerFixture::attempt(1, 0), short_timing()),
         RelayAdmissionStatus::Retired
     );
+    assert_eq!(
+        fixture.status(&PeerFixture::attempt(2, 0)),
+        RelayAdmissionStatus::Admitted
+    );
+    fixture.deliver_with_timing(2, 1, 3, short_timing());
+    assert_eq!(fixture.sweep(after(short)), Some(default_retention()));
+    assert_eq!(
+        fixture.status_with_timing(&PeerFixture::attempt(2, 1), short_timing()),
+        RelayAdmissionStatus::Admitted
+    );
+    fixture.deliver_with_timing(3, 0, 4, short_timing());
+    fixture.deliver(3, 1, 5);
+    assert_eq!(fixture.sweep(after(short)), Some(default_retention()));
+    assert_eq!(
+        fixture.status(&PeerFixture::attempt(3, 1)),
+        RelayAdmissionStatus::Admitted
+    );
+    assert_eq!(fixture.sweep(after(default_retention())), None);
+    assert_eq!(fixture.owner.snapshot().watermarks, 0);
+    assert_eq!(
+        fixture.executor.snapshot().relay_memory.reserved_bytes,
+        fixture.floor_bytes()
+    );
+    fixture.assert_watermarks_charged();
+}
+
+/// A channel whose deliveries captured different total admission budgets keeps its watermark for
+/// the longest of them, so once it is forgotten its floor still refuses a delayed repeat of every
+/// delivery it recorded, the one under the longer budget included.
+#[test]
+fn a_forgotten_channel_refuses_a_repeat_of_any_delivery_it_recorded() {
+    let fixture = PeerFixture::new(1);
+    fixture.deliver(1, 0, 1);
+    fixture.deliver_with_timing(1, 1, 2, short_timing());
+    assert_eq!(
+        fixture.sweep(after(RelayChannelRetention::captured_by(short_timing()))),
+        Some(default_retention())
+    );
+    assert_eq!(fixture.owner.snapshot().watermarks, 1);
+    assert_eq!(fixture.sweep(after(default_retention())), None);
+    assert_eq!(fixture.owner.snapshot().watermarks, 0);
+    assert!(matches!(
+        fixture.regrant(1, 0, 3),
+        RelayGrantRegistration::Retired(RelayGrantDisposition::Retired)
+    ));
+    assert!(matches!(
+        fixture.regrant_with_timing(1, 1, 4, short_timing()),
+        RelayGrantRegistration::Retired(RelayGrantDisposition::Retired)
+    ));
+    assert_eq!(
+        fixture.status(&PeerFixture::attempt(1, 0)),
+        RelayAdmissionStatus::Retired
+    );
+    fixture.assert_watermarks_charged();
 }
 
 /// A channel its sender opened before a forgotten one, and that the owner never saw, is refused as
-/// a forgotten one is; a channel opened after every forgotten one is admitted.
+/// the forgotten one is when its delivery captured no longer a total admission budget than the
+/// forgotten channel's deliveries did: it ended long before. One whose delivery captured a longer
+/// budget, as a delivery that started before the budget was lowered did, can still be held back by
+/// backpressure and is admitted. A channel kept below the floor keeps answering, and a channel
+/// opened after every forgotten one is admitted.
 #[test]
-fn the_retired_channel_floor_refuses_an_older_unseen_channel_and_admits_a_newer_one() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 2,
-    });
+fn the_retired_channel_floor_refuses_an_older_unseen_channel_only_within_its_retention() {
+    let fixture = PeerFixture::new(1);
     fixture.deliver(5, 0, 1);
-    fixture.deliver(6, 0, 2);
+    fixture.deliver_with_timing(6, 0, 2, short_timing());
     fixture.deliver(7, 0, 3);
+    fixture.sweep(after(RelayChannelRetention::captured_by(short_timing())));
     assert!(matches!(
-        fixture.regrant(4, 0, 4),
+        fixture.regrant_with_timing(4, 0, 4, short_timing()),
         RelayGrantRegistration::Retired(RelayGrantDisposition::Retired)
     ));
-    fixture.deliver(8, 0, 5);
+    fixture.deliver(3, 0, 5);
+    assert_eq!(
+        fixture.status(&PeerFixture::attempt(5, 0)),
+        RelayAdmissionStatus::Admitted
+    );
+    fixture.deliver(8, 0, 6);
+    fixture.assert_watermarks_charged();
 }
 
-/// An attempt still outstanding keeps its channel's watermark through a full budget, reconciles
-/// exactly while its channel lies below the floor, and its channel continues once it resolves.
+/// An attempt still outstanding keeps its channel's watermark past that watermark's retention,
+/// reconciles exactly while its channel lies below the floor another channel's expiry raised, and
+/// its channel continues once it resolves.
 #[test]
 fn an_outstanding_attempt_keeps_its_channel_known_below_the_floor() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 2,
-        watermarks: 3,
-    });
-    fixture.deliver(1, 0, 1);
+    let fixture = PeerFixture::new(2);
+    fixture.deliver_with_timing(1, 0, 1, short_timing());
     let ReservedAttempt { record, grant } = fixture.reserve(1, 1, 2, 101);
     assert!(matches!(
         fixture.owner.register(2, grant),
         RelayGrantRegistration::Registered { .. }
     ));
-    fixture.deliver(2, 0, 3);
-    fixture.deliver(3, 0, 4);
-    fixture.deliver(4, 0, 5);
-    assert_eq!(fixture.evicted(), 1);
+    fixture.deliver_with_timing(2, 0, 3, short_timing());
+    fixture.sweep(after(RelayChannelRetention::captured_by(short_timing())));
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(2, 0), false).0,
+        fixture.status_with_timing(&PeerFixture::attempt(2, 0), short_timing()),
         RelayAdmissionStatus::Retired
     );
     assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(1, 0), false).0,
+        fixture.status(&PeerFixture::attempt(1, 0)),
         RelayAdmissionStatus::Admitted
     );
     assert!(matches!(
-        fixture.regrant(1, 1, 6),
+        fixture.regrant(1, 1, 4),
         RelayGrantRegistration::Existing(_)
     ));
     record.mark_admitted();
     fixture
         .owner
         .retire(&record, RelayAdmissionStatus::Admitted);
-    fixture.deliver(1, 2, 7);
+    fixture.deliver(1, 2, 5);
 }
 
-/// The idle sweep forgets a watermark past its retention under the same floor, and does not count
-/// it as one forgotten for room.
+/// The idle sweep forgets a watermark once its retention has passed, under the floor its retention
+/// keeps, and returns its charge to relay memory, apart from that floor's.
 #[test]
 fn the_sweep_forgets_idle_watermarks_under_the_retired_channel_floor() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 4,
-    });
+    let fixture = PeerFixture::new(1);
     fixture.deliver(1, 0, 1);
-    let expiry = Instant::now()
-        .checked_add(crate::RelayRetentionSettings::default().retention())
-        .assured("the fixture retention fits the monotonic clock");
-    fixture.owner.sweep(expiry);
+    assert_eq!(fixture.sweep(Instant::now()), Some(default_retention()));
+    assert_eq!(fixture.sweep(after(default_retention())), None);
     assert_eq!(fixture.owner.snapshot().watermarks, 0);
+    assert_eq!(
+        fixture.executor.snapshot().relay_memory.reserved_bytes,
+        RelayChannelWatermarks::floor_charge()
+    );
     assert!(matches!(
         fixture.regrant(1, 0, 2),
         RelayGrantRegistration::Retired(RelayGrantDisposition::Retired)
     ));
-    assert_eq!(fixture.evicted(), 0);
     fixture.deliver(2, 0, 3);
 }
 
-/// Binding the peer's next process epoch forgets every watermark, and the floor with them.
+/// Binding the peer's next process epoch forgets every watermark, the floor with them, and returns
+/// their charge.
 #[test]
 fn a_new_process_epoch_clears_the_retired_channel_floor() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 2,
-    });
-    fixture.deliver(1, 0, 1);
+    let fixture = PeerFixture::new(1);
+    fixture.deliver_with_timing(1, 0, 1, short_timing());
     fixture.deliver(2, 0, 2);
-    fixture.deliver(3, 0, 3);
+    fixture.sweep(after(RelayChannelRetention::captured_by(short_timing())));
     assert!(fixture.owner.bind_epoch(102, 2, true));
     assert_eq!(fixture.owner.snapshot().watermarks, 0);
+    assert_eq!(fixture.executor.snapshot().relay_memory.reserved_bytes, 0);
     let ReservedAttempt { record: _, grant } = fixture.reserve(1, 0, 4, 102);
     assert!(matches!(
         fixture.owner.register(4, grant),
@@ -1305,26 +1576,36 @@ fn a_new_process_epoch_clears_the_retired_channel_floor() {
     ));
 }
 
-/// A cancellation that fences a channel before its grant takes a position from a full budget and
-/// is answered as cancelled, and the fence refuses the grant that follows.
+/// A cancellation that fences a channel's position before its grant records that position for the
+/// retention its delivery captured, charged to relay memory, and is answered as cancelled; the fence
+/// refuses the grant that follows. Without room for its charge it records nothing and is answered
+/// `Unknown`, so its sender asks again.
 #[test]
-fn a_cancellation_fence_takes_a_position_from_a_full_watermark_budget() {
-    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
-        retention: crate::RelayRetentionSettings::default().retention(),
-        attempts: 1,
-        watermarks: 2,
-    });
-    fixture.deliver(1, 0, 1);
-    fixture.deliver(2, 0, 2);
-    assert_eq!(
-        fixture.owner.control(&PeerFixture::attempt(3, 0), true).0,
-        RelayAdmissionStatus::Cancelled
+fn a_cancellation_fence_records_its_position_for_the_retention_its_delivery_captured() {
+    let fixture = PeerFixture::new(1);
+    let unfenced = fixture.owner.control(
+        &PeerFixture::attempt(3, 0),
+        RelayChannelRetention::captured_by(short_timing()),
+        RelayControl::Cancel { fence: None },
     );
+    assert_eq!(unfenced.status, RelayAdmissionStatus::Unknown);
+    assert_eq!(fixture.owner.snapshot().watermarks, 0);
+
+    let fenced = fixture.cancel_with_timing(&PeerFixture::attempt(3, 0), short_timing());
+    assert_eq!(fenced.status, RelayAdmissionStatus::Cancelled);
+    assert!(fenced.shortens_sweep);
     assert!(matches!(
-        fixture.regrant(3, 0, 3),
+        fixture.regrant(3, 0, 1),
         RelayGrantRegistration::Retired(RelayGrantDisposition::Cancelled)
     ));
-    assert_eq!(fixture.evicted(), 1);
+    fixture.assert_watermarks_charged();
+    let short = RelayChannelRetention::captured_by(short_timing());
+    assert_eq!(fixture.sweep(Instant::now()), Some(short));
+    assert_eq!(fixture.sweep(after(short)), None);
+    assert_eq!(
+        fixture.executor.snapshot().relay_memory.reserved_bytes,
+        RelayChannelWatermarks::floor_charge()
+    );
 }
 
 /// One delivery identity of the turnover model: the channel, numbered in the order its sender
@@ -1350,11 +1631,13 @@ struct RetainedTurnoverAttempt {
     record: StdArc<RelayAdmissionRecord>,
 }
 
-/// The turnover model: a peer owner whose three watermarks are fewer than its turnover, and what
-/// its sender knows of every channel it opened.
+/// The turnover model: a peer owner that keeps every channel's watermark until that watermark's own
+/// retention passes, deliveries that capture a short or the default total admission budget, and
+/// what their sender knows of every channel it opened.
 struct TurnoverModel {
     fixture: PeerFixture,
-    registered: BTreeSet<TurnoverIdentity>,
+    /// Every identity the owner registered, with the timing its delivery captured.
+    registered: BTreeMap<TurnoverIdentity, nervix_models::RemoteAckTiming>,
     channels: Vec<TurnoverChannel>,
     /// Attempts whose outcome is not decided yet.
     undecided: Vec<RetainedTurnoverAttempt>,
@@ -1365,17 +1648,22 @@ struct TurnoverModel {
 
 impl TurnoverModel {
     fn capacity() -> RelayPeerCapacity {
-        RelayPeerCapacity {
-            attempts: 2,
-            watermarks: 3,
-            retention: crate::RelayRetentionSettings::default().retention(),
+        RelayPeerCapacity { attempts: 2 }
+    }
+
+    /// The timing a delivery captures: the short cohort for an odd `choice`, the default otherwise.
+    fn timing(choice: usize) -> nervix_models::RemoteAckTiming {
+        if choice % 2 == 1 {
+            short_timing()
+        } else {
+            nervix_models::RemoteAckTiming::default()
         }
     }
 
     fn new() -> Self {
         Self {
             fixture: PeerFixture::with_capacity(Self::capacity()),
-            registered: BTreeSet::new(),
+            registered: BTreeMap::new(),
             channels: Vec::new(),
             undecided: Vec::new(),
             delivering: Vec::new(),
@@ -1390,29 +1678,32 @@ impl TurnoverModel {
             .assured("the operation sequence has at most 96 positions");
         let choice = usize::from(byte / 6);
         match byte % 6 {
-            0 => self.open(),
+            0 => self.open(choice),
             1 => self.decide(choice),
             2 => self.continue_channel(choice),
             3 => self.repeat(choice),
-            4 => self.sweep(),
+            4 => self.sweep(choice),
             _ => self.return_outcome(choice),
         }
-        assert!(self.fixture.owner.snapshot().watermarks <= Self::capacity().watermarks);
+        self.fixture.assert_watermarks_charged();
     }
 
     fn room(&self) -> bool {
         self.fixture.items.available_permits() > 0
     }
 
-    /// The sender opens a channel after every channel it opened before.
-    fn open(&mut self) {
+    /// The sender opens a channel after every channel it opened before, for a delivery that
+    /// captured the timing `choice` selects.
+    fn open(&mut self, choice: usize) {
         if !self.room() {
             return;
         }
         let channel = u8::try_from(self.channels.len() + 1)
             .assured("the operation sequence opens at most 96 channels");
+        let timing = Self::timing(choice);
         let ReservedAttempt { record, grant } =
-            self.fixture.reserve(channel, 0, self.grant_id, 101);
+            self.fixture
+                .reserve_with_timing(channel, 0, self.grant_id, 101, timing);
         assert!(
             matches!(
                 self.fixture.owner.register(self.grant_id, grant),
@@ -1420,10 +1711,11 @@ impl TurnoverModel {
             ),
             "channel {channel} opened after every forgotten one is admitted"
         );
-        assert!(self.registered.insert(TurnoverIdentity {
+        let identity = TurnoverIdentity {
             channel,
-            sequence: 0
-        }));
+            sequence: 0,
+        };
+        assert!(self.registered.insert(identity, timing).is_none());
         self.channels.push(TurnoverChannel {
             next_sequence: 1,
             undecided: true,
@@ -1464,7 +1756,8 @@ impl TurnoverModel {
 
     /// The sender continues a channel whose latest outcome is decided, in the receiver's grant
     /// order: a forgotten channel is answered first, then the position, the reservation and the
-    /// registration.
+    /// registration. A continuation that captured a longer budget than every delivery a forgotten
+    /// channel recorded is answered as never opened, so its sender opens another channel.
     fn continue_channel(&mut self, choice: usize) {
         if self.channels.is_empty() {
             return;
@@ -1480,7 +1773,9 @@ impl TurnoverModel {
             sequence: self.channels[index].next_sequence,
         };
         let attempt = PeerFixture::attempt(channel, identity.sequence);
-        if let Some(status) = self.fixture.owner.retired_status(&attempt) {
+        let timing = Self::timing(choice / 2);
+        let retention = RelayChannelRetention::captured_by(timing);
+        if let Some(status) = self.fixture.owner.retired_status(&attempt, retention) {
             assert_eq!(
                 status,
                 RelayAdmissionStatus::Retired,
@@ -1489,17 +1784,38 @@ impl TurnoverModel {
             self.channels[index].abandoned = true;
             return;
         }
+        let position = self.fixture.owner.grant_position(&attempt, retention);
+        if position == RelayGrantPosition::Unopened {
+            let forgotten = self
+                .fixture
+                .owner
+                .state
+                .lock()
+                .watermarks
+                .get(&attempt.channel)
+                .is_none();
+            assert!(
+                forgotten,
+                "only a channel the owner forgot is answered as unopened, at {identity:?}"
+            );
+            self.channels[index].abandoned = true;
+            return;
+        }
         assert_eq!(
-            self.fixture.owner.grant_position(&attempt),
+            position,
             RelayGrantPosition::Next,
             "a channel whose latest outcome is decided takes its next position, at {identity:?}"
         );
         if !self.room() {
             return;
         }
-        let ReservedAttempt { record, grant } =
-            self.fixture
-                .reserve(channel, identity.sequence, self.grant_id, 101);
+        let ReservedAttempt { record, grant } = self.fixture.reserve_with_timing(
+            channel,
+            identity.sequence,
+            self.grant_id,
+            101,
+            timing,
+        );
         assert!(
             matches!(
                 self.fixture.owner.register(self.grant_id, grant),
@@ -1508,7 +1824,7 @@ impl TurnoverModel {
             "{identity:?} is registered at the position it was given"
         );
         assert!(
-            self.registered.insert(identity),
+            self.registered.insert(identity, timing).is_none(),
             "{identity:?} admitted twice"
         );
         let model = &mut self.channels[index];
@@ -1521,20 +1837,26 @@ impl TurnoverModel {
             .push(RetainedTurnoverAttempt { channel, record });
     }
 
-    /// A delayed or repeated request for an identity the owner registered. The model holds at most
-    /// 96 identities, which bounds this lookup.
+    /// A delayed or repeated request for an identity the owner registered, carrying the timing its
+    /// delivery captured. The model holds at most 96 identities, which bounds this lookup.
     fn repeat(&mut self, choice: usize) {
         if !self.room() || self.registered.is_empty() {
             return;
         }
-        let identity = *self
+        let (identity, timing) = self
             .registered
             .iter()
             .nth(choice % self.registered.len())
-            .verified("the index is below the set's length");
-        let ReservedAttempt { record: _, grant } =
-            self.fixture
-                .reserve(identity.channel, identity.sequence, self.grant_id, 101);
+            .verified("the index is below the map's length");
+        let identity = *identity;
+        let timing = *timing;
+        let ReservedAttempt { record: _, grant } = self.fixture.reserve_with_timing(
+            identity.channel,
+            identity.sequence,
+            self.grant_id,
+            101,
+            timing,
+        );
         assert!(
             !matches!(
                 self.fixture.owner.register(self.grant_id, grant),
@@ -1544,16 +1866,15 @@ impl TurnoverModel {
         );
     }
 
-    /// The idle sweep passes the retention of every watermark and of every retained attempt whose
-    /// outcome is decided.
-    fn sweep(&mut self) {
+    /// The idle sweep passes the short retention, or the default one for an even `choice`, so it
+    /// forgets every watermark and every retained attempt whose outcome is decided that its delivery
+    /// keeps for no longer.
+    fn sweep(&mut self, choice: usize) {
         if !self.undecided.is_empty() {
             return;
         }
-        let expiry = Instant::now()
-            .checked_add(crate::RelayRetentionSettings::default().retention())
-            .assured("the fixture retention fits the monotonic clock");
-        self.fixture.owner.sweep(expiry);
+        let retention = RelayChannelRetention::captured_by(Self::timing(choice));
+        self.fixture.sweep(after(retention));
     }
 
     /// The delivery of a decided attempt's outcome returns.
@@ -1586,6 +1907,11 @@ impl TurnoverModel {
             self.fixture.terminals.available_permits(),
             Self::capacity().attempts
         );
+        assert_eq!(
+            self.fixture.executor.snapshot().relay_memory.reserved_bytes,
+            0,
+            "an ended peer returns every watermark's charge"
+        );
     }
 }
 
@@ -1606,31 +1932,26 @@ fn bolero_relay_channel_turnover_never_admits_an_identity_twice() {
 #[test]
 fn independent_progress_cohorts_retain_their_send_budgets_and_channel_retention() {
     let fixture = PeerFixture::new(2);
-    let timing = nervix_models::RemoteAckTiming {
-        remote_ack_alive_interval: Duration::from_millis(1),
-        remote_ack_dispatch_timeout: Duration::from_millis(1),
-        remote_ack_silence_timeout: Duration::from_millis(10),
-        remote_ack_sweep_interval: Duration::from_millis(1),
-        remote_relay_total_timeout: Duration::from_millis(50),
-        remote_relay_instantiation_wait: Duration::from_millis(5),
-    };
-    timing.validate().assured("the short cohort is coherent");
+    let timing = short_timing();
     let fast = fixture.reserve_with_timing(1, 0, 1, 101, timing);
     let fast_record = fast.record.clone();
     assert!(matches!(
         fixture.owner.register(1, fast.grant),
-        RelayGrantRegistration::Registered { .. }
+        RelayGrantRegistration::Registered {
+            shortens_sweep: true
+        }
     ));
-    assert_eq!(fixture.owner.retention(), Duration::from_millis(100));
     let slow = fixture.reserve(2, 0, 2, 101);
     assert!(matches!(
         fixture.owner.register(2, slow.grant),
-        RelayGrantRegistration::Registered { .. }
+        RelayGrantRegistration::Registered {
+            shortens_sweep: false
+        }
     ));
-    assert_eq!(
-        fixture.owner.retention(),
-        nervix_models::RemoteRelayTotalTimeout::DEFAULT * 2
-    );
+    // Each attempt keeps its own delivery's retention: the sweep honours the shortest of them.
+    let short = RelayChannelRetention::captured_by(timing);
+    assert_eq!(short.duration(), Duration::from_millis(100));
+    assert_eq!(fixture.sweep(Instant::now()), Some(short));
     let now = Instant::now();
     let (fast_reports, _) = fixture.owner.due_progress(now + Duration::from_millis(2));
     assert_eq!(fast_reports.len(), 1);

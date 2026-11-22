@@ -1195,6 +1195,7 @@ impl ProcessorDraft {
             resource: model.binding.resource,
             resource_version: model.binding.version,
             file: model.binding.file,
+            working_memory: model.working_memory,
             inputs: model.inputs,
             state: model.state,
             output_schema: model.output_schema,
@@ -1403,6 +1404,8 @@ pub(super) enum ProcessorDraftError {
     Binding(ResourcePinError),
     #[error("Enter the FILE inside the selected resource version")]
     File,
+    #[error("Choose the WORKING MEMORY: RELEASED or RETAINED")]
+    WorkingMemory,
     #[error("Add at least one {list} tensor")]
     Tensors { list: TensorList },
     #[error("{tensor}: enter the model's tensor name")]

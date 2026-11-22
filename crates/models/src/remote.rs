@@ -105,6 +105,9 @@ pub enum RemoteRuntimeValue {
     F64(f64),
     Array(Vec<RemoteRuntimeElementValue>),
     Vec(Vec<RemoteRuntimeElementValue>),
+    /// A `DURATION`, as its signed count of nanoseconds. It follows every earlier variant, so a
+    /// stored or peer archive of one of those keeps its meaning.
+    Duration(i64),
 }
 
 #[derive(
@@ -132,4 +135,7 @@ pub enum RemoteRuntimeElementValue {
     F64(f64),
     Array(#[rkyv(omit_bounds)] Vec<RemoteRuntimeElementValue>),
     Vec(#[rkyv(omit_bounds)] Vec<RemoteRuntimeElementValue>),
+    /// A `DURATION`, as its signed count of nanoseconds. It follows every earlier variant, so a
+    /// stored or peer archive of one of those keeps its meaning.
+    Duration(i64),
 }

@@ -1254,8 +1254,10 @@ Bare fields, `message.field`, and `input.field` read the source row. Direct emit
 `INHERIT` and all current direct emitters reject `INVOKE`.
 
 Nervix checks these mappings against the source schema during `CREATE` and `ALTER`, before opening
-the destination. Database and Iceberg columns accept Plexus scalar, array and vector types; OTEL
-fields require their documented exact types. For example, an I32 source field can supply
+the destination. Database and Iceberg columns accept Plexus scalar, array and vector types, except a
+`DURATION`, alone or as a list element, which each of them declares rejected: `VALUES key 'wait' is
+a DURATION, which POSTGRES TABLE declares rejected`. OTEL fields require their documented exact
+types. For example, an I32 source field can supply
 `severity_number`, while the integer literal `9` is inferred as I64 and is refused for that field.
 OTEL attributes accept supported scalar values and arrays or vectors of those values; `RESOURCE`
 entries must be literal expressions. Mapping types are never implicitly coerced. A refused
@@ -1313,7 +1315,7 @@ That expression surface applies to the full Nervix internal schema type set:
 
 - `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - `F32`, `F64`
-- `BOOL`, `STRING`, `DATETIME`
+- `BOOL`, `STRING`, `DATETIME`, `DURATION`, `BYTES`
 
 Nested conditions and chained calls such as `contains(lower(trim(input.raw)), 'warn')` are supported
 before encoding.

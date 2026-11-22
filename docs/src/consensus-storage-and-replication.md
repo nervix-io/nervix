@@ -564,16 +564,17 @@ Transaction commit plans and step effects hold no lifecycle step.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_lifecycle_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_lifecycle_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_lifecycle_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_lifecycle_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_lifecycle_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_lifecycle_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_lifecycle_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_lifecycle_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
 group and payload unfold policy. Their durations use validated, lossless seconds and nanoseconds
 projections so ordinary Raft records keep their inline footprint bound. Admitted node capabilities
-carry runtime capacities, local shutdown budgets and listener bounds.
+carry runtime capacities, local shutdown budgets, listener bounds and the size of the volume that
+holds the node's database directory.
 This namespace also includes durable cluster identity rotation and activation release operations.
 It identifies the current Model and stored transaction statement layouts, including
 `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE`,
@@ -586,7 +587,8 @@ count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quali
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
 `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, the ordered `RATE LIMIT` clauses
-an ingestor body writes, an emitter's `INSTANCES` declaration,
+an ingestor body writes, an emitter's `INSTANCES` declaration, the `DURATION` type with the
+duration literals expressions, subscription bindings and branch selections hold,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
 whose signaling data exists only on its WebSockets variant, the branch partition count every
 resolved branch declaration of the committed schedule carries, and the partition epoch the
@@ -602,11 +604,12 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host, runtime, shutdown, operational (trace export included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 48. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 52. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
-The current shape also requires inferencer state bindings and their initial expressions,
+The current shape also requires inferencer state bindings and their initial expressions, each inferencer's working memory,
+the `DURATION` type with the duration literals its Models hold,
 typed ingestor and emitter instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
 coverage; domain records carry pace, and relocation statements retain exact partition or instance

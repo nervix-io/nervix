@@ -523,6 +523,7 @@ pub enum ParseAsType {
     Bool,
     String,
     Datetime,
+    Duration,
     F32,
     F64,
     Array {
@@ -553,6 +554,7 @@ impl ParseAsType {
             Self::Bool,
             Self::String,
             Self::Datetime,
+            Self::Duration,
             Self::F32,
             Self::F64,
             Self::Bytes,
@@ -565,6 +567,12 @@ impl ParseAsType {
             Self::Array { element, .. } | Self::Vec { element } => element.contains_bytes(),
             _ => false,
         }
+    }
+
+    /// Whether a value of this type is or holds a `DURATION`: the type itself, or the element
+    /// beneath every `ARRAY` and `VEC` level.
+    pub fn holds_duration(&self) -> bool {
+        *self.innermost_element() == Self::Duration
     }
 
     /// The scalar type beneath every `ARRAY` and `VEC` level: the type itself when it is a scalar.
@@ -607,6 +615,7 @@ impl std::fmt::Display for ParseAsType {
             Self::String => formatter.write_str("STRING"),
             Self::Bytes => formatter.write_str("BYTES"),
             Self::Datetime => formatter.write_str("DATETIME"),
+            Self::Duration => formatter.write_str("DURATION"),
             Self::Vec { element } => write!(formatter, "VEC<{element}>"),
             Self::Array { element, len } => write!(formatter, "ARRAY<{element}, {len}>"),
         }

@@ -7,18 +7,23 @@ use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
 
 use crate::{
-    AdmissionError, Cancellation, ChargedBytes, CpuClass, ExecutionConfig, ExecutionConfigError,
-    ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits, QueueAdmission,
-    Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget, workers::WorkerPool,
+    AdmissionError, Cancellation, CapacityWaits, ChargedBytes, CpuClass, ExecutionConfig,
+    ExecutionConfigError, ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits,
+    QueueAdmission, Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget,
+    workers::WorkerPool,
 };
 
 /// The node's execution and memory admission, shared by every owner that runs variable-size work.
 ///
-/// Cloning it is one refcount: every class, budget and counter lives behind the single inner
-/// allocation.
+/// Cloning the node's own handle is one refcount: every class, budget and counter lives behind the
+/// single inner allocation. A handle from [`Self::reporting_waits_to`] also holds its owner's
+/// [`CapacityWaits`], a second refcount, because that owner keeps the count to watch it.
 #[derive(Clone, Debug)]
 pub struct Executor {
     inner: Arc<ExecutorInner>,
+    /// The owner told while work submitted through this handle waits for capacity. Only a handle
+    /// from [`Self::reporting_waits_to`] has one.
+    waits: Option<CapacityWaits>,
 }
 
 #[derive(Debug)]
@@ -169,6 +174,16 @@ impl Executor {
         crate::AcceptedWork { executor: self }
     }
 
+    /// A handle on the same classes and budgets that tells `waits` while work submitted through it
+    /// waits for a place in a full wait queue or for room in a memory class. It admits, queues and
+    /// refuses exactly as this handle does; only the telling is added.
+    pub fn reporting_waits_to(&self, waits: &CapacityWaits) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            waits: Some(waits.clone()),
+        }
+    }
+
     /// Build the executor from limits that are validated together, so a node whose budgets cannot
     /// hold the largest operation it is configured to accept fails at startup instead of stalling
     /// on the first one.
@@ -249,6 +264,7 @@ impl Executor {
                 ),
                 limits: validated.limits,
             }),
+            waits: None,
         })
     }
 
@@ -286,7 +302,7 @@ impl Executor {
         class: MemoryClass,
         bytes: u64,
     ) -> Result<Reservation, Report<AdmissionError>> {
-        self.budget(class).reserve(bytes).await
+        self.budget(class).reserve(bytes, self.waits.as_ref()).await
     }
 
     /// Charge `class` for an allocation the caller already holds, and take ownership of it. The
@@ -345,7 +361,9 @@ impl Executor {
     where
         T: Send + 'static,
     {
-        self.cpu_pool(class).run(admission, reservation, job).await
+        self.cpu_pool(class)
+            .run(admission, self.waits.as_ref(), reservation, job)
+            .await
     }
 
     /// Run one storage job on `class`'s workers. The consensus class has a single worker, so its
@@ -379,7 +397,7 @@ impl Executor {
         T: Send + 'static,
     {
         self.storage_pool(class)
-            .run(admission, reservation, job)
+            .run(admission, self.waits.as_ref(), reservation, job)
             .await
     }
 
@@ -395,7 +413,9 @@ impl Executor {
         reservation: Reservation,
         job: impl FnOnce(Reservation) + Send + 'static,
     ) -> Result<(), Report<ExecutionError>> {
-        self.storage_pool(class).submit(reservation, job).await
+        self.storage_pool(class)
+            .submit(self.waits.as_ref(), reservation, job)
+            .await
     }
 
     pub fn snapshot(&self) -> ExecutorSnapshot {
@@ -446,6 +466,11 @@ impl Executor {
             MemoryClass::RestoreMetadata => &self.inner.restore_metadata_memory,
             MemoryClass::Credentials => &self.inner.credentials_memory,
         }
+    }
+
+    /// The owner this handle tells while its work waits for capacity, if it has one.
+    pub(crate) fn waits(&self) -> Option<&CapacityWaits> {
+        self.waits.as_ref()
     }
 
     pub(crate) fn cpu_pool(&self, class: CpuClass) -> &WorkerPool {

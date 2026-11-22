@@ -465,12 +465,13 @@ impl RegisterType {
             | Self::Boolean
             | Self::Utf8
             | Self::Binary
-            | Self::Datetime => true,
+            | Self::Datetime
+            | Self::Duration => true,
         }
     }
 
-    /// Whether `<`, `<=`, `>` and `>=` compare values of this type: numbers, `STRING` and
-    /// `DATETIME`.
+    /// Whether `<`, `<=`, `>` and `>=` compare values of this type: numbers, `STRING`, `DATETIME`
+    /// and `DURATION`.
     pub fn is_ordered(self) -> bool {
         match self {
             Self::UInt8
@@ -484,7 +485,8 @@ impl RegisterType {
             | Self::Float32
             | Self::Float64
             | Self::Utf8
-            | Self::Datetime => true,
+            | Self::Datetime
+            | Self::Duration => true,
             Self::Boolean | Self::Binary | Self::Generic => false,
         }
     }
@@ -1525,8 +1527,8 @@ fn builtin_output_type(
                 return Err(Report::new(CompileError {
                     code: CompileErrorCode::UnsupportedFunction,
                     message: format!(
-                        "function '{}' requires numeric, BOOL, STRING or DATETIME input, found \
-                         {input}",
+                        "function '{}' requires numeric, BOOL, STRING, DATETIME or DURATION \
+                         input, found {input}",
                         function.as_str()
                     ),
                     span: span.into(),
@@ -1541,7 +1543,8 @@ fn builtin_output_type(
                 return Err(Report::new(CompileError {
                     code: CompileErrorCode::UnsupportedFunction,
                     message: format!(
-                        "function '{}' requires numeric, STRING or DATETIME input, found {input}",
+                        "function '{}' requires numeric, STRING, DATETIME or DURATION input, \
+                         found {input}",
                         function.as_str()
                     ),
                     span: span.into(),
@@ -1965,7 +1968,9 @@ pub fn binary_output_type(
     ) && !(is_numeric_type(left_type)
         || matches!(
             left_type,
-            DataType::Utf8 | DataType::Timestamp(TimeUnit::Nanosecond, Some(_))
+            DataType::Utf8
+                | DataType::Timestamp(TimeUnit::Nanosecond, Some(_))
+                | DataType::Duration(TimeUnit::Nanosecond)
         ))
     {
         return None;

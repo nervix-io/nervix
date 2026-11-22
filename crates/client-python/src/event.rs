@@ -207,8 +207,9 @@ impl Event {
     }
 
     /// The cells of `column` of `part` as Python values: an `int`, `float`, `bool`, `str` or
-    /// `bytes` for a scalar, the nanoseconds since the Unix epoch for a `DATETIME`, a `list` for a
-    /// list, `None` for a null, and `REDACTED` for a value the server withheld.
+    /// `bytes` for a scalar, the nanoseconds since the Unix epoch for a `DATETIME`, the signed
+    /// nanoseconds of a `DURATION`, a `list` for a list, `None` for a null, and `REDACTED` for a
+    /// value the server withheld.
     #[pyo3(signature = (column, part = Part::Rows))]
     fn column<'py>(
         &self,

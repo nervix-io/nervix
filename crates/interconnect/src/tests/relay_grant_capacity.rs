@@ -112,6 +112,7 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
                 .listener_bounds(),
             cpu_count: None,
             memory_bytes: None,
+            database_volume_bytes: 1 << 40,
             receive: receive.bounds(),
         },
     };

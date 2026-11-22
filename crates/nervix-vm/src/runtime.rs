@@ -26,10 +26,10 @@ use arrow_arith::{
     numeric::mul as arrow_mul,
 };
 use arrow_array::{
-    Array, ArrayRef, ArrowNumericType, BinaryArray, BooleanArray, Datum, FixedSizeListArray,
-    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
-    PrimitiveArray, Scalar, StringArray, StructArray, TimestampNanosecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, ArrowNumericType, BinaryArray, BooleanArray, Datum, DurationNanosecondArray,
+    FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    ListArray, PrimitiveArray, Scalar, StringArray, StructArray, TimestampNanosecondArray,
+    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     builder::{BooleanBuilder, Int64Builder, PrimitiveBuilder, StringBuilder},
     new_empty_array, new_null_array,
     types::{
@@ -225,7 +225,7 @@ enum NarrowedRegister {
 }
 
 macro_rules! declare_typed_bank {
-    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, [$($data_type:tt)+];)+) => {
         struct TypedBank {
             $($field: Vec<Option<Register<$Array>>>,)+
             datetime: Vec<Option<Register<TimestampNanosecondArray>>>,
@@ -365,7 +365,7 @@ impl RegisterBank {
 }
 
 macro_rules! impl_register_bank {
-    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, [$($data_type:tt)+];)+) => {
         impl RegisterBank {
             fn new(layouts: &RegisterLayouts, rows: usize) -> Self {
                 Self {
@@ -1943,6 +1943,12 @@ impl Instruction {
                 op,
                 "datetime comparison",
             )?)),
+            (RegisterType::Duration, _) => Ok(TypedArray::Boolean(compare_with_arrow_ord(
+                &registers.operand::<DurationNanosecondArray>(left)?,
+                &registers.operand::<DurationNanosecondArray>(right)?,
+                op,
+                "duration comparison",
+            )?)),
             (RegisterType::Generic, _) => Err(Report::new(RuntimeError::InvalidRegisterType {
                 reg: left,
                 expected: "scalar array",
@@ -2158,10 +2164,10 @@ fn arrow_kernel_error(context: &str, error: ArrowError) -> Report<RuntimeError> 
 }
 
 macro_rules! define_array_ref_to_typed_array {
-    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, [$($data_type:tt)+];)+) => {
         fn array_ref_to_typed_array(array: ArrayRef) -> error_stack::Result<TypedArray, RuntimeError> {
             match array.data_type() {
-                $($data_type => Ok(TypedArray::$Variant(
+                $($($data_type)+ => Ok(TypedArray::$Variant(
                     array
                         .as_any()
                         .downcast_ref::<$Array>()
@@ -2336,6 +2342,9 @@ fn write_literal(
         ScalarValue::Boolean(value) => TypedArray::Boolean(BooleanArray::from(vec![*value])),
         ScalarValue::Utf8(value) => {
             TypedArray::Utf8(StringArray::from_iter_values([value.as_str()]))
+        }
+        ScalarValue::Duration(value) => {
+            TypedArray::Duration(DurationNanosecondArray::from_value(*value, 1))
         }
     };
     registers.set(dst, scalar, Shape::Scalar)
@@ -4388,6 +4397,7 @@ fn execute_list_item(
         | DataType::Float64
         | DataType::Boolean
         | DataType::Utf8
+        | DataType::Duration(arrow_schema::TimeUnit::Nanosecond)
         | DataType::List(_)
         | DataType::FixedSizeList(_, _) => {}
         DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz))
@@ -4726,6 +4736,7 @@ fn execute_abs_typed(
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!("abs requires numeric input, found {:?}", input.data_type()),
@@ -4833,6 +4844,7 @@ fn execute_rounding(
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => Err(Report::new(RuntimeError::InvalidBatch {
             message: format!(
@@ -4901,6 +4913,7 @@ fn execute_round_to_digits(
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
     };
@@ -4962,6 +4975,7 @@ fn execute_sign(input: &TypedArray, row_errors: &mut RowErrors, span: Span) -> O
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
     };
@@ -5001,6 +5015,7 @@ fn execute_float_classification(input: &TypedArray, class: FloatClass) -> Option
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
     };
@@ -5061,6 +5076,7 @@ fn execute_bitwise_not(input: &TypedArray) -> Option<TypedArray> {
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
     };
@@ -5084,6 +5100,7 @@ fn execute_bit_count(input: &TypedArray) -> Option<TypedArray> {
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
     };
@@ -5130,6 +5147,7 @@ fn execute_shift(
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
     };
@@ -5833,6 +5851,7 @@ fn execute_to_hex(input: &TypedArray) -> error_stack::Result<StringArray, Runtim
         | TypedArray::Utf8(_)
         | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
+        | TypedArray::Duration(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => {
             return Err(Report::new(RuntimeError::InvalidBatch {
@@ -10217,6 +10236,9 @@ mod conversion_tests;
 #[cfg(test)]
 #[path = "runtime_datetime_tests.rs"]
 mod datetime_tests;
+#[cfg(test)]
+#[path = "runtime_duration_tests.rs"]
+mod duration_tests;
 #[cfg(test)]
 #[path = "runtime_json_tests.rs"]
 mod json_tests;

@@ -43,7 +43,8 @@ module Probe
     'U8' => [1, 'C', 'u8'], 'I8' => [1, 'c', 'i8'], 'U16' => [2, 'S', 'u16'],
     'I16' => [2, 's', 'i16'], 'U32' => [4, 'L', 'u32'], 'I32' => [4, 'l', 'i32'],
     'U64' => [8, 'Q', 'u64'], 'I64' => [8, 'q', 'i64'], 'F32' => [4, 'L', 'f32'],
-    'F64' => [8, 'Q', 'f64'], 'BOOL' => [1, 'C', 'bool'], 'DATETIME' => [8, 'q', 'datetime']
+    'F64' => [8, 'Q', 'f64'], 'BOOL' => [1, 'C', 'bool'], 'DATETIME' => [8, 'q', 'datetime'],
+    'DURATION' => [8, 'q', 'duration']
   }.freeze
 
   Field = Struct.new(:name, :type, :nullable, :sensitive) do
@@ -487,7 +488,8 @@ module Probe
     ['tags', [['LIST', 0], ['STRING', 0]], false, false],
     ['grid', [['FIXED_LIST', 2], ['FIXED_LIST', 2], ['I16', 0]], false, false],
     ['spans', [['LIST', 0], ['FIXED_LIST', 2], ['DATETIME', 0]], true, false],
-    ['secret', [['STRING', 0]], false, true]
+    ['secret', [['STRING', 0]], false, true],
+    ['wait', [['DURATION', 0]], false, false]
   ].freeze
   ECHO_FIELD = ['echo', [['U32', 0]], false, false].freeze
   I64_MIN = -(1 << 63)
@@ -498,7 +500,7 @@ module Probe
     { 'id' => id, 'tenant' => tenant, 'u8v' => 0, 'i8v' => 0, 'u16v' => 0, 'i16v' => 0, 'u32v' => 0,
       'i32v' => 0, 'u64v' => 0, 'i64v' => 0, 'f32v' => 0, 'f64v' => 0, 'flag' => false, 'text' => nil,
       'raw' => nil, 'at' => 0, 'maybe' => nil, 'tags' => [], 'grid' => [[0, 0], [0, 0]], 'spans' => nil,
-      'secret' => 's' }
+      'secret' => 's', 'wait' => 0 }
   end
 
   # The typed rows of the first batch.
@@ -509,29 +511,30 @@ module Probe
         'i32v' => 2_147_483_647, 'u64v' => (1 << 64) - 1, 'i64v' => I64_MAX, 'f32v' => 0x7f7fffff,
         'f64v' => 0x7fefffffffffffff, 'flag' => true, 'text' => "héllo 世界 \u{1f680}".b,
         'raw' => "\x00\xff\xfe\x80\x00".b, 'at' => I64_MAX, 'tags' => ['a', '', "héllo"],
-        'grid' => [[1, -2], [32_767, -32_768]], 'spans' => [[I64_MIN, I64_MAX]], 'secret' => 's1'
+        'grid' => [[1, -2], [32_767, -32_768]], 'spans' => [[I64_MIN, I64_MAX]], 'secret' => 's1',
+        'wait' => I64_MAX
       ),
       plain_row(2, 'acme').merge(
         'i8v' => -128, 'i16v' => -32_768, 'i32v' => -2_147_483_648, 'i64v' => I64_MIN,
         'f32v' => 0x80000000, 'f64v' => 0x0000000000000001, 'text' => "a\x00b".b, 'raw' => ''.b,
-        'at' => I64_MIN, 'maybe' => 0, 'secret' => 's2'
+        'at' => I64_MIN, 'maybe' => 0, 'secret' => 's2', 'wait' => I64_MIN
       ),
       plain_row(3, 'acme').merge(
         'u8v' => 1, 'i8v' => -1, 'u16v' => 1, 'i16v' => -1, 'u32v' => 1, 'i32v' => -1,
         'u64v' => 9_007_199_254_740_993, 'i64v' => -9_007_199_254_740_993, 'f32v' => 0x3fc00000,
         'f64v' => 0x3fb999999999999a, 'flag' => true, 'at' => 1, 'maybe' => 9_007_199_254_740_992,
-        'tags' => ['x'], 'grid' => [[-1, 1], [2, -2]], 'spans' => [], 'secret' => 's3'
+        'tags' => ['x'], 'grid' => [[-1, 1], [2, -2]], 'spans' => [], 'secret' => 's3', 'wait' => 1
       )
     ]
   end
 
   PACKING = { 'U8' => 'C', 'I8' => 'c', 'U16' => 'S', 'I16' => 's', 'U32' => 'L', 'I32' => 'l',
               'U64' => 'Q', 'I64' => 'q', 'F32' => 'L', 'F64' => 'Q', 'BOOL' => 'C',
-              'DATETIME' => 'q' }.freeze
+              'DATETIME' => 'q', 'DURATION' => 'q' }.freeze
   SCALAR_KINDS = { 'id' => 'U32', 'echo' => 'U32', 'u8v' => 'U8', 'i8v' => 'I8', 'u16v' => 'U16',
                    'i16v' => 'I16', 'u32v' => 'U32', 'i32v' => 'I32', 'u64v' => 'U64',
                    'i64v' => 'I64', 'f32v' => 'F32', 'f64v' => 'F64', 'flag' => 'BOOL',
-                   'at' => 'DATETIME' }.freeze
+                   'at' => 'DATETIME', 'wait' => 'DURATION' }.freeze
 
   def self.offsets_of(lengths)
     lengths.each_with_object([0]) { |length, offsets| offsets << (offsets.last + length) }

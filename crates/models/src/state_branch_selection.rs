@@ -143,6 +143,10 @@ impl StateBranchField {
             (Literal::Bool(value), ParseAsType::Bool) => {
                 Ok((RemoteRuntimeValue::Bool(*value), JsonValue::Bool(*value)))
             }
+            (Literal::Duration(value), ParseAsType::Duration) => Ok((
+                RemoteRuntimeValue::Duration(value.nanoseconds()),
+                JsonValue::String(value.to_string()),
+            )),
             (Literal::I64(value), ParseAsType::I64) => Ok((
                 RemoteRuntimeValue::I64(*value),
                 JsonValue::Number(JsonNumber::from(*value)),
@@ -165,11 +169,11 @@ impl StateBranchField {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
     use crate::{
-        CreateSchema, Float64Literal, ParametrizerName, SchemaField, SchemaName,
+        CreateSchema, DurationValue, Float64Literal, ParametrizerName, SchemaField, SchemaName,
         WasmStateResetScope,
     };
 
@@ -275,6 +279,11 @@ mod tests {
                 ParseAsType::F64,
                 RemoteRuntimeValue::F64(1.25),
             ),
+            (
+                Literal::Duration(DurationValue::from_nanoseconds(-90_000_000_000)),
+                ParseAsType::Duration,
+                RemoteRuntimeValue::Duration(-90_000_000_000),
+            ),
         ];
         for (literal, ty, expected) in cases {
             let mut branching = tenant_branch();
@@ -294,6 +303,73 @@ mod tests {
             };
             assert_eq!(fields[0].value, expected);
         }
+    }
+
+    #[test]
+    fn a_duration_branch_value_keys_by_its_literal_text_and_binds_only_a_duration_field() {
+        let tenant =
+            FieldName::parse("tenant").assured("the test name satisfies the field name grammar");
+        let ninety_seconds = Literal::Duration(DurationValue::from_nanoseconds(90_000_000_000));
+        let mut durations = tenant_branch();
+        let ResolvedBranching::Branched { schema, .. } = &mut durations else {
+            panic!("the fixture declares a concrete branch schema");
+        };
+        schema.fields[0].ty = ParseAsType::Duration;
+        let selected = StateBranchSelection::Branch(vec![StateBranchField {
+            name: tenant.clone(),
+            value: ninety_seconds.clone(),
+        }])
+        .resolve(&durations)
+        .assured("a DURATION literal matches a DURATION branch key field");
+        let ResolvedStateBranchSelection::Branch { fingerprint, .. } = selected else {
+            panic!("the selected scope remains a concrete branch");
+        };
+        // The canonical key text holds the literal a runtime DURATION key value renders as.
+        assert_eq!(
+            fingerprint,
+            BranchKeyFingerprint::of_canonical_text(r#"{"tenant":"1m 30s"}"#)
+        );
+        for literal in [Literal::I64(90), Literal::String("1m 30s".to_string())] {
+            let refusal = StateBranchSelection::Branch(vec![StateBranchField {
+                name: tenant.clone(),
+                value: literal,
+            }])
+            .resolve(&durations)
+            .err()
+            .assured("only a DURATION literal binds a DURATION field");
+            assert!(
+                matches!(
+                    refusal.current_context(),
+                    StateBranchSelectionError::InvalidFieldType {
+                        expected: ParseAsType::Duration,
+                        ..
+                    }
+                ),
+                "{refusal:?}"
+            );
+        }
+        let mut integers = tenant_branch();
+        let ResolvedBranching::Branched { schema, .. } = &mut integers else {
+            panic!("the fixture declares a concrete branch schema");
+        };
+        schema.fields[0].ty = ParseAsType::I64;
+        let refusal = StateBranchSelection::Branch(vec![StateBranchField {
+            name: tenant,
+            value: ninety_seconds,
+        }])
+        .resolve(&integers)
+        .err()
+        .assured("a DURATION literal does not bind an I64 field");
+        assert!(
+            matches!(
+                refusal.current_context(),
+                StateBranchSelectionError::InvalidFieldType {
+                    expected: ParseAsType::I64,
+                    ..
+                }
+            ),
+            "{refusal:?}"
+        );
     }
 
     #[test]

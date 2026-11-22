@@ -395,6 +395,7 @@ fn every_registered_filler_lexes() {
         "config_key",
         "config_value",
         "duration_literal",
+        "duration_unit",
         "hostname",
         "iceberg_location",
         "instance_index",

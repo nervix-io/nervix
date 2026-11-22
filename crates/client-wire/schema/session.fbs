@@ -1021,7 +1021,8 @@ enum ScalarType : ubyte {
   Bool,
   String,
   Datetime,
-  Bytes
+  Bytes,
+  Duration
 }
 
 table ScalarFieldType {
@@ -1140,6 +1141,11 @@ table DatetimeCell {
   unix_nanos: long;
 }
 
+/// A DURATION value as a signed count of nanoseconds.
+table DurationCell {
+  nanoseconds: long;
+}
+
 /// A fixed-length or variable-length list value.
 table ListCell {
   elements: [Cell] (required);
@@ -1162,7 +1168,8 @@ union CellValue {
   StringCell,
   DatetimeCell,
   ListCell,
-  BytesCell
+  BytesCell,
+  DurationCell
 }
 
 table Cell {

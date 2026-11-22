@@ -155,8 +155,13 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     Then selector ".create-processor-resource-version [data-value='1']" exists
     When selector ".create-processor-resource-version [data-value='1']" is clicked
     And selector ".create-processor-file" is filled with "models/simple_score.onnx"
+    # The working memory is a required choice the language gives no default for, so nothing is
+    # chosen until the author picks one.
+    Then selector ".create-inferencer-working-memory button.active" does not exist
+    When selector ".create-inferencer-working-memory [data-memory='retained']" is clicked
+    Then selector ".create-inferencer-working-memory [data-memory='retained'].active" exists
     # Each INPUTS tensor declares its dense F32 shape and maps an expression over the live input.
-    And selector ".create-inferencer-input-name" is filled with "features"
+    When selector ".create-inferencer-input-name" is filled with "features"
     And selector ".create-inferencer-input-shape .create-tensor-dimension-size" is filled with "2"
     And selector ".create-inferencer-input-fields .create-choice-search" is filled with "vector"
     Then selector ".create-inferencer-input-fields [data-value='vector']" exists
@@ -182,7 +187,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-inferencer-generated [data-tensor='score']" is clicked
     And selector ".create-processor-flush [data-flush='immediate']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "CREATE INFERENCER visual_infer_stage FROM visual_infer_features ATTACHED USING RESOURCE visual_infer_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { 'features' <tensor_type>[2] = input.vector } OUTPUT SCHEMA { 'score' <tensor_type>[1] } BRANCHED BY visual_infer_tenant"
+    Then selector ".create-preview" contains "CREATE INFERENCER visual_infer_stage FROM visual_infer_features ATTACHED USING RESOURCE visual_infer_model VERSION 1 FILE 'models/simple_score.onnx' WORKING MEMORY RETAINED INPUTS { 'features' <tensor_type>[2] = input.vector } OUTPUT SCHEMA { 'score' <tensor_type>[1] } BRANCHED BY visual_infer_tenant"
     And selector ".create-preview" contains "SET tenant = branch.tenant, score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
@@ -194,6 +199,10 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     Then the last command output contains
       """
       USING RESOURCE visual_infer_model VERSION 1
+      """
+    And the last command output contains
+      """
+      WORKING MEMORY RETAINED
       """
     And the last command output contains
       """
@@ -539,6 +548,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "FILE"
     When selector ".create-processor-file" is filled with "models/missing.onnx"
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "WORKING MEMORY"
+    When selector ".create-inferencer-working-memory [data-memory='retained']" is clicked
     And selector ".create-inferencer-input-name" is filled with "features"
     And selector ".create-inferencer-input-shape .create-tensor-dimension-size" is filled with "0"
     And selector ".create-inferencer-input-expression" is filled with "input.vector"
@@ -730,6 +742,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     Then selector ".create-processor-resource-version [data-value='1']" exists
     When selector ".create-processor-resource-version [data-value='1']" is clicked
     And selector ".create-processor-file" is filled with "models/simple_score.onnx"
+    And selector ".create-inferencer-working-memory [data-memory='released']" is clicked
     And selector ".create-inferencer-input-name" is filled with "features"
     And selector ".create-inferencer-input-shape .create-tensor-dimension-size" is filled with "2"
     And selector ".create-inferencer-input-expression" is filled with "input.vector"
@@ -755,6 +768,8 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     Then selector ".create-scope" contains "{{home}}_other"
     And selector ".create-name" has value "visual_stale_inferencer"
     And selector ".create-processor-file" has value "models/simple_score.onnx"
+    # The working memory is a value of the draft, not a reference into the previous domain.
+    And selector ".create-inferencer-working-memory [data-memory='released'].active" exists
     # Every reference the draft selected belongs to the previous domain, so each must be chosen again.
     When selector ".create-submit" is clicked
     Then selector ".create-validation" contains "Input 1: the relay belongs to a changed context"

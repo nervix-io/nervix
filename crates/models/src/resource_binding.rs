@@ -301,6 +301,7 @@ impl<Version> CreateInferencer<Version> {
             resource: self.resource,
             resource_version,
             file: self.file,
+            working_memory: self.working_memory,
             inputs: self.inputs,
             state: self.state,
             output_schema: self.output_schema,
