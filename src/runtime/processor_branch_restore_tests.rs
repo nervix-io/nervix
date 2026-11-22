@@ -20,7 +20,9 @@ use super::*;
 use crate::{
     runtime::{
         processor_branch_task::{ProcessorNodeChannels, run_processor_node_runtime},
-        processor_partition_moves::{ClaimProgress, ClaimedKey},
+        processor_partition_moves::{
+            ClaimProgress, ClaimedKey, ProcessorPartitionMoves, ReleasedProcessorBranch,
+        },
         window_state::{
             WindowSnapshotLifetime, WindowSnapshotSchemas, decode_window_processor_snapshot,
             encode_window_processor_snapshot,
@@ -811,6 +813,105 @@ async fn a_claimed_branch_that_finds_the_bulk_class_full_waits_for_a_place_while
         "the claimed branch keeps the window the claim brought and runs the input its key parked"
     );
     processor.stop().await;
+}
+
+/// A unit that released a key and then has the key's origin confirmed here resumes the key's
+/// retained branch. The built branch is installed only while the released slot still holds the
+/// lifetime it was built for: a forget, or the slot's expiry, can end the slot while the build waits
+/// for capacity, and then nothing is installed, so the key does not run here beside its claimant.
+#[nervix_primitives::test]
+async fn a_resumed_branch_is_installed_only_while_its_released_slot_holds_its_lifetime() {
+    let mut fixture = OpenWindowFixture::new();
+    let unit = Unit::partition(5);
+    let partitions = |count: u16| {
+        nervix_models::ResolvedParametrizerPartitions::Direct(
+            std::num::NonZeroU16::new(count).expect("the test counts are positive"),
+        )
+    };
+    let transition = partition_claims::UnitPartitionTransition {
+        parametrizer: named::<ParametrizerName>("by_tenant"),
+        epoch: nervix_models::PartitionEpochNumber::FIRST.next(),
+        current: RelayPartitioning::of_partitions(partitions(8)),
+        previous: RelayPartitioning::of_partitions(partitions(4)),
+        unit,
+    };
+    fixture.template.owner = NodeUnitRef::new(fixture.template.owner.node.clone(), unit);
+    fixture.template.partition_transition = Some(transition.clone());
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let (runtime, domain) = fixture.runtime(Executor::default(), &directory);
+    runtime.publish_unit_state_assignment(
+        DomainNodeUnitRef::new(
+            DomainNodeRef::node_in(
+                domain.clone(),
+                ModelKind::WindowProcessor,
+                fixture.processor.clone(),
+            ),
+            unit,
+        ),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+                inferencer_model: None,
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: None,
+        },
+    );
+    let context = ProcessorRuntimeContext::new(runtime.clone(), domain.clone());
+    let template = Arc::new(fixture.template.clone());
+    let (commands, _command_rx) = mpsc::channel(1);
+    let beta = string_branch_key("tenant", "beta");
+    let beta_key = beta.clone().expect("beta is a concrete key");
+    let released_at = Timestamp::from_unix_nanos(1_000);
+
+    for forgotten_while_building in [false, true] {
+        let mut instances = ProcessorBranches::new();
+        instances.insert_restored(
+            beta.clone(),
+            released_at,
+            4,
+            ProcessorBranchSlot::Released(ReleasedProcessorBranch {
+                last_activity: released_at,
+                incarnation: 4,
+                checkpoints: Vec::new(),
+            }),
+        );
+        let mut moves = ProcessorPartitionMoves::begin(
+            &runtime,
+            &domain,
+            &template,
+            transition.clone(),
+            &instances,
+            commands.clone(),
+            4,
+        );
+        let outcome = moves.progress(
+            &context,
+            &template,
+            &mut instances,
+            ClaimProgress::Located {
+                key: beta_key.clone(),
+                result: Ok(Some(unit)),
+            },
+        );
+        let Some(install) = outcome.install else {
+            panic!("a released key whose origin is confirmed here resumes its retained branch");
+        };
+        let built = install.begin(&context, &template).outcome().await;
+        if forgotten_while_building {
+            instances.remove(&beta);
+        }
+        moves.finish_install(&context, &template, &mut instances, install, built);
+        let installed = match instances.get(&beta) {
+            Some(slot) => slot.live().is_some(),
+            None => false,
+        };
+        assert_eq!(
+            installed, !forgotten_while_building,
+            "a resumed branch is installed exactly when its released slot outlived its build \
+             (forgotten while building: {forgotten_while_building})"
+        );
+    }
 }
 
 /// On a node that has just started, a window processor task restores its branches before the
