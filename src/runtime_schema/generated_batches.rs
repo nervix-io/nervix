@@ -784,7 +784,8 @@ impl Damage {
 }
 
 /// One value as a reader of the batch sees it. Floats keep their bits, so every NaN payload and
-/// signed zero is compared; a datetime keeps its Unix nanoseconds.
+/// signed zero is compared; a datetime keeps its Unix nanoseconds and a duration its signed count
+/// of nanoseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LogicalValue {
     U8(u8),
@@ -801,6 +802,7 @@ pub(crate) enum LogicalValue {
     String(String),
     Bytes(Vec<u8>),
     Datetime(i64),
+    Duration(i64),
     Array(Vec<Option<LogicalValue>>),
     Vec(Vec<Option<LogicalValue>>),
 }
@@ -837,6 +839,9 @@ impl LogicalValue {
             DataType::Binary => scalar!(BinaryArray, |a, r| Self::Bytes(a.value(r).to_vec())),
             DataType::Timestamp(_, _) => {
                 scalar!(TimestampNanosecondArray, |a, r| Self::Datetime(a.value(r)))
+            }
+            DataType::Duration(_) => {
+                scalar!(DurationNanosecondArray, |a, r| Self::Duration(a.value(r)))
             }
             DataType::FixedSizeList(_, _) => {
                 let list = array

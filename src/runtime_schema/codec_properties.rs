@@ -1122,7 +1122,8 @@ fn holds_non_finite_float(value: &LogicalValue) -> bool {
         | LogicalValue::Bool(_)
         | LogicalValue::String(_)
         | LogicalValue::Bytes(_)
-        | LogicalValue::Datetime(_) => false,
+        | LogicalValue::Datetime(_)
+        | LogicalValue::Duration(_) => false,
     }
 }
 
