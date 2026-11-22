@@ -49,7 +49,7 @@ use nervix_primitives::{
 
 use super::{
     BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
-    read_body, send_decode_refusal, send_static_error,
+    declared_length, read_body, send_decode_refusal, send_static_error,
 };
 
 #[cfg(test)]
@@ -111,12 +111,15 @@ fn carry_limit(frame_limit: u64) -> u64 {
 ///
 /// The charge follows what the reader actually buffers rather than the largest frame its class
 /// allows. A stream carrying small frames therefore holds a small charge for its whole life, and
-/// only a stream that really receives a large frame grows to it.
+/// only a stream that really receives a large frame grows to it. A frame handed over takes its
+/// bytes out of the charge, so its decoding never waits for room behind the reader.
 pub(crate) struct FrameReader {
     body: RecvStream,
     carry: Vec<u8>,
     frame_limit: u64,
     charge: Reservation,
+    executor: Executor,
+    class: MemoryClass,
     finished: bool,
 }
 
@@ -136,6 +139,8 @@ impl FrameReader {
             carry: Vec::new(),
             frame_limit,
             charge,
+            executor: executor.clone(),
+            class,
             finished: false,
         })
     }
@@ -160,7 +165,7 @@ impl FrameReader {
                 continue;
             };
             let chunk = chunk.map_err(TransportError::from)?;
-            self.charge_for(chunk.len())?;
+            self.charge_for(chunk.len()).await?;
             self.body
                 .flow_control()
                 .release_capacity(chunk.len())
@@ -169,8 +174,12 @@ impl FrameReader {
         }
     }
 
-    /// Charge the room the arriving chunk needs before it is buffered.
-    fn charge_for(&mut self, additional: usize) -> Result<(), Report<TransportError>> {
+    /// Charge the room the arriving chunk needs before it is buffered. A class with no room for the
+    /// larger charge now holds the chunk back: the reader gives back what it holds and waits for
+    /// the whole charge, so it never waits for room while holding part of its class. Only a charge
+    /// larger than the whole class fails. The chunk and the partial frame it extends are already
+    /// in memory meanwhile, bounded by the stream's HTTP/2 receive window.
+    async fn charge_for(&mut self, additional: usize) -> Result<(), Report<TransportError>> {
         let carried = u64::try_from(self.carry.len())
             .assured("supported targets have a pointer width no larger than u64");
         let additional = u64::try_from(additional)
@@ -193,9 +202,23 @@ impl FrameReader {
         // a stream carrying small frames never holds room it will not use.
         let doubled = self.charge.bytes().checked_mul(2).unwrap_or(ceiling);
         let charged = target.max(doubled).min(ceiling);
-        self.charge
-            .grow_to(charged)
-            .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+        if let Err(refusal) = self.charge.grow_to(charged) {
+            if !matches!(
+                refusal.current_context(),
+                nervix_execution::AdmissionError::BudgetExhausted { .. }
+            ) {
+                return Err(TransportError::with_cause(refusal, TransportError::Decode));
+            }
+            drop(std::mem::replace(
+                &mut self.charge,
+                self.executor.charge_nothing(self.class),
+            ));
+            self.charge = self
+                .executor
+                .reserve(self.class, charged)
+                .await
+                .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+        }
         let charged: usize = usize::try_from(charged)
             .assured("a charge bounded by the class limit fits the address space");
         let room = charged
@@ -227,6 +250,18 @@ impl FrameReader {
         };
         let frame = frame.to_vec();
         self.carry.drain(..end);
+        // The frame leaves with its bytes, so the reader keeps only the charge for what it still
+        // carries, and the frame's decoding never waits for room behind the reader.
+        self.carry.shrink_to(self.carry.len());
+        let carried: u64 = self.carry.capacity().arch_into();
+        if carried < self.charge.bytes() {
+            let charge = std::mem::replace(&mut self.charge, self.executor.charge_nothing(self.class));
+            let (kept, released) = charge
+                .split(carried)
+                .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+            self.charge = kept;
+            drop(released);
+        }
         Ok(Some(frame))
     }
 }
@@ -673,10 +708,14 @@ impl ClientConnection {
             let response = response.await.map_err(TransportError::from)?;
             let status = response.status();
             if !status.is_success() {
+                let declared = declared_length(
+                    response.headers(),
+                    class.control_body_limit(&state.executor),
+                )?;
                 let message = read_body(
                     &state.executor,
                     class.memory_class(),
-                    class.control_body_limit(&state.executor),
+                    declared,
                     state.options.progress_timeout,
                     response.into_body(),
                 )
@@ -789,7 +828,11 @@ impl TransportState {
                 return Ok(());
             }
         };
-        let (opening, _opening_reservation) = opening.into_parts();
+        // The handler owns the opening from here, and its own work takes charges of this class, so
+        // the opening's charge is given back before it runs. The connection's stream places bound
+        // the opening meanwhile.
+        let (opening, opening_reservation) = opening.into_parts();
+        drop(opening_reservation);
         if opening.class != class {
             send_static_error(
                 &mut respond,

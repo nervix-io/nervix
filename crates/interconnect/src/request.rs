@@ -217,6 +217,16 @@ pub trait RkyvMessage: Archive + Sized + Send + 'static {
         class: PoolClass,
         payload: Vec<u8>,
     ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
+
+    /// Decode `payload` within `room`, which the caller took together with the input that carried
+    /// it, for the payload's copy and its decoded value, so the decoding never waits for room behind
+    /// that input. Room beyond what the payload needs is given back.
+    fn decode_rkyv_within(
+        executor: Executor,
+        class: PoolClass,
+        payload: Vec<u8>,
+        room: Reservation,
+    ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
 }
 
 impl<T> RkyvMessage for T
@@ -255,6 +265,17 @@ where
         )
         .await
         .map(wire::Decoded::into_parts)
+    }
+
+    async fn decode_rkyv_within(
+        executor: Executor,
+        class: PoolClass,
+        payload: Vec<u8>,
+        room: Reservation,
+    ) -> Result<(Self, Reservation), Report<TransportError>> {
+        wire::decode_rkyv_payload_within::<Self>(&executor, class.cpu_class(), payload, room)
+            .await
+            .map(wire::Decoded::into_parts)
     }
 }
 
@@ -1204,11 +1225,15 @@ where
             let codec = DuplexCodec::of::<M>(&executor);
             let ChargedItem {
                 item: request,
-                charge: _request_charge,
+                charge: request_charge,
             } = codec
                 .decode::<M>(payload)
                 .await
                 .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
+            // The handler owns the request from here, and its own work takes charges of this
+            // class, so the request's charge is given back before it runs: no handler waits for
+            // room behind the request it serves. The connection's stream places bound it meanwhile.
+            drop(request_charge);
             let items = DuplexItems::new(frames, codec.clone(), M::NAME);
             let responses = (handler)(context, request, items)
                 .await
@@ -1249,9 +1274,13 @@ where
     ) -> StreamHandlerFuture {
         let handler = self.handler.clone();
         Box::pin(async move {
-            let (request, _request_reservation) = M::decode_rkyv(executor, M::CLASS, payload)
+            let (request, request_reservation) = M::decode_rkyv(executor, M::CLASS, payload)
                 .await
                 .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
+            // The handler owns the request from here, and its own work takes charges of this
+            // class, so the request's charge is given back before it runs: no handler waits for
+            // room behind the request it serves. The connection's stream places bound it meanwhile.
+            drop(request_reservation);
             if let Some(identity) = request.coordination_identity()
                 && !context.authenticates(identity)
             {
@@ -1309,10 +1338,14 @@ where
     ) -> HandlerFuture {
         let handler = self.handler.clone();
         Box::pin(async move {
-            let (request, _request_reservation) =
+            let (request, request_reservation) =
                 M::decode_rkyv(executor.clone(), M::CLASS, payload)
                     .await
                     .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
+            // The handler owns the request from here, and its own work takes charges of this
+            // class, so the request's charge is given back before it runs: no handler waits for
+            // room behind the request it serves. The connection's stream places bound it meanwhile.
+            drop(request_reservation);
             if let Some(identity) = request.coordination_identity()
                 && !context.authenticates(identity)
             {
@@ -1838,7 +1871,11 @@ impl Transport {
                 payload,
             },
         };
-        let body = wire::encode_stream_request(self.inner.executor(), request, payload_reservation)
+        // The envelope's encoding copies the payload, whose charge is given back first so the
+        // encoding never waits for room while holding it; the outbound admission bounds the payload
+        // meanwhile.
+        drop(payload_reservation);
+        let body = wire::encode_stream_request(self.inner.executor(), request)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         self.inner
@@ -1923,7 +1960,7 @@ impl Transport {
                         subquota: M::SUBQUOTA,
                     })
                 })?;
-            let (payload, _payload_reservation) = message
+            let (payload, payload_reservation) = message
                 .encode_rkyv(
                     self.inner.executor().clone(),
                     M::CLASS,
@@ -1931,6 +1968,10 @@ impl Transport {
                 )
                 .await
                 .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
+            // The envelope's encoding copies the payload, whose charge is given back first so the
+            // encoding and the answer never wait for room while holding it; the outbound admission
+            // bounds the payload meanwhile.
+            drop(payload_reservation);
             let request = ControlEnvelope::Request(RequestEnvelope {
                 class: M::CLASS,
                 request: M::NAME.to_string(),
@@ -1981,7 +2022,11 @@ impl Transport {
                     }),
                 }
             }?;
-            let (response, _response_reservation) = response.into_parts();
+            // The typed answer's decoding copies the payload this envelope carries, so the envelope's
+            // charge is given back before that decoding waits for its own; the outbound admission
+            // bounds the envelope meanwhile.
+            let (response, response_reservation) = response.into_parts();
+            drop(response_reservation);
             let ControlEnvelope::Response(response) = response else {
                 return Err(Report::new(RequestError::ResponseMismatch {
                     node: node.clone(),

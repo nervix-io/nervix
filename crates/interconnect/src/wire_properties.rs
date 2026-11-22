@@ -30,14 +30,35 @@ use rkyv::{rancor::Error as RkyvError, util::AlignedVec};
 use strum::{EnumCount as _, IntoEnumIterator as _};
 
 use super::{
-    ConnectionAccepted, ConnectionAnswer, ConnectionHello, RelayAdmissionRequest,
+    ConnectionAccepted, ConnectionAnswer, ConnectionHello, Decoded, RelayAdmissionRequest,
     RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
-    RelayMetadata, decode_aligned, decode_rkyv, encode_rkyv, validation_depth,
+    RelayMetadata, decode_aligned, decode_rkyv_within, encode_rkyv, validation_depth,
 };
 use crate::{
     PoolClass, RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload,
-    RelayPayloadKind,
+    RelayPayloadKind, TransportError,
 };
+
+/// Decode `bytes` as a receiver does: within room for the decoded value as large as the body,
+/// taken beside the charge the body already holds.
+async fn decode_rkyv<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    bytes: ChargedBytes,
+) -> Result<Decoded<T>, error_stack::Report<TransportError>>
+where
+    T: rkyv::Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    let length = u64::try_from(bytes.len()).assured("a bounded fixture's length fits u64");
+    let decoding = executor
+        .reserve(class, length)
+        .await
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    decode_rkyv_within(executor, cpu, bytes, decoding).await
+}
 
 /// The bytes one case reads its messages from.
 const CASE_BYTES: usize = 2048;
@@ -88,21 +109,18 @@ async fn every_relay_grant_refusal_round_trips_through_the_bounded_codec() {
     }
 }
 
+/// A stream request's envelope copies the payload it nests, and its caller gives the payload's own
+/// charge back first. A full class then holds the envelope's encoding back while the caller holds
+/// nothing of it, and the encoding completes once room frees.
 #[nervix_primitives::test]
-async fn nested_request_bulk_admission_refuses_a_queued_charge_without_waiting() {
+async fn a_stream_request_envelope_waits_for_room_while_its_caller_holds_nothing() {
     use futures_util::FutureExt as _;
 
     let executor = Executor::default();
     let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
     let held = executor
-        .try_reserve(MemoryClass::Bulk, capacity - 8192)
-        .assured("the fixture leaves room for the request payload");
-    let payload_charge = executor
-        .try_reserve(MemoryClass::Bulk, 4096)
-        .assured("the encoded payload fits");
-    let waiting = executor.reserve(MemoryClass::Bulk, 8192);
-    let mut waiting = std::pin::pin!(waiting);
-    assert!(waiting.as_mut().now_or_never().is_none());
+        .try_reserve(MemoryClass::Bulk, capacity - 1024)
+        .assured("the fixture leaves less room than the encoding's first charge");
     let request = crate::request::StreamRequestEnvelope {
         receive: crate::PeerReceiveSettings::default().bounds(),
         request: crate::request::RequestEnvelope {
@@ -111,21 +129,27 @@ async fn nested_request_bulk_admission_refuses_a_queued_charge_without_waiting()
             payload: vec![7; 4096],
         },
     };
-    let result = super::encode_stream_request(&executor, request, payload_charge).now_or_never();
+    let mut encoding = Box::pin(super::encode_stream_request(&executor, request.clone()));
     assert!(
-        result.is_some(),
-        "an envelope must refuse overlap instead of waiting behind a charge that needs its payload"
+        encoding.as_mut().now_or_never().is_none(),
+        "a full class holds the envelope's encoding back instead of refusing it"
     );
-    let error = result
-        .verified("encoding returned without waiting")
-        .err()
-        .assured("the queued charge leaves no envelope room");
-    assert!(error.contains::<nervix_execution::AdmissionError>());
-    let admitted = waiting
-        .await
-        .assured("releasing the payload lets the waiter finish");
-    drop(admitted);
     drop(held);
+    let encoded = encoding
+        .await
+        .assured("the envelope encodes once its class has room");
+    let (decoded, charge) = decode_rkyv::<crate::request::StreamRequestEnvelope>(
+        &executor,
+        MemoryClass::Bulk,
+        CpuClass::Bulk,
+        encoded,
+    )
+    .await
+    .assured("the encoded envelope decodes")
+    .into_parts();
+    assert_eq!(decoded, request);
+    drop(decoded);
+    drop(charge);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
@@ -156,13 +180,15 @@ fn bolero_bulk_request_envelopes_preserve_payload_and_release_charges() {
                 .try_reserve(MemoryClass::Bulk, payload_bytes)
                 .assured("the bounded payload fits the untouched class");
             runtime.block_on(async {
-                let encoded = super::encode_stream_request(&executor, request.clone(), charge)
+                // The caller gives the payload's charge back before the envelope's encoding.
+                drop(charge);
+                let encoded = super::encode_stream_request(&executor, request.clone())
                     .await
                     .assured("the bounded envelope encodes");
                 assert_eq!(
                     executor.memory(MemoryClass::Bulk).reserved_bytes,
                     u64::try_from(encoded.len()).assured("the bounded envelope length fits"),
-                    "encoding returns the input charge before the request opens a stream"
+                    "the encoded envelope keeps only its own charge"
                 );
                 let (decoded, charge) = decode_rkyv::<crate::request::StreamRequestEnvelope>(
                     &executor,

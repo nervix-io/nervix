@@ -257,11 +257,20 @@ pub(crate) struct ReceivedMaterializedPage {
     snapshot: Option<RestoredMaterializedSnapshot>,
 }
 
+/// A received page stream, and the room its descriptor's decoding takes, charged with it.
+struct ReceivedPageBytes {
+    bytes: ChargedBytes,
+    descriptor_room: Reservation,
+}
+
+/// Receive one page stream whole. The page and the room its descriptor's decoding takes, a copy
+/// and a decoded value no longer than the page, are one charge the coordinator waits for while it
+/// holds nothing of the class, so the descriptor's decoding never waits for room behind the page.
 async fn receive_page_bytes(
     executor: &Executor,
     mut stream: nervix_interconnect::IncomingByteStream,
     max_bytes: u64,
-) -> Result<ChargedBytes, Report<StatePageExchangeError>> {
+) -> Result<ReceivedPageBytes, Report<StatePageExchangeError>> {
     let header_bound = PoolClass::Bulk.payload_limit(executor);
     let with_header = max_bytes
         .checked_add(header_bound)
@@ -273,8 +282,19 @@ async fn receive_page_bytes(
     if length > bound || length < 8 {
         return Err(Report::new(StatePageExchangeError::Framing));
     }
+    let descriptor_room = header_bound
+        .min(length)
+        .checked_mul(2)
+        .ok_or_else(|| Report::new(StatePageExchangeError::Framing))?;
+    let whole = length
+        .checked_add(descriptor_room)
+        .ok_or_else(|| Report::new(StatePageExchangeError::Framing))?;
     let charge = executor
-        .try_reserve(MemoryClass::Bulk, length)
+        .reserve(MemoryClass::Bulk, whole)
+        .await
+        .change_context(StatePageExchangeError::Admission)?;
+    let (charge, descriptor_room) = charge
+        .split(length)
         .change_context(StatePageExchangeError::Admission)?;
     let mut buffer = BudgetedBuffer::with_limit(charge, length);
     while let Some(chunk) = stream
@@ -289,7 +309,10 @@ async fn receive_page_bytes(
     if u64::try_from(buffer.len()).assured("a bounded buffer fits u64") != length {
         return Err(Report::new(StatePageExchangeError::Framing));
     }
-    Ok(ChargedBytes::from_buffer(buffer))
+    Ok(ReceivedPageBytes {
+        bytes: ChargedBytes::from_buffer(buffer),
+        descriptor_room,
+    })
 }
 
 /// Where a received page stream's descriptor ends. The descriptor is bounded before it is decoded.
@@ -316,26 +339,22 @@ fn descriptor_end(
     Ok(end)
 }
 
-/// Decodes the reply a page stream frames before `end`.
+/// Decodes the reply a page stream frames before `end`, within `room` the page was received with:
+/// the descriptor's copy and its decoded value wait for nothing behind the page.
 async fn decode_reply<R: RkyvMessage>(
     executor: &Executor,
     bytes: &ChargedBytes,
     end: usize,
+    room: Reservation,
 ) -> Result<R, Report<StatePageExchangeError>> {
-    let header_length = u64::try_from(
-        end.checked_sub(8)
-            .verified("a descriptor ends after its eight-byte length"),
+    let (reply, _decoded_charge) = R::decode_rkyv_within(
+        executor.clone(),
+        PoolClass::Bulk,
+        bytes[8..end].to_vec(),
+        room,
     )
-    .assured("a bounded descriptor length fits u64");
-    // The descriptor is bounded independently before copying for the shared rkyv decoder.
-    let header_charge = executor
-        .try_reserve(MemoryClass::Bulk, header_length.max(1))
-        .change_context(StatePageExchangeError::Admission)?;
-    let (reply, _decoded_charge) =
-        R::decode_rkyv(executor.clone(), PoolClass::Bulk, bytes[8..end].to_vec())
-            .await
-            .change_context(StatePageExchangeError::Descriptor)?;
-    drop(header_charge);
+    .await
+    .change_context(StatePageExchangeError::Descriptor)?;
     Ok(reply)
 }
 
@@ -375,9 +394,13 @@ pub(crate) async fn receive_materialized_page(
     Report<StatePageExchangeError>,
 > {
     let max_bytes = request.max_bytes;
-    let bytes = receive_page_bytes(executor, stream, max_bytes).await?;
+    let ReceivedPageBytes {
+        bytes,
+        descriptor_room,
+    } = receive_page_bytes(executor, stream, max_bytes).await?;
     let end = descriptor_end(executor, &bytes)?;
-    let reply: MaterializedStatePageReply = decode_reply(executor, &bytes, end).await?;
+    let reply: MaterializedStatePageReply =
+        decode_reply(executor, &bytes, end, descriptor_room).await?;
     let transfer = match reply {
         Ok(transfer) => transfer,
         Err(reason) => {
@@ -592,8 +615,11 @@ pub(crate) async fn receive_processor_page(
     payload: &[(ProcessorStateSection, Vec<SchemaField>)],
 ) -> Result<Result<ReceivedProcessorPage, StateInspectionRejection>, Report<StatePageExchangeError>>
 {
-    let bytes = receive_page_bytes(executor, stream, request.max_bytes).await?;
-    ReceivedProcessorPage::decode(executor, &bytes, request, payload).await
+    let ReceivedPageBytes {
+        bytes,
+        descriptor_room,
+    } = receive_page_bytes(executor, stream, request.max_bytes).await?;
+    ReceivedProcessorPage::decode(executor, &bytes, descriptor_room, request, payload).await
 }
 
 impl ReceivedProcessorPage {
@@ -609,12 +635,14 @@ impl ReceivedProcessorPage {
     async fn decode(
         executor: &Executor,
         bytes: &ChargedBytes,
+        descriptor_room: Reservation,
         request: &ReadProcessorStatePage,
         payload: &[(ProcessorStateSection, Vec<SchemaField>)],
     ) -> Result<Result<Self, StateInspectionRejection>, Report<StatePageExchangeError>> {
         let framing = || Report::new(StatePageExchangeError::Framing);
         let end = descriptor_end(executor, bytes)?;
-        let reply: ProcessorStatePageReply = decode_reply(executor, bytes, end).await?;
+        let reply: ProcessorStatePageReply =
+            decode_reply(executor, bytes, end, descriptor_room).await?;
         let descriptor = match reply {
             Ok(descriptor) => descriptor,
             Err(reason) => {

@@ -106,8 +106,9 @@ pub(crate) mod stream_slots;
 mod targets;
 
 use body::{
-    read_body, read_body_in_free_room, read_body_into, read_error_response, send_body,
-    send_decode_refusal, send_response, send_static_error,
+    ReceivedBody, declared_length, read_body, read_body_into, read_body_to_decode,
+    read_error_response, send_body, send_decode_refusal, send_response, send_static_error,
+    until_reset,
 };
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
@@ -1733,11 +1734,11 @@ impl TransportState {
                 )
                 .await?;
             drop(binding_window);
-            let answer = wire::decode_rkyv::<ConnectionAnswer>(
+            let answer = wire::decode_rkyv_within::<ConnectionAnswer>(
                 &self.executor,
-                MemoryClass::Management,
                 CpuClass::Control,
-                accepted,
+                accepted.bytes,
+                accepted.decoding,
             )
             .await?
             .into_value();
@@ -2243,19 +2244,23 @@ impl TransportState {
                     "first HTTP/2 stream must POST the connection binding".to_string(),
                 )));
             }
-            let hello_bytes = read_body(
+            let declared = declared_length(
+                request.headers(),
+                self.executor.limits().management_event_bytes.as_u64(),
+            )?;
+            let hello = read_body_to_decode(
                 &self.executor,
                 MemoryClass::Management,
-                self.executor.limits().management_event_bytes.as_u64(),
+                declared,
                 self.options.progress_timeout,
                 request.into_body(),
             )
             .await?;
-            let hello = wire::decode_rkyv::<ConnectionHello>(
+            let hello = wire::decode_rkyv_within::<ConnectionHello>(
                 &self.executor,
-                MemoryClass::Management,
                 CpuClass::Control,
-                hello_bytes,
+                hello.bytes,
+                hello.decoding,
             )
             .await?
             .into_value();
@@ -2499,7 +2504,7 @@ impl TransportState {
                 peer.advertised_host,
                 peer.process_epoch,
                 peer.class,
-                request.into_body(),
+                request,
                 respond,
             )
             .await?;
@@ -2518,8 +2523,7 @@ impl TransportState {
             return Ok(());
         }
         if path == CONTROL_PATH {
-            self.handle_control(peer, request.into_body(), respond)
-                .await?;
+            self.handle_control(peer, request, respond).await?;
             return Ok(());
         }
         if path == ACK_PATH {
@@ -2533,21 +2537,25 @@ impl TransportState {
                 .await?;
                 return Ok(());
             }
-            let bytes = read_body(
+            let declared =
+                declared_length(request.headers(), peer.class.control_body_limit(&self.executor))?;
+            // An ack carries the outcome of a delivery the peer already resolved, so a full class
+            // holds it back rather than losing that outcome, until the peer gives up on it.
+            let reading = read_body_to_decode(
                 &self.executor,
                 MemoryClass::Management,
-                peer.class.control_body_limit(&self.executor),
+                declared,
                 self.options.progress_timeout,
                 request.into_body(),
-            )
-            .await?;
-            // An ack carries the outcome of a delivery the peer already resolved, so a full control
-            // queue holds it back rather than losing that outcome.
-            let decoded = wire::decode_rkyv::<nervix_models::RemoteAckResolution>(
+            );
+            let Some(received) = until_reset(&mut respond, reading).await? else {
+                return Ok(());
+            };
+            let decoded = wire::decode_rkyv_within::<nervix_models::RemoteAckResolution>(
                 &self.executor,
-                MemoryClass::Management,
                 CpuClass::Control,
-                bytes,
+                received.bytes,
+                received.decoding,
             )
             .await?;
             let (ack, reservation) = decoded.into_parts();
@@ -2604,7 +2612,7 @@ impl TransportState {
                     peer.process_epoch,
                     peer.relay_owner,
                     path == RELAY_CANCEL_PATH,
-                    request.into_body(),
+                    request,
                     respond,
                 )
                 .await;
@@ -2625,7 +2633,7 @@ impl TransportState {
                     peer.node_id,
                     peer.process_epoch,
                     peer.relay_owner,
-                    request.into_body(),
+                    request,
                     respond,
                 )
                 .await;
@@ -2656,22 +2664,26 @@ impl TransportState {
     async fn handle_control(
         &self,
         peer: InboundPeer,
-        body: RecvStream,
+        request: Request<RecvStream>,
         mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        let bytes = read_body(
+        let declared =
+            declared_length(request.headers(), peer.class.control_body_limit(&self.executor))?;
+        let reading = read_body_to_decode(
             &self.executor,
             peer.class.memory_class(),
-            peer.class.control_body_limit(&self.executor),
+            declared,
             self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let decoded = wire::decode_rkyv::<ControlEnvelope>(
+            request.into_body(),
+        );
+        let Some(received) = until_reset(&mut respond, reading).await? else {
+            return Ok(());
+        };
+        let decoded = wire::decode_rkyv_within::<ControlEnvelope>(
             &self.executor,
-            peer.class.memory_class(),
             peer.class.cpu_class(),
-            bytes,
+            received.bytes,
+            received.decoding,
         )
         .await?;
         let (control, reservation) = decoded.into_parts();
@@ -2687,6 +2699,11 @@ impl TransportState {
         }
 
         if let ControlEnvelope::Request(request) = control {
+            // The handler owns the request from here, and its own work takes charges of this
+            // class, so the request's charge is given back before it runs: no handler waits for
+            // room behind the request it serves. The connection's stream places bound the request
+            // meanwhile.
+            drop(reservation);
             let response = nervix_primitives::select! {
                 response = self.requests.handle(
                     &self.executor,
@@ -2700,11 +2717,12 @@ impl TransportState {
                     return Ok(());
                 }
             };
-            let (response, _payload_reservation) = response.into_parts();
-            // The handler already ran, so a full queue holds its answer back rather than throwing
-            // the work away. The request still decoded under a refusing admission above, so a
-            // burst beyond the class is refused before it takes any charge. The caller's reset
-            // ends the wait.
+            let (response, payload_reservation) = response.into_parts();
+            // The envelope's encoding copies the answer's payload, whose charge is given back
+            // first, so the encoding never waits for room while holding it. The handler already
+            // ran, so a full class holds the answer back rather than throwing the work away, and
+            // the caller's reset ends the wait.
+            drop(payload_reservation);
             let encoding = wire::encode_rkyv(
                 &self.executor,
                 peer.class.memory_class(),
@@ -2923,7 +2941,7 @@ impl StreamLease {
         &self,
         state: &TransportState,
         request: RawRequest<'_>,
-    ) -> Result<ChargedBytes, Report<TransportError>> {
+    ) -> Result<ReceivedBody, Report<TransportError>> {
         self.connection.request_raw(state, request).await
     }
 }

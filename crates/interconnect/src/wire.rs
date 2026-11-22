@@ -19,8 +19,8 @@ use std::num::NonZeroUsize;
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use nervix_execution::{
-    AdmissionError, Attempt, BudgetedBuffer, Cancellation, ChargedBytes, CpuClass, Executor,
-    MemoryClass, Reservation,
+    Attempt, BudgetedBuffer, Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass,
+    Reservation,
 };
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
@@ -129,15 +129,6 @@ pub(crate) struct RelayAdmissionRequest {
 pub(crate) struct RelayAdmissionResponse {
     pub(crate) receiver_epoch: u64,
     pub(crate) status: RelayAdmissionStatus,
-}
-
-/// The outcome of an operation charged only to room its memory class had free, which never waits
-/// in the class's line.
-pub(crate) enum FreeRoom<T> {
-    /// The class had room, and this holds what was charged to it.
-    Taken(T),
-    /// The class had no free room. Nothing was charged and nothing is held.
-    NoRoom,
 }
 
 /// A decoded value together with the charge that covers its retained allocations.
@@ -255,7 +246,6 @@ pub(crate) type MessageSerializer<'a, 'b> =
 /// the charge after the input is dropped, including when a queued job is cancelled.
 struct RkyvEncoding<T> {
     value: T,
-    _input_charge: Option<Reservation>,
 }
 
 impl<T> RkyvEncoding<T>
@@ -309,10 +299,7 @@ async fn encode_rkyv_buffer<T>(
 where
     T: Send + 'static + for<'a, 'b> Serialize<MessageSerializer<'a, 'b>>,
 {
-    let encoding = RkyvEncoding {
-        value,
-        _input_charge: None,
-    };
+    let encoding = RkyvEncoding { value };
     executor
         .run_cpu_growing(
             cpu,
@@ -325,40 +312,25 @@ where
         .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?
 }
 
-/// Encode an envelope while its nested payload remains charged. Refuse overlapping admission
-/// instead of queueing behind a charge that needs the retained payload to be released.
+/// Encode a stream request's envelope, which copies the payload it nests. The caller gives the
+/// payload's own charge back first, so the encoding never waits for room while holding it; the
+/// request's outbound admission bounds the nested payload until the encoding's charge covers its
+/// copy. An output its class has no room for now waits for room while holding nothing.
 pub(crate) async fn encode_stream_request(
     executor: &Executor,
     envelope: crate::request::StreamRequestEnvelope,
-    payload_charge: Reservation,
 ) -> Result<ChargedBytes, Report<TransportError>> {
-    let encoding = RkyvEncoding {
-        value: envelope,
-        _input_charge: Some(payload_charge),
-    };
-    let class = encoding.value.request.class;
+    let class = envelope.request.class;
     let limit = class.control_body_limit(executor);
-    let reservation = executor
-        .try_reserve(class.memory_class(), INITIAL_MESSAGE_CHARGE.min(limit))
-        .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
-    let attempt = executor
-        .run_cpu(
-            class.cpu_class(),
-            reservation,
-            move |charge, cancellation| encoding.encode(charge, limit, cancellation),
-        )
-        .await
-        .map_err(|error| TransportError::with_cause(error, TransportError::Encode))?;
-    match attempt {
-        Attempt::Finished(buffer) => Ok(ChargedBytes::from_buffer(buffer?)),
-        Attempt::Short { needed, .. } => Err(TransportError::with_cause(
-            Report::new(AdmissionError::BudgetExhausted {
-                class: class.memory_class().as_str(),
-                requested: needed,
-            }),
-            TransportError::Encode,
-        )),
-    }
+    let buffer = encode_rkyv_buffer(
+        executor,
+        class.memory_class(),
+        class.cpu_class(),
+        limit,
+        envelope,
+    )
+    .await?;
+    Ok(ChargedBytes::from_buffer(buffer))
 }
 
 /// Serialize one typed value directly into a budgeted writer on the owning CPU class. The job waits
@@ -393,50 +365,22 @@ where
     Ok(EncodedPayload { bytes, reservation })
 }
 
-/// Validate and deserialize one bounded rkyv payload off the async workers. Its input already
-/// holds memory, so additional admission must refuse rather than queue behind that input.
-pub(crate) async fn decode_rkyv<T>(
+/// Validate and deserialize one body read together with the room its decoding takes, `decoding`
+/// (`read_body_to_decode`). The decoding takes no charge of its own, so it never waits for room
+/// behind the body it decodes, and `decoding` covers the decoded value for as long as it is
+/// retained.
+pub(crate) async fn decode_rkyv_within<T>(
     executor: &Executor,
-    class: MemoryClass,
     cpu: CpuClass,
     bytes: ChargedBytes,
+    decoding: Reservation,
 ) -> Result<Decoded<T>, Report<TransportError>>
 where
     T: Archive + Send + 'static,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
-    let decoded_charge = executor
-        .try_reserve(class, bytes.len().arch_into())
-        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
-}
-
-/// Validate and deserialize one bounded rkyv payload as [`decode_rkyv`] does, but charge the
-/// decoded value only to room `class` has free now. A class without room is reported rather than
-/// waited for, so a request whose answer is that the class is full never waits on that class.
-pub(crate) async fn decode_rkyv_in_free_room<T>(
-    executor: &Executor,
-    class: MemoryClass,
-    cpu: CpuClass,
-    bytes: ChargedBytes,
-) -> Result<FreeRoom<Decoded<T>>, Report<TransportError>>
-where
-    T: Archive + Send + 'static,
-    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
-        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
-{
-    let decoded_charge = match executor.try_reserve(class, bytes.len().arch_into()) {
-        Ok(charge) => charge,
-        Err(refusal) => {
-            if let AdmissionError::BudgetExhausted { .. } = refusal.current_context() {
-                return Ok(FreeRoom::NoRoom);
-            }
-            return Err(TransportError::with_cause(refusal, TransportError::Decode));
-        }
-    };
-    let decoded = decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await?;
-    Ok(FreeRoom::Taken(decoded))
+    decode_rkyv_charged(executor, cpu, bytes, decoding).await
 }
 
 /// Validate and deserialize one bounded rkyv payload under `decoded_charge`, which covers the
@@ -471,9 +415,11 @@ where
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?
 }
 
-/// Validate and deserialize a nested typed-request payload while its outer envelope remains
-/// charged by the caller. The job takes its own input charge because cancellation can end that
-/// caller before a submitted CPU job exits. Both overlapping charges refuse without queueing.
+/// Validate and deserialize a nested typed payload. The job takes its own charge for the payload,
+/// because cancellation can end its caller before a submitted CPU job exits, and one for the decoded
+/// value: both as one charge, waited for while the caller holds nothing of the class. A caller
+/// therefore gives back the charge of the envelope that carried the payload before it decodes it,
+/// and the request's admission bounds the payload until this charge covers it.
 pub(crate) async fn decode_rkyv_payload<T>(
     executor: &Executor,
     class: MemoryClass,
@@ -485,13 +431,59 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
-    let reservation = executor
-        .try_reserve(class, bytes.len().arch_into())
+    let length: u64 = bytes.len().arch_into();
+    let whole = length.checked_mul(2).ok_or_else(|| {
+        Report::new(TransportError::Decode(format!(
+            "a payload of {length} bytes and its decoding overflow a charge"
+        )))
+    })?;
+    let charge = executor
+        .reserve(class, whole)
+        .await
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    let (reservation, decoded_charge) = charge
+        .split(length)
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
     let bytes = EncodedPayload { bytes, reservation };
-    let decoded_charge = executor
-        .try_reserve(class, bytes.as_bytes().len().arch_into())
+    decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
+}
+
+/// Validate and deserialize a nested typed payload within `room`, which its caller took together with
+/// the input that carried the payload, for the payload's copy and its decoded value: the decoding
+/// takes no charge of its own, so it never waits for room behind that input. Room beyond what the
+/// payload needs is given back at once.
+pub(crate) async fn decode_rkyv_payload_within<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    bytes: Vec<u8>,
+    room: Reservation,
+) -> Result<Decoded<T>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    let length: u64 = bytes.len().arch_into();
+    let whole = length.checked_mul(2).ok_or_else(|| {
+        Report::new(TransportError::Decode(format!(
+            "a payload of {length} bytes and its decoding overflow a charge"
+        )))
+    })?;
+    if room.bytes() < whole {
+        return Err(Report::new(TransportError::Decode(format!(
+            "a payload of {length} bytes needs {whole} bytes to decode, more than the {} taken \
+             for it",
+            room.bytes()
+        ))));
+    }
+    let (needed, spare) = room
+        .split(whole)
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    drop(spare);
+    let (reservation, decoded_charge) = needed
+        .split(length)
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    let bytes = EncodedPayload { bytes, reservation };
     decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
 }
 
@@ -544,7 +536,7 @@ mod simulation_checks {
     use meticulous::OptionExt as _;
     use nervix_execution::{CpuClass, Executor, MemoryClass};
 
-    use super::{RelayGrantDisposition, RelayGrantResponse, decode_rkyv, encode_rkyv};
+    use super::{RelayGrantDisposition, RelayGrantResponse, decode_rkyv_within, encode_rkyv};
     use crate::simulation_runner::{
         HostSupervisor, NetworkParameters, SimulationBounds, SimulationConfig, Topology,
     };
@@ -586,11 +578,19 @@ mod simulation_checks {
                         )
                         .await
                         .map_err(|error| io::Error::other(format!("{error:?}")))?;
-                        let decoded = decode_rkyv::<RelayGrantResponse>(
+                        // A receiver reads an answer together with the room its decoding takes.
+                        let decoding = executor
+                            .try_reserve(
+                                MemoryClass::Management,
+                                u64::try_from(bytes.len())
+                                    .map_err(|error| io::Error::other(format!("{error:?}")))?,
+                            )
+                            .map_err(|error| io::Error::other(format!("{error:?}")))?;
+                        let decoded = decode_rkyv_within::<RelayGrantResponse>(
                             &executor,
-                            MemoryClass::Management,
                             CpuClass::Control,
                             bytes,
+                            decoding,
                         )
                         .await
                         .map_err(|error| io::Error::other(format!("{error:?}")))?;

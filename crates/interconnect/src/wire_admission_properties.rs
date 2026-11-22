@@ -114,11 +114,18 @@ fn bolero_receive_admission_outcomes_preserve_every_field() {
                     )
                     .await
                     .assured("the bounded current refusal encodes");
-                    let (actual, charge) = super::decode_rkyv::<ResponseEnvelope>(
+                    let decoding = executor
+                        .try_reserve(
+                            class.memory_class(),
+                            u64::try_from(encoded.len())
+                                .assured("the bounded refusal's length fits u64"),
+                        )
+                        .assured("the class has room to decode the refusal");
+                    let (actual, charge) = super::decode_rkyv_within::<ResponseEnvelope>(
                         &executor,
-                        class.memory_class(),
                         class.cpu_class(),
                         encoded,
+                        decoding,
                     )
                     .await
                     .assured("the current refusal decodes")

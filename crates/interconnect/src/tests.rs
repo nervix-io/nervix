@@ -2879,14 +2879,13 @@ async fn invalid_rkyv_is_rejected_before_dispatch() {
     let bytes = executor
         .try_charge_owned(MemoryClass::Commands, vec![0xff; 32])
         .expect("test payload should fit the command budget");
+    let decoding = executor
+        .try_reserve(MemoryClass::Commands, 32)
+        .expect("the decoding room should fit the command budget");
 
-    let result = wire::decode_rkyv::<ControlEnvelope>(
-        &executor,
-        MemoryClass::Commands,
-        CpuClass::Control,
-        bytes,
-    )
-    .await;
+    let result =
+        wire::decode_rkyv_within::<ControlEnvelope>(&executor, CpuClass::Control, bytes, decoding)
+            .await;
 
     let Err(error) = result else {
         panic!("invalid rkyv must be rejected before dispatch");

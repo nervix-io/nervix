@@ -10,7 +10,7 @@
 
 use futures_util::FutureExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{AdmissionError, ChargedBytes, CpuClass, Executor, MemoryClass};
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_recovery::Discarded as _;
 
 use crate::{PoolClass, request::RequestEnvelope};
@@ -23,90 +23,96 @@ fn request() -> RequestEnvelope {
     }
 }
 
-async fn outer_bulk_decode_refuses_behind_a_waiter_that_needs_its_input() {
+/// A body read together with the room its decoding takes decodes within that room: it takes no
+/// further charge, so it never waits for room behind a waiter that needs more than the class has
+/// left.
+async fn a_decode_read_with_its_input_takes_no_charge_behind_a_waiter() {
     let executor = Executor::default();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
         .assured("the current fixture envelope serializes")
         .to_vec();
+    let length = u64::try_from(bytes.len()).assured("the bounded fixture length fits");
+    let whole = length
+        .checked_mul(2)
+        .assured("the fixture and its decoding fit u64");
     let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    let read = executor
+        .try_reserve(MemoryClass::Bulk, whole)
+        .assured("the body and its decoding fit");
+    let (input, decoding) = read
+        .split(length)
+        .assured("a charge splits at a size it holds");
     let held = executor
-        .try_reserve(MemoryClass::Bulk, capacity - 8192)
-        .assured("the fixture leaves room for the encoded input");
-    let input = executor
-        .try_reserve(MemoryClass::Bulk, 4096)
-        .assured("the encoded envelope fits");
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(whole)
+                .assured("the class holds the fixture"),
+        )
+        .assured("the rest of the class is held");
     let waiting = executor.reserve(MemoryClass::Bulk, 8192);
     let mut waiting = std::pin::pin!(waiting);
     assert!(waiting.as_mut().now_or_never().is_none());
-    let result = super::decode_rkyv::<RequestEnvelope>(
+    let decoded = super::decode_rkyv_within::<RequestEnvelope>(
         &executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
         ChargedBytes::from_owned(bytes, input),
+        decoding,
     )
-    .now_or_never();
-    assert!(
-        result.is_some(),
-        "decoding must refuse without retaining its input behind the waiter"
-    );
-    let error = result
-        .verified("the decoder returned immediately")
-        .err()
-        .assured("the queued reservation leaves no decode room");
-    assert!(matches!(
-        error.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted { class: "bulk", .. })
-    ));
+    .await
+    .assured("decoding within the room read with its input waits for nothing");
+    assert_eq!(decoded.value, request());
+    drop(decoded);
+    drop(held);
     drop(
         waiting
             .await
-            .assured("releasing the input lets the earlier waiter finish"),
+            .assured("the waiter is granted once the class frees"),
     );
-    drop(held);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
-async fn nested_bulk_decode_refuses_behind_a_waiter_that_needs_its_envelope() {
+/// A nested payload's decoding waits for its copy and its decoded value as one charge, holding
+/// nothing of the class meanwhile, and decodes once room frees.
+async fn a_nested_decode_waits_for_its_whole_charge_holding_nothing() {
     let executor = Executor::default();
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
         .assured("the current fixture envelope serializes")
         .to_vec();
+    let length = u64::try_from(bytes.len()).assured("the bounded fixture length fits");
     let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+    // The class has room for the payload's copy, but not for its decoded value beside it.
     let held = executor
-        .try_reserve(MemoryClass::Bulk, capacity - 8192)
-        .assured("the fixture leaves room for the envelope");
-    let envelope = executor
-        .try_reserve(MemoryClass::Bulk, 4096)
-        .assured("the caller's outer envelope fits");
-    let waiting = executor.reserve(MemoryClass::Bulk, 8192);
-    let mut waiting = std::pin::pin!(waiting);
-    assert!(waiting.as_mut().now_or_never().is_none());
-    let result = super::decode_rkyv_payload::<RequestEnvelope>(
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(length)
+                .assured("the class holds the fixture"),
+        )
+        .assured("the rest of the class is held");
+    let mut decoding = Box::pin(super::decode_rkyv_payload::<RequestEnvelope>(
         &executor,
         MemoryClass::Bulk,
         CpuClass::Bulk,
         bytes,
-    )
-    .now_or_never();
-    assert!(
-        result.is_some(),
-        "nested decoding must refuse before waiting on its caller's envelope"
-    );
-    let error = result
-        .verified("the decoder returned immediately")
-        .err()
-        .assured("the queued reservation leaves no decode room");
-    assert!(matches!(
-        error.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted { class: "bulk", .. })
     ));
-    drop(envelope);
-    drop(
-        waiting
-            .await
-            .assured("releasing the outer envelope lets the waiter finish"),
+    assert!(
+        decoding.as_mut().now_or_never().is_none(),
+        "a full class holds the nested decoding back instead of refusing it"
     );
     drop(held);
+    let (value, charge) = decoding
+        .await
+        .assured("the nested decoding runs once its class has room")
+        .into_parts();
+    assert_eq!(value, request());
+    assert_eq!(
+        charge.bytes(),
+        length,
+        "the decoded value keeps only its own charge"
+    );
+    drop(value);
+    drop(charge);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
@@ -244,14 +250,21 @@ async fn a_full_class_holds_request_and_response_frames_back_until_a_place_frees
     while executor.snapshot().cpu_class(CpuClass::Bulk).pending == 0 {
         nervix_primitives::task::yield_now().await;
     }
+    // Each frame is read together with the room its decoding takes.
     let charged = |bytes: Vec<u8>| {
-        let input = executor
+        let length = u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64");
+        let read = executor
             .try_reserve(
                 MemoryClass::Bulk,
-                u64::try_from(bytes.len()).assured("the fixture envelope's length fits u64"),
+                length
+                    .checked_mul(2)
+                    .assured("the fixture and its decoding fit u64"),
             )
-            .assured("the encoded envelope fits");
-        ChargedBytes::from_owned(bytes, input)
+            .assured("the encoded envelope and its decoding fit");
+        let (input, decoding) = read
+            .split(length)
+            .assured("a charge splits at a size it holds");
+        (ChargedBytes::from_owned(bytes, input), decoding)
     };
     let request_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&request())
         .assured("the current fixture envelope serializes")
@@ -272,17 +285,19 @@ async fn a_full_class_holds_request_and_response_frames_back_until_a_place_frees
         1024 * 1024,
         request(),
     ));
-    let mut request_decoding = std::pin::pin!(super::decode_rkyv::<RequestEnvelope>(
+    let (request_input, request_room) = charged(request_bytes);
+    let mut request_decoding = std::pin::pin!(super::decode_rkyv_within::<RequestEnvelope>(
         &executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
-        charged(request_bytes),
+        request_input,
+        request_room,
     ));
-    let mut response_decoding = std::pin::pin!(super::decode_rkyv::<ResponseEnvelope>(
+    let (response_input, response_room) = charged(response_bytes);
+    let mut response_decoding = std::pin::pin!(super::decode_rkyv_within::<ResponseEnvelope>(
         &executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
-        charged(response_bytes),
+        response_input,
+        response_room,
     ));
     let mut response_encoding = std::pin::pin!(super::encode_rkyv(
         &executor,
@@ -343,14 +358,14 @@ async fn a_full_class_holds_request_and_response_frames_back_until_a_place_frees
 
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
-async fn outer_bulk_decode_refusal_releases_its_input() {
-    outer_bulk_decode_refuses_behind_a_waiter_that_needs_its_input().await;
+async fn an_outer_decode_takes_no_charge_beyond_the_room_read_with_its_input() {
+    a_decode_read_with_its_input_takes_no_charge_behind_a_waiter().await;
 }
 
 #[cfg(not(feature = "shuttle"))]
 #[nervix_primitives::test]
-async fn nested_bulk_decode_refusal_releases_its_envelope() {
-    nested_bulk_decode_refuses_behind_a_waiter_that_needs_its_envelope().await;
+async fn a_nested_decode_waits_for_its_whole_charge_and_runs_once_room_frees() {
+    a_nested_decode_waits_for_its_whole_charge_holding_nothing().await;
 }
 
 #[cfg(not(feature = "shuttle"))]
@@ -364,8 +379,8 @@ async fn nested_bulk_decode_cancellation_returns_input_output_and_queue_slot() {
 fn shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs() {
     nervix_model_harness::shuttle::check_random_and_pct(|| {
         shuttle::future::block_on(async {
-            outer_bulk_decode_refuses_behind_a_waiter_that_needs_its_input().await;
-            nested_bulk_decode_refuses_behind_a_waiter_that_needs_its_envelope().await;
+            a_decode_read_with_its_input_takes_no_charge_behind_a_waiter().await;
+            a_nested_decode_waits_for_its_whole_charge_holding_nothing().await;
             nested_decode_cancellation_keeps_its_own_input_charge().await;
         });
     });
@@ -422,11 +437,17 @@ async fn an_encoding_that_outgrows_a_full_class_waits_for_room_and_completes() {
         .await
         .assured("the encoding task is joined")
         .assured("the encoding completes once its class has room");
-    let decoded = super::decode_rkyv::<RequestEnvelope>(
+    let decoding = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            u64::try_from(encoded.len()).assured("the encoded envelope's length fits u64"),
+        )
+        .assured("the class has room to decode the envelope");
+    let decoded = super::decode_rkyv_within::<RequestEnvelope>(
         &executor,
-        MemoryClass::Bulk,
         CpuClass::Bulk,
         encoded,
+        decoding,
     )
     .await
     .assured("the completed encoding decodes as an envelope");

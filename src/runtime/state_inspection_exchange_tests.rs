@@ -486,6 +486,20 @@ fn refusal(
     }
 }
 
+/// The room a page stream's descriptor decodes within, taken beside the stream as the coordinator
+/// takes it when the page arrives.
+fn descriptor_room(executor: &Executor, stream: &ChargedBytes) -> Reservation {
+    let length = u64::try_from(stream.len()).assured("a bounded fixture stream's length fits u64");
+    executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            length
+                .checked_mul(2)
+                .assured("a bounded fixture stream's decoding fits u64"),
+        )
+        .assured("the fixture class has room for a descriptor's decoding")
+}
+
 #[nervix_primitives::test]
 async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_their_rows() {
     let executor = Executor::default();
@@ -497,7 +511,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     )
     .await;
     let received =
-        ReceivedProcessorPage::decode(&executor, &stream, &read(10), &expected_sections())
+        ReceivedProcessorPage::decode(&executor, &stream, descriptor_room(&executor, &stream), &read(10), &expected_sections())
             .await
             .assured("the page agrees with its descriptor and the read");
     let Ok(page) = received else {
@@ -529,7 +543,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[],
     )
     .await;
-    let received = ReceivedProcessorPage::decode(&executor, &counted, &read(0), &[])
+    let received = ReceivedProcessorPage::decode(&executor, &counted, descriptor_room(&executor, &counted), &read(0), &[])
         .await
         .assured("a page that returns no row agrees with a count-only read");
     let Ok(page) = received else {
@@ -547,7 +561,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     // An owner's typed refusal arrives as that refusal, and carries no body.
     let refused = sent_page(&executor, Err(StateInspectionRejection::NotReady), &[]).await;
     let received =
-        ReceivedProcessorPage::decode(&executor, &refused, &read(10), &expected_sections())
+        ReceivedProcessorPage::decode(&executor, &refused, descriptor_room(&executor, &refused), &read(10), &expected_sections())
             .await
             .assured("a refusal is a complete reply");
     assert!(
@@ -561,7 +575,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     )
     .await;
     let error = refusal(
-        ReceivedProcessorPage::decode(&executor, &trailing, &read(10), &expected_sections()).await,
+        ReceivedProcessorPage::decode(&executor, &trailing, descriptor_room(&executor, &trailing), &read(10), &expected_sections()).await,
     );
     assert!(matches!(
         error.current_context(),
@@ -588,7 +602,7 @@ async fn a_body_whose_columns_or_types_disagree_with_its_declared_fields_is_refu
         )
         .await;
         let error = refusal(
-            ReceivedProcessorPage::decode(&executor, &stream, &read(10), &expected_sections())
+            ReceivedProcessorPage::decode(&executor, &stream, descriptor_room(&executor, &stream), &read(10), &expected_sections())
                 .await,
         );
         assert!(
@@ -739,7 +753,7 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
 
     for (case, stream, request) in cases {
         let error =
-            refusal(ReceivedProcessorPage::decode(&executor, &stream, &request, &expected).await);
+            refusal(ReceivedProcessorPage::decode(&executor, &stream, descriptor_room(&executor, &stream), &request, &expected).await);
         assert!(
             matches!(error.current_context(), StatePageExchangeError::Framing),
             "{case} is a framing violation, found {error:?}"

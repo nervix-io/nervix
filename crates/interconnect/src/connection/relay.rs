@@ -195,11 +195,11 @@ impl TransportState {
                 },
             )
             .await?;
-        let response = wire::decode_rkyv::<RelayAdmissionResponse>(
+        let response = wire::decode_rkyv_within::<RelayAdmissionResponse>(
             &self.executor,
-            MemoryClass::Management,
             CpuClass::Control,
-            response,
+            response.bytes,
+            response.decoding,
         )
         .await?
         .into_value();
@@ -324,11 +324,11 @@ impl TransportState {
                 return Err(error);
             }
         };
-        let grant = wire::decode_rkyv::<RelayGrantResponse>(
+        let grant = wire::decode_rkyv_within::<RelayGrantResponse>(
             &self.executor,
-            MemoryClass::Management,
             CpuClass::Control,
-            grant_response,
+            grant_response.bytes,
+            grant_response.decoding,
         )
         .await?
         .into_value();
@@ -539,22 +539,28 @@ impl TransportState {
         peer_epoch: u64,
         relay_owner: StdArc<RelayPeerOwner>,
         cancel: bool,
-        body: RecvStream,
-        respond: server::SendResponse<Bytes>,
+        request: Request<RecvStream>,
+        mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        let encoded = read_body(
-            &self.executor,
-            MemoryClass::Management,
+        let declared = declared_length(
+            request.headers(),
             self.executor.limits().management_event_bytes.as_u64(),
-            self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let request = wire::decode_rkyv::<RelayAdmissionRequest>(
+        )?;
+        let reading = read_body_to_decode(
             &self.executor,
             MemoryClass::Management,
+            declared,
+            self.options.progress_timeout,
+            request.into_body(),
+        );
+        let Some(received) = until_reset(&mut respond, reading).await? else {
+            return Ok(());
+        };
+        let request = wire::decode_rkyv_within::<RelayAdmissionRequest>(
+            &self.executor,
             CpuClass::Control,
-            encoded,
+            received.bytes,
+            received.decoding,
         )
         .await?
         .into_value();
@@ -644,39 +650,34 @@ impl TransportState {
         peer_node_id: ClusterNodeName,
         peer_epoch: u64,
         relay_owner: StdArc<RelayPeerOwner>,
-        body: RecvStream,
-        respond: server::SendResponse<Bytes>,
+        request: Request<RecvStream>,
+        mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        // A full relay budget is answered with the capacity refusal the sender holds its delivery
-        // back on. Reading or decoding the request must therefore not wait on that same budget:
-        // both take only the room it has free.
-        let encoded = read_body_in_free_room(
-            &self.executor,
-            MemoryClass::Relay,
+        // A full relay class holds the grant back, as it holds back every charge: the request is
+        // read and decoded under one charge, and once it is known the operation's whole charge is
+        // waited for while the grant holds nothing of the class. The sender's reset or deadline
+        // ends either wait.
+        let declared = declared_length(
+            request.headers(),
             self.executor.limits().relay_encoded_bytes.as_u64(),
-            self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let wire::FreeRoom::Taken(encoded) = encoded else {
-            debug!("relay grant refused: the relay budget has no room to read its request");
-            return self
-                .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
-                .await;
-        };
-        let decoded = wire::decode_rkyv_in_free_room::<RelayGrantRequest>(
+        )?;
+        let reading = read_body_to_decode(
             &self.executor,
             MemoryClass::Relay,
+            declared,
+            self.options.progress_timeout,
+            request.into_body(),
+        );
+        let Some(received) = until_reset(&mut respond, reading).await? else {
+            return Ok(());
+        };
+        let decoded = wire::decode_rkyv_within::<RelayGrantRequest>(
+            &self.executor,
             CpuClass::Data,
-            encoded,
+            received.bytes,
+            received.decoding,
         )
         .await?;
-        let wire::FreeRoom::Taken(decoded) = decoded else {
-            debug!("relay grant refused: the relay budget has no room to decode its request");
-            return self
-                .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
-                .await;
-        };
         let (grant, metadata_memory) = decoded.into_parts();
         if grant.sender_epoch != peer_epoch {
             return self
@@ -772,18 +773,31 @@ impl TransportState {
             .ok_or_else(|| {
                 TransportError::RelayGrant("relay operation limits overflow".to_string())
             })?;
-        let reservation = match self
-            .executor
-            .try_reserve(MemoryClass::Relay, operation_bytes)
-        {
-            Ok(reservation) => reservation,
-            Err(error) => {
+        // The grant's metadata stays charged with its record. That charge is given back while the
+        // grant waits for its operation's, and both are taken again as one charge, so the wait
+        // holds nothing of the class; the connection's stream places bound the metadata meanwhile.
+        let metadata_bytes = metadata_memory.bytes();
+        drop(metadata_memory);
+        let whole = operation_bytes.checked_add(metadata_bytes).ok_or_else(|| {
+            TransportError::RelayGrant("relay operation limits overflow".to_string())
+        })?;
+        let charging = async {
+            Ok::<_, Report<TransportError>>(self.executor.reserve(MemoryClass::Relay, whole).await)
+        };
+        let charge = match until_reset(&mut respond, charging).await? {
+            None => return Ok(()),
+            Some(Ok(charge)) => charge,
+            Some(Err(error)) => {
+                // Only an operation the whole class could never hold, or a closed class, fails.
                 debug!(error = %format_args!("{error:#}"), "relay grant refused by memory admission");
                 return self
                     .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
                     .await;
             }
         };
+        let (metadata_memory, reservation) = charge
+            .split(metadata_bytes)
+            .map_err(|error| TransportError::with_cause(error, TransportError::RelayGrant))?;
         let Ok(item) = StdArc::clone(&self.relay_items).try_acquire_owned() else {
             return self
                 .refuse_relay_grant(respond, RelayGrantRefusal::QueueItem)
