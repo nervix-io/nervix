@@ -222,9 +222,16 @@ async fn the_general_policy_logs_a_rejection_or_reports_nothing() {
         .await
         .assured("a logged rejection is reported to the node's observers");
     assert_eq!(
-        message,
+        message.message,
         format!(
             "ingestor 'orders_source' general error in domain 'orders': decode rejection {logged}"
         )
+    );
+    assert_eq!(
+        message.error,
+        Some(ReportedError {
+            class: MessageErrorClass::CODEC,
+            node: NodeRef::new(ModelKind::Ingestor, ingestor.clone()),
+        })
     );
 }

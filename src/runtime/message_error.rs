@@ -112,7 +112,7 @@ pub(super) enum MessageErrorHandlingError {
     )]
     RecordConstruction {
         reference: uuid::Uuid,
-        code: MessageErrorCode,
+        class: MessageErrorClass,
         operation: MessageErrorOperation,
         fields: SortedSet<FieldPath>,
         #[source]
@@ -157,7 +157,7 @@ impl MessageErrorHandlingError {
     ) -> error_stack::Report<Self> {
         error_stack::Report::new(Self::RecordConstruction {
             reference: error.reference,
-            code: error.code,
+            class: error.class,
             operation: error.operation,
             fields: error.fields.clone(),
             source,
@@ -187,7 +187,8 @@ pub(super) struct MessageErrorHandling<'a> {
     pub(super) source_route: Option<&'a RelayName>,
     pub(super) policy: &'a MessageErrorPolicy,
     pub(super) message: RelayMessage,
-    pub(super) error: StructuredMessageError,
+    /// The error the failed operation raised, which this handling attributes to the node.
+    pub(super) error: RaisedMessageError,
     pub(super) partial_output: Option<RuntimeRecordBatch>,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
     pub(super) ingest_metadata: Option<IngestFilterMapMetadata>,
@@ -196,6 +197,7 @@ pub(super) struct MessageErrorHandling<'a> {
 
 pub(super) struct MessageErrorFailure {
     pub(super) source_route: Option<RelayName>,
+    pub(super) class: MessageErrorClass,
     pub(super) reason: String,
     pub(super) operation: MessageErrorOperation,
 }
@@ -209,17 +211,15 @@ pub(super) struct MessageErrorSourceContext<'a> {
 }
 
 impl MessageErrorFailure {
-    pub(super) fn publish(source_route: Option<&RelayName>, reason: String) -> Self {
-        Self::new(source_route, reason, MessageErrorOperation::Publish)
-    }
-
     pub(super) fn new(
         source_route: Option<&RelayName>,
+        class: MessageErrorClass,
         reason: String,
         operation: MessageErrorOperation,
     ) -> Self {
         Self {
             source_route: source_route.cloned(),
+            class,
             reason,
             operation,
         }
@@ -231,7 +231,7 @@ pub(super) enum SingleRecordFilterMapOutcome {
     Filtered,
     Output(RuntimeRow),
     MessageError {
-        error: StructuredMessageError,
+        error: RaisedMessageError,
         partial_output: Option<RuntimeRecordBatch>,
         materialized_state: HashMap<String, RuntimeValue>,
     },
@@ -243,28 +243,31 @@ pub(super) enum SingleRecordFilterMapOutcome {
         reason = "the caller supplies typed error conversion and the planned route iterator"
     )
 )]
-pub(super) fn structured_message_error(
+/// The error an operation raises: its class, message and operation, before the node that runs the
+/// operation names itself on it when it handles the error.
+pub(super) fn raised_message_error<Class>(
     execution_now: Timestamp,
-    code: MessageErrorCode,
+    class: Class,
     message: String,
     operation: MessageErrorOperation,
     operation_index: Option<u32>,
     fields: impl IntoIterator<Item = FieldPath>,
-) -> StructuredMessageError {
-    StructuredMessageError {
+) -> RaisedMessageError<Class> {
+    RaisedMessageError {
         reference: uuid::Uuid::now_v7(),
-        code,
+        class,
         message,
         operation,
         operation_index,
         fields: SortedSet::from_unsorted(fields.into_iter().collect()),
         occurred_at: execution_now,
+        external_code: None,
     }
 }
 
-pub(super) fn planned_structured_message_error(
+pub(super) fn planned_message_error(
     message: RelayMessage,
-    error: StructuredMessageError,
+    error: RaisedMessageError,
     partial_output: Option<RuntimeRecordBatch>,
     materialized_state: HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
@@ -510,6 +513,7 @@ impl Runtime {
         } = context;
         let MessageErrorFailure {
             source_route,
+            class,
             reason,
             operation,
         } = failure;
@@ -521,9 +525,9 @@ impl Runtime {
             source_route: source_route.as_ref(),
             policy: &policies.message,
             message,
-            error: structured_message_error(
+            error: raised_message_error(
                 execution_now,
-                MessageErrorCode::External,
+                class,
                 reason,
                 operation,
                 None,
@@ -553,6 +557,7 @@ impl Runtime {
         } = context;
         let MessageErrorFailure {
             source_route,
+            class,
             reason,
             operation,
         } = failure;
@@ -564,9 +569,9 @@ impl Runtime {
             source_route: source_route.as_ref(),
             policy,
             message,
-            error: structured_message_error(
+            error: raised_message_error(
                 execution_now,
-                MessageErrorCode::External,
+                class,
                 reason,
                 operation,
                 None,
@@ -598,24 +603,35 @@ impl Runtime {
             ingest_metadata,
             execution_now,
         } = handling;
+        // The node that ran the operation names itself on the error it raised.
+        let error = error.attributed_to(NodeRef::new(node_kind, node.clone()));
+        // The domain's routing resolved every node's counters when its revision was installed; a
+        // node without routing cannot run, so it handles no error to count.
+        if let Some(counters) = routing.and_then(|routing| routing.message_errors.node(&error.node))
+        {
+            counters.count(error.class, error.operation);
+        }
         match policy {
             MessageErrorPolicy::Ignore => {
                 message.acks.ack_success();
             }
             MessageErrorPolicy::Log => {
-                self.inner.events.report_error(format!(
-                    "{} '{}' message error in domain '{}': {}",
-                    node_kind.as_str(),
-                    node.as_str(),
-                    domain.as_str(),
-                    error.message
-                ));
+                self.inner.events.report_node_error(
+                    format!(
+                        "{} '{}' message error in domain '{}': {}",
+                        node_kind.as_str(),
+                        node.as_str(),
+                        domain.as_str(),
+                        error.message
+                    ),
+                    error.reported(),
+                );
                 warn!(
                     domain = domain.as_str(),
                     node_kind = node_kind.as_str(),
                     node = node.as_str(),
                     error_reference = %error.reference,
-                    error_code = error.code.as_ref(),
+                    error_class = error.class.as_str(),
                     error_operation = error.operation.as_ref(),
                     reason = %error.message,
                     "runtime node handled message error"
@@ -640,15 +656,20 @@ impl Runtime {
                     self.dispatch_message_error_to_dlq(context, relay).await
                 {
                     let reason = format!("{dispatch_error:#}");
-                    self.inner.events.report_error(format!(
-                        "{} '{}' failed to dispatch message error {} to DLQ '{}' in domain '{}': \
-                         {reason}",
-                        node_kind.as_str(),
-                        node.as_str(),
-                        error.reference,
-                        relay.as_str(),
-                        domain.as_str(),
-                    ));
+                    // The event is the only witness left of the error the route could not deliver,
+                    // so it carries that error's class and node.
+                    self.inner.events.report_node_error(
+                        format!(
+                            "{} '{}' failed to dispatch message error {} to DLQ '{}' in domain \
+                             '{}': {reason}",
+                            node_kind.as_str(),
+                            node.as_str(),
+                            error.reference,
+                            relay.as_str(),
+                            domain.as_str(),
+                        ),
+                        error.reported(),
+                    );
                     message.acks.no_ack(format!(
                         "{} '{}' failed to dispatch message error {} to DLQ '{}': {reason}",
                         node_kind.as_str(),
@@ -675,13 +696,12 @@ impl Runtime {
     pub(in crate::runtime) fn handle_general_error_for_acks<'a, C: error_stack::Context>(
         &self,
         domain: &DomainName,
-        node_kind: ModelKind,
-        node: impl Into<ModelName>,
+        node: &NodeRef,
         policies: &ErrorPolicies,
         acks: impl IntoIterator<Item = &'a AckSet>,
+        class: MessageErrorClass,
         error: &Report<C>,
     ) {
-        let node = node.into();
         match policies.general {
             GeneralErrorPolicy::Ignore => {
                 for ack in acks {
@@ -692,16 +712,23 @@ impl Runtime {
                 let reason = format!("{error:#}");
                 let report = format!(
                     "{} '{}' general error in domain '{}': {}",
-                    node_kind.as_str(),
-                    node.as_str(),
+                    node.kind.as_str(),
+                    node.identifier.as_str(),
                     domain.as_str(),
                     reason
                 );
-                self.inner.events.report_error(report.clone());
+                self.inner.events.report_node_error(
+                    report.clone(),
+                    ReportedError {
+                        class,
+                        node: node.clone(),
+                    },
+                );
                 warn!(
                     domain = domain.as_str(),
-                    node_kind = node_kind.as_str(),
-                    node = node.as_str(),
+                    node_kind = node.kind.as_str(),
+                    node = node.identifier.as_str(),
+                    error_class = class.as_str(),
                     reason = %reason,
                     "runtime node handled general error"
                 );
@@ -745,11 +772,19 @@ impl Runtime {
             domain.as_str(),
             reason
         );
-        self.inner.events.report_error(report.clone());
+        // A failure inside the node's own processing is Nervix breaking its contract.
+        self.inner.events.report_node_error(
+            report.clone(),
+            ReportedError {
+                class: MessageErrorClass::INTERNAL,
+                node: NodeRef::new(node_kind, node.clone()),
+            },
+        );
         warn!(
             domain = domain.as_str(),
             node_kind = node_kind.as_str(),
             node = node.as_str(),
+            error_class = MessageErrorClass::INTERNAL.as_str(),
             reason = %reason,
             "runtime processor handled internal error"
         );
@@ -924,30 +959,31 @@ impl Runtime {
             None => Vec::new(),
         };
         let mut side_inputs = materialized_state.clone();
+        let error_field = |field: &str| format!("error.{field}");
         side_inputs.insert(
-            "error.reference".to_string(),
+            error_field(message_error_scope::REFERENCE),
             RuntimeValue::String(error.reference.to_string()),
         );
         side_inputs.insert(
-            "error.code".to_string(),
-            RuntimeValue::String(error.code.as_ref().to_string()),
+            error_field(message_error_scope::CLASS),
+            RuntimeValue::String(error.class.as_str().to_string()),
         );
         side_inputs.insert(
-            "error.message".to_string(),
+            error_field(message_error_scope::MESSAGE),
             RuntimeValue::String(error.message.clone()),
         );
         side_inputs.insert(
-            "error.operation".to_string(),
+            error_field(message_error_scope::OPERATION),
             RuntimeValue::String(error.operation.as_ref().to_string()),
         );
         if let Some(operation_index) = error.operation_index {
             side_inputs.insert(
-                "error.operation_index".to_string(),
+                error_field(message_error_scope::OPERATION_INDEX),
                 RuntimeValue::U32(operation_index),
             );
         }
         side_inputs.insert(
-            "error.fields".to_string(),
+            error_field(message_error_scope::FIELDS),
             RuntimeValue::Vec(
                 error
                     .fields
@@ -957,9 +993,23 @@ impl Runtime {
             ),
         );
         side_inputs.insert(
-            "error.occurred_at".to_string(),
+            error_field(message_error_scope::OCCURRED_AT),
             RuntimeValue::Datetime(error.occurred_at.as_datetime().fixed_offset()),
         );
+        side_inputs.insert(
+            error_field(message_error_scope::NODE),
+            RuntimeValue::String(error.node.identifier.as_str().to_string()),
+        );
+        side_inputs.insert(
+            error_field(message_error_scope::NODE_KIND),
+            RuntimeValue::String(error.node.kind.as_str().to_string()),
+        );
+        if let Some(external_code) = &error.external_code {
+            side_inputs.insert(
+                error_field(message_error_scope::EXTERNAL_CODE),
+                RuntimeValue::String(external_code.as_str().to_string()),
+            );
+        }
         let lookup_columns = message
             .acks
             .keep_alive_while_pending(compute_lookup_hash_map_columns(
@@ -1085,7 +1135,7 @@ impl Runtime {
 mod tests {
     use ahash::HashMap;
     use nervix_models::{
-        FieldPath, MessageErrorCode, MessageErrorOperation, ParseAsType, StructuredMessageError,
+        ExternalErrorCode, FieldPath, MessageErrorOperation, ParseAsType, StructuredMessageError,
         Timestamp,
     };
     use nervix_primitives::time::timeout;
@@ -1093,6 +1143,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        runtime::events::RuntimeErrorEvent,
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
@@ -1159,14 +1210,18 @@ mod tests {
 
     #[test]
     fn runtime_report_chain_record_construction_keeps_nested_reports() {
-        let error = structured_message_error(
+        let error = raised_message_error(
             Timestamp::from_unix_nanos(1),
-            MessageErrorCode::Evaluation,
+            MessageErrorClass::EVALUATION,
             "sensitive original payload".into(),
             MessageErrorOperation::Set,
             None,
             [],
-        );
+        )
+        .attributed_to(NodeRef::new(
+            ModelKind::Junction,
+            named::<ModelName>("calculate"),
+        ));
         let source = Report::new(
             crate::runtime_schema::RuntimeSchemaError::ColumnCountMismatch {
                 expected: 2,
@@ -1211,13 +1266,13 @@ mod tests {
         let (ignored_acks, ignored_completion) = AckSet::root();
         runtime.handle_general_error_for_acks(
             &domain,
-            ModelKind::Ingestor,
-            named::<ModelName>("intake"),
+            &NodeRef::new(ModelKind::Ingestor, named::<ModelName>("intake")),
             &ErrorPolicies {
                 message: MessageErrorPolicy::Log,
                 general: GeneralErrorPolicy::Ignore,
             },
             [&ignored_acks],
+            MessageErrorClass::INTERNAL,
             &failure(),
         );
         assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
@@ -1234,11 +1289,20 @@ mod tests {
         let internal_report =
             format!("junction 'route_totals' internal error in domain 'orders': {chain}");
         // Events arrive in the order they were reported, so the ignored error reported none.
-        let RuntimeEvent::Error(message) = events
+        let RuntimeEvent::Error(event) = events
             .recv()
             .await
             .expect("an internal error is reported to the node's observers");
-        assert_eq!(message, internal_report);
+        assert_eq!(
+            event,
+            RuntimeErrorEvent {
+                message: internal_report.clone(),
+                error: Some(ReportedError {
+                    class: MessageErrorClass::INTERNAL,
+                    node: NodeRef::new(ModelKind::Junction, named::<ModelName>("route_totals")),
+                }),
+            }
+        );
         assert_eq!(
             internal_completion.wait().await,
             AckOutcome::NoAck(internal_report)
@@ -1247,18 +1311,27 @@ mod tests {
         let (logged_acks, logged_completion) = AckSet::root();
         runtime.handle_general_error_for_acks(
             &domain,
-            ModelKind::Ingestor,
-            named::<ModelName>("intake"),
+            &NodeRef::new(ModelKind::Ingestor, named::<ModelName>("intake")),
             &ErrorPolicies::handled_by_log(),
             [&logged_acks],
+            MessageErrorClass::CODEC,
             &failure(),
         );
         let logged_report = format!("ingestor 'intake' general error in domain 'orders': {chain}");
-        let RuntimeEvent::Error(message) = events
+        let RuntimeEvent::Error(event) = events
             .recv()
             .await
             .expect("a logged general error is reported to the node's observers");
-        assert_eq!(message, logged_report);
+        assert_eq!(
+            event,
+            RuntimeErrorEvent {
+                message: logged_report.clone(),
+                error: Some(ReportedError {
+                    class: MessageErrorClass::CODEC,
+                    node: NodeRef::new(ModelKind::Ingestor, named::<ModelName>("intake")),
+                }),
+            }
+        );
         assert_eq!(
             logged_completion.wait().await,
             AckOutcome::NoAck(logged_report)
@@ -1332,9 +1405,9 @@ mod tests {
             ..Default::default()
         };
         let (acks, completion) = AckSet::root();
-        let error = structured_message_error(
+        let error = raised_message_error(
             Timestamp::from_unix_nanos(1),
-            MessageErrorCode::Evaluation,
+            MessageErrorClass::EVALUATION,
             "sensitive original payload".into(),
             MessageErrorOperation::Set,
             None,
@@ -1379,10 +1452,16 @@ mod tests {
             .assured("a failed DLQ dispatch publishes its report");
         assert_eq!(
             event,
-            format!(
-                "junction 'calculate' failed to dispatch message error {reference} to DLQ \
-                 'calculation_errors' in domain 'orders': {cause}"
-            )
+            RuntimeErrorEvent {
+                message: format!(
+                    "junction 'calculate' failed to dispatch message error {reference} to DLQ \
+                     'calculation_errors' in domain 'orders': {cause}"
+                ),
+                error: Some(ReportedError {
+                    class: MessageErrorClass::EVALUATION,
+                    node: NodeRef::new(ModelKind::Junction, node.clone()),
+                }),
+            }
         );
         assert_eq!(
             completion.wait().await,
@@ -1531,14 +1610,15 @@ mod tests {
             record: test_runtime_row([]),
             acks: AckSet::empty(),
         };
-        let error = structured_message_error(
+        let error = raised_message_error(
             Timestamp::now(),
-            MessageErrorCode::Evaluation,
+            MessageErrorClass::EVALUATION,
             "non-sensitive evaluation failure".to_string(),
             MessageErrorOperation::Set,
             None,
             [],
-        );
+        )
+        .attributed_to(NodeRef::new(ModelKind::Junction, node.clone()));
         let materialized_state = HashMap::default();
         let routing = DomainRoutingSnapshot::default();
         let context = |routing| MessageErrorContext {
@@ -1592,7 +1672,7 @@ mod tests {
         let occurred_at = Timestamp::now();
         let error = StructuredMessageError {
             reference,
-            code: MessageErrorCode::Evaluation,
+            class: MessageErrorClass::REFUSED,
             message: "division failed".to_string(),
             operation: MessageErrorOperation::Set,
             operation_index: Some(2),
@@ -1601,6 +1681,8 @@ mod tests {
                 FieldPath::new("output.total"),
             ]),
             occurred_at,
+            node: NodeRef::new(ModelKind::WindowProcessor, named::<ModelName>("calculate")),
+            external_code: ExternalErrorCode::new("23514"),
         };
         let input_schema = test_schema(&[("input_id", ParseAsType::U32)]);
         let partial_schema = test_schema(&[("total", ParseAsType::I64)]);
@@ -1636,6 +1718,26 @@ mod tests {
                 ty: ParseAsType::U32,
                 optional: true,
             },
+            OptionalTestField {
+                name: "class",
+                ty: ParseAsType::String,
+                optional: false,
+            },
+            OptionalTestField {
+                name: "node",
+                ty: ParseAsType::String,
+                optional: false,
+            },
+            OptionalTestField {
+                name: "node_kind",
+                ty: ParseAsType::String,
+                optional: false,
+            },
+            OptionalTestField {
+                name: "external_code",
+                ty: ParseAsType::String,
+                optional: true,
+            },
         ]);
         let materialized_specs = HashMap::from_iter([(
             named("profiles"),
@@ -1648,7 +1750,8 @@ mod tests {
         let lowered = lowered_set(
             "SET input_id = input.input_id, message_digest = md5(error.message), attempted = \
              partial_output.total, plan = relay_state.profiles.plan, operation = error.operation, \
-             operation_index = error.operation_index",
+             operation_index = error.operation_index, class = error.class, node = error.node, \
+             node_kind = error.node_kind, external_code = error.external_code",
         );
         let program = compile_message_error_set_program(
             &named("calculate"),
@@ -1705,6 +1808,22 @@ mod tests {
             row_value(&output, "operation_index"),
             Some(RuntimeValue::U32(2))
         );
+        assert_eq!(
+            row_value(&output, "class"),
+            Some(RuntimeValue::String("refused".to_string()))
+        );
+        assert_eq!(
+            row_value(&output, "node"),
+            Some(RuntimeValue::String("calculate".to_string()))
+        );
+        assert_eq!(
+            row_value(&output, "node_kind"),
+            Some(RuntimeValue::String("window_processor".to_string()))
+        );
+        assert_eq!(
+            row_value(&output, "external_code"),
+            Some(RuntimeValue::String("23514".to_string()))
+        );
         let Some(RuntimeValue::String(digest)) = row_value(&output, "message_digest") else {
             panic!("message digest should be a string");
         };
@@ -1744,12 +1863,14 @@ mod tests {
         let fields = SortedSet::from_unsorted(vec![FieldPath::new("input.secret")]);
         let original_error = StructuredMessageError {
             reference,
-            code: MessageErrorCode::External,
+            class: MessageErrorClass::REFUSED,
             message: "sensitive-payload-value".to_string(),
             operation: MessageErrorOperation::Publish,
             operation_index: None,
             fields: fields.clone(),
             occurred_at: Timestamp::now(),
+            node: NodeRef::new(ModelKind::Emitter, named::<ModelName>("calculate")),
+            external_code: None,
         };
         let message = RelayMessage {
             key: None,
@@ -1774,7 +1895,7 @@ mod tests {
 
         let MessageErrorHandlingError::RecordConstruction {
             reference: failed_reference,
-            code,
+            class,
             operation,
             fields: failed_fields,
             source:
@@ -1786,7 +1907,7 @@ mod tests {
             panic!("record construction must have its own typed failure: {failure}");
         };
         assert_eq!(*failed_reference, reference);
-        assert_eq!(*code, MessageErrorCode::External);
+        assert_eq!(*class, MessageErrorClass::REFUSED);
         assert_eq!(*operation, MessageErrorOperation::Publish);
         assert_eq!(failed_fields, &fields);
         assert_eq!(*side_code, nervix_vm::ErrorCode::DivisionByZero);

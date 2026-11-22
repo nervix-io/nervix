@@ -214,7 +214,7 @@ Feature: RabbitMQ emitter properties follow the declared envelope
         ENCODE USING event_codec TIMESTAMP from_unix('nanosecond', input.seq)
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
-          SET seq = input.seq, error_code = error.code, operation = error.operation
+          SET seq = input.seq, error_code = error.class, operation = error.operation
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejected_subscription TO rejected_events;
       START;
@@ -233,8 +233,8 @@ Feature: RabbitMQ emitter properties follow the declared envelope
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":-1 | "error_code":"external" | "operation":"publish"
-      "seq":1 | "error_code":"external" | "operation":"publish"
+      "seq":-1 | "error_code":"refused" | "operation":"publish"
+      "seq":1 | "error_code":"refused" | "operation":"publish"
       """
     And RabbitMQ queue "time_{{test_id}}" yields this envelope message
       """

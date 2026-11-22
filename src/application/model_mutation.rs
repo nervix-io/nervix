@@ -2533,8 +2533,14 @@ impl SessionServiceImpl {
             }
             Statement::ShowClusterStatus(_) => {
                 let stops = self.cluster_status_stop_lines().await;
-                let status =
-                    render_cluster_status(&self.inner.cluster, &self.inner.consensus, stops).await;
+                let node_rules = self.node_rule_annotations().await;
+                let status = render_cluster_status(
+                    &self.inner.cluster,
+                    &self.inner.consensus,
+                    stops,
+                    &node_rules,
+                )
+                .await;
                 let initialization = if self.inner.initialization.is_ready() {
                     "ready"
                 } else {

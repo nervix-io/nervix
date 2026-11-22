@@ -158,6 +158,7 @@ checks = [
   "application::restore::shuttle_tests::shuttle_a_resumed_restore_never_repeats_a_recorded_effect",
   "application::restore::shuttle_tests::shuttle_an_abandoned_restore_upload_releases_its_quota_exactly_once",
   "application::restore::shuttle_tests::shuttle_concurrent_restore_retries_join_one_execution",
+  "application::runtime_admission::shuttle_tests::shuttle_an_installation_whose_caller_goes_away_ends_before_the_next_turn_and_the_runtime_stop",
   "application::shutdown::shuttle_tests::shuttle_phases_only_advance_and_every_completion_waiter_observes_the_one_outcome",
   "application::shutdown::shuttle_tests::shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline",
   "application::termination_signals::shuttle_tests::shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal",

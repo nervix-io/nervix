@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::*;
-use nervix_models::{EmitterEntityKind, StructuredMessageError, Timestamp};
+use nervix_models::{EmitterEntityKind, RaisedMessageError, RejectedErrorClass, Timestamp};
 use nervix_primitives::{
     sync::{Arc, blocking::Mutex},
     time::Instant,
@@ -296,7 +296,7 @@ pub enum PayloadPreparation {
     #[default]
     Identity,
     Numbered,
-    Refuse(StructuredMessageError),
+    Refuse(RaisedMessageError<RejectedErrorClass>),
 }
 
 pub enum RequestPreparation {
@@ -612,7 +612,7 @@ impl RecordEmitter for FakeEmitter<Records> {
         &mut self,
         payload: Vec<u8>,
         _occurred_at: Timestamp,
-    ) -> Result<Vec<u8>, StructuredMessageError> {
+    ) -> Result<Vec<u8>, RaisedMessageError<RejectedErrorClass>> {
         let mut observations = self.observations.lock();
         observations.preparations = observations
             .preparations

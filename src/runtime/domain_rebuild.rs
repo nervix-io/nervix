@@ -310,6 +310,13 @@ impl Runtime {
         };
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
+            // A test build can hold the teardown here, once the domain's execution is out of the
+            // node and before its tasks end, as a teardown slow to end them would.
+            #[cfg(feature = "testing")]
+            self.inner
+                .fault_injection
+                .pause_domain_teardown_if_armed(domain)
+                .await;
             Box::pin(self.stop_domain_execution(domain, existing, self.emitter_finish_deadline()))
                 .await;
         }
@@ -964,6 +971,11 @@ impl Runtime {
                     DomainRoutingSnapshot {
                         passive_only: false,
                         message_error_plans,
+                        message_errors: MessageErrorCounters::resolve(
+                            &self.inner.metrics,
+                            domain,
+                            &revision,
+                        ),
                         relay_schemas,
                         relay_services,
                         lookups: lookup_runtimes,
@@ -1154,6 +1166,7 @@ impl Runtime {
             None => 0,
         };
         let transitions = relay_transitions(&revision);
+        let message_errors = MessageErrorCounters::resolve(&self.inner.metrics, domain, &revision);
         Ok(DomainExecution {
             mqtt_ingestor_clients: HashMap::default(),
             revision,
@@ -1165,6 +1178,7 @@ impl Runtime {
                 DomainRoutingSnapshot {
                     passive_only: true,
                     message_error_plans,
+                    message_errors,
                     relay_schemas,
                     relay_services,
                     lookups,

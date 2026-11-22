@@ -69,7 +69,7 @@ pub(super) fn scheduled_snapshot(
             std::slice::from_ref(&node),
             0,
             None,
-            &crate::registry::uniform_capabilities(std::slice::from_ref(&node)),
+            &crate::registry::uniform_records(std::slice::from_ref(&node)),
         )
         .assured("the fixture topology resolves");
     TransactionPlanningSnapshot {
@@ -631,9 +631,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
                             std::slice::from_ref(&destination),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &destination,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&destination)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -689,10 +687,19 @@ fn label_map(entries: serde_json::Value) -> nervix_models::EntityLabels {
     serde_json::from_value(entries).assured("the fixture label map has valid keys and values")
 }
 
+/// One `SET LABELS` edit that sets every label `entries` names on the Model.
 fn set_model_labels(kind: ModelKind, name: &str, entries: serde_json::Value) -> Statement {
+    let edits = label_map(entries)
+        .iter()
+        .map(|(key, value)| nervix_models::LabelEdit {
+            key: key.clone(),
+            change: nervix_models::LabelChange::Set(value.to_owned()),
+        })
+        .collect::<Vec<_>>();
     Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
         entity: nervix_models::EntityLabelTarget::Model(node_ref(kind, name)),
-        mutation: nervix_models::EntityLabelMutation::Set(label_map(entries)),
+        mutation: nervix_models::EntityLabelMutation::try_from(edits)
+            .assured("a label map names each key once"),
     })
 }
 
@@ -905,9 +912,7 @@ fn entity_pause_report_and_execution_share_the_exact_affected_graph() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -1041,9 +1046,7 @@ fn schedule_reassignment_raises_a_dynamic_change_to_an_entity_pause() {
                             std::slice::from_ref(&destination),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &destination,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&destination)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -1104,9 +1107,7 @@ fn schedule_rebuild_raises_entity_creation_to_a_domain_pause() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),
@@ -1175,9 +1176,7 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
                             std::slice::from_ref(&cluster_node),
                             0,
                             None,
-                            &crate::registry::uniform_capabilities(std::slice::from_ref(
-                                &cluster_node,
-                            )),
+                            &crate::registry::uniform_records(std::slice::from_ref(&cluster_node)),
                         )
                         .assured("the fixture topology resolves")
                 }),

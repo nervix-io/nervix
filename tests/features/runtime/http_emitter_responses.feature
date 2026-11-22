@@ -44,7 +44,7 @@ Feature: HTTP REQUEST emitter response classification
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
-              code = error.code,
+              code = error.class,
               operation = error.operation,
               message = error.message
         ON GENERAL ERROR LOG;
@@ -57,7 +57,7 @@ Feature: HTTP REQUEST emitter response classification
       """
     Then within "20s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"1" | "code":"external" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>"
+      "event_id":"1" | "code":"refused" | "operation":"publish" | "message":"HTTP endpoint answered with status <status>"
       """
     And HTTP receiver "api" eventually receives at least 2 requests
     And HTTP receiver "api" request 1 is

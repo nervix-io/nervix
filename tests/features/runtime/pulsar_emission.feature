@@ -197,7 +197,7 @@ Feature: Pulsar emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -226,8 +226,8 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":4 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1970-01-01T00:00:00.000
-      "seq":5 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999
+      "seq":4 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1970-01-01T00:00:00.000
+      "seq":5 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: message TIMESTAMP 1969-12-31T23:59:59.999
       """
     And within "30s" the observed broker receives exactly these Pulsar messages
       | payload                                                    | event time               |
@@ -539,7 +539,7 @@ Feature: Pulsar emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -552,7 +552,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: the Pulsar broker does not allow the message
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: the Pulsar broker does not allow the message
       """
 
     Examples:
@@ -609,7 +609,7 @@ Feature: Pulsar emission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -622,7 +622,7 @@ Feature: Pulsar emission
       """
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | "error_message":"PULSAR rejected record: DELIVER AFTER 3153600000s
+      "seq":1 | "error_code":"refused" | "operation":"publish" | "error_message":"PULSAR rejected record: DELIVER AFTER 3153600000s
       """
 
     Examples:

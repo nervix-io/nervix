@@ -1,7 +1,8 @@
 //! Canonical rendering of shared entity metadata.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** One trailing label clause and the common metadata command forms.
+//! - **Owns.** One trailing label clause and the common metadata command forms: one `SET LABELS`
+//!   edit and its inspection.
 //! - **Depends on.** Exact labels, existing typed references and the shared string renderer.
 //! - **Must not know.** Parsing, registry state or execution identity.
 
@@ -13,7 +14,7 @@
 use meticulous::OptionExt as _;
 
 use super::{Clause, INDENT, string_literal};
-use crate::{EntityLabelMutation, EntityLabels, MutateEntityLabels, ShowLabels};
+use crate::{EntityLabels, LabelChange, MutateEntityLabels, ShowLabels};
 
 pub(super) fn append_labels(mut creation: String, labels: &EntityLabels) -> String {
     if labels.is_empty() {
@@ -43,22 +44,23 @@ fn assignments(labels: &EntityLabels) -> Vec<String> {
 }
 
 impl MutateEntityLabels {
+    /// One `SET LABELS` statement: every entry in key order, a set value as an assignment and a
+    /// removal as `DROP`.
     pub fn to_canonical_plexus(&self) -> String {
-        let target = &self.entity;
-        match &self.mutation {
-            EntityLabelMutation::Set(labels) => format!(
-                "SET LABELS ON {target} {{ {} }};",
-                assignments(labels).join(", ")
-            ),
-            EntityLabelMutation::Drop(keys) => {
-                let keys = keys
-                    .iter()
-                    .map(|key| string_literal(key.as_str()))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("DROP LABELS ON {target} {{ {keys} }};")
-            }
+        let mut entries = Vec::with_capacity(self.mutation.len());
+        for (key, change) in self.mutation.iter() {
+            let key = string_literal(key.as_str());
+            let entry = match change {
+                LabelChange::Set(value) => format!("{key} = {}", string_literal(value)),
+                LabelChange::Drop => format!("{key} DROP"),
+            };
+            entries.push(entry);
         }
+        format!(
+            "SET LABELS ON {} {{ {} }};",
+            self.entity,
+            entries.join(", ")
+        )
     }
 }
 

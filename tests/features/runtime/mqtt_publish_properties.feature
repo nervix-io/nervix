@@ -195,7 +195,7 @@ Feature: MQTT publications carry the envelope the statement prepares
         }
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejections
-          SET user_id = input.user_id, error_code = error.code, error_message = error.message
+          SET user_id = input.user_id, error_code = error.class, error_message = error.message
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION rejections_subscription TO rejections;
       START;
@@ -212,7 +212,7 @@ Feature: MQTT publications carry the envelope the statement prepares
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "user_id":41 | "error_code":"external" | maximum packet size of 1024 bytes
+      "user_id":41 | "error_code":"refused" | maximum packet size of 1024 bytes
       """
     When MQTT message is published to topic "mqtt_properties_in_{{test_id}}"
       """

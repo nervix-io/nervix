@@ -25,7 +25,7 @@ pub(crate) struct NodeSelection {
     pub(crate) failures: Vec<NodeSelectionFailure>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct NodeSelectionFailure {
     #[cfg_attr(
         nervix_lint,

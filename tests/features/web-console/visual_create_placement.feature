@@ -126,6 +126,88 @@ Feature: Placement rules are created through the console's visual forms
       | 1            |
       | 3            |
 
+  @visual_placement_node_rule
+  Scenario Outline: A node rule chooses its members, node policy and selector and is applied under the node rule contract
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA visual_nodes_event (message STRING);
+      CREATE RELAY visual_nodes_input SCHEMA visual_nodes_event UNBRANCHED;
+      CREATE RELAY visual_nodes_output SCHEMA visual_nodes_event UNBRANCHED;
+      CREATE JUNCTION visual_nodes_junction FROM visual_nodes_input UNBRANCHED
+        TO visual_nodes_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      """
+    When the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
+    And selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='placement']" is clicked
+    And selector ".create-name" is filled with "visual_nodes"
+    And selector ".create-placement-form [data-form='nodes']" is clicked
+    Then selector ".create-placement-form [data-form='nodes'].active" contains "Cluster nodes"
+    And selector ".create-placement-coverage [data-scope='domain'].active" contains "Entire domain"
+    And selector ".create-placement-node-policy [data-node-policy='require'].active" contains "REQUIRE NODES WHERE"
+    When selector ".create-placement-coverage [data-scope='members']" is clicked
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "Choose at least one FOR member"
+    When selector ".create-placement-for .create-choice-search" is filled with "visual_nodes"
+    Then selector ".create-placement-for [data-value='visual_nodes_junction']" exists
+    And selector ".create-placement-for [data-value='visual_nodes_input']" exists
+    And selector ".create-placement-for [data-value='visual_nodes_event']" does not exist
+    When selector ".create-placement-for [data-value='visual_nodes_junction']" is clicked
+    Then selector ".create-placement-for-members .create-placement-member:nth-child(1)" contains "visual_nodes_junction"
+    When selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "Write the node selector"
+    When selector ".create-placement-selector" is filled with "node.name IN ("
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "The node selector is not a valid expression"
+    When selector ".create-placement-selector" is filled with "<selector>"
+    And selector ".create-placement-rank" is filled with "2"
+    Then selector ".create-preview" contains "CREATE PLACEMENT visual_nodes FOR visual_nodes_junction REQUIRE NODES WHERE <selector> RANK 2;"
+    When selector ".create-placement-node-policy [data-node-policy='any']" is clicked
+    Then selector ".create-placement-selector" does not exist
+    And selector ".create-preview" contains "CREATE PLACEMENT visual_nodes FOR visual_nodes_junction ANY NODE RANK 2;"
+    When selector ".create-placement-node-policy [data-node-policy='require']" is clicked
+    Then selector ".create-placement-selector" has value "<selector>"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CREATE PLACEMENT visual_nodes;
+      """
+    Then the last command output contains
+      """
+      CREATE PLACEMENT visual_nodes FOR visual_nodes_junction REQUIRE NODES WHERE <selector> RANK 2;
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE PLACEMENT visual_nodes;
+      """
+    Then the last command output contains
+      """
+      policy: REQUIRE NODES
+      """
+    And the last command output contains
+      """
+      selector: <selector>
+      """
+    And the last command output contains
+      """
+      matching nodes: <matching>
+      """
+    And the last command output contains
+      """
+      satisfaction=satisfied
+      """
+
+    Examples:
+      | cluster_size | selector                                    | matching               |
+      | 1            | node.name IN ('node-1')                     | node-1                 |
+      | 3            | node.name IN ('node-1', 'node-2', 'node-3') | node-1, node-2, node-3 |
+
   @visual_placement_errors
   Scenario: A corridor draft reports rank, empty-side and member reference errors inline and stays editable
     Given a 1 node nervix cluster is started

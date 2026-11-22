@@ -2,8 +2,9 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Bounded installation refusals, installation, preparation and readiness pauses, and
-//!   the forced-recovery observation that releases a held initial installation.
+//! - **Owns.** Bounded installation refusals, installation, preparation and readiness pauses, the
+//!   background reconciliation hold that waits for a domain's stop, and the forced-recovery
+//!   observation that releases a held initial installation.
 //! - **Depends on.** The fault harness's shared seam registry, typed node and domain identities and
 //!   pause points, the committed domain status, and governed atomic ordering.
 //! - **Must not know.** Graph construction, schedules, connector drivers, or persisted runtime state.
@@ -106,6 +107,74 @@ impl FaultInjection {
         pause.reach();
         self.release_runtime_installation_pause(node_id);
         // Keep the one-shot observation until the scenario observes it or finishes cleanup.
+    }
+
+    /// Holds the background reconciliation of `node_id` before its next attempt once the committed
+    /// state holds `domain` stopped, as a node slow to apply the end of a stop would. Every other
+    /// application on that node, such as the one a request handler runs for another node, still
+    /// applies the committed state.
+    pub fn hold_background_reconciliation_once_stopped(
+        &self,
+        node_id: ClusterNodeName,
+        domain: DomainName,
+    ) {
+        self.inner
+            .background_reconciliation_holds
+            .insert(node_id.clone(), domain);
+        self.arm_command_pause(CommandPausePoint::BackgroundReconciliation(node_id));
+    }
+
+    pub async fn wait_for_background_reconciliation_hold(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::BackgroundReconciliation(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_background_reconciliation_hold(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::BackgroundReconciliation(
+            node_id.clone(),
+        ));
+    }
+
+    /// The domain whose stop the background reconciliation of `node_id` waits to see before it
+    /// holds, while a scenario holds that reconciliation.
+    pub(crate) fn background_reconciliation_hold(
+        &self,
+        node_id: &ClusterNodeName,
+    ) -> Option<DomainName> {
+        let domain = self.inner.background_reconciliation_holds.get(node_id)?;
+        Some(domain.clone())
+    }
+
+    /// Holds the background reconciliation of `node_id` until the scenario releases it, and then
+    /// forgets the hold, so the reconciliation's later attempts run unheld.
+    pub(crate) async fn hold_background_reconciliation(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::BackgroundReconciliation(node_id.clone()))
+            .await;
+        self.inner.background_reconciliation_holds.remove(node_id);
+    }
+
+    /// Holds the next rebuild of `domain` a node begins once it has taken the domain's execution
+    /// out of the node, before it ends that execution's tasks, as a teardown slow to end them
+    /// would. The installation that runs the rebuild keeps waiting there until the test releases
+    /// it, unless its caller drops it first.
+    pub fn pause_domain_teardown(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::DomainTeardown(domain));
+    }
+
+    pub async fn wait_for_domain_teardown_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::DomainTeardown(domain.clone()))
+            .await;
+    }
+
+    pub fn release_domain_teardown_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::DomainTeardown(domain.clone()));
+    }
+
+    pub(crate) async fn pause_domain_teardown_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::DomainTeardown(domain.clone()))
+            .await;
     }
 
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {

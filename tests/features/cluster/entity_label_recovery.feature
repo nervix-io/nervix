@@ -170,7 +170,7 @@ Feature: Entity labels through faults and recovery
       """
       BEGIN;
       SET LABELS ON SCHEMA labelled_event { 'owner' = 'Platform', 'stage' = 'committed' };
-      DROP LABELS ON SCHEMA labelled_event { 'empty' };
+      SET LABELS ON SCHEMA labelled_event { 'empty' DROP };
       SET LABELS ON RELAY labelled_events { 'purpose' = 'billing' };
       SET LABELS ON RESOURCE labelled_resource { 'owner' = 'Platform' };
       """
@@ -261,7 +261,7 @@ Feature: Entity labels through faults and recovery
     Given command finalization on node "{{leader}}" pauses before its outcome is recorded
     When this Plexus command request with execution reference "finalizing-label-{{test_id}}" begins executing in the background on the leader node
       """
-      DROP LABELS ON SCHEMA labelled_event { 'a', 'b', 'c' };
+      SET LABELS ON SCHEMA labelled_event { 'a' DROP, 'b' DROP, 'c' DROP };
       """
     Then the command finalization pause on node "{{leader}}" is reached
     When this Plexus command request is executed on the leader node
@@ -345,7 +345,7 @@ Feature: Entity labels through faults and recovery
     And client "editor" executes these Plexus commands
       """
       SET LABELS ON SCHEMA labelled_event { 'owner' = 'Platform', 'stage' = 'edited' };
-      DROP LABELS ON SCHEMA labelled_event { 'empty' };
+      SET LABELS ON SCHEMA labelled_event { 'empty' DROP };
       DROP RELAY labelled_events;
       CREATE RELAY labelled_events SCHEMA labelled_event UNBRANCHED LABELS { 'generation' = 'second' };
       SET LABELS ON RESOURCE labelled_resource { 'owner' = 'Platform' };
@@ -431,7 +431,7 @@ Feature: Entity labels through faults and recovery
       SET LABELS ON SCHEMA labelled_event { 'step' = '1' };
       SET LABELS ON SCHEMA labelled_event { 'step' = '2' };
       SET LABELS ON SCHEMA labelled_event { 'step' = '3' };
-      DROP LABELS ON SCHEMA labelled_event { 'empty' };
+      SET LABELS ON SCHEMA labelled_event { 'empty' DROP };
       DROP RELAY labelled_events;
       CREATE RELAY labelled_events SCHEMA labelled_event UNBRANCHED LABELS { 'generation' = 'second' };
       SET LABELS ON RESOURCE labelled_resource { 'step' = '1' };
@@ -440,7 +440,7 @@ Feature: Entity labels through faults and recovery
       SET LABELS ON DOMAIN {{domain}} { 'step' = '2' };
       SET LABELS ON USER labelled_user { 'step' = '1' };
       SET LABELS ON USER labelled_user { 'step' = '2' };
-      DROP LABELS ON USER labelled_user { 'owner' };
+      SET LABELS ON USER labelled_user { 'owner' DROP };
       """
     Then within "60s" the leader node has purged its covered raft log beyond stopped node "{{stale}}"
     When node "{{stale}}" is started

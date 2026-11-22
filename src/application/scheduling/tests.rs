@@ -227,10 +227,10 @@ fn move_next_scheduled_node_for_drain_moves_only_one_node_in_canonical_order() {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ]),
-        &BTreeSet::from([
+        &super::UnitTargets::unconstrained(BTreeSet::from([
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
-        ]),
+        ])),
     );
 
     assert_eq!(
@@ -279,7 +279,7 @@ fn planned_drain_uses_canonical_runtime_node_order() {
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-2"),
         ]),
-        &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
+        &super::UnitTargets::unconstrained(BTreeSet::from([named::<ClusterNodeName>("node-1")])),
     );
 
     assert_eq!(
@@ -348,7 +348,7 @@ fn planned_drain_uses_the_first_member_to_order_placement_groups() {
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-2"),
         ]),
-        &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
+        &super::UnitTargets::unconstrained(BTreeSet::from([named::<ClusterNodeName>("node-1")])),
     );
 
     assert_eq!(
@@ -406,10 +406,10 @@ fn planned_drain_prefers_policy_target_and_retains_former_owner_as_first_replica
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ]),
-        &BTreeSet::from([
+        &super::UnitTargets::unconstrained(BTreeSet::from([
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
-        ]),
+        ])),
     );
 
     assert_eq!(
@@ -485,10 +485,10 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ]),
-        &BTreeSet::from([
+        &super::UnitTargets::unconstrained(BTreeSet::from([
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
-        ]),
+        ])),
     );
 
     assert_eq!(
@@ -550,7 +550,7 @@ fn planned_drain_replaces_an_unavailable_replica_with_the_former_owner() {
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-2"),
         ]),
-        &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
+        &super::UnitTargets::unconstrained(BTreeSet::from([named::<ClusterNodeName>("node-1")])),
     );
 
     assert_eq!(
@@ -932,10 +932,10 @@ fn drain_relocates_a_require_group_as_one_unit() {
             named::<ClusterNodeName>("node-2"),
             named::<ClusterNodeName>("node-3"),
         ]),
-        &BTreeSet::from([
+        &super::UnitTargets::unconstrained(BTreeSet::from([
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
-        ]),
+        ])),
     );
 
     assert!(moved.is_some());
@@ -984,10 +984,10 @@ fn failover_relocates_a_require_group_to_one_target() {
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
         ]),
-        &BTreeSet::from([
+        &super::UnitTargets::unconstrained(BTreeSet::from([
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
-        ]),
+        ])),
     );
 
     assert!(!moves.is_empty());
@@ -1021,7 +1021,10 @@ fn failover_starts_a_new_guest_state_lifetime_for_every_branch() {
         &mut schedule,
         None,
         &BTreeSet::from([node_named("node-1"), node_named("node-3")]),
-        &BTreeSet::from([node_named("node-1"), node_named("node-3")]),
+        &super::UnitTargets::unconstrained(BTreeSet::from([
+            node_named("node-1"),
+            node_named("node-3"),
+        ])),
     );
 
     assert!(!moves.is_empty());
@@ -1104,7 +1107,7 @@ fn forced_recovery_preserves_the_complete_healthy_partition_inside_and_outside_a
             &mut schedule,
             None,
             &live,
-            &live,
+            &super::UnitTargets::unconstrained((live).clone()),
         );
         assert!(!moves.is_empty());
         let guest = &schedule.nodes[0];
@@ -1157,7 +1160,7 @@ fn a_planned_drain_keeps_the_guest_state_lifetime() {
         &desired,
         &node_named("node-2"),
         &BTreeSet::from([node_named("node-1"), node_named("node-2")]),
-        &BTreeSet::from([node_named("node-1")]),
+        &super::UnitTargets::unconstrained(BTreeSet::from([node_named("node-1")])),
     );
 
     assert!(moved.is_some());
@@ -1292,7 +1295,7 @@ fn failover_does_not_promote_a_cordoned_live_replica() {
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
         ]),
-        &BTreeSet::from([named::<ClusterNodeName>("node-1")]),
+        &super::UnitTargets::unconstrained(BTreeSet::from([named::<ClusterNodeName>("node-1")])),
     );
 
     assert!(!moves.is_empty());
@@ -1333,10 +1336,10 @@ fn failover_promotes_live_replica_before_policy_target() {
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
         ]),
-        &BTreeSet::from([
+        &super::UnitTargets::unconstrained(BTreeSet::from([
             named::<ClusterNodeName>("node-1"),
             named::<ClusterNodeName>("node-3"),
-        ]),
+        ])),
     );
 
     assert_eq!(

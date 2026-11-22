@@ -17,6 +17,7 @@ use error_stack::Report;
 use nervix_models::{
     BranchSelection, CreateSchema, DomainName, MessageErrorPolicy, Model, ModelIndex, ModelKind,
     ModelName, NodeRef, ParametrizerName, ProcessorOutputs, RelayName, RouteConstruction,
+    StructuredMessageError,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
@@ -34,7 +35,7 @@ use crate::registry::{
         schema::{
             all_optional_binding_for_internal_schema, arrow_schema_for_internal_schema,
             compile_binding_with_internal_schema, readonly_binding_for_internal_schema,
-            schema_sensitivity_for_internal_schema, structured_message_error_arrow_schema,
+            schema_sensitivity_for_internal_schema,
         },
         vm::udf_compile_options,
         wire::{ingestor_input_schema, schema_for_ack_model, schema_for_codec_model},
@@ -376,7 +377,7 @@ fn validate_message_error_policy(
     }
     bindings.push(CompileBinding::readonly(
         "error",
-        structured_message_error_arrow_schema(),
+        StructuredMessageError::scope_arrow_schema(),
     ));
     let local_namespaces = HashSet::from_iter([
         "error_output".to_string(),

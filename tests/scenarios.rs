@@ -474,6 +474,34 @@ struct BlockedConsensusConnectivity {
     restored: AbortOnDropHandle<std::io::Result<()>>,
 }
 
+/// The last server error a step captured: its text and, when it reports a classified error of a
+/// graph node, that error's class and producing node, kept together so a step never reads the class
+/// of one error beside the text of another.
+#[derive(Debug, Clone)]
+pub(crate) struct CapturedServerError {
+    message: String,
+    error: Option<nervix_models::ReportedError>,
+}
+
+impl CapturedServerError {
+    /// A failure a step observed itself, which carries no typed error.
+    fn text(message: String) -> Self {
+        Self {
+            message,
+            error: None,
+        }
+    }
+}
+
+impl From<crate::common::raw_session::TestServerEvent> for CapturedServerError {
+    fn from(event: crate::common::raw_session::TestServerEvent) -> Self {
+        Self {
+            message: event.message,
+            error: event.error,
+        }
+    }
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     outward_tls_retained: Vec<outward_tls_policy::RetainedConnection>,
@@ -612,7 +640,7 @@ struct ScenarioWorld {
     /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
     /// against it verbatim.
     saved_relocation_plan: Option<String>,
-    last_server_error: Option<String>,
+    last_server_error: Option<CapturedServerError>,
     last_auth_attempts_elapsed: Option<Duration>,
     /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
     saturated_credentials_node: Option<String>,
@@ -730,6 +758,9 @@ struct ScenarioWorld {
     playwright: Option<Playwright>,
     dependencies: TestDependencies,
     background_plexus: Option<AbortOnDropHandle<Result<String, String>>>,
+    /// Background Plexus executions a scenario names, so that several statements can wait at
+    /// once, such as a STOP and a change that both wait for one node.
+    named_background_plexus: BTreeMap<String, AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
         Option<AbortOnDropHandle<std::io::Result<nervix_client_wire::CommandOutcome>>>,
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
@@ -13622,6 +13653,54 @@ async fn when_runtime_installation_is_released(world: &mut ScenarioWorld, node_i
         .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+/// Holds the background reconciliation of a node before its next attempt once the committed state
+/// holds `domain` stopped, as a node slow to apply the end of a stop would. Every other application
+/// on that node, such as the one a request handler runs for another node, still applies the
+/// committed state.
+#[given(
+    expr = "the background reconciliation of node {string} holds once domain {string} is stopped"
+)]
+fn given_background_reconciliation_holds_once_domain_is_stopped(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    domain: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    world
+        .fault_injection
+        .hold_background_reconciliation_once_stopped(
+            crate::common::cluster::node_name(&node_id),
+            domain,
+        );
+}
+
+#[then(expr = "the background reconciliation of node {string} reaches its hold")]
+async fn then_background_reconciliation_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_background_reconciliation_hold(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("the background reconciliation did not reach its hold");
+}
+
+#[when(expr = "the background reconciliation of node {string} is released")]
+fn when_background_reconciliation_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_background_reconciliation_hold(&crate::common::cluster::node_name(&node_id));
+}
+
 /// Holds the next runtime installation every node begins. A held installation keeps its node's
 /// installation sequence, so no later installation on that node proceeds until it is released.
 #[when("runtime installation on every node is paused")]
@@ -18315,7 +18394,35 @@ async fn when_these_plexus_commands_begin_executing_in_the_background(
         "a background Plexus execution is already active"
     );
     let commands = expand_placeholders(world, docstring(step));
-    let statements = plexus_statements(&commands);
+    let execution = begin_background_plexus_on_leader(world, &commands).await;
+    world.background_plexus = Some(execution);
+}
+
+/// Begins one of several background executions a scenario keeps waiting at once, each in its own
+/// session on the leader and the active domain, under the name the later steps address it by.
+#[when(expr = "these Plexus commands begin executing in the background as {string}")]
+async fn when_these_plexus_commands_begin_executing_in_the_background_as(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let name = expand_placeholders(world, &name);
+    assert!(
+        !world.named_background_plexus.contains_key(&name),
+        "background Plexus execution '{name}' is already active"
+    );
+    let commands = expand_placeholders(world, docstring(step));
+    let execution = begin_background_plexus_on_leader(world, &commands).await;
+    world.named_background_plexus.insert(name, execution);
+}
+
+/// Runs `commands` one after another in a session of their own on the current leader and the
+/// active domain, in a task the scenario owns.
+async fn begin_background_plexus_on_leader(
+    world: &mut ScenarioWorld,
+    commands: &str,
+) -> AbortOnDropHandle<Result<String, String>> {
+    let statements = plexus_statements(commands);
     let leader = current_leader_node(world).await;
     let mut session = world
         .cluster()
@@ -18323,18 +18430,60 @@ async fn when_these_plexus_commands_begin_executing_in_the_background(
         .await
         .expect("failed to open background Plexus session");
     let routes = world.cluster().leader_routes();
-    world.background_plexus = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
-        async move {
-            let mut last_output = String::new();
-            for command in statements {
-                nervix_primitives::task::consume_budget().await;
-                last_output = run_command_on_held_session(&routes, &mut session, &command)
-                    .await?
-                    .output()?;
-            }
-            Ok(last_output)
-        },
-    )));
+    AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+        let mut last_output = String::new();
+        for command in statements {
+            nervix_primitives::task::consume_budget().await;
+            last_output = run_command_on_held_session(&routes, &mut session, &command)
+                .await?
+                .output()?;
+        }
+        Ok(last_output)
+    }))
+}
+
+/// The named background execution must not finish within `duration`, as
+/// [`then_the_background_plexus_execution_is_still_running_after`] requires of the unnamed one.
+#[then(expr = "background Plexus execution {string} is still running after {string}")]
+async fn then_named_background_plexus_execution_is_still_running_after(
+    world: &mut ScenarioWorld,
+    name: String,
+    duration: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let window = parse_duration_text(&duration).expect("the step's window is a valid duration");
+    let task = world
+        .named_background_plexus
+        .get_mut(&name)
+        .unwrap_or_else(|| panic!("background Plexus execution '{name}' must be active"));
+    if let Ok(outcome) = nervix_primitives::time::timeout(window, task).await {
+        panic!(
+            "background Plexus execution '{name}' finished within {duration} while it was meant \
+             to keep waiting: {outcome:?}"
+        );
+    }
+}
+
+#[then(expr = "within {string} background Plexus execution {string} reaches a successful outcome")]
+async fn then_within_named_background_plexus_execution_reaches_a_successful_outcome(
+    world: &mut ScenarioWorld,
+    within: String,
+    name: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let bound = parse_duration_text(&within).expect("the step's bound is a valid duration");
+    let task = world
+        .named_background_plexus
+        .remove(&name)
+        .unwrap_or_else(|| panic!("background Plexus execution '{name}' must be active"));
+    let output = nervix_primitives::time::timeout(bound, task)
+        .await
+        .unwrap_or_else(|_| {
+            panic!("background Plexus execution '{name}' did not finish within {within}")
+        })
+        .assured("the background Plexus task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background Plexus execution '{name}' failed: {error}"));
+    world.last_command_output = Some(output);
 }
 
 fn command_probe(world: &ScenarioWorld, reference: &str) -> Option<CommandProbe> {
@@ -21946,6 +22095,24 @@ async fn when_selector_is_clicked(world: &mut ScenarioWorld, selector: String) {
         .click(None)
         .await
         .expect("selector must be clickable");
+}
+
+#[when(expr = "selector {string} is set to option {string}")]
+async fn when_selector_is_set_to_option(
+    world: &mut ScenarioWorld,
+    selector: String,
+    value: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector actions");
+    let selector = expand_placeholders(world, &selector);
+    let value = expand_placeholders(world, &value);
+    page.locator(&selector)
+        .select_option(value.as_str(), None)
+        .await
+        .expect("selector must be a select element offering the option");
 }
 
 #[when(expr = "selector {string} is clicked by script")]
@@ -27094,6 +27261,32 @@ fn scheduled_node_placement_from_status<'a>(
     })
 }
 
+/// Every whitespace-separated field of the first `SHOW CLUSTER STATUS` schedule line naming the
+/// unit of `kind` `name` in `domain`.
+fn scheduled_node_status_fields<'a>(
+    status: &'a str,
+    domain: &str,
+    kind: &str,
+    name: &str,
+) -> Option<Vec<&'a str>> {
+    let domain_field = format!("domain={domain}");
+    let kind_field = format!("kind={kind}");
+    let name_field = format!("name={name}");
+    for line in status.lines().map(str::trim) {
+        let Some(line) = line.strip_prefix("- ") else {
+            continue;
+        };
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.contains(&domain_field.as_str())
+            && fields.contains(&kind_field.as_str())
+            && fields.contains(&name_field.as_str())
+        {
+            return Some(fields);
+        }
+    }
+    None
+}
+
 fn scheduled_placements_for_domain(status: &str, domain: &str) -> Vec<SavedHealthyPlacement> {
     let mut placements = Vec::new();
     for line in status.lines() {
@@ -28325,6 +28518,96 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
     }
 }
 
+/// Waits until the named cluster node owns the scheduled unit, for a scenario that knows which
+/// node a rule admits.
+#[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} owner \
+            {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_owner(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    expected: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let expected = expand_placeholders(world, &expected);
+    let placement = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for scheduled {kind} {name} owner to equal '{expected}'. last \
+             output: {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, placement).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|(owner, _)| owner == expected)
+                {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        placement.pause(Duration::from_millis(100)).await;
+    }
+}
+
+/// Waits until the scheduled unit's `SHOW CLUSTER STATUS` line carries one exact field, such as
+/// the `violates=` or `waiting_for=` report of a node rule.
+#[then(
+    expr = "within {string} node {string} eventually reports scheduled {string} {string} with \
+            {string}"
+)]
+async fn then_within_duration_node_eventually_reports_scheduled_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    kind: String,
+    name: String,
+    field: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let kind = expand_placeholders(world, &kind);
+    let name = expand_placeholders(world, &name);
+    let field = expand_placeholders(world, &field);
+    let observation = PhaseDeadline::after(duration);
+
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !observation.has_passed(),
+            "timed out waiting for scheduled {kind} {name} to report '{field}'. last output: \
+             {:?}, last error: {:?}",
+            world.last_command_output,
+            world.last_command_error
+        );
+        match world.cluster().status_text(&node_id, observation).await {
+            Ok(output) => {
+                world.last_command_output = Some(output.clone());
+                let reported = scheduled_node_status_fields(&output, &world.domain, &kind, &name)
+                    .is_some_and(|fields| fields.contains(&field.as_str()));
+                if reported {
+                    return;
+                }
+            }
+            Err(error) => world.last_command_error = Some(format!("{error:#}")),
+        }
+        observation.pause(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(
     expr = "within {string} node {string} eventually reports scheduled {string} {string} replicas \
             without placeholder {string}"
@@ -28434,6 +28717,28 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
         .await;
 }
 
+#[then(expr = "node {string} observability metric {string} with labels is eventually absent")]
+async fn then_node_observability_metric_with_labels_is_eventually_absent(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    metric_name: String,
+    #[step] step: &Step,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let metric_name = expand_placeholders(world, &metric_name);
+    let label_fragments = docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| expand_placeholders(world, line))
+        .collect::<Vec<_>>();
+    world
+        .cluster()
+        .wait_for_observability_metric_absent(&node_id, &metric_name, &label_fragments, None)
+        .await
+        .expect("observability endpoint kept reporting the removed metric");
+}
+
 #[then(expr = "cluster observability metric {string} with labels eventually totals {int}")]
 async fn then_cluster_observability_metric_eventually_totals(
     world: &mut ScenarioWorld,
@@ -28481,6 +28786,63 @@ async fn then_cluster_observability_metric_eventually_totals(
     assert!(
         outcome.is_ok(),
         "metric '{metric_name}' with labels {labels:?} did not total {expected}: {observed:?}"
+    );
+}
+
+/// Like the step above, for a family whose series a node exposes only once it has counted one,
+/// such as `nervix_message_errors_total`: a node that declares no such family has counted nothing
+/// and contributes zero, while the total still has to come from the nodes that do.
+#[then(
+    expr = "cluster observability metric {string} with labels eventually totals {int} across the \
+            nodes that count it"
+)]
+async fn then_cluster_observability_metric_eventually_totals_across_counting_nodes(
+    world: &mut ScenarioWorld,
+    metric_name: String,
+    expected: i64,
+    #[step] step: &Step,
+) {
+    let expanded = expand_placeholders(world, docstring(step));
+    let labels = expanded
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expected: f64 = expected.approx_into();
+    let mut observed = BTreeMap::new();
+    let outcome =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                observed.clear();
+                let mut total = 0.0;
+                for node in world.cluster().node_ids() {
+                    nervix_primitives::task::consume_budget().await;
+                    let declared = match world
+                        .cluster()
+                        .sum_declared_observability_metric(&node, &metric_name, &labels)
+                        .await
+                    {
+                        Ok(declared) => declared,
+                        Err(error) => panic!("node '{node}' metrics could not be read: {error}"),
+                    };
+                    if let Some(value) = declared {
+                        total += value;
+                    }
+                    observed.insert(node, declared);
+                }
+                if total == expected {
+                    break;
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "metric '{metric_name}' with labels {labels:?} did not total {expected} across the nodes \
+         that count it (a node without the family shows None): {observed:?}"
     );
 }
 
@@ -31823,12 +32185,14 @@ async fn send_websocket_client_test_server_payload(world: &mut ScenarioWorld, pa
                 return;
             }
             Ok(response) => {
-                world.last_server_error = Some(format!(
+                world.last_server_error = Some(CapturedServerError::text(format!(
                     "websocket client test server returned {}",
                     response.status()
-                ))
+                )))
             }
-            Err(error) => world.last_server_error = Some(error.to_string()),
+            Err(error) => {
+                world.last_server_error = Some(CapturedServerError::text(error.to_string()))
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -35105,7 +35469,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error(
         "observed runtime server error level={:?} message={}",
         event.level, event.message
     ));
-    world.last_server_error = Some(event.message);
+    world.last_server_error = Some(CapturedServerError::from(event));
 }
 
 /// Waits for the server error that carries the docstring, passing over the errors reported before
@@ -35143,7 +35507,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
             event.level, event.message
         ));
         if event.message.contains(&expected) {
-            world.last_server_error = Some(event.message);
+            world.last_server_error = Some(CapturedServerError::from(event));
             return;
         }
         passed_over.push(event.message);
@@ -35190,10 +35554,10 @@ async fn then_the_active_session_observes_no_server_error_containing(
 #[then("the last server error contains")]
 async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected = expand_placeholders(world, docstring(step).trim());
-    let error = world
-        .last_server_error
-        .as_deref()
-        .expect("server error must be captured before assertion");
+    let Some(captured) = world.last_server_error.as_ref() else {
+        panic!("server error must be captured before assertion");
+    };
+    let error = captured.message.as_str();
     assert!(
         error.contains(&expected),
         "expected server error to contain {expected:?}, got: {error}"
@@ -35203,13 +35567,55 @@ async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step
 #[then("the last server error does not contain")]
 async fn then_last_server_error_does_not_contain(world: &mut ScenarioWorld, #[step] step: &Step) {
     let unexpected = expand_placeholders(world, docstring(step).trim());
-    let error = world
-        .last_server_error
-        .as_deref()
-        .expect("server error must be captured before assertion");
+    let Some(captured) = world.last_server_error.as_ref() else {
+        panic!("server error must be captured before assertion");
+    };
+    let error = captured.message.as_str();
     assert!(
         !error.contains(&unexpected),
         "expected server error not to contain {unexpected:?}, got: {error}"
+    );
+}
+
+/// The typed error the last captured server error carries beside its text: the error's class and
+/// the graph node that produced it. A client reads these fields, never the text, so the step
+/// compares them exactly. `kind` is the node kind's snake_case name, as `DESCRIBE` writes it.
+#[then(expr = "the last server error reports the class {string} of the {word} {string}")]
+async fn then_last_server_error_reports_the_class_of_the_node(
+    world: &mut ScenarioWorld,
+    class: String,
+    kind: String,
+    node: String,
+) {
+    let Some(captured) = world.last_server_error.as_ref() else {
+        panic!("server error must be captured before assertion");
+    };
+    let Some(reported) = captured.error.as_ref() else {
+        panic!(
+            "the last server error carries no typed error class or node: {}",
+            captured.message
+        );
+    };
+    let expected_kind: nervix_models::ModelKind = match kind.parse() {
+        Ok(expected_kind) => expected_kind,
+        Err(_) => panic!("'{kind}' names no node kind"),
+    };
+    assert_eq!(
+        reported.class.as_str(),
+        class,
+        "the last server error reports another class: {}",
+        captured.message
+    );
+    assert_eq!(
+        reported.node.kind, expected_kind,
+        "the last server error reports another node kind: {}",
+        captured.message
+    );
+    assert_eq!(
+        reported.node.identifier.as_str(),
+        node,
+        "the last server error reports another node: {}",
+        captured.message
     );
 }
 

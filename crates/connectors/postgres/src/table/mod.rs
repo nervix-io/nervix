@@ -47,7 +47,8 @@ use nervix_connector::{
 };
 use nervix_models::{
     ClientConfigEntry, ClientDeadline, ClientPoolBounds, ConnectorKind, EmitterBatchPolicy,
-    POSTGRES_MESSAGE_SIZE_MAXIMUM, PostgresSslMode, PostgresTableName,
+    ExternalErrorCode, POSTGRES_MESSAGE_SIZE_MAXIMUM, PostgresSslMode, PostgresTableName,
+    Timestamp,
 };
 use nervix_primitives::time::Instant;
 use sqlx::{
@@ -230,6 +231,24 @@ impl PostgresWriteError {
             return false;
         };
         is_record_sqlstate(code)
+    }
+
+    /// The rejection of the row this record error refused, carrying the server's SQLSTATE as the
+    /// code its error route reads as `error.external_code`.
+    fn record_rejection(
+        &self,
+        position: EmitterRecordPosition,
+        occurred_at: Timestamp,
+    ) -> RejectedEmitterMember<EmitterRecordPosition> {
+        let rejection =
+            RejectedEmitterMember::external(position, occurred_at, self.record_reason());
+        let Self::Server { code: Some(code) } = self else {
+            return rejection;
+        };
+        match ExternalErrorCode::new(code.clone()) {
+            Some(code) => rejection.with_external_code(code),
+            None => rejection,
+        }
     }
 
     fn record_reason(&self) -> String {
@@ -714,11 +733,11 @@ impl PostgresTableEmitter {
         }
         if written.len() == 1 {
             let member = members[written.start];
-            outcome.reject(RejectedEmitterMember::external(
-                rows.position(member),
-                rows.occurred_at(member),
-                error.current_context().record_reason(),
-            ));
+            outcome.reject(
+                error
+                    .current_context()
+                    .record_rejection(rows.position(member), rows.occurred_at(member)),
+            );
             return Ok(());
         }
         for index in written {
@@ -730,11 +749,11 @@ impl PostgresTableEmitter {
             match self.insert(connection, inserts, index..alone).await {
                 Ok(_) => outcome.deliver(rows.position(member)),
                 Err(error) if error.current_context().is_record_error() => {
-                    outcome.reject(RejectedEmitterMember::external(
-                        rows.position(member),
-                        rows.occurred_at(member),
-                        error.current_context().record_reason(),
-                    ));
+                    outcome.reject(
+                        error
+                            .current_context()
+                            .record_rejection(rows.position(member), rows.occurred_at(member)),
+                    );
                 }
                 Err(error) => return Err(error),
             }

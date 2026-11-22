@@ -361,15 +361,15 @@ impl CompiledSqlValuesProgram {
         execution_now: Timestamp,
         reason: String,
         span: VmSpan,
-    ) -> StructuredMessageError {
+    ) -> RaisedMessageError<RejectedErrorClass> {
         let site = self.error_sites.get(&span);
         let operation = match site {
             Some(site) => site.operation,
             None => MessageErrorOperation::Values,
         };
-        structured_message_error(
+        raised_message_error(
             execution_now,
-            MessageErrorCode::Evaluation,
+            RejectedErrorClass::Evaluation,
             reason,
             operation,
             site.and_then(|site| site.operation_index),
@@ -612,7 +612,6 @@ impl MappedValuesProjection {
                     batch_index,
                     row_index: *row,
                 },
-                EmitterRejectionCode::Invalid,
                 self.program
                     .structured_side_error(execution_now, reason, side_error.span),
             ));

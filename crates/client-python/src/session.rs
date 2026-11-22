@@ -2,11 +2,12 @@
 //!
 //! Layer: edges.
 //! - **Owns.** Opening a session with the connection options a host passes, preparing and
-//!   executing commands, waiting for subscription and domain clock events, reading the clock of a
-//!   followed domain, completion pages, opening producers and consumers, and reading a command's
-//!   outcome, diagnostics, upload failure, subscription, backup archive and restore report.
+//!   executing commands, waiting for subscription and domain clock events and for server notices,
+//!   reading the clock of a followed domain, completion pages, opening producers and consumers,
+//!   and reading a command's outcome, diagnostics, upload failure, subscription, backup archive
+//!   and restore report.
 //! - **Depends on.** The host session runtime's session, outcome and completion page, the
-//!   cancellation token, and the event, clock, schema and endpoint classes it returns.
+//!   cancellation token, and the event, clock, notice, schema and endpoint classes it returns.
 //! - **Must not know.** How the session reaches its server, retries or recovers; the Rust client
 //!   decides all of it through the host session runtime.
 //!
@@ -30,6 +31,7 @@ use crate::{
     enums::{CompletionKind, CompletionStatus, Disposition, Tls, UploadFailure},
     errors,
     event::{Event, Subscription},
+    notice::Notice,
     schema::{Fields, Schema},
 };
 
@@ -338,6 +340,22 @@ impl Session {
         let waited = py.detach(|| session.next_clock_event(cancel));
         match waited {
             Ok(event) => Ok(ClockEvent::new(event)),
+            Err(failure) => Err(errors::raise(py, failure)),
+        }
+    }
+
+    /// Waits for the next server notice, continuing across a lost session: the notices of a
+    /// session end with it, unread ones included, and the notices of the session the client opens
+    /// next follow. Notices that arrived faster than they were read raise `EventOverflowError`,
+    /// and the next call returns the notices after that gap.
+    #[pyo3(signature = (*, cancel = None))]
+    fn next_notice(slf: &Bound<'_, Self>, cancel: Option<PyRef<'_, Cancel>>) -> PyResult<Notice> {
+        let py = slf.py();
+        let session = Self::held(slf)?;
+        let cancel = token(cancel.as_ref());
+        let waited = py.detach(|| session.next_notice(cancel));
+        match waited {
+            Ok(notice) => Ok(Notice::new(notice)),
             Err(failure) => Err(errors::raise(py, failure)),
         }
     }
