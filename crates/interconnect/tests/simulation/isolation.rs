@@ -343,6 +343,20 @@ impl Observation {
         self.transport.leased_streams[class.index()]
     }
 
+    /// The relay memory charged for the channel watermarks this host retains, and for `pending`
+    /// more whose charge an outstanding relay attempt holds until its outcome is recorded.
+    fn watermark_bytes(&self, pending: usize) -> u64 {
+        let watermarks = self
+            .transport
+            .relay_channel_watermarks
+            .checked_add(pending)
+            .assured("a fixture host retains a handful of watermarks");
+        u64::try_from(watermarks)
+            .assured("a handful of watermarks fits u64")
+            .checked_mul(Transport::relay_channel_watermark_bytes())
+            .assured("a handful of watermark charges fits u64")
+    }
+
     fn pending(&self, direction: ConnectionDirection, subquota: RequestSubquota) -> usize {
         self.transport.pending_operations[direction.index()][subquota.index()]
     }
@@ -516,7 +530,11 @@ impl PeerHost {
                 PeerCommand::CancelRelay { delivery, reply } => {
                     let status = self
                         .transport
-                        .cancel_relay(&self.hub, delivery)
+                        .cancel_relay(
+                            &self.hub,
+                            delivery,
+                            nervix_models::RemoteAckTiming::default(),
+                        )
                         .await
                         .assured("the hub answers relay cancellation");
                     self.trace.record(
@@ -1336,8 +1354,10 @@ impl HubHost {
         );
     }
 
-    /// A relay batch the hub holds unadmitted keeps its reservation. Another peer's channel still
-    /// receives grants and admission, and cancelling the held batch returns every byte.
+    /// A relay batch the hub holds unadmitted keeps its reservation, with the charge of the watermark
+    /// its outcome records. Another peer's channel still receives grants and admission, and
+    /// cancelling the held batch returns every byte but the watermarks the hub keeps for the
+    /// channels it admitted, charged for their retention.
     async fn isolate_relay_channels(&mut self) {
         let limits = *self.executor.limits();
         let overlap = limits
@@ -1364,10 +1384,13 @@ impl HubHost {
             .and_then(|bytes| bytes.checked_add(HELD_RELAY_METADATA_BYTES))
             .assured("one relay operation is addressable");
         let reserved = self.observe();
+        let expected = reservation
+            .checked_add(reserved.watermark_bytes(1))
+            .assured("one relay operation and a handful of watermarks are addressable");
         assert_eq!(
-            reserved.executor.relay_memory.reserved_bytes, reservation,
-            "the grant reserved the exact body, retained metadata, largest decoded batch and \
-             scratch: {reserved:?}"
+            reserved.executor.relay_memory.reserved_bytes, expected,
+            "the grant reserved the exact body, retained metadata, largest decoded batch, scratch \
+             and its channel watermark, beside the watermarks the hub keeps: {reserved:?}"
         );
         assert_eq!(reserved.transport.relay_attempts, 1);
         self.trace.record(
@@ -1379,8 +1402,11 @@ impl HubHost {
 
         self.exchange_with_healthy().await;
         self.wait_until("the healthy relay retired", |observation| {
+            let held = reservation
+                .checked_add(observation.watermark_bytes(1))
+                .assured("one relay operation and a handful of watermarks are addressable");
             observation.transport.relay_attempts == 1
-                && observation.executor.relay_memory.reserved_bytes == reservation
+                && observation.executor.relay_memory.reserved_bytes == held
         })
         .await;
 
@@ -1402,13 +1428,15 @@ impl HubHost {
             |observation| {
                 observation.transport.relay_attempts == 0
                     && observation.transport.relay_grants == 0
-                    && observation.executor.relay_memory.reserved_bytes == 0
+                    && observation.executor.relay_memory.reserved_bytes
+                        == observation.watermark_bytes(0)
             },
         )
         .await;
         self.trace.record(
             HUB,
-            "cancellation fenced the held relay and returned its reservation",
+            "cancellation fenced the held relay and returned its reservation; the hub keeps its \
+             channel watermarks charged",
         );
     }
 

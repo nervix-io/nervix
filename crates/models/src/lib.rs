@@ -508,9 +508,5 @@ pub use licensing::{
     RefreshLicense, ReleaseLicense, RotateLicenseClusterKey,
 };
 
-/// The existing host's single relay admission budget. The runtime settings owner adopts this
-/// policy input; transport retention consumes it rather than choosing another timeout.
-pub const HOST_RELAY_ADMISSION_BOUND: std::time::Duration = RemoteRelayTotalTimeout::DEFAULT;
-
 /// The host's existing keep-alive cadence for unresolved relay acknowledgement admission.
 pub const HOST_RELAY_ALIVE_INTERVAL: std::time::Duration = RemoteAckAliveInterval::DEFAULT;

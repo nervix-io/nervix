@@ -48,17 +48,12 @@ pub(super) use owner_delivery::OwnerDelivery;
 mod shuttle_tests;
 
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
-/// A channel that carried no batch this long, counted from its opening or its last batch, opens a
-/// fresh incarnation for its next batch. It stays below the receiver's watermark retention, so a
-/// channel its sender resumes still finds its watermark there, and a receiver's sweep of watermarks
-/// unreconciled for the whole retention raises its retired-channel floor over a live channel's next
-/// batch only when that batch is delayed for longer than the difference.
-const RELAY_CHANNEL_IDLE_ROTATION: Duration = nervix_models::HOST_RELAY_ADMISSION_BOUND;
-const _: () = assert!(
-    RELAY_CHANNEL_IDLE_ROTATION.as_nanos()
-        < nervix_models::HOST_RELAY_ADMISSION_BOUND.as_nanos() * 2,
-    "an idle relay channel rotates before its receiver's watermark retention ends"
-);
+
+/// The idle rotation of a delivery under the default timing, which the tests' deliveries capture.
+#[cfg(test)]
+fn default_idle_rotation() -> Duration {
+    nervix_models::RemoteAckTiming::default().relay_channel_idle_rotation()
+}
 
 /// A count Plexus configures, narrowed to the width this node addresses memory with.
 ///
@@ -353,11 +348,18 @@ impl RelayOutboundSlot {
         channel.reopen(Instant::now());
     }
 
+    /// The position of the channel's next batch for a delivery that captured `timing`. A channel
+    /// that carried no batch for that delivery's idle rotation, counted from its opening or its
+    /// last batch, first opens a fresh incarnation. The rotation stays below the retention the
+    /// receiver keeps the channel's watermark for, so a channel its sender resumes still finds its
+    /// watermark there, and a receiver's sweep of watermarks unreconciled for their whole retention
+    /// raises its retired-channel floor over a live channel's next batch only when that batch is
+    /// delayed for longer than the difference.
     pub(super) fn next_delivery_with_policy(
         &self,
         timing: nervix_models::RemoteAckTiming,
     ) -> RelayDelivery {
-        self.next_delivery_at_with_rotation(Instant::now(), timing.remote_relay_total_timeout)
+        self.next_delivery_at_with_rotation(Instant::now(), timing.relay_channel_idle_rotation())
     }
     #[cfg(test)]
     pub(super) fn next_delivery(&self) -> RelayDelivery {
@@ -365,7 +367,7 @@ impl RelayOutboundSlot {
     }
     #[cfg(test)]
     fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
-        self.next_delivery_at_with_rotation(now, nervix_models::RemoteRelayTotalTimeout::DEFAULT)
+        self.next_delivery_at_with_rotation(now, default_idle_rotation())
     }
 
     #[cfg_attr(

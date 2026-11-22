@@ -771,6 +771,16 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   alteration waits for the work in motion, a payload an ingestor holds while it waits for a place or
   for room on the bounded executor included, rather than cutting it, and a full queue or memory
   class holds back what feeds it rather than dropping or refusing what it was handed.
+- Backpressure is the one control of data-plane resources, and the data plane has no magic limits.
+  What a data-plane path holds, the bookkeeping that keeps its processing correct included (channel
+  watermarks, acknowledgement and admission state, outcomes kept for reconciliation), is charged to
+  an executor memory class or to a bound declared with its capacity and overflow. A full bound holds
+  back the work that would fill it, as a capacity refusal its sender retries, a held delivery or a
+  wait for a place, until room returns. No count, cap, budget, quota or eviction of its own drops,
+  forgets, refuses or invalidates work or that bookkeeping when it fills, and work fails only when
+  its own captured deadline passes or the cluster is disrupted. An existing limit that loses,
+  forgets or refuses work in place of backpressure is a defect recorded on ClickUp, never extended
+  or copied.
 - Control commands are answered apart from data-plane work. Commands (lifecycle steps, checkpoints,
   handoffs, resets, partition-move steps, inspections, stops) are light, rare and time-sensitive;
   data work is heavy and backpressured. A command never triggers heavy work by blocking the answers

@@ -512,14 +512,6 @@ fn invalid_transport_options_report_the_failed_contract() {
                 ..TransportOptions::default()
             },
         ),
-        (
-            "relay_channel_watermark_capacity",
-            TransportOptions {
-                incoming_queue_capacity: 4,
-                relay_channel_watermark_capacity: 4,
-                ..TransportOptions::default()
-            },
-        ),
     ];
     for (contract, options) in cases {
         let error = options
@@ -2079,7 +2071,7 @@ async fn confirmed_cancellation_fences_attempt_before_grant_arrives() {
 
     assert_eq!(
         transport_a
-            .cancel_relay(&node_b, delivery)
+            .cancel_relay(&node_b, delivery, nervix_models::RemoteAckTiming::default())
             .await
             .expect("relay cancellation should be answered"),
         RelayAdmissionStatus::Cancelled
@@ -2165,7 +2157,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
 
     assert_eq!(
         transport_a
-            .relay_admission_status(&node_b, delivery)
+            .relay_admission_status(&node_b, delivery, nervix_models::RemoteAckTiming::default())
             .await
             .expect("relay status should be answered"),
         RelayAdmissionStatus::BodyReceived
@@ -2183,7 +2175,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
 
     assert_eq!(
         transport_a
-            .cancel_relay(&node_b, delivery)
+            .cancel_relay(&node_b, delivery, nervix_models::RemoteAckTiming::default())
             .await
             .expect("relay cancellation should be answered"),
         RelayAdmissionStatus::Cancelled
@@ -2197,7 +2189,7 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
     );
     assert_eq!(
         transport_a
-            .relay_admission_status(&node_b, delivery)
+            .relay_admission_status(&node_b, delivery, nervix_models::RemoteAckTiming::default())
             .await
             .expect("relay status should be answered"),
         RelayAdmissionStatus::Cancelled
@@ -2241,7 +2233,11 @@ async fn cancelled_relay_admission_can_never_reach_runtime() {
         .expect("the application queue should remain open");
     assert_eq!(
         transport_a
-            .cancel_relay(&node_b, next_delivery)
+            .cancel_relay(
+                &node_b,
+                next_delivery,
+                nervix_models::RemoteAckTiming::default()
+            )
             .await
             .expect("the next relay cancellation should be answered"),
         RelayAdmissionStatus::Cancelled
@@ -2446,7 +2442,7 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
     );
     assert_eq!(
         transport_a
-            .relay_admission_status(&node_b, delivery)
+            .relay_admission_status(&node_b, delivery, nervix_models::RemoteAckTiming::default())
             .await
             .expect("relay status should be answered"),
         RelayAdmissionStatus::BodyReceived,
@@ -2473,7 +2469,7 @@ async fn an_outcome_addressed_to_an_earlier_registrar_run_leaves_the_current_adm
     );
     assert_eq!(
         transport_a
-            .relay_admission_status(&node_b, delivery)
+            .relay_admission_status(&node_b, delivery, nervix_models::RemoteAckTiming::default())
             .await
             .expect("relay status should be answered"),
         RelayAdmissionStatus::Admitted
@@ -2549,7 +2545,11 @@ async fn receiver_process_restart_makes_unresolved_relay_indeterminate() {
     assert_eq!(
         timeout(
             Duration::from_secs(5),
-            transport_a.relay_admission_status(&node_b, delivery),
+            transport_a.relay_admission_status(
+                &node_b,
+                delivery,
+                nervix_models::RemoteAckTiming::default()
+            ),
         )
         .await
         .expect("the sender should reconnect to the replacement process")

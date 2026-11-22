@@ -293,13 +293,6 @@ const SERIES: &[SeriesSpec] = &[
         labels: NO_LABELS,
     },
     SeriesSpec {
-        name: "nervix_interconnect_relay_channel_watermarks_evicted_total",
-        help: "Relay channel watermarks forgotten before their retention ended, to make room in \
-               their peer's budget for another channel.",
-        kind: SeriesKind::Counter,
-        labels: NO_LABELS,
-    },
-    SeriesSpec {
         name: "nervix_interconnect_connections_established_total",
         help: "Interconnect connections this node has established.",
         kind: SeriesKind::Counter,
@@ -724,14 +717,6 @@ fn transport_families(families: &mut Families, transport: &TransportSnapshot) {
     outcome_age.sample(&[], transport.oldest_unresolved_outcome.as_secs_f64());
     let mut watermarks = families.open("nervix_interconnect_relay_channel_watermarks");
     watermarks.sample(&[], transport.relay_channel_watermarks.approx_into());
-    let mut evicted = families.open("nervix_interconnect_relay_channel_watermarks_evicted_total");
-    evicted.sample(
-        &[],
-        transport
-            .counters
-            .relay_channel_watermarks_evicted
-            .approx_into(),
-    );
 
     let counters = &transport.counters;
     let mut established = families.open("nervix_interconnect_connections_established_total");
@@ -1117,7 +1102,6 @@ mod tests {
                 request_time: [Duration::ZERO; RequestSubquota::COUNT],
                 relay_outcomes: [0; RelayAdmissionOutcome::COUNT],
                 relay_admission_wait: Duration::ZERO,
-                relay_channel_watermarks_evicted: 0,
                 relay_grant_refusals: [[0; RelayGrantRefusal::COUNT]; ConnectionDirection::COUNT],
                 bulk_bytes: [[0; TransferDirection::COUNT]; PoolClass::COUNT],
             },

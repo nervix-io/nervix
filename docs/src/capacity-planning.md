@@ -254,14 +254,18 @@ The claim does not itself resize executor pools or memory budgets.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's
   ordering slot. A receiving node also keeps, for every peer, a watermark for each channel that
-  peer opened in the last ten minutes, up to a fixed 8,192 per peer at about 180 bytes each.
-  Branches that end and return open new channels, so size branch turnover between two nodes
-  against that budget: beyond it the least recently used watermarks are forgotten first rather
-  than new channels refused. A branch whose channel was forgotten while it was still in use fails
-  its next delivery as indeterminate and opens a new channel; an ingestor that waits for
-  acknowledgements redelivers the batch, and one in `NO ACK` mode loses it as it loses any failed
-  delivery. Keep the branches that are active at once between two nodes below the budget, and read
-  `nervix_interconnect_relay_channel_watermarks_evicted_total` to see when turnover exceeds it. Management subquotas independently reserve streams for discovery, liveness,
+  peer used within the channel's retention: twice the longest `REMOTE_RELAY_TOTAL_TIMEOUT` its
+  deliveries captured, ten minutes at the defaults. Each watermark is charged to the relay memory
+  class while it is retained, about 180 bytes plus the text of a rejection reason it keeps, and no
+  count limits them; the retired-channel floors that forgotten channels leave take 32 bytes for each
+  budget they were kept for. Branches that end and return open new channels, so size the relay
+  memory class for the channels two nodes use within that retention as well as for their batches: a
+  thousand channels take about 180 KiB. When the class has no room for a new channel's watermark,
+  that delivery waits as a held delivery until watermarks expire or other relay work returns room;
+  nothing forgets a watermark to make room, and the wait ends the delivery only once its own total
+  admission budget has passed. Lowering `REMOTE_RELAY_TOTAL_TIMEOUT` shortens the retention of the
+  channels opened afterwards, and `nervix_interconnect_relay_channel_watermarks`
+  shows how many watermarks a node keeps. Management subquotas independently reserve streams for discovery, liveness,
   replaceable domain-clock progress, relay admission, cancellation, and terminal outcomes even when
   ordinary management requests are full.
   Bulk subquotas independently reserve streams for resource transfer and for runtime and Raft

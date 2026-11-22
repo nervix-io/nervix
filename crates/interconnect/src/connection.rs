@@ -70,8 +70,8 @@ use self::{
 use super::{
     BootstrapExpectation, ControlEnvelope, CoordinationIdentityAllocationError, Envelope,
     JoinProgress, JoinTerms, PeerTarget, PoolClass, ReceivedEnvelope, RelayAdmissionDecision,
-    RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload, RequestSubquota,
-    TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
+    RelayAdmissionStatus, RelayChannelRetention, RelayDelivery, RelayGrantRefusal, RelayPayload,
+    RequestSubquota, TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
@@ -118,7 +118,8 @@ pub use duplex::{
     DuplexSender, EncodedMessage,
 };
 pub use relay::RelaySendProgress;
-use relay_owner::{RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner};
+use relay_owner::{RelayControl, RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner};
+pub(crate) use relay_watermarks::RelayChannelWatermarks;
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
@@ -588,29 +589,20 @@ struct RelayChannelKey {
 struct RelayChannelWatermark {
     sequence: u64,
     status: RelayAdmissionStatus,
-    last_reconciled: Instant,
 }
 
 impl RelayChannelWatermark {
     fn new(sequence: u64, status: RelayAdmissionStatus) -> Self {
-        Self {
-            sequence,
-            status,
-            last_reconciled: Instant::now(),
-        }
-    }
-
-    fn mark_reconciled(&mut self) {
-        self.last_reconciled = Instant::now();
-    }
-
-    fn last_reconciled_at(&self) -> Instant {
-        self.last_reconciled
+        Self { sequence, status }
     }
 }
 
 enum RelayGrantRegistration {
-    Registered { retention_changed: bool },
+    /// The attempt took its channel's position. `shortens_sweep` says that its retention is
+    /// shorter than any its owner retained at the last sweep, so the sweep must pass sooner.
+    Registered {
+        shortens_sweep: bool,
+    },
     Existing(StdArc<RelayAdmissionRecord>),
     Retired(RelayGrantDisposition),
     InvalidSequence,
@@ -659,6 +651,10 @@ struct RelayAdmissionProtocol {
     phase: RelayBodyPhase,
     rejection: Option<String>,
     capacity: Option<RelayAdmissionCapacity>,
+    /// The relay memory charge of the channel watermark this attempt's outcome records, reserved
+    /// with its grant. Recording the outcome hands it to the channel's watermarks, and ending the
+    /// attempt any other way returns it.
+    note: Option<Reservation>,
     last_progress: Instant,
 }
 
@@ -728,6 +724,9 @@ pub struct RelayCancellationGuard {
     state: TransportState,
     peer_node_id: ClusterNodeName,
     delivery: RelayDelivery,
+    /// The timing the delivery captured, which bounds how long a dropped guard asks for its
+    /// cancellation and which the cancellation carries.
+    timing: nervix_models::RemoteAckTiming,
     armed: bool,
 }
 
@@ -736,11 +735,13 @@ impl RelayCancellationGuard {
         state: TransportState,
         peer_node_id: ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
     ) -> Self {
         Self {
             state,
             peer_node_id,
             delivery,
+            timing,
             armed: true,
         }
     }
@@ -758,9 +759,10 @@ impl Drop for RelayCancellationGuard {
         let state = self.state.clone();
         let peer_node_id = self.peer_node_id.clone();
         let delivery = self.delivery;
+        let timing = self.timing;
         self.state.tasks.spawn(async move {
             state
-                .cancel_relay_until_resolved(peer_node_id, delivery)
+                .cancel_relay_until_resolved(peer_node_id, delivery, timing)
                 .await;
         });
     }
@@ -797,8 +799,24 @@ impl RelayAdmission {
 }
 
 impl RelayAdmissionRecord {
+    /// Return the transport capacity this attempt holds: its queue item and terminal outcome
+    /// permits, and its watermark's charge unless recording its outcome already took it.
     fn release_capacity(&self) {
-        self.state.lock().capacity.take();
+        let mut state = self.state.lock();
+        state.capacity.take();
+        state.note.take();
+    }
+
+    /// The charge of the watermark this attempt's outcome records, which its owner takes once,
+    /// when it retires the attempt.
+    fn take_note(&self) -> Option<Reservation> {
+        self.state.lock().note.take()
+    }
+
+    /// How long its owner keeps this attempt after its last progress, and its channel's watermark
+    /// once its outcome is recorded: the retention of the timing its sender captured.
+    fn retention(&self) -> RelayChannelRetention {
+        RelayChannelRetention::captured_by(self.metadata.ack_timing)
     }
     fn report_progress(&self) {
         self.state.lock().last_progress = Instant::now();
@@ -977,6 +995,11 @@ pub(crate) struct TransportStateInner {
     /// protocol work, and only peer installation and withdrawal replace this publication.
     relay_owners: ArcSwap<RelayOwnersPublication>,
     relay_progress_changed: Notify,
+    /// The relay channel retention the installed committed parameters give a delivery that starts
+    /// now: an owner still awaiting membership ends after it, and the sweep passes at least once a
+    /// tenth of it.
+    relay_retention: watch::Sender<RelayChannelRetention>,
+    /// Wakes the sweep when an installed retention or a registered item needs it to pass sooner.
     relay_retention_changed: Notify,
     relay_items: StdArc<Semaphore>,
     terminal_outcomes: StdArc<Semaphore>,
@@ -1092,6 +1115,7 @@ impl TransportState {
                 requests: super::RequestState::new(&options, Arc::clone(&observations)),
                 relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
                 relay_progress_changed: Notify::new(),
+                relay_retention: watch::channel(RelayChannelRetention::default()).0,
                 relay_retention_changed: Notify::new(),
                 relay_items: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 terminal_outcomes: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),

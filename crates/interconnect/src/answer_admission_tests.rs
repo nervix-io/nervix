@@ -899,7 +899,13 @@ async fn a_relay_status_answer_waits_for_a_place_on_its_receivers_full_control_c
         let transport_a = transports.transport_a.clone();
         let node_b = transports.node_b.clone();
         let querying = nervix_primitives::task::spawn(async move {
-            transport_a.relay_admission_status(&node_b, delivery).await
+            transport_a
+                .relay_admission_status(
+                    &node_b,
+                    delivery,
+                    nervix_models::RemoteAckTiming::default(),
+                )
+                .await
         });
         eventually(
             &executor_b,
