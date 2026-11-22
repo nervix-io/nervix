@@ -95,6 +95,10 @@ const MESSAGES_PER_BATCH: &str = "messages_per_batch";
 const DELIVERY_LATENCY_SECONDS: &str = "delivery_latency_seconds";
 const RELAY_BUFFER_LEN: &str = "relay_buffer_len";
 const BRANCH_INSTANCES: &str = "branch_instances";
+const PLACEMENT_VIOLATING_UNITS: &str = "placement_violating_units";
+const PLACEMENT_WAITING_UNITS: &str = "placement_waiting_units";
+/// A domain's placement gauges carry only the domain: no label names a node, a rule or a tag.
+const PLACEMENT_UNIT_LABELS: &[&str] = &["domain"];
 const BRANCH_EVICTIONS_TOTAL: &str = "branch_evictions_total";
 const BRANCH_PARTITION_EPOCH: &str = "branch_partition_epoch";
 const BRANCH_PARTITION_KEYS_PENDING: &str = "branch_partition_keys_pending";
@@ -1764,6 +1768,40 @@ pub struct RuntimeMetrics {
 }
 
 impl RuntimeMetrics {
+    /// Sets how many of `domain`'s units break a node rule now.
+    pub(crate) fn set_placement_node_rule_units(
+        &self,
+        domain: &DomainName,
+        counts: crate::registry::NodeRuleUnitCounts,
+    ) {
+        let prometheus = &self.series.prometheus;
+        prometheus
+            .placement_violating_units
+            .with_label_values(&[domain.as_str()])
+            .set(i64::try_from(counts.violating).assured("a count of scheduled units fits in i64"));
+        prometheus
+            .placement_waiting_units
+            .with_label_values(&[domain.as_str()])
+            .set(i64::try_from(counts.waiting).assured("a count of scheduled units fits in i64"));
+    }
+
+    /// Removes `domain`'s placement gauges, once it has no node rule or no longer exists.
+    pub(crate) fn remove_placement_node_rule_units(&self, domain: &DomainName) {
+        let prometheus = &self.series.prometheus;
+        for gauge in [
+            &prometheus.placement_violating_units,
+            &prometheus.placement_waiting_units,
+        ] {
+            if let Err(error) = gauge.remove_label_values(&[domain.as_str()]) {
+                tracing::debug!(
+                    domain = domain.as_str(),
+                    %error,
+                    "placement gauge had no series for the domain"
+                );
+            }
+        }
+    }
+
     pub(crate) fn install_control_plane_cadences(
         &self,
         capabilities: &nervix_models::ControlPlaneCapabilities,
@@ -1852,6 +1890,8 @@ struct PrometheusMetrics {
     delivery_latency_seconds: HistogramVec,
     relay_buffer_len: HistogramVec,
     branch_instances: IntGaugeVec,
+    placement_violating_units: IntGaugeVec,
+    placement_waiting_units: IntGaugeVec,
     branch_evictions_total: IntCounterVec,
     branch_partition_epoch: IntGaugeVec,
     branch_partition_keys_pending: IntGaugeVec,
@@ -2035,6 +2075,32 @@ impl PrometheusMetrics {
             )
             .namespace("nervix"),
             BRANCH_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let placement_violating_units = IntGaugeVec::new(
+            Opts::new(
+                PLACEMENT_VIOLATING_UNITS,
+                "Units of a domain whose live owner a winning REQUIRE node rule does not admit, \
+                 as this Nervix node observes them.",
+            )
+            .namespace("nervix"),
+            PLACEMENT_UNIT_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        let placement_waiting_units = IntGaugeVec::new(
+            Opts::new(
+                PLACEMENT_WAITING_UNITS,
+                "Units of a domain with no live owner their node rules admit and no cluster node \
+                 that satisfies them, as this Nervix node observes them.",
+            )
+            .namespace("nervix"),
+            PLACEMENT_UNIT_LABELS,
         )
         .assured(
             "the metric name, help text and label names are constants that satisfy Prometheus \
@@ -2304,6 +2370,12 @@ impl PrometheusMetrics {
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
             );
+        for collector in [&placement_violating_units, &placement_waiting_units] {
+            registry.register(Box::new(collector.clone())).assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        }
         for collector in [&branch_partition_epoch, &branch_partition_keys_pending] {
             registry.register(Box::new(collector.clone())).assured(
                 "this registry is built here and each metric is registered once under a distinct \
@@ -2633,6 +2705,8 @@ impl PrometheusMetrics {
             delivery_latency_seconds,
             relay_buffer_len,
             branch_instances,
+            placement_violating_units,
+            placement_waiting_units,
             branch_evictions_total,
             branch_partition_epoch,
             branch_partition_keys_pending,

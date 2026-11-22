@@ -329,6 +329,22 @@ fn operand_to_plexus(
     }
 }
 
+/// A node property, one field name holding a dot such as `cuda.available`, written as the two
+/// plain segments Plexus reads it back from, `node.cuda.available`, as the node scope documents it.
+/// `None` for a name another spelling must carry: more dots, or a segment that needs quoting.
+fn node_property_path(field: &str) -> Option<String> {
+    let (group, property) = field.split_once('.')?;
+    if property.contains('.') {
+        return None;
+    }
+    if NamePosition::Qualified.spell(group) != group
+        || NamePosition::Qualified.spell(property) != property
+    {
+        return None;
+    }
+    Some(format!("{}.{group}.{property}", crate::NODE_SCOPE))
+}
+
 pub fn expression_to_plexus(
     expression: &Expression,
 ) -> error_stack::Result<String, CanonicalPlexusError> {
@@ -339,6 +355,11 @@ pub fn expression_to_plexus(
         Expression::Literal(Literal::String(value)) => Ok(string_literal(value)),
         Expression::Literal(Literal::Null) => Ok("NULL".to_string()),
         Expression::Field(reference) => {
+            if let FieldScope::Node = reference.scope
+                && let Some(path) = node_property_path(reference.field.as_str())
+            {
+                return Ok(path);
+            }
             let prefix = match &reference.scope {
                 FieldScope::Bare => None,
                 FieldScope::Message => Some("message".to_string()),
@@ -769,27 +790,48 @@ impl AlterPlacement {
             .iter()
             .map(|operation| match operation {
                 AlterPlacementOperation::SetPolicy { policy } => {
-                    format!("SET POLICY {}", policy.as_ref())
+                    Ok(format!("SET POLICY {}", policy.as_ref()))
                 }
-                AlterPlacementOperation::SetRank { rank } => format!("SET RANK {rank}"),
-                AlterPlacementOperation::DropRank => "DROP RANK".to_string(),
-                AlterPlacementOperation::SetDomainWide => "SET DOMAIN WIDE".to_string(),
-                AlterPlacementOperation::SetMembers { from, to } => format!(
+                AlterPlacementOperation::SetNodePolicy { policy } => {
+                    Ok(format!("SET POLICY {}", node_policy_to_plexus(policy)?))
+                }
+                AlterPlacementOperation::SetRank { rank } => Ok(format!("SET RANK {rank}")),
+                AlterPlacementOperation::DropRank => Ok("DROP RANK".to_string()),
+                AlterPlacementOperation::SetDomainWide => Ok("SET DOMAIN WIDE".to_string()),
+                AlterPlacementOperation::SetMembers { from, to } => Ok(format!(
                     "SET FROM {} TO {}",
                     model_name_list(from),
                     model_name_list(to)
-                ),
+                )),
+                AlterPlacementOperation::SetNodeMembers { members } => {
+                    Ok(format!("SET FOR {}", model_name_list(members)))
+                }
                 AlterPlacementOperation::RenameTo { name } => {
-                    format!("RENAME TO {}", name.as_str())
+                    Ok(format!("RENAME TO {}", name.as_str()))
                 }
             })
-            .collect::<Vec<_>>()
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER PLACEMENT {} {operations};",
             self.placement.as_str()
         ))
     }
+}
+
+/// A node rule's policy as its body writes it, the selector in canonical expression text.
+pub(crate) fn node_policy_to_plexus(
+    policy: &crate::NodePolicy,
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    Ok(match policy {
+        crate::NodePolicy::Require(selector) => {
+            format!("REQUIRE NODES WHERE {}", expression_to_plexus(selector)?)
+        }
+        crate::NodePolicy::Prefer(selector) => {
+            format!("PREFER NODES WHERE {}", expression_to_plexus(selector)?)
+        }
+        crate::NodePolicy::Any => "ANY NODE".to_owned(),
+    })
 }
 
 fn model_name_list(names: &[ModelName]) -> String {
@@ -1358,25 +1400,27 @@ impl CreatePlacement {
     pub(crate) fn configuration_to_canonical_plexus(
         &self,
     ) -> error_stack::Result<String, CanonicalPlexusError> {
-        let scope = match &self.scope {
-            crate::PlacementScope::DomainWide => "DOMAIN WIDE".to_owned(),
-            crate::PlacementScope::Corridor { from, to } => format!(
-                "FROM {} TO {}",
-                from.iter()
-                    .map(ModelName::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                to.iter()
-                    .map(ModelName::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            ),
+        let body = match &self.rule {
+            crate::PlacementRule::Colocation { scope, policy } => {
+                let scope = match scope {
+                    crate::PlacementScope::DomainWide => "DOMAIN WIDE".to_owned(),
+                    crate::PlacementScope::Corridor { from, to } => {
+                        format!("FROM {} TO {}", model_name_list(from), model_name_list(to))
+                    }
+                };
+                format!("{scope} {policy}")
+            }
+            crate::PlacementRule::Nodes { scope, policy } => {
+                let scope = match scope {
+                    crate::NodeRuleScope::DomainWide => "DOMAIN WIDE".to_owned(),
+                    crate::NodeRuleScope::Members(members) => {
+                        format!("FOR {}", model_name_list(members))
+                    }
+                };
+                format!("{scope} {}", node_policy_to_plexus(policy)?)
+            }
         };
-        let mut rendered = format!(
-            "CREATE PLACEMENT {} {scope} {}",
-            self.name.as_str(),
-            self.policy
-        );
+        let mut rendered = format!("CREATE PLACEMENT {} {body}", self.name.as_str());
         if let Some(rank) = self.rank {
             rendered.push_str(&format!(" RANK {rank}"));
         }

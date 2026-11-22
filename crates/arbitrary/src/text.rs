@@ -112,6 +112,7 @@ pub const KEYWORDS: [&str; 457] = [
     "colocation",
     "separation",
     "neutral",
+    "any",
     "user",
     "password",
     "password_iterations",

@@ -3,8 +3,8 @@
 *Plexus, the Nervix graph definition language.*
 
 Placement policies control where a domain's schedulable work executes. Use them to keep a
-latency-sensitive processing corridor on one machine, prefer locality without forcing it, or bias
-expensive stages across machines.
+latency-sensitive processing corridor on one machine, prefer locality without forcing it, bias
+expensive stages across machines, or keep work on the cluster nodes that can run it.
 
 Nervix distinguishes two kinds of nodes throughout this chapter:
 
@@ -23,6 +23,9 @@ CREATE PLACEMENT scoring_local
   REQUIRE COLOCATION
   RANK 1;
 ```
+
+A node rule instead selects the cluster nodes a runtime node's units may run on, or should prefer,
+by the facts in each node's committed record. See [Node Rules](#node-rules).
 
 Placement changes assignments, not graph routing. Records still follow the routes declared by the
 ingestors, processors, and emitters.
@@ -276,7 +279,8 @@ checkpoints and stateful inferencer tensors. Draining a host moves hard groups a
 canonical kind/name/unit order. Failover uses immediate termination because the former owner is already
 unavailable.
 
-Placement constrains primary owners. It does not control replica count or replica placement. An
+Colocation rules constrain primary owners. They do not control replica count or replica
+placement; a node rule's requirement restricts every assignment slot, replicas included. An
 ordinary relay has no replicas; a materialized relay's replicas contain only materialized state.
 Concrete branch keys do not have separate placement: their declared partition is the unit of
 ownership. The scheduler balances primary counts across eligible cluster nodes before comparing
@@ -467,9 +471,11 @@ unsatisfied, because Nervix never moves an existing assignment to improve a pref
 ```plexus,ignore
 ALTER PLACEMENT <placement>
     SET POLICY <policy>
+  | SET POLICY { REQUIRE NODES WHERE <selector> | PREFER NODES WHERE <selector> | ANY NODE }
   | SET RANK <positive_integer>
   | DROP RANK
   | SET FROM <runtime_node> [, ...] TO <runtime_node> [, ...]
+  | SET FOR <runtime_node> [, ...]
   | SET DOMAIN WIDE
   | RENAME TO <placement_name>
   [, <operation> ...];
@@ -478,9 +484,11 @@ DROP PLACEMENT <placement>;
 ```
 
 Operations execute in written order, and the complete statement is applied atomically. `SET FROM
-... TO ...` replaces the coverage with a corridor; `SET DOMAIN WIDE` covers every eligible hop
-and releases endpoint pins. This makes it possible to change policy, precedence,
-membership, and name in one statement:
+... TO ...` replaces a colocation rule's coverage with a corridor; `SET FOR` replaces a node rule's
+members; `SET DOMAIN WIDE` covers every eligible hop or runtime node and releases the member pins.
+An operation of the other form is refused: a colocation policy or `SET FROM ... TO ...` on a node
+rule, a node policy or `SET FOR` on a colocation rule. This makes it possible to change policy,
+precedence, membership, and name in one statement:
 
 ```plexus
 ALTER PLACEMENT scoring_local
@@ -490,7 +498,7 @@ ALTER PLACEMENT scoring_local
 ```
 
 A corridor placement pins the entities named in its `FROM` and `TO` lists even when its current coverage is
-empty. Dropping a referenced runtime node is blocked until every pinning placement is altered or
+empty, and a node rule pins its `FOR` members the same way. Dropping a referenced runtime node is blocked until every pinning placement is altered or
 dropped. A change that would make a member ineligible, such as changing an ingestor to an endpoint
 or Syslog ingestor, is blocked in the same way. Adding or dropping a relay's materialized state does
 not change its placement identity.
@@ -521,7 +529,7 @@ DESCRIBE DOMAIN;
 ```
 
 `SHOW CREATE PLACEMENT` renders the normalized stored rule as canonical Plexus and omits the
-creation-time `IF NOT EXISTS` modifier. `SHOW PLACEMENTS` lists each rule's scope, policy, rank, per-hop classes and effective policies, and one
+creation-time `IF NOT EXISTS` modifier. `SHOW PLACEMENTS` lists each colocation rule's scope, policy, rank, per-hop classes and effective policies, and one
 of these coverage states:
 
 | Coverage | Meaning |
@@ -543,7 +551,8 @@ members, host cluster node, and the effective hard bonds holding it together. Us
 in a larger group after a carve-out.
 
 `SHOW CLUSTER STATUS` provides the complete scheduled-owner view when you need to compare placement
-with other runtime nodes outside hard colocation groups.
+with other runtime nodes outside hard colocation groups. [Observing Node
+Rules](#observing-node-rules) covers what the same commands report for node rules.
 
 ## Troubleshooting
 
@@ -557,9 +566,14 @@ with other runtime nodes outside hard colocation groups.
 | A soft-policy change did not move anything. | This is expected. Use `REQUIRE COLOCATION` only when movement is justified by a hard locality requirement. |
 | A runtime node remains in a hard group after a carve-out. | Inspect the group's hard relationships in `DESCRIBE DOMAIN`; another uncut requirement still connects it to the group. |
 | Dropping or reshaping a member is blocked. | Alter or drop every placement named by the diagnostic before changing the member. |
+| A change to a running domain is refused because a node rule does not admit a node. | The change would leave an executing unit on that node. Relocate the unit onto a node the rule admits first, or stop the domain; `DESCRIBE PLACEMENT` lists the matching nodes. |
+| `START` does not answer. | A unit has no node its node rules admit, so `START` waits. `DESCRIBE DOMAIN` lists the waiting units and `SHOW CLUSTER STATUS` their `waiting_for=` rules; add or retag a node that satisfies them. |
+| `SHOW CLUSTER STATUS` reports `violates=` or `waiting_for=`. | A node's record changed, or its owner was lost with no admitted destination. See [When Node Rules Take Effect](#when-node-rules-take-effect). |
+| A node rule is `unmatched`. | No live node satisfies its selector now. Preview it with `SHOW NODES WHERE <selector>`. |
 
 Creation also rejects an unknown or ambiguous member, a non-schedulable entity, a cluster-wide
-server-listener ingestor, an empty side, and `RANK 0`.
+server-listener ingestor, an empty side or member list, a node selector that does not compile over
+the node schema, and `RANK 0`.
 
 ## Common Patterns
 
@@ -613,12 +627,13 @@ Placement policies do not provide:
 
 - hard separation or workload isolation;
 - grouping for runtime nodes with no directed path between them;
-- cluster-node labels, availability zones, or pinning to a named cluster node;
 - per-branch placement; or
-- replica-count or replica-placement control.
+- replica-count control, or replica placement beyond the node rules a replica's node must satisfy.
 
 `RELOCATE` moves work onto a named cluster node once. It is not pinning: nothing keeps the moved
-runtime node there, and a later failover, drain, or hard-group consolidation may move it again. It
+runtime node there, and a later failover, drain, or hard-group consolidation may move it again. To
+keep work on chosen nodes, declare a [node rule](#node-rules); `RELOCATE` refuses a destination
+the moved units' node rules do not admit. It
 also does not relocate endpoint or Syslog ingestors, an individual replica, an individual branch, a
 unit spanning domains, and it never applies a selection in part. An unqualified partitioned node
 selects every partition; an exact selector moves only that unit and its hard-group mates. Each
@@ -669,6 +684,139 @@ Any node can answer this command without a selected domain. Its answer reflects 
 records it has applied and the liveness it observes. The command is read-only. `FORMAT JSON`
 selects the JSON projection of the same inspection. See
 [Node Selectors](filter-map-functions.md#node-selectors) for the fields, types and `tag()` syntax.
+
+## Node Rules
+
+A node rule selects the cluster nodes a runtime node's units may run on, or should prefer, by the
+facts in each node's committed record. It is a named placement rule whose body selects nodes
+instead of relating hops:
+
+```plexus,ignore
+CREATE [IF NOT EXISTS] PLACEMENT <placement>
+  { FOR <runtime_node> [, ...] | DOMAIN WIDE }
+  { REQUIRE NODES WHERE <selector> | PREFER NODES WHERE <selector> | ANY NODE }
+  [RANK <positive_integer>];
+```
+
+The selector is a [node selector](filter-map-functions.md#node-selectors): the boolean expression
+`SHOW NODES WHERE` previews, over a node's name, detected properties and operator tags. This rule
+keeps the scorer on the nodes tagged `zone=eu`:
+
+```plexus
+CREATE PLACEMENT eu_only FOR risk_scorer REQUIRE NODES WHERE tag('zone') = 'eu';
+```
+
+| Policy | Effect |
+| --- | --- |
+| `REQUIRE NODES WHERE` | Every unit of a covered runtime node runs only on a node the selector admits, for its primary and every replica. |
+| `PREFER NODES WHERE` | New placement decisions favor the nodes the selector admits. A preference never moves an existing assignment. |
+| `ANY NODE` | Lifts every weaker requirement, so a stronger-ranked carve-out frees some members of a broader `REQUIRE` rule. |
+
+`FOR` names the runtime nodes the rule covers. It accepts the members a corridor accepts: relays,
+ingestors, processors, lookups, generators and emitters, but not a server-listener ingestor, which
+runs on every cluster node. `DOMAIN WIDE` covers every such runtime node of the domain, including
+ones created later. A selector is compiled when the rule is admitted, so a selector that names an
+unknown node property, or is not a boolean condition, is refused at once. A node on which a selector fails to evaluate is not
+admitted, and `DESCRIBE PLACEMENT` reports the failure.
+
+### Requirements And Preferences
+
+Each runtime node a node rule covers resolves two ladders. They are separate from the colocation
+rules and from each other, and they use the colocation rules' rank precedence: rank 1, the other
+explicit ranks in ascending order, then the unranked tier.
+
+- The **requirements ladder** holds the covering `REQUIRE NODES` and `ANY NODE` rules. At its
+  strongest rank every `REQUIRE` selector must admit a node for a unit to run there, and weaker
+  rules are overridden. An `ANY NODE` rule at the strongest rank lifts every requirement. An
+  `ANY NODE` rule beside a `REQUIRE` rule at the strongest rank is a conflict, and the change is
+  refused naming both rules and the runtime node.
+- The **preferences ladder** holds the covering `PREFER NODES` rules. Each selector at its
+  strongest rank that admits a candidate node adds one to that node's preference score.
+
+A hard colocation group may run only on the nodes that every member's requirements admit, and its
+preference score is the sum of its members' scores. The scheduler restricts each unit's candidate
+nodes to the admitted ones, then ranks them by preference score, the colocation score, upstream
+locality, capacity-weighted load, round robin and node name, in that order. The test-only random
+scheduler draws from the same admitted nodes.
+
+For example, a domain-wide requirement with a stronger carve-out and a preference:
+
+```plexus
+CREATE PLACEMENT fast_only DOMAIN WIDE REQUIRE NODES WHERE tag('pool') = 'fast' RANK 2;
+CREATE PLACEMENT archiver_anywhere FOR archiver ANY NODE RANK 1;
+CREATE PLACEMENT prefer_gpu FOR fraud_scorer PREFER NODES WHERE node.cuda.available;
+```
+
+Every runtime node runs on a `pool=fast` node except `archiver`, which may run anywhere, and
+`fraud_scorer` favors a node with CUDA among the fast ones.
+
+### When Node Rules Take Effect
+
+A node rule binds every placement decision from the moment it is accepted. Fresh schedules,
+failover, drain and explicit relocation all choose among the admitted nodes.
+
+On a running domain, a change is refused when it would leave an executing unit on a node its
+winning requirements do not admit, naming the rule, the node and the unit: creating or altering a
+node rule, or any other model change. A change that would leave a unit without any admitted node is
+refused naming the rule and the unit. The model and schedule stay unchanged, and a transaction's
+preview reports the same refusal. A breach the cluster left behind, described below, does not block
+unrelated changes. `RELOCATE` refuses a destination the moved units' rules do not admit, and so does
+its `DESCRIBE RELOCATION` preview.
+
+On a stopped domain nothing executes, so a node rule is accepted whatever the stored assignments
+are; it constrains the schedule the domain starts with. `START` first places every unit on a node
+its rules admit. A unit stored on a node its rules no longer admit moves, with its state, through
+the planned ownership handoff. While some unit has no admitted node, `START` waits, much as a
+Kubernetes pod stays Pending until a node matches. It holds the domain's mutation lease, so the domain's
+other changes are refused meanwhile, and it continues by itself once a node that satisfies the
+rules is live with a committed record. Nothing starts until every unit can be placed. A `START`
+in the same transaction as a node-rule change that would leave a breach is refused; commit the
+change first, then `START`.
+
+The cluster can still change under an accepted rule:
+
+- When a node's committed record changes so that it no longer satisfies a rule, for example after
+  a restart without its tag, the units it runs keep running there. The scheduler keeps the
+  assignment and reports it `violates=<rule>`; records keep flowing, and the unit moves only when
+  you relocate it onto an admitted node.
+- When a unit's owner is lost and no admitted node can take it, the unit keeps its last assignment
+  and is reported `waiting_for=<rule>`. It is placed as soon as an admitted node is available.
+- On a stopped domain nothing runs, so a unit stored on a node its rules do not admit is reported
+  `violates=<rule>` while an admitted node could take it, where `START` moves it, and
+  `waiting_for=<rule>` while none could, which is what `START` waits for.
+
+### Observing Node Rules
+
+`SHOW PLACEMENTS` lists each node rule with its scope, policy, rank and coverage, then one line per
+member naming the policy that wins there or the rules that override it:
+
+```text
+eu_only scope=members policy=REQUIRE NODES rank=unranked coverage=effective
+eu_only member=risk_scorer effective=REQUIRE NODES
+```
+
+A node rule reports one of these coverage states:
+
+| Coverage | Meaning |
+| --- | --- |
+| `empty` | The rule covers no runtime node. |
+| `effective` | The rule wins on every runtime node it covers. |
+| `partial` | The rule wins on some of the runtime nodes it covers, and stronger rules on the others. |
+| `overridden` | Stronger rules win on every runtime node it covers. |
+| `unmatched` | The rule wins somewhere, but no live node satisfies its selector now. |
+
+`DESCRIBE PLACEMENT` of a node rule shows its stored form and labels, scope, policy, selector,
+rank, resolved members, the nodes its selector matches now and its coverage. It then shows every
+unit of each member with its owner and satisfaction: `satisfied`, `unplaced`, `violates` or
+`waiting` for a requirement, `preferred` or `not preferred` for a preference, and `overridden`
+where a stronger rule wins. `DESCRIBE DOMAIN` lists the node rules, then the units violating them
+and the units waiting for them.
+
+`SHOW CLUSTER STATUS` adds `violates=<rule>` or `waiting_for=<rule>` to the `[schedule]` row of a
+breaking unit, listing the rules comma-separated. The gauges `nervix_placement_violating_units` and
+`nervix_placement_waiting_units` count those units per domain, and the leader logs at `info` each
+unit that enters or leaves either state. See
+[Metrics And Observability](metrics-and-observability.md).
 
 ## Ingestor Instance Units
 

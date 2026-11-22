@@ -13377,7 +13377,9 @@ mod tests {
         let target = match control {
             ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
             ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
-            ChoiceControl::PlacementFromMember | ChoiceControl::PlacementToMember => {
+            ChoiceControl::PlacementFromMember
+            | ChoiceControl::PlacementToMember
+            | ChoiceControl::PlacementForMember => {
                 nervix_client_wire::ChoiceTarget::PlacementMember
             }
             ChoiceControl::BranchSchema

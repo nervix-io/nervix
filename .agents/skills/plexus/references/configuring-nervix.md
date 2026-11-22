@@ -837,7 +837,8 @@ Choose checks relevant to the configured graph:
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
   `DESCRIBE DOMAIN` inspect placement coverage, hop classes, effective policies, exact unit
-  groups, their hosts, and domain-wide scope.
+  groups, their hosts, and domain-wide scope, and for a node rule its selector, the nodes it
+  matches, each unit's satisfaction and the units violating or waiting for it.
 - `DESCRIBE RELOCATION ...;` shows the unit, quiesce level, gated relays, corridor coverage, and
   unsatisfied preferences a `RELOCATE` with the same clauses would execute, without moving
   anything.
