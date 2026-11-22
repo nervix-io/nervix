@@ -162,7 +162,12 @@ reduced to fit: lower it, or give the node more memory.
 
 The node also measures the volumes of its database directory, `--db-path`, and its temporary
 directory, `--temp-dir`. The restore-staging quota and the snapshot staging quotas follow those
-volumes unless given, and the committed resource quotas must fit the database volume.
+volumes unless given, and the committed resource quotas must fit the database volume. The measured
+database volume is part of the node's capability claim, so `ALTER CLUSTER SET` refuses a
+`RESOURCE_MAX_ARCHIVE_BYTES` or `RESOURCE_MAX_EXTRACTED_BYTES` above the database volume any
+admitted node's committed claim carries, naming the node:
+`resource-max-extracted-bytes (8EiB) exceeds node 'node-1' database volume (1.82TiB)`. Each claim
+records the size its run measured at start, so a grown volume counts once that node restarts.
 [What A Node Needs To Start](capacity-planning.md#what-a-node-needs-to-start) sizes the volumes, and
 [The Startup Preflight](node-settings.md#the-startup-preflight) lists every check in order.
 
@@ -302,9 +307,10 @@ exceeds it. [Entity Labels](entity-labels.md) owns their use.
 | `RESOURCE_MAX_FILE_COUNT` | `1000000` | At least 1 | The most files one resource version may contain |
 
 A reduction is refused while a stored resource version exceeds it. Every node's database volume
-must also hold the two byte quotas: a node on a smaller volume refuses to start. Lower the quotas
-before a node joins on a smaller volume, and grow the volumes before raising the quotas above them,
-because a running node that cannot hold them refuses its next start.
+must also hold the two byte quotas: a node on a smaller volume refuses to start, and a raise above
+the database volume any admitted node's committed claim carries is refused, naming that node. Lower
+the quotas before a node joins on a smaller volume. To raise them above a volume, first grow it and
+restart its node, so that the node's claim carries the new size.
 
 ### Security And Licensing
 
@@ -381,8 +387,8 @@ and stops with status `1` when its database volume cannot hold `RESOURCE_MAX_ARC
 `ENTITY_GATE_DEADLINE`. Order a change that crosses the two classes accordingly. To raise
 `DOMAIN_DRAIN_TIMEOUT`, first roll every node to a drain budget that holds the new value, then
 commit it; to give a node a shorter drain budget, lower the parameter first. In the same way, lower
-the resource quotas before a node restarts on a smaller volume, and grow every volume before raising
-them.
+the resource quotas before a node restarts on a smaller volume, and grow every volume and restart
+its node before raising them.
 
 ## Reading DESCRIBE CLUSTER During A Roll
 
@@ -410,7 +416,7 @@ node=node-3 cluster parameters running=not installed
 | Line | What it tells you |
 | --- | --- |
 | `timing drift: node-3` | The nodes whose Raft heartbeat, gossip interval or clock-skew tolerance differs from the leader's; `none` when none does, or `unknown, no leader record is published` |
-| `capabilities: committed node-3#1763747012882043911 cpu-count=8 memory-bytes=8589934592` | The claim committed for the node's current run: its CPU count and memory, followed on the same line by its receive bounds, engine, connector host and runtime capabilities, its shutdown timeouts, listener bounds and operational capabilities. The lines after it give its interconnect, membership, DNS, database and consensus capacities |
+| `capabilities: committed node-3#1763747012882043911 cpu-count=8 memory-bytes=8589934592 database-volume-bytes=107374182400` | The claim committed for the node's current run: its CPU count, memory and database volume, followed on the same line by its receive bounds, engine, connector host and runtime capabilities, its shutdown timeouts, listener bounds and operational capabilities. The lines after it give its interconnect, membership, DNS, database and consensus capacities |
 | `capabilities: awaiting this incarnation; retained node-3#1763746870315562047` | The node has restarted and its new claim has not committed yet; the retained claim is its previous run's |
 | `capabilities: awaiting committed claim` | The node has no committed claim at all, as when it joins for the first time |
 | `raft-heartbeat-interval: 400ms, the leader's 250ms` | One prerequisite line per prerequisite, a timing that differs from the leader's marked with both values; `prerequisites: not published` when the node publishes none |
