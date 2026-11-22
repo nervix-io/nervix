@@ -96,7 +96,7 @@ The complete cluster-parameter record uses each declaration's validated inline s
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_` namespace and `ClusterState` encoding 49
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_` namespace and `ClusterState` encoding 50
 identify the current layout, which includes labels on domains, logical resources and users and
 the one label edit, setting and removing keys, that administrative label commands and transaction
 statements store, and each node's trace export capabilities in its committed capability claim.

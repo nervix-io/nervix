@@ -1508,11 +1508,12 @@ way `DURATION` was added; every step lands in the same change.
    expressions and relay bindings alike, with positive, negative and completion-context tests and
    a clean `just plexus-completion-walk`.
 3. **Stored shapes and the interconnect.** A new `ParseAsType` or `Literal` variant changes the
-   registry's Model archive header, the consensus keyspace namespace and the interconnect's
-   `WIRE_CONTRACT` fingerprint in the same change. Every other archived enum the type reaches
-   either changes its own marker, as backup state values change their record version, or appends
-   the new variant after every earlier one, as remote branch-key values and deduplicator key
-   snapshots do, so that no stored or peer archive of an earlier variant is read as the new one.
+   registry's Model archive header, the consensus keyspace namespace, the consensus `ClusterState`
+   metadata encoding and the interconnect's `WIRE_CONTRACT` fingerprint in the same change. Every
+   other archived enum the type reaches either changes its own marker, as backup state values
+   change their record version, or appends the new variant after every earlier one, as remote
+   branch-key values and deduplicator key snapshots do, so that no stored or peer archive of an
+   earlier variant is read as the new one.
 4. **The VM.** Add its register type and `TypedArray` variant through `with_typed_registers!`, its
    comparisons, its place in the ordered types if it orders, its set elements, list item
    selection and extremes, window ordering, and the conversions it performs or refuses. Decide

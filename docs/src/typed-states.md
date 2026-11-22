@@ -384,9 +384,9 @@ precision in eight bytes. Decoding validates the same declaration before publish
 value.
 
 Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_` keyspaces and `ClusterState`
-metadata encoding 49 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+metadata encoding 50 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
-inferencer working memory, each node's trace export capabilities, the database volume size each node record's capacity claim carries, and the partition
+inferencer working memory, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, the database volume size each node record's capacity claim carries, and the partition
 count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity

@@ -594,11 +594,12 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host, runtime, shutdown, operational (trace export included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 49. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 50. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions, each inferencer's working memory,
+the `DURATION` type with the duration literals its Models hold,
 typed ingestor and emitter instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
 coverage; domain records carry pace, and relocation statements retain exact partition or instance
