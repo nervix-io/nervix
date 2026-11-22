@@ -114,6 +114,7 @@ mod subscription_response;
 mod syslog_tests;
 mod transaction_cleanup;
 mod wasm_reset_publication;
+mod wasm_state_page_reply;
 
 pub(crate) use application_progress::ApplicationProgressQuery;
 pub use application_progress::ApplicationProgressQueryError;
@@ -151,6 +152,7 @@ use runtime_installation::RuntimeInstallationRefusals;
 use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
+pub use wasm_state_page_reply::WasmStatePageOverflow;
 
 /// A consensus storage failure a scenario armed for a node before that node started.
 ///
@@ -272,6 +274,9 @@ struct FaultInjectionState {
     /// scenario slowed, with the messages each has parked on `REQUIRED WAIT` since.
     delayed_materialized_dependency_reads:
         DashMap<DomainNodeRef, DelayedMaterializedReads, RandomState>,
+    /// WASM processors, keyed by processor, whose owner page replies a scenario made too large for
+    /// their request class, with which of their replies overflow.
+    wasm_state_page_overflows: DashMap<DomainNodeRef, WasmStatePageOverflow, RandomState>,
     /// Holds, keyed by node, of that node's next materialized snapshot fetch on its first received
     /// chunk until the node's restore checkpoint maintenance asks for bulk memory.
     materialized_snapshot_fetch_holds: DashMap<ClusterNodeName, Arc<TestPause>, RandomState>,
@@ -583,6 +588,7 @@ impl Default for FaultInjection {
                 delayed_ingestor_confirmations: DashMap::default(),
                 delayed_stopped_state_writes: DashMap::default(),
                 delayed_materialized_dependency_reads: DashMap::default(),
+                wasm_state_page_overflows: DashMap::default(),
                 materialized_snapshot_fetch_holds: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),

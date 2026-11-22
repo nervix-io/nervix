@@ -1,7 +1,8 @@
 //! Bounded operational capability values with every dependent setting resolved.
 //!
 //! Outside the layer order: test harness.
-//! - **Owns.** Complete current session, control-plane and client-link claim generation.
+//! - **Owns.** Complete current session, control-plane, client-link and trace export claim
+//!   generation.
 //! - **Depends on.** Vocabulary constructors and the deterministic entropy cursor.
 //! - **Must not know.** Transports, running queues or server composition.
 
@@ -47,6 +48,26 @@ impl Entropy<'_> {
             string_bytes: NonZeroU64::new(self.boundary_biased(1..=transfer)),
         })
         .assured("the generated bounds hold their relationships and fit native and browser targets")
+    }
+
+    /// A share of root traces on the closed unit interval, both ends included.
+    fn sample_ratio(&mut self) -> SampleRatio {
+        let thousandths = u32::try_from(self.boundary_biased(0..=1000))
+            .assured("the generated thousandths are at most 1000");
+        SampleRatio::new(f64::from(thousandths) / 1000.0)
+    }
+
+    pub fn trace_export_capabilities(&mut self) -> TraceExportCapabilities {
+        let queue = self.boundary_biased(1..=65_536);
+        let batch = self.boundary_biased(1..=queue);
+        TraceExportCapabilities::resolve(TraceExportCapabilityValues {
+            sample_ratio: Some(self.sample_ratio()),
+            export_timeout: Some(self.operational_duration()),
+            export_interval: Some(self.operational_duration()),
+            queue_capacity: NonZeroU64::new(queue),
+            export_batch_spans: NonZeroU64::new(batch),
+        })
+        .assured("the generated ratio, cadences and a batch within its queue are in each domain")
     }
 
     pub fn node_operational_capabilities(&mut self) -> NodeOperationalCapabilities {
@@ -102,6 +123,7 @@ impl Entropy<'_> {
                 consumer_writer_capacity: Some(self.operational_count()),
             })
             .assured("the generated link capacities and cadences are positive and bounded"),
+            traces: self.trace_export_capabilities(),
         }
     }
 }

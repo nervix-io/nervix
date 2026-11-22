@@ -392,6 +392,37 @@ stored projections. Their public u64 values, defaults and admitted ranges remain
 full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
 the owning definition before publishing the complete policy.
 
+### Trace Export
+
+A node exports its own traces to an OpenTelemetry collector over OTLP gRPC once it is provisioned
+with one. `--otel-otlp-endpoint` (`NERVIX_OTEL_OTLP_ENDPOINT`) names the collector, such as
+`http://collector:4317`, and `--otel-service-name` (`NERVIX_OTEL_SERVICE_NAME`, `nervix` by
+default) names the service its spans carry. Both are provisioning, like the node's addresses, not
+settings. A node without an endpoint exports no traces. An endpoint that is not a URI, the empty
+text included, refuses the node before it opens a store. The option outranks its environment twin.
+
+How the node exports is a group of node capabilities in its operational claim, beside the
+control-plane, session and client-link groups. `DESCRIBE CLUSTER` shows them on each node's
+capability line, and changing one requires restarting that node.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--otel-trace-sample-ratio` | 1 | share of root traces the node exports, from 0 through 1; a span follows its parent's sampling decision |
+| `--otel-trace-export-timeout` | 10s | limit on reaching the collector, the name lookup and TCP attempts together, and on each export request |
+| `--otel-trace-export-interval` | 5s | longest a span waits in the queue before its batch exports; a full batch exports at once |
+| `--otel-trace-queue-capacity` | 2048 spans | spans the node holds for export; a span that finds the queue full is dropped |
+| `--otel-trace-export-batch-spans` | 512 spans, at most the queue | most spans one export request carries |
+
+No `OTEL_*` environment variable applies to a node's trace export. The OpenTelemetry SDK reads
+some of them while it builds its own defaults, and the node replaces each of those defaults with a
+declared value. So no endpoint, header, compression, timeout, batch, sampler, span limit, resource
+attribute or service name variable changes where the node sends its traces, what it sends or
+whether it starts. The exporter sends no request metadata and compresses nothing. Spans keep the
+OpenTelemetry specification's default limits: 128 attributes, events and links per span, and 128
+attributes per event and per link. [Node Trace Export](name-resolution.md#node-trace-export)
+describes how the exporter reaches its collector, and
+[Metrics And Observability](metrics-and-observability.md#the-nodes-own-traces) what it exports.
+
 ## The Node Record
 
 The capacity claim is one of three parts of the record Raft commits for every node run:
@@ -669,7 +700,10 @@ A capability is a feature a license switches on. The typed `capabilities` sectio
 catalog capability with its `state`, `enabled` or `disabled`, and the text form prints one line
 per capability, such as `capability licensing.dummy: enabled`. The section's `permitted` state and
 its `permitted_until` deadline belong to a capability whose removal has a grace period; no current
-capability has one. The catalog's only capability, `licensing.dummy`, changes nothing in Nervix:
+capability has one. A capability the license's decision does not list is disabled, so a cluster
+keeps working with a licensing service that does not know the capability yet. A capability the
+cluster does not know is left out of the section and counts under `conditions not understood`. The
+catalog's only capability, `licensing.dummy`, changes nothing in Nervix:
 the free policy disables it, and a license whose plan enables it shows that a verified decision
 reached the cluster. A follower marks the leader's
 incarnation- and tenure-bound connectivity observation as reported. Connectivity distinguishes
@@ -1132,8 +1166,9 @@ on defaults too. Typed reports retain the definition owner's cause without flatt
 
 `nervix-server` reads its command line as one options group per area, each in its own file at the
 server's command-line edge and printed under its own heading by `--help`. One group holds the
-node's identity, its tags, listen and advertised addresses, TLS files, name resolution files and
-storage paths. Those are what a node is provisioned with, not settings. Every other group is the
+node's identity, its tags, listen and advertised addresses, TLS files, name resolution files,
+storage paths and the collector it exports its own traces to. Those are what a node is provisioned
+with, not settings. Every other group is the
 command-line form of one owner's class-typed group: each option is named by its definition's
 `NAME`, has the environment variable `NERVIX_` followed by that name with underscores, and shows
 the default its definition returns. Cluster-parameter help identifies it as a bootstrap default. Durations and byte quantities print in the edge's forms, such as `250ms`,
@@ -1174,7 +1209,7 @@ describes, defaults included.
 | `--memory-high-watermark`, `--memory-low-watermark`, `--memory-pressure-check-interval`, `--memory-pressure-resume-jitter` | node capability | memory pressure |
 | `--drain-timeout`, `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
-| `--otel-trace-sample-ratio` | node capability | trace export |
+| `--otel-trace-sample-ratio`, `--otel-trace-export-timeout`, `--otel-trace-export-interval`, `--otel-trace-queue-capacity`, `--otel-trace-export-batch-spans` | node capability | trace export |
 | `--cpu-count`, `--memory-limit`, `--node-detection-timeout` | node capability | capacity |
 | `--execution-*`, `--runtime-worker-threads`, `--runtime-max-blocking-threads`, `--runtime-thread-stack-size` | node capability | execution |
 | `--client-producer-node-bytes`, `--client-consumer-node-bytes` | node capability | client admission |
@@ -1249,7 +1284,9 @@ store, binds a listener or starts a task:
   teardown after the drain.
 - The memory watermarks are set together or not at all, the low one below the high one, and with
   them the check interval is above zero.
-- The trace sample ratio lies between 0 and 1.
+- The trace sample ratio lies between 0 and 1, and a trace export batch holds no more spans than
+  the trace queue.
+- A trace collector endpoint, when one is given, is a URI; the empty text is not.
 
 A value its option cannot read, such as malformed duration text or a sample ratio outside its
 range, ends the process with status `2` as the command line reports it. A relationship that does

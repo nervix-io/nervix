@@ -15,10 +15,7 @@ mod inspection;
 #[cfg(test)]
 mod tests;
 
-use std::{
-    borrow::Borrow,
-    collections::{BTreeMap, BTreeSet},
-};
+use std::{borrow::Borrow, collections::BTreeMap};
 
 use error_stack::Report;
 pub use inspection::*;
@@ -149,14 +146,12 @@ impl EntityLabels {
 
     /// Apply syntax-validated operands. The candidate owner validates the complete atomic run.
     pub fn apply(&mut self, mutation: &EntityLabelMutation) {
-        match mutation {
-            EntityLabelMutation::Set(labels) => {
-                for (key, value) in &labels.0 {
+        for (key, change) in &mutation.0 {
+            match change {
+                LabelChange::Set(value) => {
                     self.0.insert(key.clone(), value.clone());
                 }
-            }
-            EntityLabelMutation::Drop(keys) => {
-                for key in &keys.0 {
+                LabelChange::Drop => {
                     self.0.remove(key);
                 }
             }
@@ -186,44 +181,73 @@ impl TryFrom<Vec<LabelAssignment>> for EntityLabels {
     }
 }
 
-/// An authored set of distinct keys to remove.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
-#[serde(transparent)]
-pub struct EntityLabelKeys(BTreeSet<LabelKey>);
-
-impl EntityLabelKeys {
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = &LabelKey> {
-        self.0.iter()
-    }
-}
-
-impl TryFrom<Vec<LabelKey>> for EntityLabelKeys {
-    type Error = Report<EntityLabelError>;
-    fn try_from(keys: Vec<LabelKey>) -> Result<Self, Self::Error> {
-        let mut unique = BTreeSet::new();
-        for key in keys {
-            if !unique.insert(key.clone()) {
-                return Err(Report::new(EntityLabelError::DuplicateKey { key: key.0 }));
-            }
-        }
-        Ok(Self(unique))
-    }
-}
-
+/// What one authored entry does to its key.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub enum EntityLabelMutation {
-    Set(EntityLabels),
-    Drop(EntityLabelKeys),
+#[serde(rename_all = "snake_case")]
+pub enum LabelChange {
+    /// Sets the key to this exact value, adding the key when it is absent.
+    Set(String),
+    /// Removes the key. A key that is absent is already removed.
+    Drop,
 }
 
+/// One authored entry of an edit, before duplicate detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelEdit {
+    pub key: LabelKey,
+    pub change: LabelChange,
+}
+
+/// One edit of an existing label set: each named key is set or removed, each key at most once,
+/// and the whole edit applies as one change. Its iterator and encodings use lexicographic key
+/// order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Archive, RkyvSerialize)]
+#[serde(transparent)]
+pub struct EntityLabelMutation(BTreeMap<LabelKey, LabelChange>);
+
 impl EntityLabelMutation {
-    pub fn statement_keyword(&self) -> &'static str {
-        match self {
-            Self::Set(_) => "SET LABELS",
-            Self::Drop(_) => "DROP LABELS",
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn get(&self, key: &str) -> Option<&LabelChange> {
+        self.0.get(key)
+    }
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (&LabelKey, &LabelChange)> {
+        self.0.iter()
+    }
+
+    fn insert_unique(
+        &mut self,
+        key: LabelKey,
+        change: LabelChange,
+    ) -> Result<(), Report<EntityLabelError>> {
+        match self.0.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(change);
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                Err(Report::new(EntityLabelError::DuplicateKey {
+                    key: entry.key().as_str().to_owned(),
+                }))
+            }
         }
+    }
+}
+
+impl TryFrom<Vec<LabelEdit>> for EntityLabelMutation {
+    type Error = Report<EntityLabelError>;
+    fn try_from(entries: Vec<LabelEdit>) -> Result<Self, Self::Error> {
+        let mut mutation = Self::default();
+        for entry in entries {
+            mutation.insert_unique(entry.key, entry.change)?;
+        }
+        Ok(mutation)
     }
 }
 

@@ -1,7 +1,8 @@
 //! Class-typed operational capacity of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Immutable control-plane, session and client-link capability declarations and claims.
+//! - **Owns.** Immutable control-plane, session, client-link and trace export capability
+//!   declarations and claims.
 //! - **Depends on.** Setting classes, scalar values and validated serialization.
 //! - **Must not know.** Machines, command lines, consensus, transports or graph execution.
 
@@ -46,6 +47,18 @@ pub enum NodeOperationalError {
     QueueCapacity,
     #[error("session-subscription-rows-per-frame must not exceed session-collection-entries")]
     SubscriptionRows,
+    #[error("{setting} must be between 0 and 1, found {ratio}")]
+    SampleRatio {
+        setting: &'static str,
+        ratio: SampleRatio,
+    },
+    #[error("{batch_setting} ({batch}) must not exceed {queue_setting} ({queue})")]
+    TraceExportBatch {
+        batch_setting: &'static str,
+        batch: u64,
+        queue_setting: &'static str,
+        queue: u64,
+    },
 }
 
 fn validate_duration(
@@ -275,6 +288,8 @@ impl ClientLinkCapabilities {
 
 mod session;
 pub use session::*;
+mod traces;
+pub use traces::*;
 
 /// Required operational values of one incarnation; no stored field has a default.
 #[derive(
@@ -295,6 +310,7 @@ pub struct NodeOperationalCapabilities {
     pub control_plane: ControlPlaneCapabilities,
     pub session: SessionCapabilities,
     pub links: ClientLinkCapabilities,
+    pub traces: TraceExportCapabilities,
 }
 
 impl NodeOperationalCapabilities {
@@ -302,6 +318,7 @@ impl NodeOperationalCapabilities {
         let mut values = self.control_plane.described();
         values.extend(self.session.described());
         values.extend(self.links.described());
+        values.extend(self.traces.described());
         values
     }
 }
