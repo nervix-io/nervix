@@ -2731,7 +2731,7 @@ fn every_record_variant_is_generated_across_seeds() {
 }
 
 fn administrative_label_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect {
-    use nervix_models::{AdministrativeLabelTarget, EntityLabelMutation};
+    use nervix_models::AdministrativeLabelTarget;
 
     let target = if arbitrary.entropy().flag() {
         AdministrativeLabelTarget::Domain(arbitrary.rule_name())
@@ -2747,7 +2747,7 @@ fn administrative_label_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutio
     };
     CommandExecutionEffect::EditAdministrativeLabels {
         target,
-        mutation: EntityLabelMutation::Set(arbitrary.entity_labels()),
+        mutation: arbitrary.entity_label_mutation(),
         outcome,
     }
 }

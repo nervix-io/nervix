@@ -184,15 +184,10 @@ impl LicensingPolicy {
     }
 
     pub fn capability(&self, name: CapabilityName) -> CapabilityVerdict {
-        let state = self
-            .conditions
-            .capabilities
-            .get(name.as_str())
-            .and_then(|value| value.known())
-            .verified(
-                "the embedded free policy and every decision verified as complete list each \
-                 catalog capability",
-            );
+        let state = self.conditions.capability(name.as_str()).verified(
+            "the embedded free policy holds known values, and verification refuses an extension \
+             value for a catalog name",
+        );
         match state {
             Capability::Enabled => CapabilityVerdict::Enabled,
             Capability::Disabled => CapabilityVerdict::Disabled,
@@ -500,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn the_free_policy_disables_every_capability_and_applied_conditions_enable_one() {
+    fn the_free_policy_disables_every_capability_and_applied_conditions_enable_or_leave_one_out() {
         let mut policy = evaluate_policy(LicensingSnapshot {
             initialized: None,
             revision: None,
@@ -519,6 +514,12 @@ mod tests {
                 nervix_licensing_protocol::conditions::ConditionValue::Known(Capability::Enabled),
             );
             assert_eq!(policy.capability(name), CapabilityVerdict::Enabled);
+            policy.conditions.capabilities.remove(name.as_str());
+            assert_eq!(
+                policy.capability(name),
+                CapabilityVerdict::Disabled,
+                "a capability the applied conditions leave out is disabled"
+            );
         }
         let deadline = Timestamp::from_unix_nanos(1_700_000_000_000_000_000);
         let permitted = CapabilityVerdict::PermittedUntil { deadline };

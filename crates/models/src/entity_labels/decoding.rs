@@ -1,7 +1,8 @@
 //! Validated current metadata decoders.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Key and uniqueness validation at serde and archive boundaries.
+//! - **Owns.** Key and uniqueness validation of label sets and label edits at serde and archive
+//!   boundaries.
 //! - **Depends on.** The metadata value constructors and serialization traits.
 //! - **Must not know.** Committed policy, registry state or runtime execution.
 
@@ -22,8 +23,8 @@ use serde::{
 };
 
 use super::{
-    ArchivedEntityLabelKeys, ArchivedEntityLabels, ArchivedLabelKey, EntityLabelError,
-    EntityLabelKeys, EntityLabels, LabelKey,
+    ArchivedEntityLabelMutation, ArchivedEntityLabels, ArchivedLabelKey, EntityLabelError,
+    EntityLabelMutation, EntityLabels, LabelChange, LabelKey,
 };
 
 impl<'de> Deserialize<'de> for LabelKey {
@@ -86,26 +87,45 @@ where
     }
 }
 
-impl<'de> Deserialize<'de> for EntityLabelKeys {
+impl<'de> Deserialize<'de> for EntityLabelMutation {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Self::try_from(Vec::<LabelKey>::deserialize(deserializer)?)
-            .map_err(|error| D::Error::custom(format_args!("{error:#}")))
+        struct EditVisitor;
+        impl<'de> Visitor<'de> for EditVisitor {
+            type Value = EntityLabelMutation;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a map of distinct label keys to the change of each")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut mutation = EntityLabelMutation::default();
+                while let Some((key, change)) = access.next_entry::<LabelKey, LabelChange>()? {
+                    mutation
+                        .insert_unique(key, change)
+                        .map_err(|error| A::Error::custom(format_args!("{error:#}")))?;
+                }
+                Ok(mutation)
+            }
+        }
+        deserializer.deserialize_map(EditVisitor)
     }
 }
 
-impl<D: Fallible + ?Sized> RkyvDeserialize<EntityLabelKeys, D> for ArchivedEntityLabelKeys
+impl<D: Fallible + ?Sized> RkyvDeserialize<EntityLabelMutation, D> for ArchivedEntityLabelMutation
 where
     D::Error: Source,
 {
-    fn deserialize(&self, deserializer: &mut D) -> Result<EntityLabelKeys, D::Error> {
-        let mut keys = Vec::with_capacity(self.0.len());
-        for key in self.0.iter() {
+    fn deserialize(&self, deserializer: &mut D) -> Result<EntityLabelMutation, D::Error> {
+        let mut mutation = EntityLabelMutation::default();
+        let mut previous: Option<LabelKey> = None;
+        for (key, change) in self.0.iter() {
             let key: LabelKey = key.deserialize(deserializer)?;
-            if keys.last().is_some_and(|previous| previous >= &key) {
+            if previous.as_ref().is_some_and(|previous| previous >= &key) {
                 return Err(D::Error::new(EntityLabelError::NonCanonicalKeys));
             }
-            keys.push(key);
+            previous = Some(key.clone());
+            mutation
+                .insert_unique(key, change.deserialize(deserializer)?)
+                .map_err(|error| D::Error::new(error.into_error()))?;
         }
-        EntityLabelKeys::try_from(keys).map_err(|error| D::Error::new(error.into_error()))
+        Ok(mutation)
     }
 }
