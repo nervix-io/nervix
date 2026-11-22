@@ -29,10 +29,11 @@ use nervix_models::{
 };
 
 use crate::{
+    duration_literal::duration_value_literal,
     lexer::{Identifier, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, duration_value_literal, into_parse_error, kw,
-        kw_phrase, lex_input, tok,
+        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, kw_phrase, lex_input,
+        tok,
     },
 };
 

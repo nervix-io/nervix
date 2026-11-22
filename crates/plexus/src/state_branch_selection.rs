@@ -16,10 +16,9 @@ use chumsky::prelude::*;
 use nervix_models::{Float64Literal, Literal, StateBranchField, StateBranchSelection};
 
 use crate::{
+    duration_literal::duration_value_literal,
     lexer::{Identifier, Token},
-    parser_support::{
-        ParseError, duration_value_literal, field_ref, kw, kw_phrase2, string_lit, tok,
-    },
+    parser_support::{ParseError, field_ref, kw, kw_phrase2, string_lit, tok},
 };
 
 pub(crate) fn branch_selection<'src>()
