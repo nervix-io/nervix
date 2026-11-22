@@ -1247,7 +1247,7 @@ keep their own inputs and evidence; they may invoke the Rust owner as a process 
 its compiler evidence.
 
 The synchronization driver, its isolated artifacts and Bolero's sanitizer campaigns use
-`nightly-2026-09-17`; product builds stay stable. An upgrade moves every declaration of that nightly
+`nightly-2026-11-21`; product builds stay stable. An upgrade moves every declaration of that nightly
 in one change that keeps every compiler fixture's result. The driver's workspace wrapper composes
 beneath the configured kache. Analysis requires current source, annotations, rule, dependency and
 configuration inputs and complete declared target evidence, zero findings included, and missing

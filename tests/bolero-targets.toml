@@ -2,7 +2,7 @@
 # source-adjacent work directories, so ordinary cargo test replays corpus files.
 [tool]
 cargo_bolero = "0.13.4"
-nightly = "nightly-2026-09-17"
+nightly = "nightly-2026-11-21"
 pr_fuzz_seconds = 30
 # One target of each harness whose sanitizer build CI prepares first, with one Cargo build job and
 # the preparation deadline: the server library is too large for a campaign's build deadline.

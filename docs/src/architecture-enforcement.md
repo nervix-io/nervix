@@ -181,7 +181,7 @@ throughout, and missing analysis never reads as zero findings.
 
 Product code and the `nervix-ratchet` orchestration binary build with the stable toolchain
 `rust-toolchain.toml` declares. The analysis driver links rustc's internal crates and builds on one
-pinned nightly, `nightly-2026-09-17`, which the isolated tooling workspace declares with `rustc-dev`,
+pinned nightly, `nightly-2026-11-21`, which the isolated tooling workspace declares with `rustc-dev`,
 `rust-src`, `rustfmt` and `llvm-tools`. `just toolchains-install` installs both toolchains. The
 driver refuses any other analysis compiler: it locates the pinned compiler through rustup and checks
 the commit that `rustc -vV` reports. Bolero's sanitizer campaigns use the same nightly, which the
@@ -264,8 +264,8 @@ representations and every generated location in ordinary and sanitizer execution
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. Its diagnostic analysis has peaked just over 26 GiB, while other
-crates stay below the 4 GiB threshold. Its 27 GiB reservation accounts for that peak when the host
+library's dwarfs every other. Its diagnostic analysis has peaked just over 25 GiB in CI, while other
+crates stay below the 4 GiB threshold. Its 26 GiB reservation accounts for that peak when the host
 admits compilations. Every configuration builds in a directory of its own, and up to four
 configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
