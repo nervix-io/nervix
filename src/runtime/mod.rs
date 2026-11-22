@@ -32,10 +32,10 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
     UInt64Array,
     builder::{
-        ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
-        Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
-        TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
-        make_builder,
+        ArrayBuilder, BooleanBuilder, DurationNanosecondBuilder, FixedSizeListBuilder,
+        Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder,
+        ListBuilder, StringBuilder, TimestampNanosecondBuilder, UInt8Builder, UInt16Builder,
+        UInt32Builder, UInt64Builder, make_builder,
     },
     new_empty_array, new_null_array,
 };
@@ -1047,7 +1047,7 @@ pub(crate) use entity_gate::{
 pub(crate) use error::{ApplicationWait, RuntimeError};
 pub(crate) use events::RuntimeEvent;
 use execution_build_error::{ExecutionBuildError, ExecutionStep};
-pub(crate) use inferencer::onnx_environment;
+pub(crate) use inferencer::{OnnxSessionOptions, onnx_environment};
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;

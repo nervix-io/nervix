@@ -2631,6 +2631,7 @@ mod tests {
             T::String,
             T::Datetime,
             T::Bytes,
+            T::Duration,
         ];
         let choice = usize::from(arbitrary.entropy().byte())
             % if depth == 0 {
@@ -2639,10 +2640,10 @@ mod tests {
                 scalar_types.len() + 2
             };
         match choice {
-            14 => T::Vec {
+            15 => T::Vec {
                 element: Box::new(generated_schema_type(arbitrary, depth - 1)),
             },
-            15 => T::Array {
+            16 => T::Array {
                 element: Box::new(generated_schema_type(arbitrary, depth - 1)),
                 len: NonZeroU32::new(u32::from(arbitrary.entropy().byte() % 4) + 1)
                     .assured("generated fixed-size lists contain one to four elements"),
@@ -2709,6 +2710,7 @@ mod tests {
                     .byte())))
             ),
             T::F64 => primitive!(Float64Array, f64::from_bits(arbitrary.entropy().any_u64())),
+            T::Duration => primitive!(DurationNanosecondArray, arbitrary.entropy().any_i64()),
             T::Bytes => {
                 StdArc::new(BinaryArray::from_iter(valid.iter().map(|valid| {
                     valid.then(|| arbitrary.entropy().any_u64().to_le_bytes())

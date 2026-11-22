@@ -102,6 +102,7 @@ module RubySuite
           NX::FieldType::DATETIME => 14,
           NX::FieldType::FIXED_LIST => 15,
           NX::FieldType::LIST => 16,
+          NX::FieldType::DURATION => 17,
         },
         NX::Part => {
           NX::Part::ROWS => 1,

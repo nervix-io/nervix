@@ -19,7 +19,7 @@ Feature: Inferencer resources
       """
       CREATE INFERENCER score_model FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <input_tensor_type> = input.vector }
         OUTPUT SCHEMA { "score" <output_tensor_type> }
         UNBRANCHED
@@ -91,7 +91,7 @@ Feature: Inferencer resources
         ON GENERAL ERROR LOG;
       CREATE INFERENCER score_model FROM features
         USING RESOURCE fraud_model VERSION 1
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         BRANCHED BY by_feature_source
@@ -132,7 +132,7 @@ Feature: Inferencer resources
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER score_model FROM features
         USING RESOURCE fraud_model VERSION 1
-        FILE 'models/not_a_model.onnx'
+        FILE 'models/not_a_model.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         UNBRANCHED
@@ -194,7 +194,7 @@ Feature: Inferencer resources
         ON GENERAL ERROR LOG;
       CREATE INFERENCER score_model FROM features
         USING RESOURCE fraud_model VERSION 1
-        FILE 'models/<model_file>'
+        FILE 'models/<model_file>' WORKING MEMORY RELEASED
         INPUTS { "<input_tensor>" <tensor_type>[<input_dimensions>] = input.vector }
         OUTPUT SCHEMA { "<output_tensor>" <tensor_type>[<output_dimensions>] }
         BRANCHED BY by_feature_source
@@ -233,7 +233,7 @@ Feature: Inferencer resources
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER invalid_batch_schema FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[<features_dimensions>] = input.features, "mask" <tensor_type>[<mask_dimensions>] = input.mask }
         OUTPUT SCHEMA { "scores" <tensor_type>[<output_dimensions>] }
         UNBRANCHED
@@ -259,7 +259,7 @@ Feature: Inferencer resources
       """
       CREATE INFERENCER unsupported_schema FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'model.onnx'
+        FILE 'model.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <unsupported_tensor_type>[2] = input.features }
         OUTPUT SCHEMA { "scores" <supported_tensor_type>[2] }
         UNBRANCHED
@@ -292,7 +292,7 @@ Feature: Inferencer resources
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER incomplete_bindings FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[BATCH, 2] = input.features }
         OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         UNBRANCHED
@@ -331,7 +331,7 @@ Feature: Inferencer resources
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER fixed_dynamic_axis FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[3, 2] = input.features, "mask" <tensor_type>[3, 2] = input.mask }
         OUTPUT SCHEMA { "scores" <tensor_type>[3, 2] }
         UNBRANCHED
@@ -395,7 +395,7 @@ Feature: Inferencer resources
         ON GENERAL ERROR LOG;
       CREATE INFERENCER observe_execution_time FROM inference_values
         USING RESOURCE inference VERSION 1
-        FILE 'models/scalar_identity.onnx'
+        FILE 'models/scalar_identity.onnx' WORKING MEMORY RELEASED
         INPUTS {
           "value" <tensor_type>[] = CASE
             WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.value
@@ -456,7 +456,7 @@ Feature: Inferencer resources
         ON GENERAL ERROR LOG;
       CREATE INFERENCER transform_matrix FROM matrices
         USING RESOURCE inference VERSION 1
-        FILE 'models/matrix_identity.onnx'
+        FILE 'models/matrix_identity.onnx' WORKING MEMORY RELEASED
         INPUTS { "matrix" <tensor_type>[2, 3] = input.matrix }
         OUTPUT SCHEMA { "transformed" <tensor_type>[2, 3] }
         UNBRANCHED
@@ -515,7 +515,7 @@ Feature: Inferencer resources
         ON GENERAL ERROR LOG;
       CREATE INFERENCER score_sequence FROM sequences
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[DYNAMIC, 2] = input.features, "mask" <tensor_type>[DYNAMIC, 2] = input.mask }
         OUTPUT SCHEMA { "scores" <tensor_type>[DYNAMIC, 2] }
         UNBRANCHED
@@ -578,7 +578,7 @@ Feature: Inferencer resources
       CREATE INFERENCER score_sequence_batch FROM sequences
         COLLECT FOR 1h MAX BATCH SIZE 88B
         USING RESOURCE inference VERSION 1
-        FILE 'models/dynamic_batch_score.onnx'
+        FILE 'models/dynamic_batch_score.onnx' WORKING MEMORY RETAINED
         INPUTS { "features" <tensor_type>[BATCH, DYNAMIC, 2] = input.features, "mask" <tensor_type>[BATCH, DYNAMIC, 2] = input.mask }
         OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, DYNAMIC, 2] }
         UNBRANCHED
@@ -665,7 +665,7 @@ Feature: Inferencer resources
         ON GENERAL ERROR LOG;
       CREATE INFERENCER score_messages FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         UNBRANCHED
@@ -751,7 +751,7 @@ Feature: Inferencer resources
       CREATE INFERENCER batch_score_messages FROM features
         COLLECT FOR 1h MAX BATCH SIZE 48B
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[BATCH, 2] = input.features, "mask" <tensor_type>[BATCH, 2] = input.mask }
         OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         UNBRANCHED
@@ -854,7 +854,7 @@ Feature: Inferencer resources
       CREATE INFERENCER branch_batch_score FROM features
         COLLECT FOR 1h MAX BATCH SIZE 512B
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RETAINED
         INPUTS { "features" <tensor_type>[BATCH, 2] = input.features, "mask" <tensor_type>[BATCH, 2] = input.mask }
         OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         BRANCHED BY by_tenant
@@ -939,7 +939,7 @@ Feature: Inferencer resources
         ON GENERAL ERROR LOG;
       CREATE INFERENCER score_defaults FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         UNBRANCHED

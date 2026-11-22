@@ -24,7 +24,7 @@ Feature: Cluster benchmark for one model with and without carried inference stat
     When these Plexus commands are executed on the leader node
       """
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector <state_input> }
         <state_clause>
         OUTPUT SCHEMA { 'score' <tensor_type>[1] <state_output> }

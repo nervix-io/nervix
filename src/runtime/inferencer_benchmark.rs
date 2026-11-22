@@ -28,9 +28,10 @@ use nervix_models::{
     DomainState, DomainStatus, FieldName, FlushPolicy, InferencerModelFingerprint,
     InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
     InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, MessageErrorPolicy, Model, ModelKind,
-    ModelName, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName,
-    ResourceId, ResourceName, RouteConstruction, SchemaField, SchemaFingerprint, Timestamp, Unit,
+    InferencerTensorRepresentation, InferencerTensorSchema, InferencerWorkingMemory,
+    MessageErrorPolicy, Model, ModelKind, ModelName, ParseAsType, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayName, ResourceId, ResourceName, RouteConstruction, SchemaField,
+    SchemaFingerprint, Timestamp, Unit,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use tempfile::TempDir;
@@ -280,6 +281,7 @@ impl InferencerBranchFixture {
             resource,
             resource_version: 1,
             file: format!("models/{}", model.file),
+            working_memory: InferencerWorkingMemory::Released,
             inputs: model
                 .inputs
                 .iter()

@@ -790,6 +790,79 @@ mod tests {
         assert_eq!(expected, &ParseAsType::Datetime);
     }
 
+    /// Materialized state, branch keys and lookups reach a program through runtime values, so a
+    /// DURATION among them projects into the nanosecond column its field declares, alone or as
+    /// the elements of a VEC.
+    #[test]
+    fn duration_values_project_into_their_declared_columns_and_refuse_another_kind() {
+        let field =
+            arrow_schema::Field::new("timeout", ParseAsType::Duration.arrow_data_type(), true);
+        let longest =
+            RuntimeValue::Duration(nervix_models::DurationValue::from_nanoseconds(i64::MAX));
+        let negative = RuntimeValue::Duration(nervix_models::DurationValue::from_nanoseconds(-1));
+        let column = runtime_values_input_column(
+            [Some(&longest), None, Some(&negative)].into_iter(),
+            3,
+            &field,
+        )
+        .verified("every projected value is a DURATION or absent");
+        let column = column.to_array_ref();
+        let durations = column
+            .as_any()
+            .downcast_ref::<arrow_array::DurationNanosecondArray>()
+            .verified("a DURATION field projects a nanosecond duration column");
+        assert_eq!(
+            durations.iter().collect::<Vec<_>>(),
+            [Some(i64::MAX), None, Some(-1)]
+        );
+
+        let list_type = ParseAsType::Vec {
+            element: Box::new(ParseAsType::Duration),
+        }
+        .arrow_data_type();
+        let list_field = arrow_schema::Field::new("retries", list_type.clone(), false);
+        let retries = RuntimeValue::Vec(vec![
+            RuntimeValue::Duration(nervix_models::DurationValue::from_nanoseconds(100_000_000)),
+            RuntimeValue::Duration(nervix_models::DurationValue::from_nanoseconds(0)),
+        ]);
+        let column = runtime_values_input_column(std::iter::once(Some(&retries)), 1, &list_field)
+            .verified("a VEC of DURATION projects element by element");
+        let column = column.to_array_ref();
+        assert_eq!(column.data_type(), &list_type);
+        let lists = column
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .verified("a VEC field projects a list column");
+        let elements = lists.value(0);
+        let elements = elements
+            .as_any()
+            .downcast_ref::<arrow_array::DurationNanosecondArray>()
+            .verified("the VEC's elements are nanosecond durations");
+        assert_eq!(elements.values().as_ref(), &[100_000_000, 0]);
+
+        let wrong_kind = RuntimeValue::I64(30);
+        let error = runtime_values_input_column(std::iter::once(Some(&wrong_kind)), 1, &field)
+            .err()
+            .verified("a number is not a DURATION");
+        let RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location,
+            expected,
+            found,
+        } = error.current_context()
+        else {
+            panic!("unexpected scalar projection error: {error:#}");
+        };
+        assert_eq!(
+            location,
+            &RuntimeValueLocation::VmInputField {
+                field: "timeout".to_string(),
+                elements: Vec::new(),
+            }
+        );
+        assert_eq!(expected, &ParseAsType::Duration);
+        assert_eq!(found, &crate::runtime_schema::RuntimeValueKind::I64);
+    }
+
     #[test]
     fn selected_rows_export_in_batch_order_and_report_a_row_outside_the_batch() {
         let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(

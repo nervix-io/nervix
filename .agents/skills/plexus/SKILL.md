@@ -242,6 +242,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   shapes or routes: the model runs once per admitted batch before any route, a `BATCH` model's batch
   is the input batch, so size it with `COLLECT FOR ... MAX BATCH SIZE` rather than a route's
   `FLUSH`, and one message at a time a refused row fails alone through `ON MESSAGE ERROR`.
+- Every `CREATE INFERENCER` needs `WORKING MEMORY RELEASED` or `WORKING MEMORY RETAINED` right after
+  `FILE`; there is no default. Read `Runtime Nodes` → `Inferencer` → `Working memory` before
+  choosing: prefer `RELEASED`, and choose `RETAINED` only for a measured model of many small
+  operations, since it keeps working memory per concrete branch that no budget counts.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
   and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
   branch isolation or recovery guarantees, and `Inferencer State And Recovery` → `Guarantees And
@@ -591,6 +595,9 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   - literals are `I64` and `F64`, so a narrower operand's literal is cast (`input.count > 5 AS U32`),
     a float is one word (`2.5`, never `2 .5`), and there is no exponent, `DATETIME`, or `BYTES`
     literal;
+  - a `DURATION` literal is one or more parts, each a number with its unit `ns`, `us`, `ms`, `s`,
+    `m`, `h` or `d` written right after it (`30s`, `1h 30m`); months, years, weeks and spellings
+    such as `min` are refused, and a duration converts to and from no other type;
   - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
     `(-128) AS I8`;
   - a field, call, or `SET`/`INHERIT` target named like a reserved word (`end`, `from`, `in`, `all`,

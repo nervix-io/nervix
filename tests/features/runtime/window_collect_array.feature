@@ -270,7 +270,7 @@ Feature: Fixed arrays of retained window values
         TO histories SET series = COLLECT_ARRAY(input.value),
           sampled_at = COLLECT_ARRAY(input.sampled_at) ON MESSAGE ERROR LOG;
       CREATE INFERENCER score_model FROM histories
-        USING RESOURCE inference VERSION 1 FILE 'models/simple_score.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.series }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
         BRANCHED BY by_tenant TO scores SET score = score

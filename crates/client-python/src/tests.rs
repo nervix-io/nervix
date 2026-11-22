@@ -538,6 +538,7 @@ fn a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds() {
         field("tags", list(ParseAsType::String)),
         field("pair", pair),
         field("nested", list(list(ParseAsType::U8))),
+        field("wait", ParseAsType::Duration),
     ];
     let mut retyped = fields.clone();
     retyped[0].ty = ParseAsType::U16;
@@ -574,6 +575,7 @@ builder.fixed(15, 1, struct.pack('=4q', -2**63, 2**63 - 1, 0, -1))
 builder.offsets(16, 0, [0, 2, 3])
 builder.offsets(16, 1, [0, 1, 1, 3])
 builder.fixed(16, 2, bytes([255, 0, 7]))
+builder.fixed(17, 0, struct.pack('=2q', -2**63, 2**63 - 1))
 batch = builder.finish()
 columns = len(schema.fields)
 expected = [batch.column(index) for index in range(columns)]
@@ -581,6 +583,7 @@ assert expected[12] == ['h\\u00e9\\u0000', None], expected[12]
 assert expected[14] == [['a', 'bc'], []], expected[14]
 assert expected[15] == [[-2**63, 2**63 - 1], [0, -1]], expected[15]
 assert expected[16] == [[[255], []], [[0, 7]]], expected[16]
+assert expected[17] == [-2**63, 2**63 - 1], expected[17]
 
 # Every capsule carries the name the interface gives what it holds.
 is_valid = ctypes.pythonapi.PyCapsule_IsValid

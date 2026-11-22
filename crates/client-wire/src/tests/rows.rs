@@ -7,7 +7,7 @@ use bytes::Bytes;
 use error_stack::Report;
 use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, Vector, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{FieldName, ParseAsType, SchemaField, Timestamp};
+use nervix_models::{DurationValue, FieldName, ParseAsType, SchemaField, Timestamp};
 
 use super::{
     fixtures::{
@@ -563,7 +563,7 @@ fn malformed_cells_are_refused() {
         let inner = wire::Cell::create(
             builder,
             &wire::CellArgs {
-                value_type: wire::CellValue(18),
+                value_type: wire::CellValue(19),
                 value: Some(inner.as_union_value()),
             },
         );
@@ -586,7 +586,7 @@ fn malformed_cells_are_refused() {
         decode_error(ServerMessage::decode(&raw_server(bytes))),
         WireDecodeError::UnknownUnionVariant {
             field: "Cell.value",
-            discriminant: 18,
+            discriminant: 19,
         }
     );
 }
@@ -755,7 +755,7 @@ fn every_cell_kind_stays_within_its_table_bound() {
     let limits = limits();
     let mut batch = SubscriptionRowsEncoder::unbranched(subscription(), &limits)
         .assured("a subscription handle fits the limits");
-    let cells: [WriteCells; 16] = [
+    let cells: [WriteCells; 17] = [
         |cells| cells.push_null(),
         |cells| cells.push_redacted(),
         |cells| cells.push_u8(u8::MAX),
@@ -771,6 +771,7 @@ fn every_cell_kind_stays_within_its_table_bound() {
         |cells| cells.push_bool(true),
         |cells| cells.push_string(""),
         |cells| cells.push_datetime(Timestamp::from_unix_nanos(i64::MIN)),
+        |cells| cells.push_duration(DurationValue::MIN),
         |cells| cells.push_list(|_| Ok(())),
     ];
     for write in cells {
@@ -927,14 +928,14 @@ fn malformed_schemas_are_refused() {
     );
 
     let bytes = schema_reply(
-        |builder| scalar_type(builder, Some(wire::ScalarType(14))),
+        |builder| scalar_type(builder, Some(wire::ScalarType(15))),
         None,
     );
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
         WireDecodeError::UnknownEnumValue {
             field: "ScalarFieldType.scalar",
-            value: 14,
+            value: 15,
         }
     );
 

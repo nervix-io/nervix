@@ -1254,6 +1254,7 @@ fn typed_emitter_headers(
             }
             VmTypedArray::Float32(_)
             | VmTypedArray::Float64(_)
+            | VmTypedArray::Duration(_)
             | VmTypedArray::Generic(_)
             | VmTypedArray::Uninitialized { .. } => {
                 return Err(Report::new(EmitterHeaderError::ArgumentTypes));
@@ -1432,6 +1433,27 @@ pub(super) fn append_filter_map_datetime(
     }
 }
 
+pub(super) fn append_filter_map_duration(
+    builder: &mut DurationNanosecondBuilder,
+    value: &RuntimeValue,
+    field: &arrow_schema::Field,
+) -> error_stack::Result<(), RuntimeSchemaError> {
+    match value {
+        RuntimeValue::Duration(value) => {
+            builder.append_value(value.nanoseconds());
+            Ok(())
+        }
+        value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: ParseAsType::Duration,
+            found: value.kind(),
+        })),
+    }
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(
@@ -1482,6 +1504,9 @@ pub(super) fn append_filter_map_nested_value(
             if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
         {
             append_primitive!(TimestampNanosecondBuilder, append_filter_map_datetime)
+        }
+        ArrowDataType::Duration(arrow_schema::TimeUnit::Nanosecond) => {
+            append_primitive!(DurationNanosecondBuilder, append_filter_map_duration)
         }
         ArrowDataType::List(element) => {
             let builder = builder

@@ -229,6 +229,7 @@ enum ExactValue {
     Bool(bool),
     String(String),
     Datetime(String),
+    Duration(i64),
     F32(u32),
     F64(u64),
     Array(Vec<ExactValue>),
@@ -249,6 +250,7 @@ impl ExactValue {
             RemoteRuntimeValue::Bool(v) => Self::Bool(*v),
             RemoteRuntimeValue::String(v) => Self::String(v.clone()),
             RemoteRuntimeValue::Datetime(v) => Self::Datetime(v.clone()),
+            RemoteRuntimeValue::Duration(v) => Self::Duration(*v),
             RemoteRuntimeValue::F32(v) => Self::F32(v.to_bits()),
             RemoteRuntimeValue::F64(v) => Self::F64(v.to_bits()),
             RemoteRuntimeValue::Array(values) => {
@@ -273,6 +275,7 @@ impl ExactValue {
             RemoteRuntimeElementValue::Bool(v) => Self::Bool(*v),
             RemoteRuntimeElementValue::String(v) => Self::String(v.clone()),
             RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(v.clone()),
+            RemoteRuntimeElementValue::Duration(v) => Self::Duration(*v),
             RemoteRuntimeElementValue::F32(v) => Self::F32(v.to_bits()),
             RemoteRuntimeElementValue::F64(v) => Self::F64(v.to_bits()),
             RemoteRuntimeElementValue::Array(values) => {
@@ -551,7 +554,7 @@ fn branch_key(arbitrary: &mut Arbitrary<'_>) -> nervix_models::RemoteBranchKey {
 
 fn remote_value(arbitrary: &mut Arbitrary<'_>, depth: u8) -> RemoteRuntimeValue {
     let collections = if depth == 0 { 0 } else { 2 };
-    let choice = arbitrary.entropy().byte() % (13 + collections);
+    let choice = arbitrary.entropy().byte() % (14 + collections);
     match choice {
         0 => RemoteRuntimeValue::U8(arbitrary.entropy().byte()),
         1 => RemoteRuntimeValue::I8(i8::from_le_bytes([arbitrary.entropy().byte()])),
@@ -568,7 +571,8 @@ fn remote_value(arbitrary: &mut Arbitrary<'_>, depth: u8) -> RemoteRuntimeValue 
             arbitrary.entropy(),
         )))),
         12 => RemoteRuntimeValue::F64(f64::from_bits(arbitrary.entropy().any_u64())),
-        13 => RemoteRuntimeValue::Array(elements(arbitrary, depth)),
+        13 => RemoteRuntimeValue::Duration(arbitrary.entropy().any_i64()),
+        14 => RemoteRuntimeValue::Array(elements(arbitrary, depth)),
         _ => RemoteRuntimeValue::Vec(elements(arbitrary, depth)),
     }
 }
@@ -587,7 +591,7 @@ fn elements(arbitrary: &mut Arbitrary<'_>, depth: u8) -> Vec<RemoteRuntimeElemen
 
 fn remote_element(arbitrary: &mut Arbitrary<'_>, depth: u8) -> RemoteRuntimeElementValue {
     let collections = if depth == 0 { 0 } else { 2 };
-    let choice = arbitrary.entropy().byte() % (13 + collections);
+    let choice = arbitrary.entropy().byte() % (14 + collections);
     match choice {
         0 => RemoteRuntimeElementValue::U8(arbitrary.entropy().byte()),
         1 => RemoteRuntimeElementValue::I8(i8::from_le_bytes([arbitrary.entropy().byte()])),
@@ -604,7 +608,8 @@ fn remote_element(arbitrary: &mut Arbitrary<'_>, depth: u8) -> RemoteRuntimeElem
             arbitrary.entropy(),
         )))),
         12 => RemoteRuntimeElementValue::F64(f64::from_bits(arbitrary.entropy().any_u64())),
-        13 => RemoteRuntimeElementValue::Array(elements(arbitrary, depth)),
+        13 => RemoteRuntimeElementValue::Duration(arbitrary.entropy().any_i64()),
+        14 => RemoteRuntimeElementValue::Array(elements(arbitrary, depth)),
         _ => RemoteRuntimeElementValue::Vec(elements(arbitrary, depth)),
     }
 }

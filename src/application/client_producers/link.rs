@@ -5,9 +5,9 @@
 //!
 //! - **Owns.** The one duplex stream a serving node keeps to each owning node while producers use
 //!   it, the frames it carries in each direction, the link-local key of every forwarded producer,
-//!   the clearance the serving node gives each forwarded batch before the owning node may admit
-//!   it, the heartbeat each end sends while idle, and ending every producer of a link that fails or
-//!   falls silent.
+//!   the largest batch one frame carries within each node's relay bound, the clearance the serving
+//!   node gives each forwarded batch before the owning node may admit it, the heartbeat each end
+//!   sends while idle, and ending every producer of a link that fails or falls silent.
 //! - **Depends on.** The interconnect's ordered duplex streams and the runtime's client ingestor
 //!   endpoints on the owning side.
 //! - **Must not know.** Sessions, the session wire, or how a batch is decoded or admitted.
@@ -16,6 +16,12 @@
 //! holds one relay stream per peer however many producers use it. Frames of one producer keep
 //! their order in both directions: its open precedes its batches, and its outcomes, admission
 //! changes and end follow the owning node's answer to its open.
+//!
+//! A frame above the serving node's relay encoded limit or the owning node's committed relay batch
+//! bound would end the link with every producer on it. So the serving node asks for no batch
+//! larger than a `Submit` frame within its own limit carries, the owning node grants none larger
+//! than one within its bound carries, and the serving node answers a batch above the grant itself,
+//! as the owning node would, without sending it.
 //!
 //! The owning node admits a forwarded batch only once the serving node cleared it: when the
 //! batch's turn comes it sends `Admitting`, and the serving node records that the batch may now be
@@ -33,6 +39,7 @@
 use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, RandomState};
+use arch_into::ArchInto as _;
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::StreamExt as _;
@@ -42,7 +49,7 @@ use nervix_interconnect::{
     InterconnectDuplexRequest, PoolClass, RequestSubquota, StreamHandlerError, Transport,
 };
 use nervix_models::{
-    AnnouncedLinkHeartbeat, ClientLinkCapabilities, ClientProducerAdmission,
+    AnnouncedLinkHeartbeat, ClientBatchDefect, ClientLinkCapabilities, ClientProducerAdmission,
     ClientProducerDescription, ClientProducerEndReason, ClientProducerLimits,
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal, ClusterNodeName,
     DomainName, IngestorName, SchemaField, UserName,
@@ -119,6 +126,31 @@ pub(super) enum ClientProducerLinkItem {
     Heartbeat,
 }
 
+impl ClientProducerLinkItem {
+    /// What a `Submit` frame encodes besides the batch it forwards. rkyv writes the batch's bytes
+    /// first and then the archived frame as its root at the root's alignment, so the archive root
+    /// and that alignment bound everything else.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a Submit frame stores its batch and then its archive root at the root's \
+                      alignment"
+        )
+    )]
+    const SUBMIT_ENVELOPE_BYTES: usize = size_of::<ArchivedClientProducerLinkItem>()
+        + align_of::<ArchivedClientProducerLinkItem>()
+        - 1;
+
+    /// The largest batch one `Submit` frame carries within a frame bound of `frame_bytes`, or
+    /// `None` when the bound cannot hold the frame's envelope and a byte of batch beside it.
+    fn largest_batch_within(frame_bytes: u64) -> Option<NonZeroU64> {
+        let envelope: u64 = Self::SUBMIT_ENVELOPE_BYTES.arch_into();
+        let batch = frame_bytes.checked_sub(envelope)?;
+        NonZeroU64::new(batch)
+    }
+}
+
 /// What an owning node answers over a link.
 #[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) enum ClientProducerLinkEvent {
@@ -172,6 +204,9 @@ struct LinksInner {
     settings: ClientLinkCapabilities,
     interconnect: Transport,
     local_node: ClusterNodeName,
+    /// The largest batch a `Submit` frame within this node's relay encoded limit carries, or
+    /// `None` when that limit cannot carry one beside the frame's envelope.
+    largest_batch: Option<NonZeroU64>,
     links: DashMap<ClusterNodeName, LinkHandle, RandomState>,
     /// The key the next forwarded producer takes. Keys are never reused within the process, so a
     /// late frame about a producer can never reach a later one.
@@ -254,16 +289,19 @@ impl Drop for ForwardedProducer {
 }
 
 impl ProducerLinks {
+    /// The links of a node whose relay pool encodes frames of at most `relay_encoded_bytes`.
     pub(super) fn new(
         interconnect: Transport,
         local_node: ClusterNodeName,
         settings: ClientLinkCapabilities,
+        relay_encoded_bytes: u64,
     ) -> Self {
         Self {
             inner: Arc::new(LinksInner {
                 settings,
                 interconnect,
                 local_node,
+                largest_batch: ClientProducerLinkItem::largest_batch_within(relay_encoded_bytes),
                 links: DashMap::with_hasher(RandomState::default()),
                 next_key: AtomicU64::new(1),
             }),
@@ -271,11 +309,18 @@ impl ProducerLinks {
     }
 
     /// Attaches a producer to the client ingestor `owner` executes, over this node's link to it.
+    /// The producer asks for no batch larger than a frame this node sends carries, and the owning
+    /// node grants none larger than a frame it accepts carries.
     pub(super) async fn open(
         &self,
         owner: &ClusterNodeName,
-        open: ProducerOpen,
+        mut open: ProducerOpen,
     ) -> Result<OpenedRoute, ClientProducerRefusal> {
+        let Some(largest_batch) = self.inner.largest_batch else {
+            debug!(%owner, "this node's relay encoded limit cannot carry a forwarded batch");
+            return Err(ClientProducerRefusal::NodeCapacityExhausted);
+        };
+        open.max_batch_bytes = open.max_batch_bytes.min(largest_batch);
         let key = self.inner.next_key.fetch_add(1, Ordering::Relaxed);
         let (reply, answer) = oneshot::channel();
         let mut command = LinkCommand::Open { key, open, reply };
@@ -360,9 +405,38 @@ struct ForwardedRoute {
     events: mpsc::UnboundedSender<ClientProducerEvent>,
     admission: watch::Sender<ClientProducerAdmission>,
     submissions: ForwardedSubmissions,
+    /// The largest batch the owning node granted, which one frame within both nodes' relay bounds
+    /// carries.
+    largest_batch: NonZeroU64,
 }
 
 impl ForwardedRoute {
+    /// Takes one batch for the link and returns the bytes its `Submit` frame carries, recording the
+    /// batch as handed to the link. A batch above the grant stays on this node and is answered at
+    /// once as not admitted, as the owning node answers a batch above a grant it receives: its frame
+    /// could exceed a node's relay bound and end the link with every producer on it.
+    fn take(&mut self, submission: NonZeroU64, batch: Bytes) -> Option<Vec<u8>> {
+        let size: u64 = batch.len().arch_into();
+        let limit = self.largest_batch.get();
+        if size > limit {
+            let refusal = ClientProducerEvent::Outcome {
+                submission: ClientSubmissionId::new(submission),
+                outcome: ClientSubmissionOutcome::NotAdmitted(
+                    ClientSubmissionRefusal::InvalidBatch(ClientBatchDefect::TooLarge),
+                ),
+                detail: Some(format!(
+                    "a batch of {size} bytes exceeds the {limit} byte limit"
+                )),
+            };
+            self.events
+                .send(refusal)
+                .means_peer_left("forwarded producer");
+            return None;
+        }
+        self.submissions.track(submission);
+        Some(batch.to_vec())
+    }
+
     /// Ends the producer as lost with its owning node. Every batch the owning node cannot have
     /// admitted, because this side never cleared it, is answered as not admitted before the end,
     /// which leaves the cleared ones for the producer's session to report as of unknown outcome.
@@ -608,11 +682,13 @@ impl ServingLink {
                     // The producer ended; that end answers every batch it still had.
                     return;
                 };
-                route.submissions.track(submission);
+                let Some(batch) = route.take(submission, batch) else {
+                    return;
+                };
                 ClientProducerLinkItem::Submit {
                     key,
                     submission,
-                    batch: batch.to_vec(),
+                    batch,
                 }
             }
             LinkCommand::Close { key } => {
@@ -648,6 +724,7 @@ impl ServingLink {
                 let Some(reply) = self.pending.remove(&key) else {
                     return;
                 };
+                let largest_batch = description.grant.max_batch_bytes;
                 let (events, outcomes) = mpsc::unbounded_channel();
                 let (admission, admission_receiver) = watch::channel(description.admission);
                 let forwarded = ForwardedProducer {
@@ -672,6 +749,7 @@ impl ServingLink {
                     events,
                     admission,
                     submissions: ForwardedSubmissions::default(),
+                    largest_batch,
                 };
                 self.routes.insert(key, route);
             }
@@ -774,6 +852,10 @@ pub(super) fn serve_owner_links(
     runtime: Runtime,
     settings: ClientLinkCapabilities,
 ) -> error_stack::Result<(), HandlerRegistrationError> {
+    // Peers rely on this node's committed relay batch bound, so a producer forwarded here is
+    // granted no batch larger than a `Submit` frame within it carries.
+    let committed_bound = interconnect.local_receive_bounds().relay_batch_bytes.get();
+    let largest_batch = ClientProducerLinkItem::largest_batch_within(committed_bound);
     interconnect.register_duplex_handler::<OpenClientProducerLink, _, _>(
         move |context, request, items| {
             let runtime = runtime.clone();
@@ -793,6 +875,7 @@ pub(super) fn serve_owner_links(
                     serving_node: request.serving_node,
                     answers,
                     producers: HashMap::default(),
+                    largest_batch,
                 };
                 nervix_primitives::task::spawn(link.run(items));
                 Ok(DuplexResponses::new(ReceiverStream::new(answered).map(Ok)))
@@ -828,6 +911,9 @@ struct OwnerLink {
     serving_node: ClusterNodeName,
     answers: mpsc::Sender<ClientProducerLinkEvent>,
     producers: HashMap<u64, ClientProducerHandle>,
+    /// The largest batch a `Submit` frame within this node's committed relay batch bound carries,
+    /// or `None` when that bound cannot carry one beside the frame's envelope.
+    largest_batch: Option<NonZeroU64>,
 }
 
 impl OwnerLink {
@@ -899,6 +985,20 @@ impl OwnerLink {
                 limits,
                 max_batch_bytes,
             } => {
+                let Some(largest_batch) = self.largest_batch else {
+                    debug!(
+                        serving_node = %self.serving_node,
+                        "this node's relay batch bound cannot carry a forwarded batch"
+                    );
+                    return self
+                        .answers
+                        .send(ClientProducerLinkEvent::Refused {
+                            key,
+                            refusal: ClientProducerRefusal::NodeCapacityExhausted,
+                        })
+                        .await
+                        .is_ok();
+                };
                 let (clearance_requests, clearances) = mpsc::unbounded_channel();
                 let request = ClientProducerOpenRequest {
                     user,
@@ -906,7 +1006,7 @@ impl OwnerLink {
                     ingestor,
                     expected_fields,
                     limits,
-                    max_batch_bytes,
+                    max_batch_bytes: max_batch_bytes.min(largest_batch),
                     retention: ClientProducerRetention::Forwarded { clearance_requests },
                 };
                 let opened = self.runtime.open_client_producer(request).await;

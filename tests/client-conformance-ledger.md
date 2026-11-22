@@ -105,6 +105,7 @@ runtime and held to one expected report:
   values on both sides of the JavaScript safe-integer boundary, an absent and a present-zero optional
   value, multi-byte text with an embedded NUL, bytes that are not UTF-8, empty text and bytes,
   `-0.0`, the smallest subnormal and the largest finite floats by their bits, the extreme DATETIME
+  nanoseconds, the longest, the zero and the shortest DURATION a literal writes, read as signed
   nanoseconds, and a sensitive field that is always redacted. The ingestor passes integer, text,
   bytes, datetime, optional and sensitive fields through `coalesce`, `concat`, hex encode/decode,
   and `nullif` calls before the client reads them, so the report covers function output through
@@ -186,7 +187,8 @@ Every probe prints the same report:
 - The typed batch, built column by column: every integer width at both extremes, 64-bit values on
   both sides of the JavaScript safe-integer boundary, `-0.0`, the smallest subnormal and the largest
   finite floats by their bits, multi-byte text, text with an embedded NUL, bytes that are not UTF-8,
-  empty and null text and bytes, the extreme DATETIME nanoseconds, an absent and a present-zero
+  empty and null text and bytes, the extreme DATETIME nanoseconds, the extreme signed DURATION
+  nanoseconds written and read back, an absent and a present-zero
   optional value, a `VEC<STRING>` holding an empty list and an empty string, an `ARRAY<I16, 2, 2>`
   at the `I16` extremes, and a nullable `VEC<ARRAY<DATETIME, 2>>` that is null, empty, and at the
   extremes. Its submission stays unresolved while its output waits, and the output rows are read

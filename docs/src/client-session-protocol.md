@@ -1484,7 +1484,8 @@ schema for. Batches the relay published during the opening are not delivered.
 The subscriber's node encodes Row frames directly from the Arrow batch it received. It validates the
 batch against the announced definition once, then writes each selected cell from its typed column
 into the FlatBuffers builder; no JSON object, map of fields, or intermediate row is built. Every
-Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds, floats keep their
+Plexus type has exactly one cell type, `DATETIME` travels as signed nanoseconds since the epoch,
+`DURATION` as a signed count of nanoseconds in a `DurationCell`, floats keep their
 exact bits, and `BYTES` travels as raw octets. A sensitive field is written as `RedactedCell` in
 every row, whether or not it held a value, so the frame reveals neither the value nor its nullness.
 A null in a nullable field is `NullCell`; a list element is never null or redacted. A null fixed
@@ -1832,7 +1833,11 @@ a refused open leaves nothing attached and reserves nothing. `ProducerOpened` ca
 the ingestor, and a `ClientProducerDescription`: the attachment identity, the input schema, the
 domain's `START` generation, the endpoint contract digest, the ingestor's window, ACK timeout and
 retry backoff, the granted credit with the largest batch one submission may carry, and whether
-admission is open.
+admission is open. The largest batch is at most what one frame of the session carries beside its
+submission envelope, and never more than the credit. When the producer is attached through
+another node, it is also at most what one frame between the two nodes carries, which can be less
+([Client Producer Links](./interconnect.md#client-producer-links)); the serving node answers a
+batch above it at once as not admitted with `InvalidBatch(TooLarge)`, and the producer stays open.
 
 The ordered open captures the session's authenticated user name and carries it to the ingestor
 owner. Every row of that producer's batches reads the same identity as `metadata.user`, including
@@ -2817,7 +2822,8 @@ single-terminal reply gate still govern that outcome. Other typed reasons are `U
 `NotMaterialized`, `InvalidSelection`, `InvalidLimit`, `StaleContinuation`, `OwnerUnavailable`,
 `NotReady` and `Deadline`.
 
-The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, base64
+The JSON projection preserves cell types: integer values, float bits, datetime nanoseconds, duration
+nanoseconds, base64
 bytes, nested typed lists, null and redacted cells. Counts and origin fields remain structural
 metadata; WASM stages, phases, reasons, readiness, rejections, outcomes and render stages render as
 snake-case strings and reset scopes as `{"kind": ..., "branch": ...}`, and a guest-state

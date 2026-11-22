@@ -41,7 +41,10 @@ use nervix_models::{
 };
 use strum::{EnumIter, IntoEnumIterator as _};
 
-use super::{ClientProducerLinkEvent, ClientProducerLinkItem, OpenClientProducerLink};
+use super::{
+    ArchivedClientProducerLinkItem, ClientProducerLinkEvent, ClientProducerLinkItem,
+    OpenClientProducerLink,
+};
 use crate::{
     application::test_fixtures::duplex_frame_checks::{
         StreamFrame, assert_damaged_bytes_fail_typed_or_decode_to_a_frame,
@@ -573,6 +576,61 @@ async fn the_largest_batch_a_default_session_submits_fits_a_frame() {
     let received = through_the_stream(&codec, submit_of(largest)).await;
     assert_eq!(received, submit_of(largest));
     assert_nothing_stays_charged(&executor);
+}
+
+/// The largest batch a link forwards within a frame bound fits one frame of that bound through the
+/// codec of the link's stream, whichever alignment the bound has, and the envelope that leaves
+/// beside the batch is the archived frame and at most one alignment of padding.
+#[nervix_primitives::test]
+async fn the_largest_batch_forwarded_within_a_bound_fits_a_frame_of_that_bound() {
+    let archived_frame = size_of::<ArchivedClientProducerLinkItem>();
+    for bound in NARROW_PAYLOAD_LIMIT..=NARROW_PAYLOAD_LIMIT + 16 {
+        let executor = executor_with_relay_payload_limit(bound);
+        let codec = DuplexCodec::of::<OpenClientProducerLink>(&executor);
+        let largest = ClientProducerLinkItem::largest_batch_within(bound)
+            .assured("a frame of a few kibibytes carries a forwarded batch");
+        let largest =
+            usize::try_from(largest.get()).assured("a few kibibytes fit the address space");
+        let encoded = submit_of(largest)
+            .encoded(&codec)
+            .await
+            .assured("the largest batch a bound carries encodes within it");
+        let encoded_bytes = u64::try_from(encoded.len()).assured("a frame length fits u64");
+        assert!(
+            encoded_bytes <= bound,
+            "a frame of {encoded_bytes} bytes forwards the largest batch of a {bound} byte bound"
+        );
+        assert!(
+            encoded.len() >= largest + archived_frame,
+            "the envelope a frame leaves beside its batch holds the archived frame"
+        );
+        let received = through_the_stream(&codec, submit_of(largest)).await;
+        assert_eq!(received, submit_of(largest));
+        assert_nothing_stays_charged(&executor);
+    }
+}
+
+/// A bound that cannot hold a frame's envelope and one byte of batch beside it forwards no batch,
+/// and one byte more forwards a batch of one byte.
+#[test]
+fn a_bound_that_cannot_carry_the_envelope_and_a_byte_forwards_no_batch() {
+    let envelope = u64::try_from(ClientProducerLinkItem::SUBMIT_ENVELOPE_BYTES)
+        .assured("a frame envelope fits u64");
+    assert_eq!(ClientProducerLinkItem::largest_batch_within(0), None);
+    assert_eq!(ClientProducerLinkItem::largest_batch_within(envelope), None);
+    let one_more = envelope
+        .checked_add(1)
+        .assured("a frame envelope is far below u64::MAX");
+    assert_eq!(
+        ClientProducerLinkItem::largest_batch_within(one_more),
+        Some(NonZeroU64::MIN)
+    );
+    assert_eq!(
+        ClientProducerLinkItem::largest_batch_within(64),
+        None,
+        "a 64-byte relay batch bound, which the scenario of a node that refuses forwarded \
+         producers sets, carries no batch beside the {envelope}-byte envelope"
+    );
 }
 
 /// The codec of a link carries a forwarded batch up to its class's payload limit and refuses the

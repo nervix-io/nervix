@@ -49,6 +49,7 @@ pub mod describe_wasm_processor;
 pub mod describe_window_processor;
 pub mod domain;
 pub mod drop_stmt;
+mod duration_literal;
 pub mod emitter;
 pub mod endpoint;
 pub mod generator;

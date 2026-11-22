@@ -93,7 +93,7 @@ codes!(open_refusal(host::OpenRefusal) {
 });
 codes!(field_kind(host::FieldType) {
     U8=1,I8=2,U16=3,I16=4,U32=5,I32=6,U64=7,I64=8,F32=9,F64=10,Bool=11,String=12,
-    Bytes=13,Datetime=14,FixedList=15,List=16,
+    Bytes=13,Datetime=14,FixedList=15,List=16,Duration=17,
 });
 codes!(disposition(host::Disposition) {
     Completed=1,Failed=2,NotLeader=3,TransactionDetached=4,TransactionTakenOver=5,OutcomeUnknown=6,

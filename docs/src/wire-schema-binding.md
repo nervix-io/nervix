@@ -104,6 +104,7 @@ reads for lists.
 | `STRING` | `string` | `text` | `string` |
 | `DATETIME` | `string` under `RFC3339` | `text` under `RFC3339` | `string` under `RFC3339` |
 | `BYTES` | `string` under `BASE64` | `bytes`, no rule | `bytes`, no rule; `string` under `BASE64` |
+| `DURATION` | none | none | none |
 | `ARRAY` and `VEC`, any nesting | `array` | `array` | `array<item>` nested exactly as deep, with `item` binding the innermost element by this table |
 
 JSON and CBOR `integer` bind every integer width, and the decoder checks each value against the
@@ -122,6 +123,13 @@ field, with one of four typed reasons:
 - `EncodingRequired`: the innermost internal values travel as text only under a rule the codec does
   not declare for the field.
 - `EncodingRefused`: the codec declares a text rule for bytes the wire type carries natively.
+
+No format binds `DURATION`, so no codec carries one: a codec whose internal schema holds a
+`DURATION` field, or an `ARRAY` or `VEC` whose innermost element is a `DURATION`, is refused before
+its wire fields are compared, with `RegistryError::CodecDurationField` naming the codec and the
+first such field, `codec 'timed_codec' in domain 'd' cannot carry DURATION field 'wait': no codec
+reads or writes a DURATION`. The refusal covers every codec family, the JAQ-native and protobuf
+codecs included, whose programs would otherwise decide what reaches the field.
 
 A missing field, unequal optionality and unequal field sets are refusals of the same error. A
 codec's format looks its wire schema up through `WireSchemaLookup`, whose one method per format
@@ -276,8 +284,9 @@ Contract](./backup-and-restore-architecture.md#records-mirror-the-contract)).
 
 ## Failure Semantics
 
-**At validation.** A codec whose wire schema cannot carry its internal schema is refused with
-`RegistryError::IncompatibleSchema`, and a codec whose rules are wrong with
+**At validation.** A codec whose internal schema holds a `DURATION` is refused with
+`RegistryError::CodecDurationField`, a codec whose wire schema cannot carry its internal schema
+with `RegistryError::IncompatibleSchema`, and a codec whose rules are wrong with
 `RegistryError::InvalidModel`, each naming the codec and the field. The refusal fails the whole
 candidate graph of the transaction, so no partial definition is committed.
 

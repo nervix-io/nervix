@@ -56,7 +56,8 @@ impl DeduplicatorKey {
                 | ReorderKeyPart::Int64(_)
                 | ReorderKeyPart::UInt64(_)
                 | ReorderKeyPart::Float64(_)
-                | ReorderKeyPart::Datetime(_) => 8,
+                | ReorderKeyPart::Datetime(_)
+                | ReorderKeyPart::Duration(_) => 8,
             };
             bytes = bytes
                 .checked_add(part_bytes)
@@ -126,6 +127,8 @@ enum DeduplicatorKeyPartSnapshot {
     Utf8(String),
     Bytes(Vec<u8>),
     Datetime(i64),
+    /// Follows every earlier part, so a stored keyspace of those keeps its meaning.
+    Duration(i64),
 }
 
 /// A serialization view of the current archived keyspace root, whose entries are converted from
@@ -302,6 +305,9 @@ impl From<&DeduplicatorKey> for DeduplicatorKeySnapshot {
                     ReorderKeyPart::Datetime(value) => {
                         DeduplicatorKeyPartSnapshot::Datetime(*value)
                     }
+                    ReorderKeyPart::Duration(value) => {
+                        DeduplicatorKeyPartSnapshot::Duration(*value)
+                    }
                 })
                 .collect(),
         )
@@ -324,6 +330,7 @@ impl From<DeduplicatorKeySnapshot> for DeduplicatorKey {
                     DeduplicatorKeyPartSnapshot::Utf8(value) => ReorderKeyPart::Utf8(value),
                     DeduplicatorKeyPartSnapshot::Bytes(value) => ReorderKeyPart::Bytes(value),
                     DeduplicatorKeyPartSnapshot::Datetime(value) => ReorderKeyPart::Datetime(value),
+                    DeduplicatorKeyPartSnapshot::Duration(value) => ReorderKeyPart::Duration(value),
                 })
                 .collect(),
         )
@@ -560,7 +567,7 @@ pub(super) fn decode_deduplicator_snapshot(
 /// One key part of any kind a deduplicator key holds, floats of any bit pattern included.
 #[cfg(test)]
 fn generated_key_part(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> ReorderKeyPart {
-    match arbitrary.entropy().byte() % 8 {
+    match arbitrary.entropy().byte() % 9 {
         0 => ReorderKeyPart::Null,
         1 => ReorderKeyPart::Boolean(arbitrary.entropy().flag()),
         2 => ReorderKeyPart::Int64(arbitrary.entropy().any_i64()),
@@ -570,7 +577,8 @@ fn generated_key_part(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Reorde
         ))),
         5 => ReorderKeyPart::Utf8(arbitrary.string()),
         6 => ReorderKeyPart::Bytes(arbitrary.string().into_bytes()),
-        _ => ReorderKeyPart::Datetime(arbitrary.entropy().any_i64()),
+        7 => ReorderKeyPart::Datetime(arbitrary.entropy().any_i64()),
+        _ => ReorderKeyPart::Duration(arbitrary.entropy().any_i64()),
     }
 }
 

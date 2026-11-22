@@ -464,9 +464,9 @@ impl ArchivedDeduplicatorKeys {
 )]
 mod tests {
     use arrow_array::{
-        BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-        Int64Array, ListArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
-        types::Int64Type,
+        BinaryArray, BooleanArray, DurationNanosecondArray, Float32Array, Float64Array, Int8Array,
+        Int16Array, Int32Array, Int64Array, ListArray, StringArray, UInt8Array, UInt16Array,
+        UInt32Array, UInt64Array, types::Int64Type,
     };
     use arrow_schema::{DataType, Field, TimeUnit};
     use nervix_arbitrary::Entropy;
@@ -478,7 +478,7 @@ mod tests {
 
     /// One of the key column types a `DEDUPLICATE ON` expression can produce.
     fn generated_key_type(entropy: &mut Entropy<'_>) -> DataType {
-        match entropy.index(nonzero!(15_usize)) {
+        match entropy.index(nonzero!(16_usize)) {
             0 => DataType::Int8,
             1 => DataType::Int16,
             2 => DataType::Int32,
@@ -493,6 +493,7 @@ mod tests {
             11 => DataType::Utf8,
             12 => DataType::Binary,
             13 => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+            14 => DataType::Duration(TimeUnit::Nanosecond),
             _ => DataType::List(StdArc::new(Field::new_list_field(DataType::Int64, true))),
         }
     }
@@ -508,6 +509,7 @@ mod tests {
         Utf8(String),
         Bytes(Vec<u8>),
         Datetime(i64),
+        Duration(i64),
     }
 
     impl From<&ReorderKeyPart> for ExactPart {
@@ -521,6 +523,7 @@ mod tests {
                 ReorderKeyPart::Utf8(value) => Self::Utf8(value.clone()),
                 ReorderKeyPart::Bytes(value) => Self::Bytes(value.clone()),
                 ReorderKeyPart::Datetime(value) => Self::Datetime(*value),
+                ReorderKeyPart::Duration(value) => Self::Duration(*value),
             }
         }
     }
@@ -657,6 +660,9 @@ mod tests {
                 let array = TimestampNanosecondArray::from(values).with_timezone_opt(zone.clone());
                 let array: ArrayRef = StdArc::new(array);
                 array
+            }
+            DataType::Duration(TimeUnit::Nanosecond) => {
+                values!(DurationNanosecondArray, entropy.any_i64())
             }
             DataType::List(_) => {
                 let mut lists = Vec::with_capacity(rows);

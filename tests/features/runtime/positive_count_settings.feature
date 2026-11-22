@@ -135,7 +135,7 @@ Feature: Positive count settings
       """
       CREATE INFERENCER empty_dimension FROM embeddings
         USING RESOURCE fraud_model VERSION 1
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" DENSE TENSOR<F32>[0] = input.vector }
         OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
         UNBRANCHED

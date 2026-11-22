@@ -81,10 +81,11 @@ pub struct ClickHouseValueEncoding {
     pub json_each_row: &'static str,
 }
 
-/// The types a `CLICKHOUSE TABLE` mapping admits and the bytes its row writer emits.
-/// `MappedValueType::Column` rejects any other inferred Arrow type before the emitter opens,
-/// including null-only, decimal, structured, dictionary, large-string and non-nanosecond
-/// timestamp values. A list is admitted only when its element type is admitted recursively.
+/// The types a `CLICKHOUSE TABLE` mapping admits and the bytes its row writer emits, and the one
+/// it declares rejected. `MappedValueType::Column` rejects any other inferred Arrow type before the
+/// emitter opens, including null-only, decimal, structured, dictionary, large-string and
+/// non-nanosecond timestamp values. A list is admitted only when its element type is admitted
+/// recursively.
 pub const CLICKHOUSE_VALUE_ENCODINGS: &[ClickHouseValueEncoding] = &[
     ClickHouseValueEncoding {
         plexus_type: "BOOL",
@@ -117,6 +118,10 @@ pub const CLICKHOUSE_VALUE_ENCODINGS: &[ClickHouseValueEncoding] = &[
     ClickHouseValueEncoding {
         plexus_type: "ARRAY<T>, VEC<T>",
         json_each_row: "JSON array with recursive element encoding",
+    },
+    ClickHouseValueEncoding {
+        plexus_type: "DURATION, and a list of it",
+        json_each_row: "rejected: no ClickHouse column holds a DURATION losslessly",
     },
 ];
 
