@@ -540,8 +540,8 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         .join(" ");
     format!(
         "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} \
-         database-volume-bytes={} {} {} {} {} shutdown-timeout={} \
-         task-grace-period={} listeners={:?} {operational}",
+         database-volume-bytes={} {} {} {} {} shutdown-timeout={} task-grace-period={} \
+         listeners={:?} {operational}",
         record.identity,
         capabilities.database_volume_bytes,
         bounds_line(capabilities.receive),
