@@ -19,7 +19,7 @@ use nervix_models::{
 
 use super::*;
 use crate::{
-    runtime::{RuntimeState, materialized_snapshot::SealedSource},
+    runtime::{RetainedStateOpening, RuntimeState, materialized_snapshot::SealedSource},
     runtime_schema::{RuntimeRecordMetadata, RuntimeValue, compile_schema},
 };
 
@@ -247,7 +247,13 @@ async fn materialized_branch_eviction_withdraws_its_record_before_recreation() {
     install_unpaced_test_domain(&runtime, &placed.domain);
     let branch_key = key("acme");
     let mut branch = junction_branch_template("joining", "incoming")
-        .instantiate(&runtime, &placed.domain, branch_key.clone(), 1)
+        .instantiate(
+            &runtime,
+            &placed.domain,
+            branch_key.clone(),
+            1,
+            &RetainedStateOpening::RefusedWhenFull,
+        )
         .await
         .assured("the branch installs")
         .into_inner();
@@ -344,7 +350,13 @@ async fn each_materialized_relay_installs_its_branch_owner_in_the_same_routing_e
     let placed = placement();
     install_unpaced_test_domain(&runtime, &placed.domain);
     let mut branch = junction_branch_template("joining", "incoming")
-        .instantiate(&runtime, &placed.domain, key("acme"), 1)
+        .instantiate(
+            &runtime,
+            &placed.domain,
+            key("acme"),
+            1,
+            &RetainedStateOpening::RefusedWhenFull,
+        )
         .await
         .assured("the branch installs")
         .into_inner();
