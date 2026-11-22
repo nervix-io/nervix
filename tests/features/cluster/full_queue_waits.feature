@@ -528,6 +528,86 @@ Feature: Work no caller waits on waits for a place in a full worker class
       | 1            | claimant |
       | 3            | claimant |
 
+  # Growing the branch moves beta from partition 1 to partition 5. The first record that reaches
+  # partition 5 claims beta, and once beta's holder has released its window, the claiming unit
+  # reopens that window on its node's bulk workers. With every bulk place taken, the reopen waits
+  # for a place instead of being refused and the claim tried again, while the unit keeps beta's
+  # record parked. The window then continues from the row beta's holder kept.
+  @full_queue_window_claim
+  Scenario Outline: A moved window key's claimed branch waits for a bulk place and continues its window once on a <cluster_size> node cluster
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA summary (
+        tenant STRING,
+        samples I64,
+        first_value I32 OPTIONAL,
+        last_value I32 OPTIONAL
+      );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
+      CREATE VHOST edge window-claim-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT metric_ingress ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor FROM metric_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
+        TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR pair_window FROM metrics
+        WIDTH 2 MESSAGES
+        STEP 1 MESSAGES
+        BRANCHED BY by_tenant
+        TO summaries
+          SET tenant = FIRST(input.tenant), samples = COUNT(input.value),
+              first_value = FIRST(input.value), last_value = LAST(input.value)
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION summaries_seen TO summaries;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "window-claim-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","value":11}
+      """
+    And http payload is posted to node "node-1" with host "window-claim-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","value":12}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "tenant":"beta" | "samples":2 | "first_value":11 | "last_value":12
+      """
+    When the next partition install of window processor "pair_window" is held
+    And these Plexus commands are executed on the leader node
+      """
+      ALTER PARAMETRIZER by_tenant SET PARTITIONS 8;
+      CREATE SUBSCRIPTION summaries_after_change TO summaries;
+      """
+    And http payload is posted to node "node-1" with host "window-claim-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","value":71}
+      """
+    Then within "60s" the partition install of window processor "pair_window" reaches its hold
+    When bulk execution is saturated on every node
+    And the held partition install of window processor "pair_window" is released
+    Then within "30s" a bulk job waits for a place on some node
+    When bulk execution is released on every node
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "tenant":"beta" | "samples":2 | "first_value":12 | "last_value":71
+      """
+    And within "60s" DESCRIBE PARAMETRIZER "by_tenant" on node "node-1" reports no partition transition
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   # A junction on node-3 reads the profile row of a materialized relay whose state node-2 owns, so it
   # asks node-2 to describe and send the row, which node-2 serves on its bulk workers. With every
   # bulk place taken, the fetch waits for one instead of being refused, so the event is held back

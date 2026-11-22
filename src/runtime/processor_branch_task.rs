@@ -26,8 +26,8 @@ use error_stack::ResultExt as _;
 use super::{
     materialized_read::MaterializedStateWait,
     processor_partition_moves::{
-        ClaimProgress, HolderKeyRequest, HolderStep, ProcessorBranchSlot, ProcessorBranches,
-        ProcessorPartitionMoves, answer_partition_key,
+        ClaimProgress, ClaimProgressOutcome, HolderKeyRequest, HolderStep, ProcessorBranchSlot,
+        ProcessorBranches, ProcessorPartitionMoves, answer_partition_key,
     },
     processor_wasm_state_reset::{
         ProcessorWasmStateResetContext, abort_processor_wasm_state_reset,
@@ -845,18 +845,65 @@ pub(super) async fn run_processor_node_runtime(
                     let Some(moves_in_progress) = moves.as_mut() else {
                         continue;
                     };
-                    let released = nervix_primitives::expect_lint!(
+                    let ClaimProgressOutcome {
+                        mut released,
+                        install,
+                    } = nervix_primitives::expect_lint!(
                         nervix::lifecycle_call,
-                        "a claim task's report settles one catalog read, claim or forget, and an \
-                         installed claim starts its key's branch once",
+                        "a claim task's report settles one catalog read, claim, forget or build, \
+                         and an installed claim starts its key's branch once",
                         moves_in_progress.progress(
                             &restore_context,
                             &template,
                             &mut instances,
                             progress
                         )
-                    )
-                    .await;
+                    );
+                    // A claim or a confirmed origin that brings a key's state builds the key's
+                    // branch as an attempt. It runs alone while it makes progress, as an install
+                    // awaited inline did; one that waits for capacity goes on beside the unit's
+                    // commands and reports back once built, while the key's input stays parked.
+                    if let Some(install) = install {
+                        let mut attempt = nervix_primitives::expect_lint!(
+                            nervix::lifecycle_call,
+                            "an installed claim builds its key's branch once",
+                            install.begin(&restore_context, &template)
+                        );
+                        let progress = nervix_primitives::expect_lint!(
+                            nervix::lifecycle_call,
+                            "an installed claim builds its key's branch once, and the unit \
+                             answers nothing while the build makes progress",
+                            attempt.run_until_waiting()
+                        )
+                        .await;
+                        match progress {
+                            AttemptProgress::Ended => {
+                                let built = attempt.into_outcome().verified(
+                                    "the attempt whose build just ended holds its outcome",
+                                );
+                                released.extend(nervix_primitives::expect_lint!(
+                                    nervix::lifecycle_call,
+                                    "an installed claim starts its key's branch once and settles \
+                                     its claim",
+                                    moves_in_progress.finish_install(
+                                        &restore_context,
+                                        &template,
+                                        &mut instances,
+                                        install,
+                                        built,
+                                    )
+                                ));
+                            }
+                            AttemptProgress::Waiting => {
+                                nervix_primitives::expect_lint!(
+                                    nervix::lifecycle_call,
+                                    "an installed claim whose build waits for capacity continues \
+                                     it once, on a task of its own",
+                                    moves_in_progress.finish_install_later(install, attempt)
+                                );
+                            }
+                        }
+                    }
                     for input in released {
                         nervix_primitives::task::consume_budget().await;
                         dispatch_processor_node_input(

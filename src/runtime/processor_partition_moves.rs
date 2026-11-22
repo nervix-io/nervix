@@ -29,6 +29,7 @@
 use std::collections::VecDeque;
 
 use error_stack::{Report, ResultExt as _};
+use nervix_execution::CapacityWaits;
 use nervix_interconnect::{
     PartitionClaimOutcome, PartitionClaimStep, PartitionClaimSubject, ReleasedBranch,
     ReleasedCheckpoint, ReleasedKey, RemoteOperationFailure, RemoteOperationSubject,
@@ -38,21 +39,23 @@ use nervix_models::{
     ClusterNodeName, DomainName, DomainNodeRef, DomainNodeUnitRef, ModelKind, ModelName, NodeRef,
     PartitionEpochNumber, Timestamp, Unit,
 };
+use nervix_primitives::sync::{Arc, CancellationToken, DropGuard};
 use nervix_recovery::NoReceiver as _;
 use tracing::{debug, warn};
 
 use super::{
     BranchInstanceRegistry, BranchInstanceTemplate, BranchKey, BranchScope, DomainClock,
     ProcessorBranchLifetime, ProcessorBranchTask, ProcessorNodeCommand, ProcessorRuntimeContext,
-    Runtime, RuntimeStateKind, RuntimeStatePlacement,
+    RetainedStateOpening, Runtime, RuntimeStateKind, RuntimeStatePlacement,
+    capacity_attempt::CapacityAttempt,
     partition_claims::{
         CatalogResolution, ClaimAdmission, ClaimRetries, ClaimStart, PartitionClaimError,
         PartitionClaimant, ReadCatalog, RetryStep, UnitPartitionTransition,
     },
     partition_holdings::HoldingsTracker,
     processor_branch_task::{
-        ProcessorBranchInput, ProcessorBranchStopMode, spawn_processor_branch_task,
-        stop_processor_branch_task,
+        PreparedProcessorBranch, ProcessorBranchInput, ProcessorBranchStopMode,
+        ProcessorBranchTaskError, stop_processor_branch_task,
     },
     state_replication::StateReplicationError,
 };
@@ -76,6 +79,14 @@ impl ProcessorBranchSlot {
         match self {
             Self::Live(task) => Some(task),
             Self::Released(_) => None,
+        }
+    }
+
+    /// The lifetime of the key's released state, while it is released.
+    fn released_incarnation(&self) -> Option<u64> {
+        match self {
+            Self::Live(_) => None,
+            Self::Released(released) => Some(released.incarnation),
         }
     }
 }
@@ -128,6 +139,12 @@ pub(super) enum ClaimProgress {
         holder: Unit,
         result: error_stack::Result<(), PartitionClaimError>,
     },
+    /// The branch an install asked for, whose build waited for capacity and went on beside the
+    /// unit's commands, was built, or why it could not be.
+    Built {
+        install: ClaimedBranchInstall,
+        built: ClaimedBranchBuild,
+    },
 }
 
 /// What a settled claim found.
@@ -153,6 +170,11 @@ pub(super) struct ProcessorPartitionMoves {
     commands: nervix_primitives::sync::mpsc::Sender<ProcessorNodeCommand>,
     /// Claims and forgets that failed and wait for their next attempt.
     retries: ClaimRetries,
+    /// The parent of every install build that waits for capacity beside the unit's commands, so
+    /// that the unit's stop, its handoff or its retired transition ends their waits.
+    builds: CancellationToken,
+    /// Cancels `builds` once these moves end.
+    _builds_end: DropGuard,
 }
 
 impl ProcessorPartitionMoves {
@@ -188,6 +210,8 @@ impl ProcessorPartitionMoves {
             entries.iter().map(|entry| &entry.key),
         );
         let claimant = PartitionClaimant::for_transition(capacity, &transition);
+        let builds = CancellationToken::new();
+        let builds_end = builds.clone().drop_guard();
         Self {
             transition,
             entity,
@@ -195,6 +219,8 @@ impl ProcessorPartitionMoves {
             holdings,
             commands,
             retries: ClaimRetries::new(),
+            builds,
+            _builds_end: builds_end,
         }
     }
 
@@ -415,7 +441,8 @@ impl ProcessorPartitionMoves {
     }
 
     /// Applies one claim task's progress. Returns the parked inputs the progress released, in the
-    /// order they must be dispatched, after installing any branch whose state arrived.
+    /// order they must be dispatched, and the branch it asks the task to build and install when its
+    /// state arrived or its origin was confirmed here.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -424,13 +451,13 @@ impl ProcessorPartitionMoves {
                       installed claim starts its key's branch once"
         )
     )]
-    pub(super) async fn progress(
+    pub(super) fn progress(
         &mut self,
         context: &ProcessorRuntimeContext,
         template: &BranchInstanceTemplate,
         instances: &mut ProcessorBranches,
         progress: ClaimProgress,
-    ) -> Vec<ProcessorBranchInput> {
+    ) -> ClaimProgressOutcome {
         let runtime = &context.runtime_handle;
         let domain = &context.domain;
         let mut released = Vec::new();
@@ -449,33 +476,21 @@ impl ProcessorPartitionMoves {
                         },
                         None => None,
                     };
-                    if let Some((incarnation, last_activity)) = retained
-                        && let Err(error) = install_claimed_branch(
-                            context,
-                            template,
-                            instances,
-                            &key,
-                            incarnation,
-                            last_activity,
-                        )
-                        .await
-                    {
-                        warn!(error = %format_args!("{error:#}"), "a retained branch could not resume after origin confirmation");
-                        self.retry_later(RetryStep::Locate { key });
-                        return released;
+                    if let Some((incarnation, last_activity)) = retained {
+                        // The retained branch resumes before the key's location settles: the task
+                        // builds it and settles the location once it is installed.
+                        return ClaimProgressOutcome {
+                            released,
+                            install: Some(ClaimedBranchInstall {
+                                key,
+                                incarnation,
+                                last_activity,
+                                settlement: InstallSettlement::Located { holder },
+                            }),
+                        };
                     }
                 }
-                let holder = holder.filter(|holder| *holder != self.transition.unit);
-                match self.claimant.located(key, holder) {
-                    CatalogResolution::Begin { key, inputs } => {
-                        self.holdings.confirmed_here(&Some(key));
-                        released.extend(inputs);
-                    }
-                    CatalogResolution::Claim { key, holder } => {
-                        self.spawn_claim(runtime, domain, template, key, holder)
-                    }
-                }
-                self.publish();
+                self.locate(runtime, domain, template, key, holder, &mut released);
             }
             ClaimProgress::Located {
                 key,
@@ -521,33 +536,16 @@ impl ProcessorPartitionMoves {
                         last_activity,
                     }),
             } => {
-                match install_claimed_branch(
-                    context,
-                    template,
-                    instances,
-                    &key,
-                    incarnation,
-                    last_activity,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        released.extend(self.claimant.claim_settled(&key));
-                        self.holdings.confirmed_here(&Some(key.clone()));
-                        self.holdings.claimed_one();
-                        self.publish();
-                        self.spawn_forget(runtime, domain, key, holder);
-                    }
-                    Err(error) => {
-                        warn!(
-                            domain = domain.as_str(),
-                            processor = template.owner.node.identifier.as_str(),
-                            error = %format_args!("{error:#}"),
-                            "claimed branch could not be restored; the claim is tried again"
-                        );
-                        self.retry_later(RetryStep::Claim { key, holder });
-                    }
-                }
+                // The key's input stays parked until the task has built and installed its branch.
+                return ClaimProgressOutcome {
+                    released,
+                    install: Some(ClaimedBranchInstall {
+                        key,
+                        incarnation,
+                        last_activity,
+                        settlement: InstallSettlement::Claimed { holder },
+                    }),
+                };
             }
             ClaimProgress::Claimed {
                 key,
@@ -564,6 +562,9 @@ impl ProcessorPartitionMoves {
                     self.retry_later(RetryStep::Claim { key, holder });
                 }
             }
+            ClaimProgress::Built { install, built } => {
+                released = self.finish_install(context, template, instances, install, built);
+            }
             ClaimProgress::Forgotten { result: Ok(()), .. } => {}
             ClaimProgress::Forgotten {
                 key,
@@ -579,7 +580,175 @@ impl ProcessorPartitionMoves {
                 self.retry_later(RetryStep::Forget { key, holder });
             }
         }
+        ClaimProgressOutcome {
+            released,
+            install: None,
+        }
+    }
+
+    /// Resolve where `key` lies now that its location is known, beginning it here or claiming it
+    /// from `holder`, and collect any input the resolution releases into `released`.
+    fn locate(
+        &mut self,
+        runtime: &Runtime,
+        domain: &DomainName,
+        template: &BranchInstanceTemplate,
+        key: BranchKey,
+        holder: Option<Unit>,
+        released: &mut Vec<ProcessorBranchInput>,
+    ) {
+        let holder = holder.filter(|holder| *holder != self.transition.unit);
+        match self.claimant.located(key, holder) {
+            CatalogResolution::Begin { key, inputs } => {
+                self.holdings.confirmed_here(&Some(key));
+                released.extend(inputs);
+            }
+            CatalogResolution::Claim { key, holder } => {
+                self.spawn_claim(runtime, domain, template, key, holder)
+            }
+        }
+        self.publish();
+    }
+
+    /// Install the branch `install` asked for, from what its build produced, and settle what the
+    /// install was for: the claim that brought the key's state, or the location of a key whose
+    /// retained branch resumed here. Returns the parked inputs that settled, in the order they must
+    /// be dispatched.
+    ///
+    /// A build that failed installs nothing: the claim or the location is tried again on the moves'
+    /// retry cadence, and the key's input stays parked meanwhile.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an installed claim starts its key's branch once and settles its claim"
+        )
+    )]
+    pub(super) fn finish_install(
+        &mut self,
+        context: &ProcessorRuntimeContext,
+        template: &BranchInstanceTemplate,
+        instances: &mut ProcessorBranches,
+        install: ClaimedBranchInstall,
+        built: ClaimedBranchBuild,
+    ) -> Vec<ProcessorBranchInput> {
+        let runtime = &context.runtime_handle;
+        let domain = &context.domain;
+        let ClaimedBranchInstall {
+            key,
+            incarnation,
+            last_activity,
+            settlement,
+        } = install;
+        let mut released = Vec::new();
+        match settlement {
+            InstallSettlement::Located { holder } => {
+                // A forget, or the slot's expiry, can end a released slot while the build that
+                // resumes it waits for capacity. The key's location then resolves as if the slot
+                // had never been retained, and the built branch is dropped unstarted.
+                let still_released = match instances.get(&Some(key.clone())) {
+                    Some(slot) => slot.as_ref().released_incarnation() == Some(incarnation),
+                    None => false,
+                };
+                if !still_released {
+                    drop(built);
+                    self.locate(runtime, domain, template, key, holder, &mut released);
+                    return released;
+                }
+                match built {
+                    Ok(prepared) => {
+                        install_built_branch(
+                            context,
+                            template,
+                            instances,
+                            &key,
+                            incarnation,
+                            last_activity,
+                            prepared,
+                        );
+                        self.locate(runtime, domain, template, key, holder, &mut released);
+                    }
+                    Err(error) => {
+                        let error = error.change_context(PartitionClaimError::Restore {
+                            branch: BranchScope::from(&Some(key.clone())),
+                        });
+                        warn!(error = %format_args!("{error:#}"), "a retained branch could not resume after origin confirmation");
+                        self.retry_later(RetryStep::Locate { key });
+                    }
+                }
+            }
+            InstallSettlement::Claimed { holder } => match built {
+                Ok(prepared) => {
+                    install_built_branch(
+                        context,
+                        template,
+                        instances,
+                        &key,
+                        incarnation,
+                        last_activity,
+                        prepared,
+                    );
+                    released.extend(self.claimant.claim_settled(&key));
+                    self.holdings.confirmed_here(&Some(key.clone()));
+                    self.holdings.claimed_one();
+                    self.publish();
+                    self.spawn_forget(runtime, domain, key, holder);
+                }
+                Err(error) => {
+                    let error = error.change_context(PartitionClaimError::Restore {
+                        branch: BranchScope::from(&Some(key.clone())),
+                    });
+                    warn!(
+                        domain = domain.as_str(),
+                        processor = template.owner.node.identifier.as_str(),
+                        error = %format_args!("{error:#}"),
+                        "claimed branch could not be restored; the claim is tried again"
+                    );
+                    self.retry_later(RetryStep::Claim { key, holder });
+                }
+            },
+        }
         released
+    }
+
+    /// Let the install `attempt` builds go on beside the unit's commands while it waits for
+    /// capacity. The build continues on a task of its own and reports what it built through the
+    /// unit's commands, so the unit keeps answering them, and taking its other keys' input, while
+    /// it waits. The key's input stays parked until that report installs the branch, and the end
+    /// of these moves ends the wait.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "an installed claim whose build waits for capacity continues it once, on a \
+                      task of its own"
+        )
+    )]
+    pub(super) fn finish_install_later(
+        &self,
+        install: ClaimedBranchInstall,
+        attempt: CapacityAttempt<ClaimedBranchBuild>,
+    ) {
+        let commands = self.commands.clone();
+        let build = self
+            .builds
+            .child_token()
+            .run_until_cancelled_owned(async move {
+                let built = nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "an installed claim builds its key's branch once",
+                    attempt.outcome()
+                )
+                .await;
+                commands
+                    .send(ProcessorNodeCommand::PartitionClaim(ClaimProgress::Built {
+                        install,
+                        built,
+                    }))
+                    .await
+                    .means_shutdown("processor unit awaiting a claimed branch's build");
+            });
+        nervix_primitives::task::spawn(build);
     }
 
     /// Drops from the published holdings every key this unit no longer holds because it forgot,
@@ -617,27 +786,19 @@ fn processor_state_kind(kind: ModelKind) -> RuntimeStateKind {
 /// Restores the branch of `key`, whose released state was installed under this unit, as the
 /// lifetime its holder gave it, and records it in the unit's lifecycle before anything else of it
 /// happens.
-async fn install_claimed_branch(
+/// Start the branch an install attempt built for `key` and record it in `instances` under the
+/// lifetime its holder handed over.
+fn install_built_branch(
     context: &ProcessorRuntimeContext,
     template: &BranchInstanceTemplate,
     instances: &mut ProcessorBranches,
     key: &BranchKey,
     incarnation: u64,
     last_activity: Timestamp,
-) -> error_stack::Result<(), PartitionClaimError> {
+    prepared: PreparedProcessorBranch,
+) {
     let branch = Some(key.clone());
-    let task = spawn_processor_branch_task(
-        context.clone(),
-        template,
-        branch.clone(),
-        VecDeque::new(),
-        ProcessorBranchLifetime::Restored,
-        incarnation,
-    )
-    .await
-    .change_context_lazy(|| PartitionClaimError::Restore {
-        branch: BranchScope::from(&branch),
-    })?;
+    let task = prepared.start(VecDeque::new());
     instances.insert_restored(
         branch.clone(),
         last_activity,
@@ -655,7 +816,71 @@ async fn install_claimed_branch(
         template.parametrizer.as_ref(),
         &branch,
     );
-    Ok(())
+}
+
+/// What one claim task's progress asks of its processor task.
+pub(super) struct ClaimProgressOutcome {
+    /// The parked inputs the progress released, in the order they must be dispatched.
+    pub(super) released: Vec<ProcessorBranchInput>,
+    /// The branch the progress asks the task to build and install before its key's input runs.
+    pub(super) install: Option<ClaimedBranchInstall>,
+}
+
+/// A branch a claim or an origin confirmation installs, built by the processor task as an attempt
+/// so that the task keeps serving its other keys and answering its commands while the build waits
+/// for capacity.
+pub(super) struct ClaimedBranchInstall {
+    key: BranchKey,
+    incarnation: u64,
+    last_activity: Timestamp,
+    settlement: InstallSettlement,
+}
+
+/// What follows an install once its branch is built.
+enum InstallSettlement {
+    /// A branch this unit retained resumes after its origin was confirmed here, and the key's
+    /// location then resolves as `holder` says.
+    Located { holder: Option<Unit> },
+    /// The key's state arrived from `holder`: the claim settles and the holder forgets the key.
+    Claimed { holder: Unit },
+}
+
+/// What one install attempt built: the key's branch, ready to start, or why it could not be built.
+pub(super) type ClaimedBranchBuild =
+    error_stack::Result<PreparedProcessorBranch, ProcessorBranchTaskError>;
+
+impl ClaimedBranchInstall {
+    /// Begin building the branch from `template`, opening its retained state through an executor
+    /// handle that tells the attempt while the build waits for a place or for room.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "an installed claim builds its key's branch once")
+    )]
+    pub(super) fn begin(
+        &self,
+        context: &ProcessorRuntimeContext,
+        template: &BranchInstanceTemplate,
+    ) -> CapacityAttempt<ClaimedBranchBuild> {
+        let waits = CapacityWaits::new();
+        let opening = RetainedStateOpening::ReportingWaits(
+            context.runtime_handle.executor().reporting_waits_to(&waits),
+        );
+        let context = context.clone();
+        let template = Arc::new(template.clone());
+        let key = self.key.clone();
+        let incarnation = self.incarnation;
+        CapacityAttempt::start(waits, async move {
+            PreparedProcessorBranch::prepare(
+                context,
+                &template,
+                Some(key),
+                ProcessorBranchLifetime::Restored,
+                incarnation,
+                &opening,
+            )
+            .await
+        })
+    }
 }
 
 /// A claimant's step for one key, as the holder's supervisor received it.

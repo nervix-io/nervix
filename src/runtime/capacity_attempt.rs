@@ -122,6 +122,22 @@ impl<T> CapacityAttempt<T> {
         }
     }
 
+    /// The work's outcome once it ends, for an attempt that its task no longer runs: the work goes
+    /// on wherever this future is polled.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one attempt finishes the lifecycle work its processor task started"
+        )
+    )]
+    pub(super) async fn outcome(self) -> T {
+        match self.work {
+            AttemptWork::Running(running) => running.await,
+            AttemptWork::Ended(outcome) => outcome,
+        }
+    }
+
     /// The work's outcome, once it has ended.
     pub(super) fn into_outcome(self) -> Option<T> {
         match self.work {
