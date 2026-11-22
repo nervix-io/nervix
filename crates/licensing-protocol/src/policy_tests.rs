@@ -166,7 +166,7 @@ fn resolver_refuses_missing_unknown_misplaced_and_inconsistent_values() {
 }
 
 #[test]
-fn licensing_dummy_is_a_cluster_capability_every_complete_plan_lists() {
+fn licensing_dummy_is_a_cluster_capability_a_complete_plan_may_leave_out() {
     assert_eq!(
         FREE_POLICY.usage().capabilities.get(LICENSING_DUMMY),
         Some(&ConditionValue::Known(Capability::Disabled))
@@ -174,16 +174,43 @@ fn licensing_dummy_is_a_cluster_capability_every_complete_plan_lists() {
     let plan = plan();
     let mut missing = plan.clone();
     missing.usage.capabilities.clear();
-    let Err(report) = Catalog::validate(&missing, true, false, false) else {
-        panic!("a complete plan lists every catalog capability");
-    };
-    assert!(matches!(
-        report.current_context(),
-        ConditionError::Missing { name } if name == LICENSING_DUMMY
-    ));
+    assert_eq!(
+        Catalog::validate(&missing, true, false, false).assured("a plan may leave it out"),
+        0
+    );
+    assert_eq!(
+        missing
+            .usage
+            .capability(LICENSING_DUMMY)
+            .assured("an absent capability has a state"),
+        Capability::Disabled
+    );
+    let left_out = missing
+        .resolve(&empty_conditions(), resolution_facts(), limits().bytes)
+        .assured("a plan without the capability resolves");
+    assert_eq!(
+        left_out.values().usage.capabilities.get(LICENSING_DUMMY),
+        None,
+        "resolution signs what the plan lists"
+    );
+    let mut unknown = plan.clone();
+    unknown.usage.capabilities.insert(
+        "licensing.unreleased".to_owned(),
+        ConditionValue::Known(Capability::Enabled),
+    );
     assert!(
-        Catalog::validate(&missing, false, false, false).is_ok(),
-        "an override may leave the capability out"
+        matches!(
+            Catalog::validate(&unknown, true, false, false)
+                .err()
+                .assured("a plan names only known capabilities")
+                .current_context(),
+            ConditionError::Unknown { name } if name == "licensing.unreleased"
+        ),
+        "the service refuses a capability it does not know"
+    );
+    assert_eq!(
+        Catalog::validate(&unknown, true, true, false).assured("a receiver ignores it"),
+        1
     );
     let mut overrides = empty_conditions();
     overrides.usage.capabilities.insert(
@@ -212,6 +239,7 @@ fn licensing_dummy_is_a_cluster_capability_every_complete_plan_lists() {
         Catalog::validate(&extension, true, true, false).is_err(),
         "a known name never accepts an extension value"
     );
+    assert!(extension.usage.capability(LICENSING_DUMMY).is_err());
 }
 
 #[test]
