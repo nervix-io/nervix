@@ -3564,8 +3564,10 @@ goes back with the scenario's other fixture ports at the end of cleanup.
 
 ## gRPC Receivers
 
-The node trace-export scenarios start one or three real server processes with `--otel-enabled`,
-separate service names and the scenario's DNS configuration. A local gRPC collector captures their
+The node trace-export scenarios start one or three real server processes with a collector
+endpoint, given as `--otel-otlp-endpoint` or as its environment twin, separate service names and
+the scenario's DNS configuration. One scenario also sets every OpenTelemetry environment variable
+and requires that none of them reaches the export. A local gRPC collector captures their
 OTLP trace requests; the steps decode the current trace schema and require spans from every node
 and a query for the collector's fixture name. This uses the process cluster's existing readiness
 and failure diagnostics. Processes are dropped before the DNS authority, resolver files and

@@ -712,7 +712,13 @@ async fn detached_branch_publishes_buffered_route_output_before_it_stops() {
         .bind_domain_clock(&domain)
         .expect("the fixture installs a running unpaced clock");
     let mut branch = template
-        .instantiate(&runtime, &domain, None, 1)
+        .instantiate(
+            &runtime,
+            &domain,
+            None,
+            1,
+            &RetainedStateOpening::OnNodeExecutor,
+        )
         .await
         .expect("the junction fixture instantiates")
         .into_inner();
@@ -837,7 +843,13 @@ async fn junction_branch_holding(
         .bind_domain_clock(domain)
         .expect("the fixture installs a running unpaced clock");
     let mut branch = template
-        .instantiate(runtime, domain, None, 1)
+        .instantiate(
+            runtime,
+            domain,
+            None,
+            1,
+            &RetainedStateOpening::OnNodeExecutor,
+        )
         .await
         .expect("the junction fixture instantiates")
         .into_inner();

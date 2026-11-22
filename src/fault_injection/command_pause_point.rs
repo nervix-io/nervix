@@ -83,6 +83,7 @@ pub(super) enum CommandPausePoint {
     ProcessorFlushCompletion(DomainNodeRef),
     ProcessorPartitionInstall(DomainNodeRef),
     ProcessorPartitionForget(DomainNodeRef),
+    ProcessorBranchRestore(DomainNodeRef),
     MaterializedRowRelease(DomainNodeRef),
     MaterializedRowTake(DomainNodeRef),
     MaterializedCheckpointSeal(DomainNodeRef),

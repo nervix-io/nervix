@@ -511,6 +511,20 @@ only once the executor admits no more work. VM execution still owns its class an
 [Traffic And Resource Isolation](./interconnect.md#traffic-and-resource-isolation) says, for each
 interconnect protocol, which charges its frames take and what ends their waits.
 
+An owner that must keep serving others while its own work waits submits that work through
+`Executor::reporting_waits_to`, a handle on the same classes, budgets and allowances that admits and
+queues exactly as the node's handle does and also tells the owner's `CapacityWaits` while a
+submission waits for capacity: a job that finds its class's wait queue full, which the class also
+counts among its waiting jobs, or a memory charge its class cannot grant yet. The wait ends when the
+submission takes its place or room, or when its future is dropped. A job admitted at once and a job
+that has its place and waits for a worker never count, because every job passes through that last
+wait however idle the node is. A processor task restores its branches this way: it runs the restore
+alone while the restore makes progress, and answers its commands as unrestored beside it only while
+`CapacityWaits` reports a wait, so a command never overtakes an ordinary restore. The count is a
+watch value: an owner subscribes before it reads, so a wait that begins or ends in between still
+wakes it, and Shuttle checks that the owner sees its job begin and end waiting for a place whichever
+of its watch and the job's wait comes first.
+
 An owner can acquire a charged CPU queue place before transferring mutable state into a job
 (`Executor::prepare_cpu`). Every inferencer does this before moving its branch's native session into the job that runs
 its model on the extension workers; the job hands the session back with its outcome. Dropping the

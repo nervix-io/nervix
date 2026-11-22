@@ -32,6 +32,17 @@ relay is branched by high-cardinality values such as tenant, user, account, or d
 lifecycle metrics identify the parametrizer, not the concrete key. A partitioned relay or processor's series
 carry its partition, whose cardinality is bounded by the partition count its parametrizer declares.
 
+## The Node's Own Traces
+
+A node provisioned with a collector exports the spans its `tracing` instrumentation records to that
+collector over OTLP gRPC. Each span's resource names the configured service and the
+OpenTelemetry SDK's own identity, and nothing else. [Trace Export](node-settings.md#trace-export)
+lists the endpoint, the service name and the sampling, timeout, interval, queue and batch
+capabilities, all shown on each node's `DESCRIBE CLUSTER` capability line. No `OTEL_*`
+environment variable applies: none of them adds a resource attribute or a request header, sets a
+span limit, sampler or batch, or names another collector. A span that finds the export queue full
+is dropped, and export failures never reach connector retries or acknowledgements.
+
 ## Metric Labels
 
 Graph metric series use these labels:

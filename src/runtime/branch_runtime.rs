@@ -1380,7 +1380,13 @@ impl BranchExecutionRuntime {
                     nervix::lifecycle_call,
                     "the missing concrete branch is installed once under its branch key and \
                      incarnation before batch dispatch",
-                    template.instantiate(runtime_handle, domain, key.clone(), incarnation)
+                    template.instantiate(
+                        runtime_handle,
+                        domain,
+                        key.clone(),
+                        incarnation,
+                        &RetainedStateOpening::OnNodeExecutor,
+                    )
                 )
                 .await
                 {
@@ -2305,7 +2311,13 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     for (entry, lifetime) in lifetimes.into_iter().enumerate() {
         nervix_primitives::task::consume_budget().await;
         let state = template
-            .instantiate(runtime, domain, lifetime.key.clone(), lifetime.incarnation)
+            .instantiate(
+                runtime,
+                domain,
+                lifetime.key.clone(),
+                lifetime.incarnation,
+                &RetainedStateOpening::OnNodeExecutor,
+            )
             .await
             .change_context(BranchLruSnapshotError::Restore { entry })?;
         restored.push(RestoredBranch { lifetime, state });

@@ -22,7 +22,9 @@ use nervix_recovery::NoReceiver as _;
 use thiserror::Error;
 
 use crate::{
+    CapacityWaits,
     cancellation::{ArmedCancellation, CancelOnDrop, Cancellation},
+    capacity_waits::CapacityWait,
     executor::SemaphoreRef,
     limits::WorkerClassName,
     memory::Reservation,
@@ -184,13 +186,14 @@ impl WorkerPool {
 
     pub(crate) async fn run<T>(
         &self,
+        waits: Option<&CapacityWaits>,
         reservation: Reservation,
         job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
     ) -> Result<T, Report<ExecutionError>>
     where
         T: Send + 'static,
     {
-        let RunningJob { handle, obligation } = self.start(reservation, job).await?;
+        let RunningJob { handle, obligation } = self.start(waits, reservation, job).await?;
         self.finish(handle.await, obligation)
     }
 
@@ -221,11 +224,12 @@ impl WorkerPool {
     )]
     pub(crate) async fn submit(
         &self,
+        waits: Option<&CapacityWaits>,
         reservation: Reservation,
         job: impl FnOnce(Reservation) + Send + 'static,
     ) -> Result<(), Report<ExecutionError>> {
         let RunningJob { handle, obligation } = self
-            .start(reservation, move |reservation, _| job(reservation))
+            .start(waits, reservation, move |reservation, _| job(reservation))
             .await?;
         obligation.disarm();
         drop(handle);
@@ -234,22 +238,26 @@ impl WorkerPool {
 
     async fn start<T>(
         &self,
+        waits: Option<&CapacityWaits>,
         reservation: Reservation,
         job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
     ) -> Result<RunningJob<T>, Report<ExecutionError>>
     where
         T: Send + 'static,
     {
-        let slot = self.enter_queue().await?;
+        let slot = self.enter_queue(waits).await?;
         let StartingJob { running, started } = self.enqueue(slot, reservation, job);
         started.await.map_err(|cause| self.closed(cause))?;
         Ok(running)
     }
 
-    pub(crate) async fn prepare(&self) -> Result<PreparedWork<'_>, Report<ExecutionError>> {
+    pub(crate) async fn prepare(
+        &self,
+        waits: Option<&CapacityWaits>,
+    ) -> Result<PreparedWork<'_>, Report<ExecutionError>> {
         Ok(PreparedWork {
             pool: self,
-            slot: self.enter_queue().await?,
+            slot: self.enter_queue(waits).await?,
         })
     }
 
@@ -320,8 +328,12 @@ impl WorkerPool {
     /// Take a place in the class's queue, waiting for one while the queue is full. Places go to
     /// waiting jobs in the order they asked; the wait ends with a place, or with `PoolClosed` once
     /// the class admits no more work. A free place is taken at once; only a job that finds the
-    /// queue full counts as waiting, and it waits behind every job that asked before it.
-    async fn enter_queue(&self) -> Result<QueueSlot, Report<ExecutionError>> {
+    /// queue full counts as waiting, in its class and to the owner its caller reports waits to,
+    /// and it waits behind every job that asked before it.
+    async fn enter_queue(
+        &self,
+        waits: Option<&CapacityWaits>,
+    ) -> Result<QueueSlot, Report<ExecutionError>> {
         let permit = match StdArc::clone(&self.inner.queue_permits).try_acquire_owned() {
             Ok(permit) => permit,
             Err(TryAcquireError::Closed) => {
@@ -330,7 +342,7 @@ impl WorkerPool {
                 }));
             }
             Err(TryAcquireError::NoPermits) => {
-                let _waiting = WaitingForPlace::enter(&self.inner);
+                let _waiting = WaitingForPlace::enter(&self.inner, waits);
                 StdArc::clone(&self.inner.queue_permits)
                     .acquire_owned()
                     .await
@@ -581,16 +593,21 @@ fn elapsed_nanos(started_at: Instant) -> u64 {
     )
 }
 
-/// One job counted in its class's `waiting` from the moment it found the wait queue full until it
-/// takes a place, its pool closes or its caller drops the wait.
+/// One job counted in its class's `waiting`, and told to the owner its caller reports waits to,
+/// from the moment it found the wait queue full until it takes a place, its pool closes or its
+/// caller drops the wait.
 struct WaitingForPlace<'pool> {
     pool: &'pool PoolShared,
+    _told: Option<CapacityWait<'pool>>,
 }
 
 impl<'pool> WaitingForPlace<'pool> {
-    fn enter(pool: &'pool PoolShared) -> Self {
+    fn enter(pool: &'pool PoolShared, waits: Option<&'pool CapacityWaits>) -> Self {
         pool.waiting.fetch_add(1, Ordering::AcqRel);
-        Self { pool }
+        Self {
+            pool,
+            _told: waits.map(CapacityWaits::begin_wait),
+        }
     }
 }
 
@@ -683,7 +700,7 @@ mod queue_admission_checks {
         let queued_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget has room");
-        let mut queued = Box::pin(pool.start(queued_charge, |_, _| ()));
+        let mut queued = Box::pin(pool.start(None, queued_charge, |_, _| ()));
         let queued_state = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
         assert!(
             queued_state.is_pending(),
@@ -694,7 +711,7 @@ mod queue_admission_checks {
         let waiting_charge = executor
             .try_reserve(MemoryClass::Relay, 4096)
             .assured("the relay budget has room for the waiting job");
-        let mut waiting = Box::pin(pool.start(waiting_charge, |_, _| 7));
+        let mut waiting = Box::pin(pool.start(None, waiting_charge, |_, _| 7));
         let waiting_state = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
         assert!(
             waiting_state.is_pending(),
@@ -760,7 +777,7 @@ mod simulation_checks {
         let queued_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget has room");
-        let mut queued = Box::pin(pool.start(queued_charge, |_, _| ()));
+        let mut queued = Box::pin(pool.start(None, queued_charge, |_, _| ()));
         let state = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
         assert!(matches!(state, Poll::Pending));
         assert_eq!(pool.snapshot().pending, 1);
@@ -769,7 +786,7 @@ mod simulation_checks {
         let waiting_charge = executor
             .try_reserve(MemoryClass::Relay, 2048)
             .assured("worker queue pressure does not consume memory admission");
-        let mut waiting = Box::pin(pool.start(waiting_charge, |_, _| ()));
+        let mut waiting = Box::pin(pool.start(None, waiting_charge, |_, _| ()));
         let state = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
         assert!(
             matches!(state, Poll::Pending),
@@ -789,7 +806,7 @@ mod simulation_checks {
             .try_reserve(MemoryClass::Relay, 4096)
             .assured("the dropped waiter returned its charge");
         let next = pool
-            .start(next_charge, |_, _| ())
+            .start(None, next_charge, |_, _| ())
             .await
             .assured("the dropped waiter returned its queue place");
         next.handle
@@ -814,7 +831,7 @@ mod simulation_checks {
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the untouched relay budget admits the first job");
         let first_completed = completed.clone();
-        let mut first = Box::pin(pool.start(first_charge, move |_, _| {
+        let mut first = Box::pin(pool.start(None, first_charge, move |_, _| {
             first_completed
                 .send(1)
                 .assured("the test holds the completion receiver");
@@ -825,7 +842,7 @@ mod simulation_checks {
         let second_charge = executor
             .try_reserve(MemoryClass::Relay, 1024)
             .assured("the relay budget admits the second job");
-        let mut second = Box::pin(pool.start(second_charge, move |_, _| {
+        let mut second = Box::pin(pool.start(None, second_charge, move |_, _| {
             completed
                 .send(2)
                 .assured("the test holds the completion receiver");
@@ -870,7 +887,7 @@ mod simulation_checks {
             .assured("the untouched management budget has room");
         let observed = executor.clone();
         let RunningJob { handle, obligation } = pool
-            .start(charge, move |_, cancellation| {
+            .start(None, charge, move |_, cancellation| {
                 (
                     cancellation.check().is_err(),
                     observed.snapshot().management_memory.reserved_bytes,

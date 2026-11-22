@@ -38,6 +38,9 @@
 //! owner waits for that charge while holding nothing and runs the job again under it
 //! ([`Executor::run_cpu_growing`]).
 //!
+//! An owner that must keep serving others while its own work waits submits through a handle that
+//! tells it, with [`CapacityWaits`], while that work waits for a place or for memory room.
+//!
 //! A class bounds admission, not threads. Jobs run on the process-wide Tokio blocking pool, and a
 //! class's worker count is the number of its jobs that may be on that pool at once — taken before
 //! the job is submitted, so a class can never hand the pool more than it is allowed. What a class
@@ -67,6 +70,7 @@
 )]
 
 mod cancellation;
+mod capacity_waits;
 mod executor;
 mod growing;
 mod limits;
@@ -94,6 +98,7 @@ pub use settings::{
 
 pub use crate::{
     cancellation::{Cancellation, Cancelled},
+    capacity_waits::CapacityWaits,
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
     growing::Attempt,
     limits::{

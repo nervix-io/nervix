@@ -100,7 +100,13 @@ impl LaneRelays {
 
     async fn entrypoint_branch(&self, key: &Option<BranchKey>) -> BranchInstanceRuntime {
         self.template
-            .instantiate(&self.runtime, &self.domain, key.clone(), 1)
+            .instantiate(
+                &self.runtime,
+                &self.domain,
+                key.clone(),
+                1,
+                &RetainedStateOpening::OnNodeExecutor,
+            )
             .await
             .expect("the junction template instantiates on the test domain")
     }

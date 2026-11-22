@@ -833,6 +833,8 @@ pub(super) struct WindowSnapshotSchemas<'a> {
     pub(super) arguments: &'a StdArc<ArrowSchema>,
 }
 
+/// Decode a sealed window checkpoint for the branch lifetime `lifetime` names, its decoding jobs
+/// waiting for places on the bulk workers.
 pub(super) async fn decode_window_processor_snapshot(
     payload: &[u8],
     executor: &Executor,
@@ -843,7 +845,8 @@ pub(super) async fn decode_window_processor_snapshot(
     else {
         return Ok(None);
     };
-    let decoded = decode_window_processor_layout(payload, executor, schemas, layout).await?;
+    let decoded =
+        decode_window_processor_layout(payload, executor, schemas, layout).await?;
     Ok(Some(decoded.snapshot))
 }
 
@@ -855,6 +858,11 @@ pub(in crate::runtime) struct AdmittedWindowSnapshot {
     pub(in crate::runtime) metadata: Option<nervix_execution::Reservation>,
 }
 
+/// Open the two Arrow sections of a parsed window checkpoint, their decoding jobs waiting for
+/// places on the bulk workers.
+///
+/// A processor task's restore decodes through an executor handle that tells the task while it
+/// waits, and the task answers its commands meanwhile.
 pub(in crate::runtime) async fn decode_window_processor_layout(
     payload: &[u8],
     executor: &Executor,
@@ -865,10 +873,6 @@ pub(in crate::runtime) async fn decode_window_processor_layout(
     let header = &layout.header;
     let input = &payload[layout.input.clone()];
     let arguments = &payload[layout.arguments.clone()];
-    // Every caller of this decode answers someone at once: a processor task restores its branches
-    // inline before it answers its commands, and archives and inspection are requests. A full bulk
-    // queue therefore fails the decode rather than holding the caller: a processor keeps answering
-    // as unrestored and retries on its backoff, and the checkpoint it reads stays where it is.
     let mut input = RestoredMaterializedSnapshot::open(
         executor,
         schemas.input,
@@ -958,7 +962,8 @@ impl ReplicatedWindowProcessorState {
         Self::from_generations(placement, generations)
     }
 
-    /// Build the live window a branch task owns from the window published last.
+    /// Build the live window a branch task owns from the window published last, opening a sealed
+    /// window on `executor`, whose decoding jobs wait for places on the bulk workers.
     pub(super) async fn restore_state(
         &self,
         plan: &WindowAccumulatorPlan,

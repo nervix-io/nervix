@@ -6100,6 +6100,21 @@ selections = [
   "deloxide-stress",
   "deloxide-stress-restore",
 ]
+
+[[workload]]
+coverage = "A raised resource quota is validated against the database volume each admitted node's committed claim carries, in the application pre-check and the replicated apply, and is refused naming the node on one and three nodes; the last node then restarts under the unchanged value. The check reads immutable claims and adds no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.resource-quota-volume"
+invariant = "A committed resource quota always fits the database volume of every admitted node."
+invocation = "cluster-parameters"
+scenario = "A resource quota above a node's database volume is refused, naming the node, on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 [[workload]]
 coverage = "Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
 examples = 2

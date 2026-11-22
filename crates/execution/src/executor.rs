@@ -7,20 +7,25 @@ use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
 
 use crate::{
-    AdmissionError, Cancellation, ChargedBytes, CpuClass, ExecutionConfig, ExecutionConfigError,
-    ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits, PreparedCpu, Reservation,
-    StorageClass, WorkerClassSnapshot, memory::MemoryBudget, workers::WorkerPool,
+    AdmissionError, Cancellation, CapacityWaits, ChargedBytes, CpuClass, ExecutionConfig,
+    ExecutionConfigError, ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits,
+    PreparedCpu, Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget,
+    workers::WorkerPool,
 };
 
 /// The node's execution and memory admission, shared by every owner that runs variable-size work.
 ///
 /// Cloning it is one refcount: every class, budget and counter lives behind the single inner
 /// allocation. An executor within an allowance ([`Executor::reserve_allowance`]) also carries the
-/// allowances it draws from.
+/// allowances it draws from, and a handle from [`Self::reporting_waits_to`] holds its owner's
+/// [`CapacityWaits`], a second refcount, because that owner keeps the count to watch it.
 #[derive(Clone, Debug)]
 pub struct Executor {
     inner: Arc<ExecutorInner>,
     scope: Option<StdArc<AllowanceScope>>,
+    /// The owner told while work submitted through this handle waits for capacity. Only a handle
+    /// from [`Self::reporting_waits_to`], and the handles drawn from it, have one.
+    waits: Option<CapacityWaits>,
 }
 
 /// The allowances an executor draws from, innermost first: each is the budget of its class for
@@ -173,6 +178,17 @@ impl Default for Executor {
 }
 
 impl Executor {
+    /// A handle on the same classes, budgets and allowances that tells `waits` while work submitted
+    /// through it waits for a place in a full wait queue or for room in a memory class. It admits
+    /// and queues exactly as this handle does; only the telling is added.
+    pub fn reporting_waits_to(&self, waits: &CapacityWaits) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            scope: self.scope.clone(),
+            waits: Some(waits.clone()),
+        }
+    }
+
     /// Build the executor from limits that are validated together, so a node whose budgets cannot
     /// hold the largest operation it is configured to accept fails at startup instead of stalling
     /// on the first one.
@@ -254,6 +270,7 @@ impl Executor {
                 ),
                 limits: validated.limits,
             }),
+            waits: None,
         })
     }
 
@@ -301,7 +318,7 @@ impl Executor {
         class: MemoryClass,
         bytes: u64,
     ) -> Result<Reservation, Report<AdmissionError>> {
-        self.budget(class).reserve(bytes).await
+        self.budget(class).reserve(bytes, self.waits.as_ref()).await
     }
 
     /// Charge `class` for an allocation the caller already holds, and take ownership of it. The
@@ -345,7 +362,9 @@ impl Executor {
     where
         T: Send + 'static,
     {
-        self.cpu_pool(class).run(reservation, job).await
+        self.cpu_pool(class)
+            .run(self.waits.as_ref(), reservation, job)
+            .await
     }
 
     /// Wait for a charged place in `class`'s queue before the caller transfers mutable state into
@@ -357,7 +376,7 @@ impl Executor {
         class: CpuClass,
         reservation: Reservation,
     ) -> Result<PreparedCpu<'_>, Report<ExecutionError>> {
-        let place = self.cpu_pool(class).prepare().await?;
+        let place = self.cpu_pool(class).prepare(self.waits.as_ref()).await?;
         Ok(PreparedCpu { place, reservation })
     }
 
@@ -375,7 +394,9 @@ impl Executor {
     where
         T: Send + 'static,
     {
-        self.storage_pool(class).run(reservation, job).await
+        self.storage_pool(class)
+            .run(self.waits.as_ref(), reservation, job)
+            .await
     }
 
     /// Submit one storage job and return once it is running off the async workers.
@@ -389,7 +410,9 @@ impl Executor {
         reservation: Reservation,
         job: impl FnOnce(Reservation) + Send + 'static,
     ) -> Result<(), Report<ExecutionError>> {
-        self.storage_pool(class).submit(reservation, job).await
+        self.storage_pool(class)
+            .submit(self.waits.as_ref(), reservation, job)
+            .await
     }
 
     pub fn snapshot(&self) -> ExecutorSnapshot {
@@ -451,6 +474,8 @@ impl Executor {
                 budget: MemoryBudget::allowance(share),
                 outer: self.scope.clone(),
             })),
+            // Work drawn from the allowance still tells this handle's owner while it waits.
+            waits: self.waits.clone(),
         })
     }
 
