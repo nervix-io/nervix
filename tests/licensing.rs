@@ -1406,6 +1406,30 @@ async fn enable_capability(world: &mut ScenarioWorld, name: String) {
         .await;
 }
 
+#[given(expr = "the licensing service does not know the capability {string}")]
+async fn service_without_capability(world: &mut ScenarioWorld, name: String) {
+    world
+        .licensing_service
+        .as_ref()
+        .verified("the fixture started its HTTPS licensing service")
+        .configure(|model| model.sign_without_capability(name))
+        .await;
+}
+
+#[given(
+    expr = "the licensing service enables the capability {string}, which the cluster does not know"
+)]
+async fn service_with_unknown_capability(world: &mut ScenarioWorld, name: String) {
+    use nervix_licensing_protocol::conditions::Capability;
+
+    world
+        .licensing_service
+        .as_ref()
+        .verified("the fixture started its HTTPS licensing service")
+        .configure(|model| model.sign_unknown_capability(name, Capability::Enabled))
+        .await;
+}
+
 #[when(expr = "the licensing service sets the domain quota to {int} with {int} seconds of grace")]
 async fn set_domain_quota_with_grace(world: &mut ScenarioWorld, limit: u64, seconds: u64) {
     use nervix_licensing_protocol::conditions::{
