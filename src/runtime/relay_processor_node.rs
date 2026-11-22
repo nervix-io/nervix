@@ -2196,7 +2196,13 @@ mod tests {
                 );
             }
             let mut branch = template
-                .instantiate(&runtime, &domain, None, 1)
+                .instantiate(
+                    &runtime,
+                    &domain,
+                    None,
+                    1,
+                    &RetainedStateOpening::RefusedWhenFull,
+                )
                 .await
                 .assured("the branch instantiates on the test domain")
                 .into_inner();

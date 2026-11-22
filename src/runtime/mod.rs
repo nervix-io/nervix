@@ -594,7 +594,9 @@ use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,
     materialize_ingestor_route_template, parse_branch_flush_policy, parse_input_collect_policy,
 };
-use processor_branch_restore::PendingProcessorBranchRestore;
+use processor_branch_restore::{
+    PendingProcessorBranchRestore, ProcessorBranchRestoreAttempt, RestoreProgress,
+};
 use processor_branch_task::{
     PreparedProcessorBranch, ProcessorBranchCommand, ProcessorBranchHandoff,
     ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
@@ -622,7 +624,7 @@ pub(crate) use processor_state_inspection::{
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
-    wasm_guest_call_schemas, wasm_instance_next_deadline,
+    RetainedStateOpening, wasm_guest_call_schemas, wasm_instance_next_deadline,
 };
 use processors::{
     BranchInstanceTemplate, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,

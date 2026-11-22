@@ -911,6 +911,7 @@ mod tests {
         let resident_native = decode_window_processor_snapshot(
             &native,
             executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             WindowSnapshotSchemas {
                 input: &input,
                 arguments: &arguments,
@@ -1047,6 +1048,7 @@ mod tests {
         decode_window_processor_snapshot(
             &checkpoint,
             executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             WindowSnapshotSchemas {
                 input: &input,
                 arguments: &arguments,

@@ -1140,8 +1140,9 @@ same branch key cannot inherit the evicted window or its sketch panes. After the
 the owner releases the evicted branch's in-memory publication. A branch that appears without a
 restored lifecycle entry also publishes an empty initial window, even if a previous lifetime of its
 key left a checkpoint behind. A processor task therefore installs every branch its lifecycle names
-before it dequeues any input, and a restore the bulk executor refuses installs none of them and is
-attempted again; see [Restoring Processor Branches](./shutdown.md#restoring-processor-branches).
+before it dequeues any input, and a restore that finds the bulk executor full waits for a place and
+installs none of them until it has every branch built; see [Restoring Processor
+Branches](./shutdown.md#restoring-processor-branches).
 Stopping a branch for an ownership handoff follows the normal finalization path and publishes its
 retained window instead.
 The branch lifecycle and window checkpoint carry the same incarnation, assigned when the concrete
