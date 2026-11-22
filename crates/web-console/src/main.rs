@@ -2386,9 +2386,16 @@ fn submit_create_command(
         lines.push(TermLine::prompt(presentation.clone(), prompt_transaction));
     });
     let transaction = transaction_status.get_untracked();
-    let expected_transaction_position = match &transaction {
-        Some(status) if status.lifecycle().is_active() => Some(status.accepted_operations()),
-        Some(_) | None => None,
+    // Inside the session's transaction a request names a domain, as every REPL request does: the
+    // server places a statement against the transaction's domain before it decides whether the
+    // transaction can queue it, so a cluster statement without one would be refused for the
+    // missing domain instead of with the transaction's refusal.
+    let (expected_transaction_position, domain) = match &transaction {
+        Some(status) if status.lifecycle().is_active() => (
+            Some(status.accepted_operations()),
+            domain.or_else(|| Some(status.domain().clone())),
+        ),
+        Some(_) | None => (None, domain),
     };
     let context = CreateCommandContext {
         attempt,
@@ -13821,6 +13828,54 @@ mod tests {
                 attempt,
                 revision,
             );
+        });
+    }
+
+    /// A cluster statement names no domain of its own. Outside a transaction its request names
+    /// none; inside the session's transaction it names the transaction's domain, so the server
+    /// refuses it as a statement the transaction cannot queue rather than for a missing domain.
+    #[test]
+    fn a_cluster_statement_inside_a_transaction_names_the_transaction_domain() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let submitted_domain = || {
+                signals.create.open(CreateKind::User, None, "trigger");
+                let (attempt, revision) = signals.create.begin_submission(true);
+                let (sender, mut receiver) = request_handoff();
+                submit_create_command(
+                    signals,
+                    RwSignal::new(Some(sender)),
+                    CreateKind::User,
+                    "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                    CommandDispatch {
+                        query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
+                        domain: None,
+                        resource: None,
+                        created_domain: None,
+                    },
+                    attempt,
+                    revision,
+                );
+                let ConsoleRequest::Command { request, .. } = receiver
+                    .try_take()
+                    .assured("the shared command queue receives the form command")
+                else {
+                    panic!("a form submission sends a command request");
+                };
+                request.domain
+            };
+
+            assert_eq!(submitted_domain(), None);
+            let transaction = TransactionStatus::new(
+                "attached".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(0),
+                0,
+            )
+            .assured("the open test transaction has accepted no operation");
+            signals.transaction_status.set(Some(transaction));
+            assert_eq!(submitted_domain(), Some(domain_name("demo")));
         });
     }
 

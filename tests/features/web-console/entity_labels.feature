@@ -257,7 +257,7 @@ Feature: Web console entity labels
     When selector ".labels-new-add" is clicked
     And selector ".labels-new-row[data-row='0'] .labels-new-key" is filled with "three"
     And selector ".create-submit" is clicked
-    Then selector ".create-validation" contains "ENTITY_LABELS_MAX_COUNT: 3 > 2"
+    Then selector ".create-validation" contains "label set exceeds entity-labels-max-count: 3 > 2"
     And selector ".terminal" does not contain "SET LABELS ON SCHEMA readings"
     When selector ".labels-entry[data-key='two'] .labels-entry-remove" is clicked
     And selector ".labels-new-add" is clicked
