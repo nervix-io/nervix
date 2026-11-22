@@ -22,8 +22,10 @@
 )]
 
 use error_stack::ResultExt as _;
+use nervix_execution::CapacityWaits;
 
 use super::{
+    capacity_attempt::{CapacityAttempt, DetachedAttempt},
     materialized_read::MaterializedStateWait,
     processor_partition_moves::{
         ClaimProgress, ClaimProgressOutcome, HolderKeyRequest, HolderStep, ProcessorBranchSlot,
@@ -335,8 +337,8 @@ pub(super) async fn run_processor_node_runtime(
         runtime_handle,
         domain,
     } = context;
-    // A claimed branch whose build waits for capacity goes on on a task of its own, which shares
-    // the template rather than copying it.
+    // Builds that wait for capacity go on on tasks of their own, which share the template rather
+    // than copy it.
     let mut template = Arc::new(template);
     let processor = template.owner.node.identifier.clone();
     let domain_clock = match nervix_primitives::expect_lint!(
@@ -419,6 +421,17 @@ pub(super) async fn run_processor_node_runtime(
         .filter(|reset| reset.phase() == nervix_models::WasmStateResetPhase::Publishing);
     let mut prepared_reset = None::<PreparedWasmStateReset>;
     let mut moves = None::<ProcessorPartitionMoves>;
+    // The first batch of a key the unit had not seen, waiting for its branch's build, which goes on
+    // beside the unit's state inspections and maintenance; every other event follows it.
+    let mut pending_build = None::<PendingBranchBuild>;
+
+    /// What the task woke for while a key's first branch waits to be built.
+    enum BesideBuild<E> {
+        /// The build ended, or the runtime ended it as it shut down.
+        Built(Option<NewBranchBuild>),
+        /// The unit's relays or commands delivered an event.
+        Event(E),
+    }
 
     let mut handoff_response = None;
     loop {
@@ -533,7 +546,12 @@ pub(super) async fn run_processor_node_runtime(
             }
             did_scheduled_work = true;
         }
-        if pending_restore.is_none() && !ownership_frozen && Instant::now() >= next_expiration_scan
+        // An expiry scan changes the branch registry, which a pending build's lifetime was
+        // allocated from, so it waits for the build.
+        if pending_restore.is_none()
+            && pending_build.is_none()
+            && !ownership_frozen
+            && Instant::now() >= next_expiration_scan
         {
             if let Some(branch_ttl) = template.branch_ttl {
                 expire_processor_branch_instances(
@@ -599,6 +617,8 @@ pub(super) async fn run_processor_node_runtime(
         } else {
             let mut next_maintenance = match pending_restore.as_ref() {
                 Some(restore) => restore.retry_at(),
+                // The build's end wakes the task, and the expiry scan waits for it.
+                None if pending_build.is_some() => next_lru_snapshot,
                 None => next_expiration_scan.min(next_lru_snapshot),
             };
             if let Some(retry_at) = moves.as_ref().and_then(ProcessorPartitionMoves::next_retry) {
@@ -631,12 +651,12 @@ pub(super) async fn run_processor_node_runtime(
             Some(moves) => moves.is_full(),
             None => false,
         };
-        let next = match restore_attempt.as_mut() {
+        let next = match (restore_attempt.as_mut(), pending_build.as_mut()) {
             // While its restore waits for capacity the task answers its commands beside it, as
             // unrestored, and runs the attempt alone again once it no longer waits. Dropping the
             // interaction's wait loses nothing: what it collected and every pending command stay
             // in the interaction for its next call.
-            Some(attempt) => nervix_primitives::select! {
+            (Some(attempt), _) => nervix_primitives::select! {
                 biased;
                 () = nervix_primitives::expect_lint!(
                     nervix::lifecycle_call,
@@ -646,7 +666,41 @@ pub(super) async fn run_processor_node_runtime(
                 ) => None,
                 next = interaction.next_with_input(wake, false) => Some(next),
             },
-            None => Some(
+            // While a key's first branch waits to be built the task takes no new input. It answers
+            // what goes beside the build, and installs the build once it ends.
+            (None, Some(pending)) => {
+                let woke = nervix_primitives::select! {
+                    biased;
+                    built = nervix_primitives::expect_lint!(
+                        nervix::lifecycle_call,
+                        "a key's first batch waits for the build of its branch once",
+                        pending.ended()
+                    ) => BesideBuild::Built(built),
+                    next = interaction.next_with_input(wake, false) => BesideBuild::Event(next),
+                };
+                match woke {
+                    BesideBuild::Built(built) => {
+                        let pending = pending_build
+                            .take()
+                            .verified("the build that just ended is the pending one");
+                        let dispatch = ProcessorNodeDispatchContext {
+                            runtime_handle: &runtime_handle,
+                            domain: &domain,
+                            template: &template,
+                            domain_clock: &domain_clock,
+                        };
+                        nervix_primitives::expect_lint!(
+                            nervix::lifecycle_call,
+                            "a key's first batch installs the branch built for it once",
+                            pending.finish(&dispatch, &mut instances, built)
+                        )
+                        .await;
+                        None
+                    }
+                    BesideBuild::Event(next) => Some(next),
+                }
+            }
+            (None, None) => Some(
                 interaction
                     .next_with_input(wake, pending_restore.is_none() && !parked_full)
                     .await,
@@ -670,6 +724,30 @@ pub(super) async fn run_processor_node_runtime(
             }
         };
         let (event, work) = work.into_parts();
+        // A key's first branch that waits to be built goes on beside the unit's state inspections
+        // and maintenance. Every other event follows it, in the order it arrived: input a drain
+        // delivers, and every command that drains input, changes the unit's branches or
+        // dispatches input.
+        let beside_a_build = matches!(
+            &event,
+            RelayInteractionEvent::Command(ProcessorNodeCommand::SelectStateBranches { .. })
+                | RelayInteractionEvent::Wake
+                | RelayInteractionEvent::ForceFlush(_)
+        );
+        if !beside_a_build && let Some(pending) = pending_build.take() {
+            let dispatch = ProcessorNodeDispatchContext {
+                runtime_handle: &runtime_handle,
+                domain: &domain,
+                template: &template,
+                domain_clock: &domain_clock,
+            };
+            nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "a key's first batch waits for and installs the branch built for it once",
+                pending.complete(&dispatch, &mut instances)
+            )
+            .await;
+        }
         match event {
             RelayInteractionEvent::Batch { relay, batch } => {
                 let work = work.verified(
@@ -708,8 +786,8 @@ pub(super) async fn run_processor_node_runtime(
                     None => Some(input),
                 };
                 if let Some(input) = input {
-                    dispatch_processor_node_input(
-                        ProcessorNodeDispatchContext {
+                    let dispatched = dispatch_processor_node_input_beside_builds(
+                        &ProcessorNodeDispatchContext {
                             runtime_handle: &runtime_handle,
                             domain: &domain,
                             template: &template,
@@ -721,6 +799,9 @@ pub(super) async fn run_processor_node_runtime(
                         input.work,
                     )
                     .await;
+                    if let DispatchedInput::Building(pending) = dispatched {
+                        pending_build = Some(pending);
+                    }
                 }
             }
             RelayInteractionEvent::Wake => {}
@@ -1008,6 +1089,22 @@ pub(super) async fn run_processor_node_runtime(
         }
     }
 
+    // A key's first batch whose branch still waits to be built is work in motion, so the task's
+    // end waits for the build and delivers the batch.
+    if let Some(pending) = pending_build.take() {
+        let dispatch = ProcessorNodeDispatchContext {
+            runtime_handle: &runtime_handle,
+            domain: &domain,
+            template: &template,
+            domain_clock: &domain_clock,
+        };
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "a key's first batch waits for and installs the branch built for it once",
+            pending.complete(&dispatch, &mut instances)
+        )
+        .await;
+    }
     // An attempt still in progress ends here: its build gives up its place in line and drops the
     // branches it built unstarted, so the task's successor, or its next start, restores them.
     drop(restore_attempt);
@@ -1082,10 +1179,41 @@ pub(super) async fn run_processor_node_runtime(
 pub(super) struct ProcessorNodeDispatchContext<'a> {
     pub(super) runtime_handle: &'a Runtime,
     pub(super) domain: &'a DomainName,
-    pub(super) template: &'a BranchInstanceTemplate,
+    pub(super) template: &'a Arc<BranchInstanceTemplate>,
     pub(super) domain_clock: &'a DomainClock,
 }
 
+/// What dispatching one batch left to do.
+pub(super) enum DispatchedInput {
+    /// The batch reached its branch, or was answered.
+    Done,
+    /// The batch's key had no branch, and the branch's build waits for capacity on a task of its
+    /// own. The batch follows the build.
+    Building(PendingBranchBuild),
+}
+
+/// The first batch of a key the unit had not seen, waiting for the build of its branch.
+pub(super) struct PendingBranchBuild {
+    first: FirstBatch,
+    build: DetachedAttempt<NewBranchBuild>,
+}
+
+/// The first batch of a key the unit had not seen, with the time it was accepted and the lifetime
+/// its branch is built for.
+struct FirstBatch {
+    key: Option<BranchKey>,
+    relay: RelayName,
+    batch: RelayRecordBatch,
+    work: NodeQuiesceWorkGuard,
+    accepted_at: Timestamp,
+    incarnation: u64,
+}
+
+/// A new key's branch, built and not started yet, or why it could not be built.
+type NewBranchBuild = error_stack::Result<PreparedProcessorBranch, ProcessorBranchTaskError>;
+
+/// Dispatch one batch to its branch, building the branch when its key has none and waiting for
+/// that build however long it waits for capacity, as input that other input follows in order does.
 pub(super) async fn dispatch_processor_node_input(
     context: ProcessorNodeDispatchContext<'_>,
     instances: &mut ProcessorBranches,
@@ -1093,12 +1221,40 @@ pub(super) async fn dispatch_processor_node_input(
     batch: RelayRecordBatch,
     dequeued_work: NodeQuiesceWorkGuard,
 ) {
+    let dispatched = dispatch_processor_node_input_beside_builds(
+        &context,
+        instances,
+        relay,
+        batch,
+        dequeued_work,
+    )
+    .await;
+    if let DispatchedInput::Building(pending) = dispatched {
+        nervix_primitives::expect_lint!(
+            nervix::lifecycle_call,
+            "a key's first batch waits for the build of its branch once",
+            pending.complete(&context, instances)
+        )
+        .await;
+    }
+}
+
+/// Dispatch one batch to its branch. When the batch's key has no branch, the dispatch builds one,
+/// alone while the build makes progress; a build that waits for capacity goes on on a task of its
+/// own and comes back with the batch, which follows it.
+pub(super) async fn dispatch_processor_node_input_beside_builds(
+    context: &ProcessorNodeDispatchContext<'_>,
+    instances: &mut ProcessorBranches,
+    relay: RelayName,
+    batch: RelayRecordBatch,
+    dequeued_work: NodeQuiesceWorkGuard,
+) -> DispatchedInput {
     let ProcessorNodeDispatchContext {
         runtime_handle,
         domain,
         template,
         domain_clock,
-    } = context;
+    } = *context;
     let key = batch.key.clone();
     // Branch activity is the domain time at which this input was accepted. The supervisor reads it
     // here, after the wait that delivered the batch, so an idle supervisor never records the
@@ -1116,7 +1272,7 @@ pub(super) async fn dispatch_processor_node_input(
                     branch: BranchScope::from(&key),
                 }),
             );
-            return;
+            return DispatchedInput::Done;
         }
     };
     if (key
@@ -1132,29 +1288,175 @@ pub(super) async fn dispatch_processor_node_input(
     {
         instances.replace_key(key.clone());
     }
-    let instance = if let Some(state) = instances.touch(&key, accepted_at) {
-        GetOrCreateBranchInstance {
-            state,
-            created: false,
+    if let Some(state) = instances.touch(&key, accepted_at) {
+        deliver_processor_node_input(context, instances, state, key, relay, batch, dequeued_work)
+            .await;
+        return DispatchedInput::Done;
+    }
+    let first = FirstBatch {
+        key,
+        relay,
+        batch,
+        work: dequeued_work,
+        accepted_at,
+        incarnation: instances.next_incarnation(),
+    };
+    let mut attempt = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "the missing or replacement concrete branch builds one retained task under its branch key \
+         and incarnation",
+        first.begin_build(runtime_handle, domain, template)
+    );
+    let progress = nervix_primitives::expect_lint!(
+        nervix::lifecycle_call,
+        "a key's first batch builds its branch once, and the unit answers nothing while the build \
+         makes progress",
+        attempt.run_until_waiting()
+    )
+    .await;
+    match progress {
+        AttemptProgress::Ended => {
+            let built = attempt
+                .into_outcome()
+                .verified("the attempt whose build just ended holds its outcome");
+            nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "a key's first batch installs the branch built for it once",
+                first.install(context, instances, built)
+            )
+            .await;
+            DispatchedInput::Done
         }
-    } else {
-        let incarnation = instances.next_incarnation();
-        let state = match nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the missing or replacement concrete branch installs one retained task under its \
-             branch key and incarnation",
-            spawn_processor_branch_task(
-                ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone()),
-                template,
-                key.clone(),
-                VecDeque::new(),
+        AttemptProgress::Waiting => DispatchedInput::Building(PendingBranchBuild {
+            first,
+            build: nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "a key's first branch whose build waits for capacity continues it once, on a task \
+                 of its own",
+                attempt.detach()
+            ),
+        }),
+    }
+}
+
+impl PendingBranchBuild {
+    /// The build's outcome once it ends, or nothing when the runtime ended it as it shut down.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a key's first batch waits for the build of its branch once"
+        )
+    )]
+    pub(super) async fn ended(&mut self) -> Option<NewBranchBuild> {
+        self.build.ended().await
+    }
+
+    /// Install what the build produced and deliver the batch that waited for it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a key's first batch installs the branch built for it once"
+        )
+    )]
+    pub(super) async fn finish(
+        self,
+        context: &ProcessorNodeDispatchContext<'_>,
+        instances: &mut ProcessorBranches,
+        built: Option<NewBranchBuild>,
+    ) {
+        let Self { first, build } = self;
+        drop(build);
+        match built {
+            Some(built) => first.install(context, instances, built).await,
+            // The unit is ending with its runtime: the batch's source sends it again.
+            None => first.refuse("the processor unit stopped before its key's branch was built"),
+        }
+    }
+
+    /// Wait for the build to end, then install it and deliver the batch that waited for it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a key's first batch waits for and installs the branch built for it once"
+        )
+    )]
+    pub(super) async fn complete(
+        mut self,
+        context: &ProcessorNodeDispatchContext<'_>,
+        instances: &mut ProcessorBranches,
+    ) {
+        let built = self.ended().await;
+        self.finish(context, instances, built).await;
+    }
+}
+
+impl FirstBatch {
+    /// Begin building the batch's branch as an attempt, opening its retained state through an
+    /// executor handle that tells the attempt while the build waits for a place or for room.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(lifecycle, reason = "a key's first batch builds its branch once")
+    )]
+    fn begin_build(
+        &self,
+        runtime: &Runtime,
+        domain: &DomainName,
+        template: &Arc<BranchInstanceTemplate>,
+    ) -> CapacityAttempt<NewBranchBuild> {
+        let waits = CapacityWaits::new();
+        let opening =
+            RetainedStateOpening::ReportingWaits(runtime.executor().reporting_waits_to(&waits));
+        let context = ProcessorRuntimeContext::new(runtime.clone(), domain.clone());
+        let template = Arc::clone(template);
+        let key = self.key.clone();
+        let incarnation = self.incarnation;
+        CapacityAttempt::start(waits, async move {
+            PreparedProcessorBranch::prepare(
+                context,
+                &template,
+                key,
                 ProcessorBranchLifetime::Appeared,
                 incarnation,
+                &opening,
             )
+            .await
+        })
+    }
+
+    /// Start the branch built for the batch, record it under the lifetime it was built for, and
+    /// deliver the batch to it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a key's first batch installs the branch built for it once"
         )
-        .await
-        {
-            Ok(state) => state,
+    )]
+    async fn install(
+        self,
+        context: &ProcessorNodeDispatchContext<'_>,
+        instances: &mut ProcessorBranches,
+        built: NewBranchBuild,
+    ) {
+        let ProcessorNodeDispatchContext {
+            runtime_handle,
+            domain,
+            template,
+            ..
+        } = *context;
+        let Self {
+            key,
+            relay,
+            batch,
+            work: dequeued_work,
+            accepted_at,
+            incarnation,
+        } = self;
+        let prepared = match built {
+            Ok(prepared) => prepared,
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     domain,
@@ -1167,14 +1469,16 @@ pub(super) async fn dispatch_processor_node_input(
                 return;
             }
         };
+        // Nothing changes the branch registry while a key's first branch is built, so the
+        // registry records the branch under the lifetime it was built for.
+        debug_assert_eq!(
+            instances.next_incarnation(),
+            incarnation,
+            "the branch registry changed while a key's first branch was built"
+        );
+        let task = prepared.start(VecDeque::new());
         let state =
-            instances.insert_changed(key.clone(), accepted_at, ProcessorBranchSlot::Live(state));
-        GetOrCreateBranchInstance {
-            state,
-            created: true,
-        }
-    };
-    if instance.created {
+            instances.insert_changed(key.clone(), accepted_at, ProcessorBranchSlot::Live(task));
         nervix_primitives::expect_lint!(
             nervix::lifecycle_call,
             "the concrete branch creation transition registers its one metric identity",
@@ -1219,8 +1523,36 @@ pub(super) async fn dispatch_processor_node_input(
                 "failed to offer a new processor branch to its replicas"
             );
         }
+        deliver_processor_node_input(context, instances, state, key, relay, batch, dequeued_work)
+            .await;
     }
-    let Some(task) = instance.state.live() else {
+
+    /// Refuse the batch, so that its source sends it again.
+    fn refuse(self, reason: &'static str) {
+        for ack in self.batch.acks.iter() {
+            ack.no_ack(reason);
+        }
+        drop(self.work);
+    }
+}
+
+/// Deliver one batch to its key's branch, `state`, which the registry holds.
+async fn deliver_processor_node_input(
+    context: &ProcessorNodeDispatchContext<'_>,
+    instances: &mut ProcessorBranches,
+    state: Arc<ProcessorBranchSlot>,
+    key: Option<BranchKey>,
+    relay: RelayName,
+    batch: RelayRecordBatch,
+    dequeued_work: NodeQuiesceWorkGuard,
+) {
+    let ProcessorNodeDispatchContext {
+        runtime_handle,
+        domain,
+        template,
+        ..
+    } = *context;
+    let Some(task) = state.live() else {
         // The key was released to the unit its branch's partition count places it in, which
         // receives its input from here on; input that still reaches this unit is refused, and
         // its source sends it again.

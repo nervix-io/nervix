@@ -366,7 +366,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
             sensitive: false,
         }],
     }));
-    let template = BranchInstanceTemplate {
+    let template = Arc::new(BranchInstanceTemplate {
         revision: ProcessorPlanRevision::new(),
         owner: NodeUnitRef::new(
             NodeRef::new(ModelKind::Deduplicator, named::<ModelName>("dedup_users")),
@@ -424,7 +424,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         .collect(),
         wasm_state_reset: None,
         partition_transition: None,
-    };
+    });
     let mut instances = ProcessorBranches::new();
     let domain_clock = runtime
         .bind_domain_clock(&domain)
@@ -517,7 +517,10 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
     install_unpaced_test_domain(&runtime, &domain);
     let processor = named::<ModelName>("route_orders");
     let input_relay = named::<RelayName>("orders");
-    let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+    let template = Arc::new(junction_branch_template(
+        processor.as_str(),
+        input_relay.as_str(),
+    ));
     let counters =
         runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
     let (input_tx, mut input_rx) = mpsc::channel(1);
@@ -583,7 +586,10 @@ async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time
     install_unpaced_test_domain(&runtime, &domain);
     let processor = named::<ModelName>("route_orders");
     let input_relay = named::<RelayName>("orders");
-    let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+    let template = Arc::new(junction_branch_template(
+        processor.as_str(),
+        input_relay.as_str(),
+    ));
     let counters =
         runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
     let (input_tx, mut input_rx) = mpsc::channel(1);

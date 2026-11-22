@@ -914,6 +914,151 @@ async fn a_resumed_branch_is_installed_only_while_its_released_slot_holds_its_li
     }
 }
 
+/// A processor whose input brings a key it has no branch for builds that branch as an attempt. A
+/// build that waits for capacity, as an inferencer's does while it reads its carried state, goes on
+/// on a task of its own. Here a window's build waits instead, because the test stores window state
+/// under the very lifetime the new branch is built for, so the build decodes it on the full bulk
+/// class. While the build waits the processor takes no new input and still names its branches for
+/// an inspection. A checkpoint follows the build, and once a place frees the branch installs, runs
+/// the input that waited for it and is named by the checkpoint and by every later inspection.
+#[nervix_primitives::test]
+async fn a_new_keys_branch_that_waits_for_capacity_lets_its_processor_answer_inspections() {
+    use nervix_models::StateInspectionBranchSelection as Selection;
+
+    let fixture = OpenWindowFixture::new();
+    let directory = tempfile::tempdir().expect("the state directory opens");
+    let executor = single_worker_executor();
+    let (runtime, domain) = fixture.runtime(executor.clone(), &directory);
+    let alpha = string_branch_key("tenant", "alpha");
+    // A processor that never formed a lifecycle builds its first branch as lifetime 1.
+    let stored = fixture
+        .open_window(
+            runtime.executor(),
+            &OpenBranch {
+                key: alpha.clone(),
+                incarnation: 1,
+                latency: 10,
+            },
+        )
+        .await;
+    runtime
+        .inner
+        .state_store
+        .clone()
+        .expect("the runtime has a state store")
+        .persist_latest_snapshot(
+            &fixture.window_placement(&runtime, &domain, &alpha),
+            1,
+            &stored,
+        )
+        .expect("the window state is stored");
+    let input = RelayBroadcast::with_capacity(nonzero_capacity(4));
+    let processor = fixture.start(&runtime, &domain, &input, Vec::new());
+    let restored = processor.restored_lifecycle().await;
+    assert_eq!(
+        branch_lifetimes(&restored),
+        Vec::new(),
+        "a processor that never formed a lifecycle restores no branch"
+    );
+
+    let filled = FilledCpuClass::fill(&executor, nervix_execution::CpuClass::Bulk).await;
+    input
+        .broadcast(fixture.input_batch(&alpha, 20, AckSet::empty()))
+        .await
+        .expect("the input queues");
+    timeout(WAIT, async {
+        while executor.snapshot().bulk_cpu.waiting == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the new branch's build waits for a place on the full bulk class");
+    assert_eq!(
+        processor
+            .inspected_branches(Selection::All)
+            .await
+            .expect("a processor whose new branch waits for capacity still names its branches"),
+        Vec::new(),
+        "the new branch is not installed while its build waits"
+    );
+
+    let (response, checkpoint) = oneshot::channel();
+    processor
+        .commands
+        .send(ProcessorNodeCommand::Checkpoint {
+            purpose: ProcessorCheckpointPurpose::OwnershipHandoff,
+            response,
+        })
+        .await
+        .expect("the processor takes its checkpoint");
+    // The processor's commands hold one at a time, so this inspection is taken only once the
+    // processor took the checkpoint, which follows the build.
+    let (response, inspected) = oneshot::channel();
+    timeout(
+        WAIT,
+        processor
+            .commands
+            .send(ProcessorNodeCommand::SelectStateBranches {
+                selection: Selection::All,
+                response,
+            }),
+    )
+    .await
+    .expect("the processor takes the checkpoint while its new branch waits")
+    .expect("the processor takes its command");
+    assert!(
+        executor.snapshot().bulk_cpu.waiting >= 1,
+        "the new branch still waits for a place while the checkpoint follows it"
+    );
+
+    filled.release().await;
+    let checkpointed = timeout(WAIT, checkpoint)
+        .await
+        .expect("the checkpoint is answered once the new branch is built")
+        .expect("the processor keeps the checkpoint's response")
+        .expect("the processor checkpoints its branches");
+    assert_eq!(
+        branch_lifetimes(&checkpointed),
+        vec![(alpha.clone(), 1)],
+        "a checkpoint that followed the build names the branch it built"
+    );
+    let inspected = timeout(WAIT, inspected)
+        .await
+        .expect("the inspection after the checkpoint is answered")
+        .expect("the processor keeps the inspection's response")
+        .expect("the processor names its branches");
+    let mut keys = Vec::with_capacity(inspected.branches.len());
+    for branch in inspected.branches {
+        keys.push(branch.key);
+    }
+    assert_eq!(
+        keys,
+        vec![alpha.clone()],
+        "an inspection after the build names the branch it built"
+    );
+    // A branch takes a checkpoint before input already queued for it, so the batch delivered as the
+    // branch started shows in a later checkpoint.
+    timeout(WAIT, async {
+        loop {
+            processor
+                .checkpoint()
+                .await
+                .expect("the processor checkpoints its branches");
+            if fixture
+                .published_latencies(&runtime, &domain, &alpha, 1)
+                .await
+                == Some(vec![20])
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the new branch begins a fresh window and runs the input that waited for it");
+    processor.stop().await;
+}
+
 /// On a node that has just started, a window processor task restores its branches before the
 /// domain's routing is published. Every branch its lifecycle checkpoint names keeps its lifetime,
 /// so each keeps its open window, and later input continues those windows.

@@ -843,29 +843,43 @@ supervisor loop, which dispatches the unit's input to its branches and handles e
 `ProcessorNodeCommand`. A checkpoint, a handoff and a WASM reset's preparation drain that input
 before they are handled, which orders them within the data stream.
 
-Until the planes are separate there, the loop runs two heavy steps as attempts: restoring the
-unit's branches, and building a claimed key's branch. Both reopen the retained window state of the
-lifetime they resume, and its decode waits for a place on the bulk workers or for room in a memory
-class. An attempt runs alone while it makes progress, so commands keep their order behind work that
-moves. Once it waits, the loop answers its commands beside it:
+Until the planes are separate there, the loop runs three heavy steps as attempts, each of which can
+wait for a place on the workers or for room in a memory class:
+
+- restoring the unit's branches, which reopens the retained state of the lifetimes they resume;
+- building a claimed key's branch, which reopens the state the claim brought;
+- building the branch of a key the unit has not seen, as an inferencer does while it reads its
+  carried state.
+
+An attempt runs alone while it makes progress, so commands keep their order behind work that moves.
+Once it waits, the loop answers its commands beside it:
 
 - While the restore waits, the loop answers commands that need the branches as unrestored, as
   [Restoring Processor Branches](./shutdown.md#restoring-processor-branches) states. Those answers
   are light, so the loop is soon back driving the restore.
 - A claimed key's build that waits goes on on a task of its own and reports the built branch back
-  through the unit's commands. The executor hands a freed place, or freed room, to the waiter first
-  in line, and only that waiter's own progress uses it. A build the loop stopped driving while it
-  handled a heavier command could therefore hold that capacity while the command waited for it.
-  Meanwhile the loop goes on with everything else, further claims build beside it, and the key's
-  input stays parked until the report installs the branch ([Partition transitions and key
-  claims](#partition-transitions-and-key-claims)).
+  through the unit's commands. Meanwhile the loop goes on with everything else, further claims build
+  beside it, and the key's input stays parked until the report installs the branch ([Partition
+  transitions and key claims](#partition-transitions-and-key-claims)).
+- A new key's build that waits goes on on a task of its own too, and its first batch waits with it.
+  Meanwhile the loop takes no new input. It answers state inspections and runs its lifecycle
+  snapshots and claim retries beside the build. Every other event follows the build, in the order it
+  arrived: input a drain delivers, and every command that drains input, changes the unit's branches
+  or dispatches input. An expiry scan waits too, since it would change the branch registry the
+  build's lifetime was allocated from. A stop or a handoff waits for the build, which holds a batch
+  the unit accepted.
 
-The loop's other builds reopen no retained window. A new key's branch begins a lifetime of its own,
-so the window state another lifetime left behind is set aside by its header alone, and a WASM
-reset's branches carry guest state. What those builds wait for, such as a guest's instantiation, is
-data work in a loop that still serves both planes, like a batch dispatched to a branch whose input
-is full. It waits for capacity as backpressure, and commands queued behind it wait with it until the
-planes are separate tasks.
+A build that waits leaves the loop because of how the executor grants capacity. It hands a freed
+place, or freed room, to the waiter first in line, and only that waiter's own progress uses it. So a
+build the loop stopped driving, while it handled a command that itself waits for capacity, could
+hold what that command waits for.
+
+A WASM reset's rebuilds build branches whose guest their branch task instantiates later, so they
+wait for nothing in the loop. The reset's preparation, which builds a fresh guest for each branch
+it reaches, and its commit still run inline. They are heavy work a command starts in a loop that
+still serves both planes: commands queued behind them wait with them until the planes are separate
+tasks. So does data work in that loop, such as a batch dispatched to a branch whose input is full,
+which waits for capacity as backpressure.
 
 ## Mutable Execution State
 

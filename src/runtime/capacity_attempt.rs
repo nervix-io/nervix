@@ -17,6 +17,7 @@
 use std::{future::Future, pin::Pin};
 
 use nervix_execution::CapacityWaits;
+use nervix_primitives::task::AbortOnDropHandle;
 
 /// One attempt at a piece of work that its task owns until the work ends.
 ///
@@ -35,6 +36,16 @@ enum AttemptWork<T> {
     Running(Pin<Box<dyn Future<Output = T> + Send>>),
     /// Ended, with its outcome, until the task takes it.
     Ended(T),
+}
+
+/// An attempt whose work waited for capacity and goes on on a task of its own.
+///
+/// The executor hands a freed place, or freed room, to the waiter first in line, and only that
+/// waiter's own progress uses it. Work on a task of its own makes that progress whatever its owner
+/// awaits meanwhile, so nothing the owner awaits beside it can hold back capacity handed to it.
+/// Dropping the attempt ends the work, which gives up its place in line.
+pub(super) struct DetachedAttempt<T> {
+    work: AbortOnDropHandle<T>,
 }
 
 /// What an attempt does after its task has run it.
@@ -143,6 +154,48 @@ impl<T> CapacityAttempt<T> {
         match self.work {
             AttemptWork::Ended(outcome) => Some(outcome),
             AttemptWork::Running(_) => None,
+        }
+    }
+}
+
+impl<T: Send + 'static> CapacityAttempt<T> {
+    /// Let the work go on on a task of its own, for an attempt whose owner answers its commands
+    /// beside it while it waits.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one attempt that waits for capacity moves its lifecycle work to a task of \
+                      its own once"
+        )
+    )]
+    pub(super) fn detach(self) -> DetachedAttempt<T> {
+        let work = nervix_primitives::task::spawn(self.outcome());
+        DetachedAttempt {
+            work: AbortOnDropHandle::new(work),
+        }
+    }
+}
+
+impl<T> DetachedAttempt<T> {
+    /// The work's outcome once it ends, or nothing when the runtime ended its task as it shut down.
+    ///
+    /// A panic in the work resumes here, as it would have in the owner had the owner run the work
+    /// itself.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one attempt waits for the lifecycle work it moved to a task of its own"
+        )
+    )]
+    pub(super) async fn ended(&mut self) -> Option<T> {
+        match (&mut self.work).await {
+            Ok(outcome) => Some(outcome),
+            Err(ended) => match ended.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(_cancelled) => None,
+            },
         }
     }
 }
