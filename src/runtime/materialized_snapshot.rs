@@ -1275,17 +1275,26 @@ impl RestoredMaterializedSnapshot {
         let metadata_bytes = layout.metadata_bytes.max(1);
         let share = match share {
             Some(share) => share,
-            None => RetainedShare::first(
-                metadata_bytes,
-                cursor.remaining(),
-                executor.memory(MemoryClass::StateRead).capacity_bytes,
-            ),
+            None => {
+                let capacity = executor.memory(MemoryClass::StateRead).capacity_bytes;
+                match cursor.scanned_retained_bytes(header.groups, section_limit) {
+                    // A container in memory declares exactly what its sections keep, so its open
+                    // takes exactly that share and never runs again.
+                    Some(sections) => metadata_bytes.saturating_add(sections).min(capacity),
+                    None => RetainedShare::first(
+                        metadata_bytes,
+                        cursor.remaining(),
+                        header.groups,
+                        capacity,
+                    ),
+                }
+            }
         };
         let mut retained = RetainedShare::reserve(executor, share.max(metadata_bytes)).await?;
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
         let Some(mut metadata_charge) = retained.draw(metadata_bytes)? else {
-            return Ok(retained.short(metadata_bytes, cursor.remaining()));
+            return Ok(retained.short(metadata_bytes, cursor.remaining(), header.groups));
         };
         let mut records = Vec::with_capacity(layout.records);
         let mut column_charges = Vec::with_capacity(layout.groups);
@@ -1314,7 +1323,7 @@ impl RestoredMaterializedSnapshot {
                 // The decoder's scratch goes back to the container before the next attempt
                 // reads it again.
                 cursor.give_back(scratch)?;
-                return Ok(retained.short(identity_growth, cursor.remaining()));
+                return Ok(retained.short(identity_growth, cursor.remaining(), header.groups));
             };
             metadata_charge = metadata_charge
                 .merge(growth)
@@ -1340,7 +1349,7 @@ impl RestoredMaterializedSnapshot {
                 .max(1);
             let Some(column_charge) = retained.draw(retained_bytes)? else {
                 cursor.give_back(scratch)?;
-                return Ok(retained.short(retained_bytes, cursor.remaining()));
+                return Ok(retained.short(retained_bytes, cursor.remaining(), header.groups));
             };
             column_charges.push(column_charge);
             let (batch, scratch) = RuntimeRecordBatch::decode_arrow_snapshot_section_within(
@@ -1445,13 +1454,15 @@ struct RetainedShare {
 }
 
 impl RetainedShare {
-    /// The share a first attempt takes: the row metadata its header declares, and twice the bytes
-    /// still to read for the columns and record identities they hold, within the whole class.
-    fn first(metadata_bytes: u64, remaining: u64, capacity: u64) -> u64 {
+    /// The share a first attempt on a container read from storage takes: the row metadata its
+    /// header declares, and twice the bytes still to read, which covers the decoded columns that
+    /// make up most containers, within the whole class.
+    fn first(metadata_bytes: u64, remaining: u64, groups: u32, capacity: u64) -> u64 {
         // The estimate is clamped to the class: an attempt that needs more finds out, and asks
         // for the whole class before it reports that even that is too little.
         metadata_bytes
             .saturating_add(remaining.saturating_mul(2))
+            .saturating_add(u64::from(groups))
             .min(capacity)
     }
 
@@ -1496,16 +1507,18 @@ impl RetainedShare {
     }
 
     /// The end of an attempt whose share had no room for a charge of `bytes`, with `remaining`
-    /// bytes of the container still unread. The next attempt needs everything this one drew, the
-    /// charge it missed and room for the columns still to come, and at least twice this share,
-    /// so an open runs a few times rather than once per section.
-    fn short(self, bytes: u64, remaining: u64) -> OpenAttempt {
-        // The estimate saturates: the class bounds every share, and a share larger than the
-        // class is refused as one.
+    /// bytes of the container still unread in `groups` groups at most. The next attempt needs
+    /// everything this one drew, the charge it missed, and the most the rest can keep: eight bytes
+    /// of row metadata per byte of record identities, more than any column keeps, and one byte
+    /// per group. So an open runs at most twice, and at least twice its last share.
+    fn short(self, bytes: u64, remaining: u64, groups: u32) -> OpenAttempt {
+        // The bound saturates: the class bounds every share, and a share larger than the class is
+        // refused as one.
         let needed = self
             .drawn
             .saturating_add(bytes)
-            .saturating_add(remaining.saturating_mul(2))
+            .saturating_add(remaining.saturating_mul(8))
+            .saturating_add(u64::from(groups))
             .max(self.share.saturating_mul(2));
         OpenAttempt::Short {
             share: self.share,
@@ -1735,6 +1748,31 @@ impl<'a> SealedSource<'a> {
             .change_context(MaterializedSnapshotError::Execution)?;
         *reader = Some(result.0);
         result.1
+    }
+
+    /// What the `groups` record groups still to be read keep charged to the state-read class once
+    /// decoded, when the container is in memory: eight bytes of row metadata per byte of record
+    /// identities, and twice each column section's bytes up to `section_limit`. Nothing for a
+    /// container read from storage, or one whose framing ends early, which its open reports.
+    fn scanned_retained_bytes(&self, groups: u32, section_limit: u64) -> Option<u64> {
+        let (bytes, offset) = match self {
+            Self::Memory { sealed, offset, .. } => (sealed.as_ref(), *offset),
+            Self::Borrowed { bytes, offset, .. } => (*bytes, *offset),
+            Self::Staged(_) | Self::Stored { .. } => return None,
+            #[cfg(test)]
+            Self::Artifact { .. } => return None,
+        };
+        let mut position = offset;
+        let mut retained: u64 = 0;
+        for _ in 0..groups {
+            let identities = framed_section_length(bytes, &mut position)?;
+            let columns = framed_section_length(bytes, &mut position)?;
+            let columns = columns.checked_mul(2)?.min(section_limit).max(1);
+            retained = retained
+                .checked_add(identities.checked_mul(8)?)?
+                .checked_add(columns)?;
+        }
+        Some(retained)
     }
 
     /// How many bytes of the container are still to be read.
@@ -2144,6 +2182,21 @@ where
     Ok((decoded?, scratch))
 }
 
+/// The length of the section framed at `position` in `bytes`, its kind byte and length prefix
+/// before it, moving `position` past the section; nothing when the framing ends early.
+fn framed_section_length(bytes: &[u8], position: &mut usize) -> Option<u64> {
+    let length_start = position.checked_add(1)?;
+    let body_start = length_start.checked_add(LENGTH_PREFIX_BYTES)?;
+    let prefix: [u8; LENGTH_PREFIX_BYTES] = bytes.get(length_start..body_start)?.try_into().ok()?;
+    let length = u32::from_le_bytes(prefix);
+    let body_end = body_start.checked_add(usize::try_from(length).ok()?)?;
+    if body_end > bytes.len() {
+        return None;
+    }
+    *position = body_end;
+    Some(u64::from(length))
+}
+
 /// Read an archived value out of a container.
 ///
 /// A section starts wherever the framing put it, and rkyv reads its relative pointers from an
@@ -2266,12 +2319,12 @@ mod tests {
         kept
     }
 
-    /// An open whose record identities need more of the state-read class than the container's size
-    /// suggests gives back everything its first attempt took and opens the container again within
-    /// a larger share. It ends holding exactly the charges the snapshot keeps.
+    /// An open of a container read from storage whose record identities need more of the state-read
+    /// class than the container's size suggests gives back everything its first attempt took and
+    /// opens the container again within the most its rest can keep, so it runs exactly twice. It
+    /// ends holding exactly the charges the snapshot keeps.
     #[nervix_primitives::test]
-    async fn an_open_whose_record_identities_outgrow_its_first_share_opens_again_within_a_larger_one()
-     {
+    async fn a_stored_open_whose_record_identities_outgrow_its_first_share_runs_once_more() {
         let executor =
             Executor::new(ExecutionConfig::default()).assured("default bounds are valid");
         // Long branch keys beside one small column: the identities fill the container, and each of
@@ -2282,20 +2335,56 @@ mod tests {
         let restored = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::borrowed(&executor, &payload),
+            SealedSource::stored(
+                executor.clone(),
+                crate::runtime::state_store::checkpoint_reader::CheckpointReader::Inline(
+                    std::io::Cursor::new(payload),
+                ),
+            ),
         )
         .await
         .assured("the snapshot opens within a larger share");
         let after = executor.memory(MemoryClass::StateRead);
         assert_eq!(restored.records.len(), 64, "every record is restored");
-        assert!(
-            after.granted - before.granted >= 2,
-            "the open took a first share, gave it back and took a larger one"
+        assert_eq!(
+            after.granted - before.granted,
+            2,
+            "the open took a first share, gave it back and took the most its rest can keep"
         );
         assert_eq!(
             after.reserved_bytes - before.reserved_bytes,
             kept_bytes(&restored),
             "the open keeps exactly the snapshot's own charges, nothing of its shares"
+        );
+    }
+
+    /// The same container in memory declares exactly what its sections keep, so its open takes
+    /// exactly that share once.
+    #[nervix_primitives::test]
+    async fn an_open_of_a_container_in_memory_takes_exactly_its_share_once() {
+        let executor =
+            Executor::new(ExecutionConfig::default()).assured("default bounds are valid");
+        let records = indexed_records(64, |index| format!("{index:04}-{}", "t".repeat(200)));
+        let (schema, payload) = sealed_payload(&executor, records).await;
+        let before = executor.memory(MemoryClass::StateRead);
+        let restored = RestoredMaterializedSnapshot::open_relay(
+            &executor,
+            &schema,
+            SealedSource::borrowed(&executor, &payload),
+        )
+        .await
+        .assured("the snapshot opens");
+        let after = executor.memory(MemoryClass::StateRead);
+        assert_eq!(restored.records.len(), 64, "every record is restored");
+        assert_eq!(
+            after.granted - before.granted,
+            1,
+            "an open of a container in memory takes one share"
+        );
+        assert_eq!(
+            after.reserved_bytes - before.reserved_bytes,
+            kept_bytes(&restored),
+            "the share it took is exactly the snapshot's own charges"
         );
     }
 
