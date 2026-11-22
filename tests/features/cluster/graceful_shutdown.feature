@@ -1087,7 +1087,7 @@ Feature: Graceful shutdown
       CREATE HTTP ENDPOINT eligible_ingress ON edge PATH '/events';
       CREATE HTTP ENDPOINT INGESTOR eligible_ingestor
         FROM eligible_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING eligible_event_codec
         TO eligible_ingested
           INHERIT ALL
           UNBRANCHED
