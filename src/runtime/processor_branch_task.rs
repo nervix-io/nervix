@@ -377,13 +377,16 @@ pub(super) async fn run_processor_node_runtime(
     let mut last_persisted_lru_lsm = 0;
     // The task restores its branches before it takes any input. Until one attempt installs every
     // branch, its input stays queued in its relays, so no record starts a new lifetime for a branch
-    // the restore would resume.
+    // the restore would resume. An attempt that makes progress keeps every command waiting behind
+    // it; one that waits for a place in a full worker class, or for room in a memory class, keeps
+    // its place in line while the task answers its commands as unrestored.
     let restore_context = ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone());
     let mut pending_restore = Some(PendingProcessorBranchRestore::new(
         restored_handoffs,
         runtime_handle.inner.data_plane,
         runtime_handle.inner.connector_host.retry,
     ));
+    let mut restore_attempt = None::<ProcessorBranchRestoreAttempt>;
     let quiesce_counters = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "task startup installs and retains the exact node quiesce counters before processing input",
@@ -436,22 +439,49 @@ pub(super) async fn run_processor_node_runtime(
         };
         let now = snapshot.now();
         let mut did_scheduled_work = false;
-        if let Some(restore) = pending_restore.as_mut()
+        if let Some(restore) = pending_restore.as_ref()
+            && restore_attempt.is_none()
             && Instant::now() >= restore.retry_at()
         {
-            let attempt = nervix_primitives::expect_lint!(
+            restore_attempt = Some(nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
-                "the processor task installs the branch lifetimes it restores before it accepts \
+                "the processor task begins an attempt to restore its branch lifetimes at start \
+                 and again only after a failed attempt's backoff",
+                restore.begin(&restore_context, &template)
+            ));
+        }
+        let restore_progress = match restore_attempt.as_mut() {
+            Some(attempt) => Some(
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the processor task builds the branch lifetimes it restores before it accepts \
+                     input, and answers nothing while the build makes progress",
+                    attempt.run_until_waiting()
+                )
+                .await,
+            ),
+            None => None,
+        };
+        if let Some(RestoreProgress::Built) = restore_progress {
+            let attempt = restore_attempt
+                .take()
+                .verified("the attempt whose build just ended is the one in progress");
+            let restore = pending_restore
+                .as_mut()
+                .verified("an attempt is in progress only while its restore is pending");
+            let installed = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the processor task installs the branch lifetimes it restored before it accepts \
                  input, and a failed attempt retries only after its backoff",
-                restore.attempt(
+                restore.finish(
+                    attempt,
                     &restore_context,
                     &template,
                     &mut instances,
                     &mut last_persisted_lru_lsm,
                 )
-            )
-            .await;
-            match attempt {
+            );
+            match installed {
                 Ok(()) => {
                     pending_restore = None;
                     if let Some(max_instances) = template.branch_max_instances {
@@ -558,7 +588,11 @@ pub(super) async fn run_processor_node_runtime(
         }
 
         let maintenance_timeout = if ownership_frozen {
-            (runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))
+            Some((runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1)))
+        } else if restore_attempt.is_some() {
+            // The attempt's own progress wakes the task, and nothing else falls due while its
+            // restore is pending.
+            None
         } else {
             let mut next_maintenance = match pending_restore.as_ref() {
                 Some(restore) => restore.retry_at(),
@@ -567,21 +601,26 @@ pub(super) async fn run_processor_node_runtime(
             if let Some(retry_at) = moves.as_ref().and_then(ProcessorPartitionMoves::next_retry) {
                 next_maintenance = next_maintenance.min(retry_at);
             }
-            next_maintenance
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO)
+            Some(
+                next_maintenance
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO),
+            )
         };
-        let wake = match RuntimeWake::after(maintenance_timeout) {
-            Ok(wake) => wake,
-            Err(error) => {
-                runtime_handle.events().report_error(format!(
-                    "processor '{}' in domain '{}' could not schedule its next maintenance scan: \
-                     {error:#}",
-                    processor.as_str(),
-                    domain.as_str(),
-                ));
-                break;
-            }
+        let wake = match maintenance_timeout {
+            Some(timeout) => match RuntimeWake::after(timeout) {
+                Ok(wake) => wake,
+                Err(error) => {
+                    runtime_handle.events().report_error(format!(
+                        "processor '{}' in domain '{}' could not schedule its next maintenance \
+                         scan: {error:#}",
+                        processor.as_str(),
+                        domain.as_str(),
+                    ));
+                    break;
+                }
+            },
+            None => RuntimeWake::never(),
         };
         // A pending restore keeps new input in the relays; only a drain still delivers it. A unit
         // whose parked input fills its bound takes no more until a claim releases some.
@@ -589,10 +628,31 @@ pub(super) async fn run_processor_node_runtime(
             Some(moves) => moves.is_full(),
             None => false,
         };
-        let work = match interaction
-            .next_with_input(wake, pending_restore.is_none() && !parked_full)
-            .await
-        {
+        let next = match restore_attempt.as_mut() {
+            // While its restore waits for capacity the task answers its commands beside it, as
+            // unrestored, and runs the attempt alone again once it no longer waits. Dropping the
+            // interaction's wait loses nothing: what it collected and every pending command stay
+            // in the interaction for its next call.
+            Some(attempt) => nervix_primitives::select! {
+                biased;
+                () = nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the processor task builds the branch lifetimes it restores while their \
+                     opening waits for capacity",
+                    attempt.until_no_longer_waiting()
+                ) => None,
+                next = interaction.next_with_input(wake, false) => Some(next),
+            },
+            None => Some(
+                interaction
+                    .next_with_input(wake, pending_restore.is_none() && !parked_full)
+                    .await,
+            ),
+        };
+        let Some(next) = next else {
+            continue;
+        };
+        let work = match next {
             Ok(work) => work,
             Err(failure) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
@@ -898,6 +958,9 @@ pub(super) async fn run_processor_node_runtime(
         }
     }
 
+    // An attempt still in progress ends here: its build gives up its place in line and drops the
+    // branches it built unstarted, so the task's successor, or its next start, restores them.
+    drop(restore_attempt);
     if let Some(moves) = moves.as_mut() {
         // Input still waiting for its key's claim cannot be handed over with the key's state,
         // which stays in its holder: it is refused, and its source sends it again.
@@ -1181,8 +1244,17 @@ pub(super) async fn spawn_processor_branch_task(
     lifetime: ProcessorBranchLifetime,
     incarnation: u64,
 ) -> error_stack::Result<ProcessorBranchTask, ProcessorBranchTaskError> {
-    let branch =
-        PreparedProcessorBranch::prepare(context, template, key, lifetime, incarnation).await?;
+    // The record path, a partition move and a guest-state reset report or retry a refused build,
+    // so the branch opens its retained state refused when a worker class is full.
+    let branch = PreparedProcessorBranch::prepare(
+        context,
+        template,
+        key,
+        lifetime,
+        incarnation,
+        &RetainedStateOpening::RefusedWhenFull,
+    )
+    .await?;
     Ok(branch.start(pending_materialized))
 }
 
@@ -1211,6 +1283,7 @@ impl PreparedProcessorBranch {
         key: Option<BranchKey>,
         lifetime: ProcessorBranchLifetime,
         incarnation: u64,
+        opening: &RetainedStateOpening,
     ) -> error_stack::Result<Self, ProcessorBranchTaskError> {
         let published_template = if matches!(lifetime, ProcessorBranchLifetime::Appeared) {
             context
@@ -1226,10 +1299,19 @@ impl PreparedProcessorBranch {
         } else {
             None
         };
-        let template = published_template.unwrap_or_else(|| StdArc::new(template.clone()));
+        let template = match &published_template {
+            Some(published) => published.as_ref(),
+            None => template,
+        };
         let branch_key = key.clone();
         let instance = template
-            .instantiate(&context.runtime_handle, &context.domain, key, incarnation)
+            .instantiate(
+                &context.runtime_handle,
+                &context.domain,
+                key,
+                incarnation,
+                opening,
+            )
             .await
             .change_context_lazy(|| ProcessorBranchTaskError::Instantiate {
                 branch: BranchScope::from(&branch_key),

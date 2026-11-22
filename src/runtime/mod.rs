@@ -592,7 +592,9 @@ use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,
     materialize_ingestor_route_template, parse_branch_flush_policy, parse_input_collect_policy,
 };
-use processor_branch_restore::PendingProcessorBranchRestore;
+use processor_branch_restore::{
+    PendingProcessorBranchRestore, ProcessorBranchRestoreAttempt, RestoreProgress,
+};
 use processor_branch_task::{
     PreparedProcessorBranch, ProcessorBranchCommand, ProcessorBranchHandoff,
     ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
@@ -620,7 +622,7 @@ pub(crate) use processor_state_inspection::{
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
-    wasm_guest_call_schemas, wasm_instance_next_deadline,
+    RetainedStateOpening, wasm_guest_call_schemas, wasm_instance_next_deadline,
 };
 use processors::{
     BranchInstanceTemplate, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
@@ -1044,7 +1046,7 @@ pub(crate) use entity_gate::{
 pub(crate) use error::{ApplicationWait, RuntimeError};
 pub(crate) use events::RuntimeEvent;
 use execution_build_error::{ExecutionBuildError, ExecutionStep};
-pub(crate) use inferencer::onnx_environment;
+pub(crate) use inferencer::{OnnxSessionOptions, onnx_environment};
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;

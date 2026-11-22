@@ -29,7 +29,7 @@ use super::{
     processor_key_editor::ProcessorKeyEditor,
     processor_route_editor::ProcessorRouteEditor,
     processor_state_editor::ProcessorStateEditor,
-    processor_tensor_editor::ProcessorTensorEditor,
+    processor_tensor_editor::{ProcessorTensorEditor, ProcessorWorkingMemoryEditor},
     processor_wasm_editor::{ProcessorWasmLimitsEditor, ProcessorWasmPoliciesEditor},
     processor_window_editor::ProcessorWindowEditor,
 };
@@ -98,6 +98,7 @@ pub(super) fn ProcessorEditor(
         ProcessorFamily::Inferencer => Some(
             view! {
                 <ProcessorBindingEditor family=family signals=signals request_tx=request_tx session_generation=session_generation />
+                <ProcessorWorkingMemoryEditor signals=signals />
                 <ProcessorTensorEditor signals=signals request_tx=request_tx session_generation=session_generation />
             }
             .into_any(),

@@ -2411,6 +2411,7 @@ mod tests {
         let restored = super::super::window_state::decode_window_processor_snapshot(
             &sealed,
             &executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             super::super::window_state::WindowSnapshotSchemas {
                 input: &window.input_schema.arrow_schema(),
                 arguments: &arguments,
