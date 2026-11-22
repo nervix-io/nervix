@@ -490,6 +490,8 @@ for committed Nervix cluster policy changes. Keep it outside domain transactions
 selected domain. Read `Domains And Time` → `Duration Literals` for duration spelling, and
 `Node Settings` for the complete parameter set, one assignment per parameter, positive duration
 bounds, existing-model cap refusals, live installation and committed-versus-running inspection.
+A resource byte quota above any admitted node's committed `database-volume-bytes` (shown by
+`DESCRIBE CLUSTER`) is refused, naming the node; grow that volume and restart the node first.
 Seed flags belong only to the first bootstrap, including when their value equals the default.
 Later starts, including the returning bootstrap node, omit them.
 `HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect

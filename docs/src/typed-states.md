@@ -381,9 +381,10 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_` keyspaces and `ClusterState`
-metadata encoding 45 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
-domain, resource and user labels, node selector statements, placement node rules and the partition count of every resolved
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_volume_` keyspaces and `ClusterState`
+metadata encoding 46 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+domain, resource and user labels, node selector statements, placement node rules, the database volume size each node record's
+capacity claim carries, and the partition count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
