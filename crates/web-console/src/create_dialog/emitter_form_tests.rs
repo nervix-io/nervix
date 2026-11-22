@@ -54,6 +54,8 @@ fn every_declared_emitter_renders_its_entity_options_body_modes_and_policies() {
                     .session_generation(generation)
                     .request_tx(request_tx)
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();

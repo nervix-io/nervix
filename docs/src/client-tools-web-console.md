@@ -64,12 +64,14 @@ The console is one screen with three regions:
 
 - the **sidebar** on the left: the domain selector, live throughput for the selected domain, and
   the domain's entities grouped by kind — schemas, wire schemas, codecs, resources, clients,
-  vhosts, and endpoints
+  vhosts, and endpoints — each with a **labels** button that opens its
+  [labels](#entity-labels)
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
 The top bar carries the websocket connection state, the node panel, the global **Create** menu, the
-**Backups** button, the domain lifecycle button, the selected clock state, and the theme picker. The
+**Labels** button, the **Backups** button, the domain lifecycle button, the selected clock state,
+and the theme picker. The
 clock panel below the domain selector shows the selected domain's clock in detail.
 
 ### Following cluster events
@@ -593,6 +595,8 @@ into the REPL and runs it, so the console never does anything you could not have
 - **PLACE** — ingestors, processors, emitters and relays; opens a new corridor placement draft
   whose first `FROM` member is that item, described in
   [Creating Entities From Forms](#creating-entities-from-forms)
+- **LABELS** — clients, ingestors, emitters, relays and every processor the graph names by its
+  family; opens the item's labels in the [label editor](#editing-an-entitys-labels)
 
 ### Node Health
 
@@ -788,6 +792,82 @@ its session delivers, and says where it left something out:
   as it arrives, and the page holds one chunk at a time. A restore reads its archive file one slice
   at a time, at most 4 MiB while it digests the file and 256 KiB while it streams it, and keeps at
   most 1 MiB queued on its connection.
+
+## Entity Labels
+
+Labels are descriptive key and value pairs stored with an entity, as
+[Entity Labels](entity-labels.md) describes. The console writes and reads them with the same
+statements the REPL accepts. Labels grant no permissions: Nervix enforces no access rule based on
+them, so they are not a place for secrets either.
+
+### Labels on a new entity
+
+Every create form that stores an entity, which is every form except the subscription form, ends
+with a **Labels** section. **Add label** adds a row with a key and a value, and **Remove** deletes
+a row. A key is lowercase ASCII that starts with a letter or a digit and continues with letters,
+digits, `.`, `_`, `/` or `-`. A value is any text, kept exactly as typed, spaces, capitals and line
+breaks included, and it may be empty: an empty value is still a label. A row without a key, an
+invalid key or a key written twice is refused inline and names the row. The preview shows the
+`LABELS { … }` clause the creation statement carries:
+
+```plexus
+CREATE SCHEMA readings ( value U32 ) LABELS { 'empty' = '', 'team/path' = 'Platform / East' };
+```
+
+Each form keeps its own labels with its draft. The cluster's committed label limits apply when the
+server runs the statement, and a refusal is shown inline like any other.
+
+### Editing an entity's labels
+
+The label editor shows the labels an existing entity has and changes them. It opens:
+
+- from an entity in the sidebar, with its **labels** button;
+- from an item of the execution graph, with its **LABELS** action;
+- from the top bar's **Labels** button, on the selected domain's own labels.
+
+The editor's **Entity kind** and **Name** choose any entity whose labels exist: a domain, a user,
+a resource or a Model of any kind. The name field suggests the cluster's domains and the selected
+domain's entities; a user is named by typing it. **Show labels** reads the chosen entity. A Model or
+a resource is read in the domain the editor opened in, which the **Scope** row shows; a domain or a
+user is named by its own identity, and its scope is the cluster.
+
+The editor names the entity and its domain and reads its labels with `SHOW LABELS`, from the typed
+result that command returns, never from the text the REPL prints. It shows whether the labels it
+read are **Committed**, with their revision, or **Staged** in the attached transaction and not
+committed yet.
+
+Change a value in place, **Remove** a label (**Undo remove** keeps it), or use **Add label** for a
+new key. The preview shows the one statement **Save** sends, which applies every change together:
+
+```plexus
+SET LABELS ON SCHEMA readings { 'owner' = 'Platform', 'region' = 'east', 'team' DROP };
+```
+
+The statement names only the labels you changed, so a change another session made to a label you
+left alone is kept. Before sending it, the editor checks the complete result against the label
+limits its read returned: too many labels, a key or a value that is too long, a key written twice,
+or a new key the entity already has is refused inline and nothing is sent. A save that changes
+nothing is refused as well.
+
+**Save** uses the same durable command path as the create forms, with the same progress, redirect,
+reconnect and exact-recovery behavior. While a transaction is attached, an edit of a Model's or a
+resource's labels is queued in it, and the editor shows the staged labels; `COMMIT` applies the
+edit and `REVERT` discards it with the rest of the transaction. Domain and user labels are
+administrative: they are edited outside a transaction, and the server refuses such a save while
+one is attached. After a save completes or is queued, the editor reads the labels again and shows
+the result.
+
+**Reload** reads the labels again. A label you left alone takes the value read. A label you changed
+keeps your change; when another session changed or removed it meanwhile, the editor says so, and
+**Save** waits until you choose **Keep my change**, which saves your value over theirs, or **Use
+current**, which drops your change. A key you are adding that another session added meanwhile
+offers **Keep my value** and **Use current** the same way. The editor never overwrites a value it
+has not shown you.
+
+The editor keeps the entity it opened on, in that entity's domain: selecting another domain in the
+console does not move it, not even to an entity with the same name there. Closing the editor keeps
+an unsaved edit, and the top bar's **Labels** button reopens it as you left it; opening the labels
+of an entity from the sidebar or the graph starts an edit of that entity.
 
 ## Inspecting a transaction
 

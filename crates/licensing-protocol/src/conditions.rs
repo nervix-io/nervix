@@ -151,7 +151,8 @@ pub const CAPABILITY_GRACE: &str = "transition.capability_removal_grace";
 pub const QUOTA_GRACE: &str = "transition.quota_reduction_grace";
 
 /// The current catalog is finite and read by every resolver; a new name lands with its owner, and a
-/// name nothing reads says so as its owner.
+/// name nothing reads says so as its owner. A complete document lists every name but the
+/// capabilities: a capability a document leaves out is disabled.
 pub const CATALOG: &[ConditionDefinition] = &[
     ConditionDefinition {
         name: CLUSTER_NODES,
@@ -349,7 +350,9 @@ impl Catalog {
                 continue;
             }
             let present = match definition.shape {
-                ConditionShape::Capability => usage.capabilities.contains_key(definition.name),
+                // A capability a document does not list is disabled, so a cluster and a service
+                // built from different catalogs agree on it: completeness never requires one.
+                ConditionShape::Capability => continue,
                 ConditionShape::Quota {
                     scope: Scope::Cluster,
                     ..
@@ -397,6 +400,17 @@ impl Catalog {
 }
 
 impl UsageConditions {
+    /// The state of the capability `name`; a capability the conditions do not list is disabled.
+    pub fn capability(&self, name: &str) -> Result<Capability, Report<ConditionError>> {
+        match self.capabilities.get(name) {
+            Some(ConditionValue::Known(value)) => Ok(*value),
+            Some(ConditionValue::Extension(_)) => Err(Report::new(ConditionError::Invalid {
+                name: name.to_owned(),
+            })),
+            None => Ok(Capability::Disabled),
+        }
+    }
+
     pub fn quota(&self, name: &str) -> Result<Quota, Report<ConditionError>> {
         match self.quotas.get(name) {
             Some(ConditionValue::Known(value)) => Ok(*value),
