@@ -242,7 +242,9 @@ pub struct NodeTraceExport<'a> {
 }
 
 impl super::Application {
-    /// The node's own trace export, when the node is provisioned with a collector.
+    /// The node's own trace export, when the node is provisioned with a collector. Only the
+    /// process entry point installs it, and a Shuttle build has no process entry point.
+    #[cfg(not(feature = "shuttle"))]
     pub(in crate::application) fn trace_export(&self) -> Option<NodeTraceExport<'_>> {
         let collector = self.identity.trace_collector.as_ref()?;
         Some(NodeTraceExport {

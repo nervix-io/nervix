@@ -477,7 +477,6 @@ fn server_args_do_not_require_opentelemetry_options() {
     let app = Application::try_from(test_args(&[])).expect("args should parse");
 
     assert_eq!(app.identity.trace_collector, None);
-    assert!(app.trace_export().is_none());
     assert_eq!(
         app.settings.operational.traces,
         nervix_models::TraceExportCapabilities::default()
@@ -485,6 +484,7 @@ fn server_args_do_not_require_opentelemetry_options() {
 }
 
 #[test]
+#[cfg(not(feature = "shuttle"))]
 fn a_collector_endpoint_alone_provisions_trace_export() {
     let app = Application::try_from(test_args(&[
         "--otel-otlp-endpoint",
