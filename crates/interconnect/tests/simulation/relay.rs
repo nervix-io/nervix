@@ -238,7 +238,11 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                     if matches!(case, RelayCase::CancelBeforeGrant) {
                         assert_eq!(
                             client
-                                .cancel_relay(&peer, case.delivery())
+                                .cancel_relay(
+                                    &peer,
+                                    case.delivery(),
+                                    nervix_models::RemoteAckTiming::default()
+                                )
                                 .await
                                 .assured("cancellation is acknowledged"),
                             RelayAdmissionStatus::Cancelled
@@ -254,7 +258,11 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                         );
                         assert_eq!(
                             client
-                                .relay_admission_status(&peer, case.delivery())
+                                .relay_admission_status(
+                                    &peer,
+                                    case.delivery(),
+                                    nervix_models::RemoteAckTiming::default()
+                                )
                                 .await
                                 .assured("the cancellation fence remains known"),
                             RelayAdmissionStatus::Cancelled
@@ -274,7 +282,13 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                                 "cancellation requested while body reply is pending",
                             );
                             Some(nervix_primitives::task::spawn(async move {
-                                cancelling.cancel_relay(&target, case.delivery()).await
+                                cancelling
+                                    .cancel_relay(
+                                        &target,
+                                        case.delivery(),
+                                        nervix_models::RemoteAckTiming::default(),
+                                    )
+                                    .await
                             }))
                         } else {
                             None
@@ -319,7 +333,13 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             let target = peer.clone();
                             trace.record("client", "cancellation requested during reconnect");
                             Some(nervix_primitives::task::spawn(async move {
-                                cancelling.cancel_relay(&target, case.delivery()).await
+                                cancelling
+                                    .cancel_relay(
+                                        &target,
+                                        case.delivery(),
+                                        nervix_models::RemoteAckTiming::default(),
+                                    )
+                                    .await
                             }))
                         } else {
                             None
@@ -342,7 +362,11 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             }
                             assert_eq!(
                                 client
-                                    .relay_admission_status(&peer, case.delivery())
+                                    .relay_admission_status(
+                                        &peer,
+                                        case.delivery(),
+                                        nervix_models::RemoteAckTiming::default()
+                                    )
                                     .await
                                     .assured("fence status is known"),
                                 RelayAdmissionStatus::Cancelled
@@ -376,14 +400,22 @@ fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationErr
                             ));
                             assert_eq!(
                                 client
-                                    .relay_admission_status(&peer, case.delivery())
+                                    .relay_admission_status(
+                                        &peer,
+                                        case.delivery(),
+                                        nervix_models::RemoteAckTiming::default()
+                                    )
                                     .await
                                     .assured("admission status is known"),
                                 RelayAdmissionStatus::Admitted
                             );
                             assert_eq!(
                                 client
-                                    .cancel_relay(&peer, case.delivery())
+                                    .cancel_relay(
+                                        &peer,
+                                        case.delivery(),
+                                        nervix_models::RemoteAckTiming::default()
+                                    )
                                     .await
                                     .assured("late cancellation returns the retained outcome"),
                                 RelayAdmissionStatus::Admitted
@@ -660,7 +692,11 @@ fn exercise_partitioned_relay(run: ScenarioRun) -> Result<(), SimulationError> {
                     ] {
                         assert_eq!(
                             client
-                                .relay_admission_status(&peer, partition.delivery())
+                                .relay_admission_status(
+                                    &peer,
+                                    partition.delivery(),
+                                    nervix_models::RemoteAckTiming::default()
+                                )
                                 .await
                                 .assured("admission status is known"),
                             RelayAdmissionStatus::Admitted
@@ -967,7 +1003,11 @@ fn restarted_receiver_fences_unresolved_relay(
                         if let RestartMilestone::RuntimeAdmittedWithDelayedReply = milestone {
                             assert_eq!(
                                 client
-                                    .relay_admission_status(&peer, FIRST)
+                                    .relay_admission_status(
+                                        &peer,
+                                        FIRST,
+                                        nervix_models::RemoteAckTiming::default()
+                                    )
                                     .await
                                     .assured("old admission resolves against the new epoch"),
                                 RelayAdmissionStatus::Indeterminate
@@ -1026,7 +1066,11 @@ fn restarted_receiver_fences_unresolved_relay(
                         trace.record("client", "fresh relay body response received");
                         assert_eq!(
                             client
-                                .relay_admission_status(&peer, FRESH)
+                                .relay_admission_status(
+                                    &peer,
+                                    FRESH,
+                                    nervix_models::RemoteAckTiming::default()
+                                )
                                 .await
                                 .assured("fresh admission status crosses the restarted transport"),
                             RelayAdmissionStatus::Admitted

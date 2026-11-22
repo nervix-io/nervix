@@ -197,7 +197,8 @@ latency and relay-memory reclamation, and measures an empty sweep of the positio
 claimed beside the fixed position count. Its
 authenticated frame probe sends three current Arrow rows, admits them, returns the exact terminal
 reply and checks retired attempt counts. A separate 5,000-frame peer-owner probe completes while
-another peer's protocol guard is continuously held and checks returned permits and memory. These
+another peer's protocol guard is continuously held and checks returned permits and memory, with only its
+channel's watermark left charged. These
 native probes also run through the existing benchmark smoke producer; local debug timings describe
 their measured build and host load, rather than a production throughput guarantee.
 
