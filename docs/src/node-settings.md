@@ -664,7 +664,10 @@ A capability is a feature a license switches on. The typed `capabilities` sectio
 catalog capability with its `state`, `enabled` or `disabled`, and the text form prints one line
 per capability, such as `capability licensing.dummy: enabled`. The section's `permitted` state and
 its `permitted_until` deadline belong to a capability whose removal has a grace period; no current
-capability has one. The catalog's only capability, `licensing.dummy`, changes nothing in Nervix:
+capability has one. A capability the license's decision does not list is disabled, so a cluster
+keeps working with a licensing service that does not know the capability yet. A capability the
+cluster does not know is left out of the section and counts under `conditions not understood`. The
+catalog's only capability, `licensing.dummy`, changes nothing in Nervix:
 the free policy disables it, and a license whose plan enables it shows that a verified decision
 reached the cluster. A follower marks the leader's
 incarnation- and tenure-bound connectivity observation as reported. Connectivity distinguishes
