@@ -1543,7 +1543,14 @@ fn list_bridge_accessor(element: &ParseAsType) -> Option<&'static str> {
         ParseAsType::Bytes => Some("vec_bytes"),
         ParseAsType::Datetime => Some("vec_datetime"),
         ParseAsType::Duration => None,
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Some("any"),
+        // A nested list reads through the generic column, unless a DURATION lies beneath it.
+        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
+            if element.holds_duration() {
+                None
+            } else {
+                Some("any")
+            }
+        }
     }
 }
 
@@ -1564,7 +1571,14 @@ fn list_bridge_conversion(element: &ParseAsType) -> Option<&'static str> {
         ParseAsType::Bytes => Some("from_vec_bytes"),
         ParseAsType::Datetime => Some("from_vec_datetime"),
         ParseAsType::Duration => None,
-        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Some("from_any"),
+        // A nested list writes through the generic column, unless a DURATION lies beneath it.
+        ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
+            if element.holds_duration() {
+                None
+            } else {
+                Some("from_any")
+            }
+        }
     }
 }
 
@@ -1759,22 +1773,193 @@ mod tests {
     }
 
     #[test]
+    fn every_type_but_a_duration_has_a_column_bridge_both_ways() {
+        struct Bridge {
+            ty: ParseAsType,
+            accessor: &'static str,
+            conversion: &'static str,
+            list_accessor: &'static str,
+            list_conversion: &'static str,
+        }
+        fn entry(
+            ty: ParseAsType,
+            accessor: &'static str,
+            conversion: &'static str,
+            list_accessor: &'static str,
+            list_conversion: &'static str,
+        ) -> Bridge {
+            Bridge {
+                ty,
+                accessor,
+                conversion,
+                list_accessor,
+                list_conversion,
+            }
+        }
+        let two = std::num::NonZeroU32::new(2).assured("two is positive");
+        let bridges = [
+            entry(ParseAsType::U8, "u8", "from_u8", "vec_u8", "from_vec_u8"),
+            entry(ParseAsType::I8, "i8", "from_i8", "vec_i8", "from_vec_i8"),
+            entry(
+                ParseAsType::U16,
+                "u16",
+                "from_u16",
+                "vec_u16",
+                "from_vec_u16",
+            ),
+            entry(
+                ParseAsType::I16,
+                "i16",
+                "from_i16",
+                "vec_i16",
+                "from_vec_i16",
+            ),
+            entry(
+                ParseAsType::U32,
+                "u32",
+                "from_u32",
+                "vec_u32",
+                "from_vec_u32",
+            ),
+            entry(
+                ParseAsType::I32,
+                "i32",
+                "from_i32",
+                "vec_i32",
+                "from_vec_i32",
+            ),
+            entry(
+                ParseAsType::U64,
+                "u64",
+                "from_u64",
+                "vec_u64",
+                "from_vec_u64",
+            ),
+            entry(
+                ParseAsType::I64,
+                "i64",
+                "from_i64",
+                "vec_i64",
+                "from_vec_i64",
+            ),
+            entry(
+                ParseAsType::F32,
+                "f32",
+                "from_f32",
+                "vec_f32",
+                "from_vec_f32",
+            ),
+            entry(
+                ParseAsType::F64,
+                "f64",
+                "from_f64",
+                "vec_f64",
+                "from_vec_f64",
+            ),
+            entry(
+                ParseAsType::Bool,
+                "bool",
+                "from_bool",
+                "vec_bool",
+                "from_vec_bool",
+            ),
+            entry(
+                ParseAsType::String,
+                "string",
+                "from_string",
+                "vec_string",
+                "from_vec_string",
+            ),
+            entry(
+                ParseAsType::Bytes,
+                "bytes",
+                "from_bytes",
+                "vec_bytes",
+                "from_vec_bytes",
+            ),
+            entry(
+                ParseAsType::Datetime,
+                "datetime",
+                "from_datetime",
+                "vec_datetime",
+                "from_vec_datetime",
+            ),
+        ];
+        for scalar in ParseAsType::scalar_variants() {
+            let decided = *scalar == ParseAsType::Duration
+                || bridges.iter().any(|bridge| bridge.ty == *scalar);
+            assert!(decided, "{scalar} has no column bridge decision");
+        }
+        for bridge in &bridges {
+            let ty = &bridge.ty;
+            assert_eq!(bridge_accessor(ty), Some(bridge.accessor), "{ty}");
+            assert_eq!(bridge_conversion(ty), Some(bridge.conversion), "{ty}");
+            let vec = ParseAsType::Vec {
+                element: Box::new(ty.clone()),
+            };
+            let array = ParseAsType::Array {
+                element: Box::new(ty.clone()),
+                len: two,
+            };
+            for list in [&vec, &array] {
+                assert_eq!(bridge_accessor(list), Some(bridge.list_accessor), "{list}");
+                assert_eq!(
+                    bridge_conversion(list),
+                    Some(bridge.list_conversion),
+                    "{list}"
+                );
+            }
+            let nested = ParseAsType::Vec {
+                element: Box::new(array),
+            };
+            assert_eq!(bridge_accessor(&nested), Some("any"), "{nested}");
+            assert_eq!(bridge_conversion(&nested), Some("from_any"), "{nested}");
+        }
+        let durations = [
+            ParseAsType::Duration,
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Duration),
+            },
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::Duration),
+                len: two,
+            },
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Array {
+                    element: Box::new(ParseAsType::Duration),
+                    len: two,
+                }),
+            },
+        ];
+        for ty in &durations {
+            assert_eq!(bridge_accessor(ty), None, "{ty}");
+            assert_eq!(bridge_conversion(ty), None, "{ty}");
+        }
+    }
+
+    #[test]
     fn a_udf_signature_that_names_a_duration_is_refused_with_its_argument_or_result() {
-        let mut argument = add_one_model();
-        argument.arguments[0].ty = ParseAsType::Vec {
+        let list = ParseAsType::Vec {
             element: Box::new(ParseAsType::Duration),
         };
-        let refusal = UdfExecutor::compile_sync([argument], None)
-            .err()
-            .assured("no column bridge reads a DURATION argument");
-        assert!(
-            matches!(
-                refusal.current_context(),
-                UdfError::DurationArgument { name, argument }
-                    if name == "add_one" && argument == "value"
-            ),
-            "{refusal:?}"
-        );
+        let nested = ParseAsType::Vec {
+            element: Box::new(list.clone()),
+        };
+        for ty in [list, nested] {
+            let mut argument = add_one_model();
+            argument.arguments[0].ty = ty;
+            let refusal = UdfExecutor::compile_sync([argument], None)
+                .err()
+                .assured("no column bridge reads a DURATION argument");
+            assert!(
+                matches!(
+                    refusal.current_context(),
+                    UdfError::DurationArgument { name, argument }
+                        if name == "add_one" && argument == "value"
+                ),
+                "{refusal:?}"
+            );
+        }
         let mut result = add_one_model();
         result.returns.ty = ParseAsType::Duration;
         let refusal = UdfExecutor::compile_sync([result], None)

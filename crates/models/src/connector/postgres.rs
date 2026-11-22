@@ -258,11 +258,8 @@ pub enum PostgresValueEncoding {
 
 impl PostgresValueEncoding {
     /// The binding of a declared type; every current Plexus type has one, a declared rejection
-    /// for a `DURATION` and a list of them.
+    /// for a `DURATION` and a list of them at any depth.
     pub fn for_type(ty: &ParseAsType) -> Self {
-        if *ty.innermost_element() == ParseAsType::Duration {
-            return Self::Rejected;
-        }
         match ty {
             ParseAsType::Bool => Self::BooleanText,
             ParseAsType::U8
@@ -278,7 +275,13 @@ impl PostgresValueEncoding {
             ParseAsType::Bytes => Self::ByteaHex,
             ParseAsType::Datetime => Self::TimestampText,
             ParseAsType::Duration => Self::Rejected,
-            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Self::JsonText,
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
+                if ty.holds_duration() {
+                    Self::Rejected
+                } else {
+                    Self::JsonText
+                }
+            }
         }
     }
 }
