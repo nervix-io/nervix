@@ -590,7 +590,8 @@ parametrizer with the branch key fields. Every later batch is positional against
     list holds exactly its declared number of elements;
   - a list element is never `NullCell` or `RedactedCell`.
 - **R-3.** A client MUST NOT convert a value to another type while reading it. An integer keeps its
-  width and signedness, a `DATETIME` is signed nanoseconds since the Unix epoch in UTC, a `STRING`
+  width and signedness, a `DATETIME` is signed nanoseconds since the Unix epoch in UTC, a `DURATION`
+  is a signed count of nanoseconds, never a unit-converted or floating-point length, a `STRING`
   is UTF-8 that may contain NUL, and a `BYTES` value is raw octets that may be empty or not UTF-8.
 - **R-4.** A client MUST keep a null value, a withheld value, and a present value distinct in its
   data model. A presentation MAY render a withheld value as a placeholder such as `"<masked>"`.
@@ -606,6 +607,7 @@ parametrizer with the branch key fields. Every later batch is positional against
 | `STRING` | `StringCell` | UTF-8 text |
 | `BYTES` | `BytesCell` | Raw octets |
 | `DATETIME` | `DatetimeCell` | Signed Unix nanoseconds in UTC |
+| `DURATION` | `DurationCell` | Signed nanoseconds |
 | Fixed-length list | `ListCell` | Exactly the declared number of elements, each a cell of the element type |
 | Variable-length list | `ListCell` | Any number of elements, each a cell of the element type |
 
@@ -620,7 +622,7 @@ payload, infinity, and nullable and sensitive branch key fields.
 
 | Runtime | Pitfall | Required handling |
 | --- | --- | --- |
-| JavaScript and TypeScript | A `Number` holds 53 bits of integer precision. | Read `U64`, `I64`, `DATETIME`, request identities, generations, and counts as `BigInt`. |
+| JavaScript and TypeScript | A `Number` holds 53 bits of integer precision. | Read `U64`, `I64`, `DATETIME`, `DURATION`, request identities, generations, and counts as `BigInt`. |
 | JavaScript and TypeScript | JavaScriptCore, which Bun runs on, canonicalizes a NaN it materializes as a `Number`; V8 keeps the payload. | Read a float's bits from the buffer as an unsigned integer when the bits matter, instead of calling the generated `value()` accessor. |
 | JavaScript and TypeScript | `Date` has millisecond precision and a narrower range than the protocol's nanoseconds. | Keep a `DATETIME` as a `BigInt` of nanoseconds. |
 | Java and other JVM languages | There are no unsigned primitive types. | JNI preserves a `U64` in a `long`; compare and print it with the unsigned `Long` operations. Generations, identities, unsigned offsets and durations use the same bit-preserving rule. Values read from the binding's column copies are raw bytes of the declared width, so widen a `U8`, `U16`, or `U32` without sign extension. |
@@ -1063,7 +1065,8 @@ B-16 apply through its classes and enum constants. Ruby owns object lifetimes:
 - **R-3.** Frame and IPC `IO::Buffer` views MUST remain read-only and retain their native owner,
   including through derived slices after session closure and collection. A caller MAY use
   `get_string` for a binary copy. Builders copy their inputs. Read columns as typed arrays or
-  bulk values; preserve unsigned widths, signed nanosecond timestamps and float bits.
+  bulk values; preserve unsigned widths, signed nanosecond timestamps and durations and float
+  bits.
 - **R-4.** Branch on the typed `ClientError` subclass or `kind`, never message text. Recover a
   durable command with the same `Execution`; inspect `execution_reference` after an uncertain,
   cancelled or expired call and `open_refusal` after an endpoint refusal. A command disposition
@@ -1147,7 +1150,7 @@ it. A CPython host follows these rules instead:
   and `uncertainty` raise `TypeMismatchError` otherwise.
 - **N-5.** A host that exchanges Arrow data through the PyCapsule interface MUST give a submission
   the producer's field names in order, exactly its types, `timestamp[ns, tz=+00:00]` for a
-  `DATETIME`, and no null in a required field or in any list element. The package refuses anything
+  `DATETIME`, `duration[ns]` for a `DURATION`, and no null in a required field or in any list element. The package refuses anything
   else with `InvalidArgumentError` before it sends a batch. A rows event's Arrow export marks every
   sensitive field nullable and reads a withheld value as a null; a host MUST read `states` to tell a
   withheld value from a null.
@@ -1303,7 +1306,8 @@ beside the probes and the representation properties.
 
 The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
 add complete generated-value evidence for F-1 to F-7, R-1 to R-5 and B-1 to B-7. They preserve
-integer widths, float bits, nanosecond timestamps, schema metadata, cell validity, nested lists,
+integer widths, float bits, nanosecond timestamps and durations, schema metadata, cell validity,
+nested lists,
 branch and subscription identities, and retained bytes. Opaque JSON and connector payloads are
 compared as exact text or bytes. The malformed-request scenario also checks both completion page
 bounds and then sends a valid completion and command on the same session.

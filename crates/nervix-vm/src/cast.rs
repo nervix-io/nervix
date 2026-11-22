@@ -122,6 +122,9 @@ pub(crate) enum CastRefusal {
     /// A `BYTES` value and a value of another type, which only the bytes functions convert.
     #[error("BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or hex functions")]
     Bytes,
+    /// A `DURATION` and a value of another type, which no conversion joins.
+    #[error("a DURATION converts to no other type, and no other type converts to a DURATION")]
+    Duration,
     /// A list converted to a scalar type, `STRING` included.
     #[error("an ARRAY or VEC value converts only to an ARRAY or VEC type")]
     ListToScalar,
@@ -148,6 +151,10 @@ pub(crate) enum CastRefusal {
 fn scalar_target(value: &DataType, target: &DataType) -> Result<RegisterType, CastRefusal> {
     if (value == &DataType::Binary || target == &DataType::Binary) && value != target {
         return Err(CastRefusal::Bytes);
+    }
+    let is_duration = |data_type: &DataType| matches!(data_type, DataType::Duration(_));
+    if (is_duration(value) || is_duration(target)) && value != target {
+        return Err(CastRefusal::Duration);
     }
     let (Some(_), Some(target_register)) = (
         RegisterType::from_data_type(value),

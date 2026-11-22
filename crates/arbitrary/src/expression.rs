@@ -31,7 +31,7 @@ const FUNCTIONS: [&str; 20] = [
 ];
 
 /// Every scalar type a conversion names.
-const SCALAR_TYPES: [ParseAsType; 14] = [
+const SCALAR_TYPES: [ParseAsType; 15] = [
     ParseAsType::U8,
     ParseAsType::I8,
     ParseAsType::U16,
@@ -43,6 +43,7 @@ const SCALAR_TYPES: [ParseAsType; 14] = [
     ParseAsType::Bool,
     ParseAsType::String,
     ParseAsType::Datetime,
+    ParseAsType::Duration,
     ParseAsType::F32,
     ParseAsType::F64,
     ParseAsType::Bytes,
@@ -288,17 +289,42 @@ impl Arbitrary<'_> {
 
     /// A literal of any type.
     ///
-    /// In Plexus a number literal is never negative, because `-5` is the negation of `5`, and a float
-    /// is finite; a negative value is built as a negation around a literal instead. The vocabulary
-    /// holds any `i64` and any `f64` bit pattern, NaN payloads and negative zero included.
+    /// In Plexus a number or duration literal is never negative, because `-5` is the negation of
+    /// `5`, and a float is finite; a negative value is built as a negation around a literal
+    /// instead. The vocabulary holds any `i64`, any signed duration and any `f64` bit pattern, NaN
+    /// payloads and negative zero included.
     pub fn literal(&mut self) -> Literal {
-        match self.entropy.byte() % 5 {
+        match self.entropy.byte() % 6 {
             0 => Literal::I64(self.integer_literal()),
             1 => Literal::F64(self.float_literal()),
             2 => Literal::Bool(self.entropy.flag()),
             3 => Literal::String(self.string()),
+            4 => Literal::Duration(self.duration_literal()),
             _ => Literal::Null,
         }
+    }
+
+    /// A duration literal's value: in Plexus zero up to the longest `DURATION`, biased to the
+    /// lengths of each unit and the edges of the range; in the vocabulary any signed count.
+    pub fn duration_literal(&mut self) -> nervix_models::DurationValue {
+        let nanoseconds = match self.domain {
+            Domain::Plexus => match self.entropy.byte() % 3 {
+                0 => self.entropy.pick([
+                    0,
+                    1,
+                    1_000,
+                    1_000_000,
+                    1_000_000_000,
+                    60_000_000_000,
+                    3_600_000_000_000,
+                    86_400_000_000_000,
+                    i64::MAX,
+                ]),
+                _ => self.integer_literal(),
+            },
+            Domain::Vocabulary => self.entropy.any_i64(),
+        };
+        nervix_models::DurationValue::from_nanoseconds(nanoseconds)
     }
 
     fn integer_literal(&mut self) -> i64 {

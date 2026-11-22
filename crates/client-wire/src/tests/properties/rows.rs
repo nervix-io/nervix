@@ -13,7 +13,7 @@
 use std::num::NonZeroU32;
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{ParseAsType, SchemaField};
+use nervix_models::{DurationValue, ParseAsType, SchemaField};
 
 use super::WireValues;
 use crate::{tests::fixtures::name, *};
@@ -58,6 +58,14 @@ fn check(bytes: &[u8]) {
         0x7fef_ffff_ffff_ffff,
     ]);
     let timestamp = values.timestamp();
+    let duration = DurationValue::from_nanoseconds(values.arbitrary.entropy().pick([
+        signed,
+        i64::MIN,
+        -1,
+        0,
+        1,
+        i64::MAX,
+    ]));
     let flag = values.arbitrary.entropy().flag();
     let low8 = integer.to_le_bytes()[0];
     let low16 = u16::from_le_bytes([integer.to_le_bytes()[0], integer.to_le_bytes()[1]]);
@@ -124,6 +132,7 @@ fn check(bytes: &[u8]) {
             }),
         },
     ));
+    fields.push(field(18, ParseAsType::Duration));
     let branched = values.arbitrary.entropy().flag();
     let schema = RowSchema {
         fields,
@@ -172,7 +181,8 @@ fn check(bytes: &[u8]) {
                 writer.push_list(|items| {
                     items.push_list(|inner| inner.push_u64(integer))?;
                     items.push_list(|_| Ok(()))
-                })
+                })?;
+                writer.push_duration(duration)
             })
             .assured("bounded typed row fits");
     }
@@ -209,7 +219,7 @@ fn check(bytes: &[u8]) {
         assert!(batch.branch_key().is_none());
     }
     for row in batch.rows() {
-        assert_eq!(row.len(), 18);
+        assert_eq!(row.len(), 19);
         for (index, original) in expected.iter().enumerate() {
             assert_eq!(
                 row.get(index).assured("the complete row has this cell"),
@@ -235,6 +245,10 @@ fn check(bytes: &[u8]) {
             panic!("empty and null lists differ");
         };
         assert!(empty.is_empty());
+        assert_eq!(
+            row.get(18).assured("the duration cell exists"),
+            CellView::Duration(duration)
+        );
     }
     assert!(batch.row(rows).is_none());
 }

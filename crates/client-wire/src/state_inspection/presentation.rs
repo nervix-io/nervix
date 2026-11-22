@@ -339,6 +339,7 @@ impl Serialize for CellView<'_> {
                 scalar!("bytes", &base64_simd::STANDARD.encode_to_string(data))
             }
             CellView::Datetime(data) => scalar!("datetime", &data.unix_nanos()),
+            CellView::Duration(data) => scalar!("duration", &data.nanoseconds()),
             CellView::List(data) => scalar!("list", data),
         }
         value.end()

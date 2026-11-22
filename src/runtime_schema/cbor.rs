@@ -576,6 +576,9 @@ pub(super) fn append_to_arrow(
                 None
             }
         ),
+        ParseAsType::Duration => Err(Report::new(RuntimeSchemaError::CodecDuration {
+            location: location.to_runtime_location(),
+        })),
         ParseAsType::F32 => append_primitive!(
             Float32Builder,
             if let Value::Float(v) = value {

@@ -63,7 +63,7 @@ impl SchemafulFormat {
     pub(crate) fn domain(self) -> GeneratedDomain {
         match self {
             Self::Json => GeneratedDomain::Json,
-            Self::Cbor => GeneratedDomain::Arrow,
+            Self::Cbor => GeneratedDomain::Codec,
             Self::Avro => GeneratedDomain::Avro,
         }
     }
@@ -391,6 +391,7 @@ fn json_wire_type(ty: &ParseAsType) -> JsonType {
         ParseAsType::Datetime | ParseAsType::String | ParseAsType::Bytes => JsonType::String,
         ParseAsType::Bool => JsonType::Boolean,
         ParseAsType::Array { .. } | ParseAsType::Vec { .. } => JsonType::Array,
+        ParseAsType::Duration => unreachable!("the codec domains declare no DURATION at any depth"),
     }
 }
 
@@ -410,6 +411,7 @@ fn cbor_wire_type(ty: &ParseAsType) -> CborType {
         ParseAsType::Bool => CborType::Boolean,
         ParseAsType::Bytes => CborType::Bytes,
         ParseAsType::Array { .. } | ParseAsType::Vec { .. } => CborType::Array,
+        ParseAsType::Duration => unreachable!("the codec domains declare no DURATION at any depth"),
     }
 }
 
@@ -499,6 +501,7 @@ fn avro_wire_type(ty: &ParseAsType, bytes_as_text: bool) -> AvroType {
         | ParseAsType::U64 => {
             unreachable!("the Avro domain declares no narrow or unsigned integer at any depth")
         }
+        ParseAsType::Duration => unreachable!("the codec domains declare no DURATION at any depth"),
     }
 }
 
@@ -1119,7 +1122,8 @@ fn holds_non_finite_float(value: &LogicalValue) -> bool {
         | LogicalValue::Bool(_)
         | LogicalValue::String(_)
         | LogicalValue::Bytes(_)
-        | LogicalValue::Datetime(_) => false,
+        | LogicalValue::Datetime(_)
+        | LogicalValue::Duration(_) => false,
     }
 }
 
@@ -1169,9 +1173,9 @@ fn bolero_non_finite_floats_follow_the_json_projection() {
         .for_each(|input| {
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
             let format = SchemafulFormat::Json;
-            let schema = GeneratedDomain::Arrow.schema(&mut arbitrary);
+            let schema = GeneratedDomain::Codec.schema(&mut arbitrary);
             let case = CodecCase::with_schema(&mut arbitrary, format, schema);
-            let rows = GeneratedDomain::Arrow.batch(&mut arbitrary, &case.schema);
+            let rows = GeneratedDomain::Codec.batch(&mut arbitrary, &case.schema);
             let batch = case.schema.runtime_batch(rows.clone());
             let payloads = case.encode(&batch);
             for (row, payload) in LogicalValue::rows(&rows).into_iter().zip(&payloads) {

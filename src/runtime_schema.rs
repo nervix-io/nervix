@@ -32,14 +32,15 @@ use apache_avro::{
 };
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, RecordBatchOptions,
-    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DurationNanosecondArray, FixedSizeListArray,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
+    RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
     builder::{
-        ArrayBuilder, BinaryBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder,
-        Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder,
-        StringBuilder, TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
-        UInt64Builder, make_builder,
+        ArrayBuilder, BinaryBuilder, BooleanBuilder, DurationNanosecondBuilder,
+        FixedSizeListBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
+        Int32Builder, Int64Builder, ListBuilder, StringBuilder, TimestampNanosecondBuilder,
+        UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder, make_builder,
     },
     make_array, new_empty_array,
 };
@@ -64,7 +65,7 @@ use nervix_columnar_json::{FieldNulls, JsonColumnSpec, JsonColumns, NestedNulls}
 use nervix_jaq::{CompiledJaqProgram, JaqFormatError, JaqNativeFormat, JaqProgramError};
 use nervix_models::{
     AvroType, CborType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec,
-    JsonType, ModelName, ParseAsType, PayloadSizeLimit, RemoteRuntimeElementValue,
+    DurationValue, JsonType, ModelName, ParseAsType, PayloadSizeLimit, RemoteRuntimeElementValue,
     RemoteRuntimeRecordMetadata, RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp,
     WireSchemaStrictness,
 };
@@ -392,6 +393,7 @@ pub enum RuntimeValue {
     Bool(bool),
     String(String),
     Datetime(DateTime<FixedOffset>),
+    Duration(DurationValue),
     F32(OrderedFloat<f32>),
     F64(OrderedFloat<f64>),
     Array(Vec<RuntimeValue>),
@@ -433,6 +435,8 @@ enum SerializableRuntimeValue {
     Bool(bool),
     String(String),
     Datetime(String),
+    /// A `DURATION`, as its signed count of nanoseconds.
+    Duration(i64),
     F32(f32),
     F64(f64),
     Array(Vec<SerializableRuntimeValue>),
@@ -772,7 +776,10 @@ impl CompiledSchema {
                 .iter()
                 .map(|field| WasmProcessorField {
                     name: field.name.clone(),
-                    ty: WasmProcessorType::from(&field.ty),
+                    ty: WasmProcessorType::try_from(&field.ty).assured(
+                        "the registry refuses a WASM processor whose schemas hold a DURATION \
+                         before any plan is built from its Model",
+                    ),
                     optional: field.optional,
                 })
                 .collect(),
@@ -930,6 +937,7 @@ fn test_runtime_value_arrow_type(
             ArrowTimeUnit::Nanosecond,
             Some("+00:00".into()),
         )),
+        RuntimeValue::Duration(_) => Ok(ArrowDataType::Duration(ArrowTimeUnit::Nanosecond)),
         RuntimeValue::F32(_) => Ok(ArrowDataType::Float32),
         RuntimeValue::F64(_) => Ok(ArrowDataType::Float64),
         RuntimeValue::Array(values) => {
@@ -2162,6 +2170,8 @@ pub enum RuntimeValueKind {
     String,
     #[strum(serialize = "DATETIME")]
     Datetime,
+    #[strum(serialize = "DURATION")]
+    Duration,
     #[strum(serialize = "F32")]
     F32,
     #[strum(serialize = "F64")]
@@ -2519,6 +2529,10 @@ pub enum RuntimeSchemaError {
         expected: ParseAsType,
         found: RuntimeValueKind,
     },
+    /// A codec reached a `DURATION` field, which no codec reads or writes; the registry refuses a
+    /// codec whose schema holds one before any of it is compiled.
+    #[error("{location} is a DURATION, which no codec reads or writes")]
+    CodecDuration { location: RuntimeValueLocation },
     #[error("{location} holds a JSON {found}, which is incompatible with {expected:?}")]
     JsonValueTypeMismatch {
         location: RuntimeValueLocation,
@@ -2634,6 +2648,7 @@ pub(crate) fn parse_as_type_from_arrow(
         ArrowDataType::Utf8 => Ok(ParseAsType::String),
         ArrowDataType::Binary => Ok(ParseAsType::Bytes),
         ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => Ok(ParseAsType::Datetime),
+        ArrowDataType::Duration(ArrowTimeUnit::Nanosecond) => Ok(ParseAsType::Duration),
         ArrowDataType::Float32 => Ok(ParseAsType::F32),
         ArrowDataType::Float64 => Ok(ParseAsType::F64),
         ArrowDataType::List(element) => Ok(ParseAsType::Vec {
@@ -2718,6 +2733,7 @@ impl RuntimeValue {
             Self::Bool(_) => RuntimeValueKind::Bool,
             Self::String(_) => RuntimeValueKind::String,
             Self::Datetime(_) => RuntimeValueKind::Datetime,
+            Self::Duration(_) => RuntimeValueKind::Duration,
             Self::F32(_) => RuntimeValueKind::F32,
             Self::F64(_) => RuntimeValueKind::F64,
             Self::Array(_) => RuntimeValueKind::Array,
@@ -2745,7 +2761,8 @@ impl RuntimeValue {
             | (Self::F64(_), ParseAsType::F64)
             | (Self::Bool(_), ParseAsType::Bool)
             | (Self::String(_), ParseAsType::String)
-            | (Self::Datetime(_), ParseAsType::Datetime) => return Ok(()),
+            | (Self::Datetime(_), ParseAsType::Datetime)
+            | (Self::Duration(_), ParseAsType::Duration) => return Ok(()),
             (Self::Array(elements), ParseAsType::Array { element, len }) => {
                 let length = usize::try_from(len.get())
                     .assured("a u32 fixed-list length fits every supported target");
@@ -2784,6 +2801,7 @@ impl RuntimeValue {
             Self::Bool(v) => RemoteRuntimeValue::Bool(*v),
             Self::String(v) => RemoteRuntimeValue::String(v.clone()),
             Self::Datetime(v) => RemoteRuntimeValue::Datetime(v.to_rfc3339()),
+            Self::Duration(v) => RemoteRuntimeValue::Duration(v.nanoseconds()),
             Self::F32(v) => RemoteRuntimeValue::F32(v.into_inner()),
             Self::F64(v) => RemoteRuntimeValue::F64(v.into_inner()),
             Self::Array(v) => {
@@ -2814,6 +2832,7 @@ impl RuntimeValue {
             RemoteRuntimeValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeValue::String(v) => Self::String(v),
             RemoteRuntimeValue::Datetime(v) => Self::Datetime(Self::remote_datetime(&v)?),
+            RemoteRuntimeValue::Duration(v) => Self::Duration(DurationValue::from_nanoseconds(v)),
             RemoteRuntimeValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeValue::F64(v) => Self::F64(OrderedFloat(v)),
             RemoteRuntimeValue::Array(v) => Self::Array(Self::from_remote_elements(v)?),
@@ -2854,6 +2873,7 @@ impl RuntimeValue {
             Self::Bool(v) => RemoteRuntimeElementValue::Bool(*v),
             Self::String(v) => RemoteRuntimeElementValue::String(v.clone()),
             Self::Datetime(v) => RemoteRuntimeElementValue::Datetime(v.to_rfc3339()),
+            Self::Duration(v) => RemoteRuntimeElementValue::Duration(v.nanoseconds()),
             Self::F32(v) => RemoteRuntimeElementValue::F32(v.into_inner()),
             Self::F64(v) => RemoteRuntimeElementValue::F64(v.into_inner()),
             Self::Array(values) => RemoteRuntimeElementValue::Array(
@@ -2880,6 +2900,9 @@ impl RuntimeValue {
             RemoteRuntimeElementValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeElementValue::String(v) => Self::String(v),
             RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(Self::remote_datetime(&v)?),
+            RemoteRuntimeElementValue::Duration(v) => {
+                Self::Duration(DurationValue::from_nanoseconds(v))
+            }
             RemoteRuntimeElementValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeElementValue::F64(v) => Self::F64(OrderedFloat(v)),
             RemoteRuntimeElementValue::Array(values) => {
@@ -2896,6 +2919,7 @@ impl RuntimeValue {
         match self {
             Self::String(v) => v.clone(),
             Self::Datetime(v) => v.to_rfc3339(),
+            Self::Duration(v) => v.to_string(),
             other => other.to_json_value().to_string(),
         }
     }
@@ -2918,7 +2942,8 @@ impl RuntimeValue {
             | Self::I64(_)
             | Self::Bool(_)
             | Self::String(_)
-            | Self::Datetime(_) => true,
+            | Self::Datetime(_)
+            | Self::Duration(_) => true,
         }
     }
 
@@ -2953,6 +2978,7 @@ impl RuntimeValue {
             Self::Bool(v) => JsonValue::Bool(*v),
             Self::String(v) => JsonValue::String(v.clone()),
             Self::Datetime(v) => JsonValue::String(v.to_rfc3339()),
+            Self::Duration(v) => JsonValue::String(v.to_string()),
             Self::F32(v) => Self::json_float(f64::from(v.into_inner())),
             Self::F64(v) => Self::json_float(v.into_inner()),
             Self::Array(values) | Self::Vec(values) => {
@@ -2997,6 +3023,7 @@ impl From<&RuntimeValue> for SerializableRuntimeValue {
             RuntimeValue::Bool(v) => Self::Bool(*v),
             RuntimeValue::String(v) => Self::String(v.clone()),
             RuntimeValue::Datetime(v) => Self::Datetime(v.to_rfc3339()),
+            RuntimeValue::Duration(v) => Self::Duration(v.nanoseconds()),
             RuntimeValue::F32(v) => Self::F32(v.into_inner()),
             RuntimeValue::F64(v) => Self::F64(v.into_inner()),
             RuntimeValue::Array(values) => Self::Array(values.iter().map(Self::from).collect()),
@@ -3028,6 +3055,9 @@ impl TryFrom<SerializableRuntimeValue> for RuntimeValue {
                         source,
                     })),
                 }
+            }
+            SerializableRuntimeValue::Duration(v) => {
+                Ok(Self::Duration(DurationValue::from_nanoseconds(v)))
             }
             SerializableRuntimeValue::F32(v) => Ok(Self::F32(OrderedFloat(v))),
             SerializableRuntimeValue::F64(v) => Ok(Self::F64(OrderedFloat(v))),
@@ -3622,6 +3652,10 @@ impl Serialize for ArrowCodecValue<'_> {
                         .to_rfc3339(),
                 )
             }
+            ParseAsType::Duration => Err(serde::ser::Error::custom(format!(
+                "field '{}' is a DURATION, which no codec writes",
+                self.field
+            ))),
             ParseAsType::F32 => serialize_primitive!(Float32Array, serialize_f32),
             ParseAsType::F64 => serialize_primitive!(Float64Array, serialize_f64),
             ParseAsType::Array { .. } | ParseAsType::Vec { .. } => self
@@ -4034,6 +4068,9 @@ fn append_json_value_to_arrow(
                 None
             }
         ),
+        ParseAsType::Duration => Err(Report::new(RuntimeSchemaError::CodecDuration {
+            location: location.to_runtime_location(),
+        })),
         ParseAsType::F32 => append_primitive!(Float32Builder, value.as_f64().map(json_number_f32)),
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
@@ -4204,6 +4241,9 @@ fn append_borrowed_json_value_to_arrow(
                 .append_value(value);
             Ok(())
         }
+        ParseAsType::Duration => Err(Report::new(RuntimeSchemaError::CodecDuration {
+            location: location.to_runtime_location(),
+        })),
         ParseAsType::F32 => {
             append_primitive!(Float32Builder, value.cast_f64().map(json_number_f32))
         }
@@ -4403,6 +4443,9 @@ fn append_avro_value_to_arrow(
             }
             Ok(())
         }
+        ParseAsType::Duration => Err(Report::new(RuntimeSchemaError::CodecDuration {
+            location: location.to_runtime_location(),
+        })),
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
             if let AvroValue::String(value) = value {
@@ -4596,6 +4639,7 @@ fn append_placeholder_to_arrow(
         ParseAsType::String => append!(StringBuilder, ""),
         ParseAsType::Bytes => append!(BinaryBuilder, []),
         ParseAsType::Datetime => append!(TimestampNanosecondBuilder, 0),
+        ParseAsType::Duration => append!(DurationNanosecondBuilder, 0),
         ParseAsType::F32 => append!(Float32Builder, 0.0),
         ParseAsType::F64 => append!(Float64Builder, 0.0),
         ParseAsType::Array { element, len } => {
@@ -4700,6 +4744,11 @@ fn append_runtime_value_to_arrow(
             TimestampNanosecondBuilder,
             RuntimeValue::Datetime,
             |value: &DateTime<FixedOffset>| value.timestamp_nanos_opt()
+        ),
+        ParseAsType::Duration => append_primitive!(
+            DurationNanosecondBuilder,
+            RuntimeValue::Duration,
+            |value: &DurationValue| Some(value.nanoseconds())
         ),
         ParseAsType::F32 => {
             append_primitive!(Float32Builder, RuntimeValue::F32, |value: &OrderedFloat<
@@ -4910,6 +4959,11 @@ pub(crate) fn runtime_value_from_arrow_array(
                 typed_arrow_array::<TimestampNanosecondArray>(array, ty, field)?.value(row_index),
             )
             .fixed_offset(),
+        ))),
+        ParseAsType::Duration => Ok(Some(RuntimeValue::Duration(
+            DurationValue::from_nanoseconds(
+                typed_arrow_array::<DurationNanosecondArray>(array, ty, field)?.value(row_index),
+            ),
         ))),
         ParseAsType::F32 => Ok(Some(RuntimeValue::F32(OrderedFloat(
             typed_arrow_array::<Float32Array>(array, ty, field)?.value(row_index),

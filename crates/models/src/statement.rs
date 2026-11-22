@@ -38,11 +38,11 @@ use crate::{
     CreateEmitter, CreateInferencer, CreateJsonWireSchema, CreateJunction, CreatePlacement,
     CreateReingestor, CreateReorderer, CreateSchema, CreateUdf, CreateWasmProcessor,
     CreateWindowProcessor, DeduplicatorName, DescribeInferencer, DescribeWasmProcessor,
-    DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName,
-    EndpointName, FieldName, GeneratorName, InferencerName, IngestQuiesceMode, IngestorName,
-    JsonType, JunctionName, LookupName, ModelName, NodeRef, ParametrizerName,
-    ParametrizerPartitions, PlacementName, ProcessorOutput, ProcessorOutputs, RebindResource,
-    RefreshLicense, ReingestorName, RelayName, ReleaseLicense, ReordererName,
+    DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName, DomainTimeRate,
+    DurationValue, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
+    IngestQuiesceMode, IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef,
+    ParametrizerName, ParametrizerPartitions, PlacementName, ProcessorOutput, ProcessorOutputs,
+    RebindResource, RefreshLicense, ReingestorName, RelayName, ReleaseLicense, ReordererName,
     RequestedResourceVersion, ResetWasmState, ResolvedParametrizerPartitions, ResourceName,
     Restore, RotateLicenseClusterKey, SchemaName, ShowWasmProcessorState, SignalingProtocolName,
     SubscriptionName, Timestamp, TransactionInspectionRequest, UdfName, Unit, UserName, VhostName,
@@ -1206,6 +1206,8 @@ pub enum SubscriptionLiteral {
     String(String),
     Number(String),
     Bool(bool),
+    /// A duration literal such as `30s`, which binds a `DURATION` field.
+    Duration(DurationValue),
 }
 
 /// A model shape that its [`ModelKind`] names, and that names its kind back.

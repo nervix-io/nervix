@@ -17,12 +17,12 @@
 use std::cmp::Ordering;
 
 use arrow_array::{
-    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
+    DurationNanosecondArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+    Int64Array, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
     cast::AsArray as _,
     types::{
-        Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
-        TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        DurationNanosecondType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+        Int64Type, TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
 use arrow_schema::{Field as ArrowField, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit};
@@ -54,6 +54,7 @@ enum ArgumentValues {
     Boolean(BooleanArray),
     Utf8(StringArray),
     Timestamp(TimestampNanosecondArray),
+    Duration(DurationNanosecondArray),
     /// A value the window only passes through, such as an `ARRAY` or `VEC` read by `FIRST`.
     Passthrough,
 }
@@ -365,6 +366,12 @@ impl ArgumentColumn {
                     .verified(DOWNCAST)
                     .clone(),
             ),
+            ArrowDataType::Duration(ArrowTimeUnit::Nanosecond) => ArgumentValues::Duration(
+                array
+                    .as_primitive_opt::<DurationNanosecondType>()
+                    .verified(DOWNCAST)
+                    .clone(),
+            ),
             _ => ArgumentValues::Passthrough,
         };
         Self { array, values }
@@ -414,6 +421,7 @@ impl ArgumentColumn {
             ArgumentValues::Boolean(_)
             | ArgumentValues::Utf8(_)
             | ArgumentValues::Timestamp(_)
+            | ArgumentValues::Duration(_)
             | ArgumentValues::Passthrough => None,
         };
         run.verified(NUMERIC_ARGUMENT)
@@ -481,6 +489,7 @@ impl ArgumentColumn {
             ArgumentValues::Boolean(_)
             | ArgumentValues::Utf8(_)
             | ArgumentValues::Timestamp(_)
+            | ArgumentValues::Duration(_)
             | ArgumentValues::Passthrough => None,
         };
         Some(number.verified(NUMERIC_ARGUMENT))
@@ -544,6 +553,9 @@ impl ArgumentColumn {
                 Some(left.value(row).cmp(right.value(other_row)))
             }
             (ArgumentValues::Timestamp(left), ArgumentValues::Timestamp(right)) => {
+                Some(left.value(row).cmp(&right.value(other_row)))
+            }
+            (ArgumentValues::Duration(left), ArgumentValues::Duration(right)) => {
                 Some(left.value(row).cmp(&right.value(other_row)))
             }
             _ => None,
@@ -635,6 +647,10 @@ impl ArgumentColumn {
             }
             ArgumentValues::Timestamp(values) => {
                 key.push(13);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::Duration(values) => {
+                key.push(14);
                 key.extend_from_slice(&values.value(row).to_le_bytes());
             }
             ArgumentValues::Passthrough => return None,
@@ -730,6 +746,9 @@ impl ArgumentColumn {
             }
             ArgumentValues::Timestamp(values) => {
                 fixed_keys!(values, 13, |value: i64| value.to_le_bytes())
+            }
+            ArgumentValues::Duration(values) => {
+                fixed_keys!(values, 14, |value: i64| value.to_le_bytes())
             }
             ArgumentValues::Passthrough => {}
         }
@@ -989,6 +1008,25 @@ mod sketch_key_tests {
 
         let zeros = ArgumentColumn::new(StdArc::new(Float64Array::from(vec![0.0, -0.0])));
         assert_eq!(zeros.sketch_key(0), zeros.sketch_key(1));
+
+        // A duration and a datetime of the same count of nanoseconds are different values.
+        let duration = ArgumentColumn::new(StdArc::new(DurationNanosecondArray::from(vec![7])));
+        let datetime = ArgumentColumn::new(StdArc::new(TimestampNanosecondArray::from(vec![7])));
+        assert_ne!(duration.sketch_key(0), datetime.sketch_key(0));
+        assert_ne!(duration.sketch_key(0), signed.sketch_key(0));
+    }
+
+    #[test]
+    fn durations_order_by_their_signed_nanoseconds() {
+        let left = ArgumentColumn::new(StdArc::new(DurationNanosecondArray::from(vec![
+            -1_000,
+            0,
+            30_000_000_000,
+        ])));
+        let right = ArgumentColumn::new(StdArc::new(DurationNanosecondArray::from(vec![0])));
+        assert_eq!(left.compare(0, &right, 0), Ordering::Less);
+        assert_eq!(left.compare(1, &right, 0), Ordering::Equal);
+        assert_eq!(left.compare(2, &right, 0), Ordering::Greater);
     }
 
     #[test]
@@ -1007,6 +1045,7 @@ mod sketch_key_tests {
             StdArc::new(BooleanArray::from(vec![Some(true), None, Some(false)])),
             StdArc::new(StringArray::from(vec![Some("seven"), None, Some("eight")])),
             StdArc::new(TimestampNanosecondArray::from(vec![Some(7), None, Some(8)])),
+            StdArc::new(DurationNanosecondArray::from(vec![Some(-7), None, Some(8)])),
         ];
         for array in columns {
             let column = ArgumentColumn::new(array);
