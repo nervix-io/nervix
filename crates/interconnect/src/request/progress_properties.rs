@@ -22,7 +22,7 @@ use nervix_models::ClusterNodeName;
 use super::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationProgress,
     ApplicationProgressReceipt, ApplicationProgressReport, ApplicationRevisionRequest,
-    InterconnectRequest, RkyvMessage,
+    InterconnectRequest, RkyvMessage, RuntimeApplicationFailure,
 };
 
 /// The current progress messages one generated input describes.
@@ -52,6 +52,17 @@ impl<'a> Generator<'a> {
         Some(self.arbitrary.entropy().boundary_biased(0..=u64::MAX))
     }
 
+    /// A runtime revision the incarnation failed to prepare, or none.
+    fn runtime_failure(&mut self) -> Option<RuntimeApplicationFailure> {
+        if !self.arbitrary.entropy().flag() {
+            return None;
+        }
+        Some(RuntimeApplicationFailure {
+            revision: self.arbitrary.entropy().boundary_biased(0..=u64::MAX),
+            reason: self.arbitrary.string(),
+        })
+    }
+
     fn progress(&mut self) -> ApplicationProgress {
         let identity = self.arbitrary.node_identity();
         ApplicationProgress {
@@ -60,6 +71,7 @@ impl<'a> Generator<'a> {
             runtime_prepared: self.phase(),
             runtime_ready: self.phase(),
             domain_clock_installed: self.phase(),
+            runtime_failure: self.runtime_failure(),
         }
     }
 

@@ -788,8 +788,7 @@ table ActivationImpact {
 
 enum RebuildReason : ubyte {
   Configuration,
-  Ownership,
-  Recovery
+  Ownership
 }
 
 table RebuildImpact {

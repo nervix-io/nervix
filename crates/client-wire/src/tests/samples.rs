@@ -577,18 +577,14 @@ fn full_effects() -> ImpactEffects {
                 attribution: attribution(1, 2),
             },
         ]),
-        rebuilds: [
-            RebuildReason::Configuration,
-            RebuildReason::Ownership,
-            RebuildReason::Recovery,
-        ]
-        .into_iter()
-        .map(|reason| RebuildImpact {
-            node: relay_execution.clone(),
-            reason,
-            attribution: attribution(1, 2),
-        })
-        .collect(),
+        rebuilds: [RebuildReason::Configuration, RebuildReason::Ownership]
+            .into_iter()
+            .map(|reason| RebuildImpact {
+                node: relay_execution.clone(),
+                reason,
+                attribution: attribution(1, 2),
+            })
+            .collect(),
         state_resets: [
             StatePurge::DeduplicatorKeyspace,
             StatePurge::ReordererBuffer,

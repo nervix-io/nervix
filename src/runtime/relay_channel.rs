@@ -46,7 +46,11 @@ use tracing::debug;
     )
 )]
 pub(in crate::runtime) struct RelayDispatchGate {
+    /// Whether any engagement holds producers back.
     closed: AtomicBool,
+    /// Whether any engagement also holds back the hand-on of what the relay already accepted:
+    /// an owner's fan-out and a routed delivery from another node's owner.
+    fanout_closed: AtomicBool,
     in_flight_dispatches: AtomicUsize,
     state: Mutex<RelayDispatchGateState>,
     /// Wakes every waiter when an engagement begins, is released, or expires.
@@ -70,7 +74,23 @@ struct RelayDispatchGateState {
 #[derive(Debug)]
 struct RelayDispatchGateEngagement {
     phase: RelayDispatchGateEngagementPhase,
+    hold: RelayDispatchGateHold,
     reason: String,
+}
+
+/// What one engagement of a dispatch gate holds back.
+///
+/// Producers always wait at an engaged gate. What the relay already accepted is held back only
+/// by an engagement that changes the routes its hand-on reads: a hold that waits for the relay
+/// to empty must let that hand-on through, so the relay empties by delivering, never by refusing
+/// what it accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum RelayDispatchGateHold {
+    /// Producers wait; an owner's fan-out and a routed delivery go on with the current routes.
+    Producers,
+    /// Producers, an owner's fan-out and a routed delivery all wait, so the routes they read
+    /// can change.
+    ProducersAndHandOn,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,6 +163,7 @@ impl RelayDispatchGate {
     pub(in crate::runtime) fn new() -> Self {
         Self {
             closed: AtomicBool::new(false),
+            fanout_closed: AtomicBool::new(false),
             in_flight_dispatches: AtomicUsize::new(0),
             state: Mutex::new(RelayDispatchGateState::default()),
             changed: Notify::new(),
@@ -158,6 +179,22 @@ impl RelayDispatchGate {
         )
     )]
     pub(super) fn engage(&self, deadline: Instant, reason: impl Into<String>) -> u64 {
+        self.engage_holding(deadline, reason, RelayDispatchGateHold::ProducersAndHandOn)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
+    pub(super) fn engage_holding(
+        &self,
+        deadline: Instant,
+        reason: impl Into<String>,
+        hold: RelayDispatchGateHold,
+    ) -> u64 {
         let mut state = self.state.lock();
         loop {
             state.generation = state
@@ -173,13 +210,17 @@ impl RelayDispatchGate {
             generation,
             RelayDispatchGateEngagement {
                 phase: RelayDispatchGateEngagementPhase::Fencing { deadline },
+                hold,
                 reason: reason.into(),
             },
         );
-        // Relaxed: the fence reads the dispatch count with a read-modify-write after this store,
-        // and a dispatch whose own read-modify-write of the count comes later acquires that one,
-        // which orders this store before the dispatch's look at the flag.
+        // Relaxed: the fence reads the dispatch count with a read-modify-write after these
+        // stores, and a dispatch whose own read-modify-write of the count comes later acquires
+        // that one, which orders these stores before the dispatch's look at either flag.
         self.closed.store(true, Ordering::Relaxed);
+        if hold == RelayDispatchGateHold::ProducersAndHandOn {
+            self.fanout_closed.store(true, Ordering::Relaxed);
+        }
         drop(state);
         self.changed.notify_waiters();
         generation
@@ -198,6 +239,11 @@ impl RelayDispatchGate {
     /// Reopens the gate once no engagement is left, which releases what the protected mutation
     /// changed while the gate was closed to every dispatch that observes it open.
     fn reopen_unless_engaged(&self, state: &RelayDispatchGateState) {
+        let holds_hand_on = state
+            .engagements
+            .values()
+            .any(|engagement| engagement.hold == RelayDispatchGateHold::ProducersAndHandOn);
+        self.fanout_closed.store(holds_hand_on, Ordering::Release);
         self.closed
             .store(!state.engagements.is_empty(), Ordering::Release);
     }
@@ -207,17 +253,65 @@ impl RelayDispatchGate {
         RelayDispatchPermit { gate: self }
     }
 
-    /// A buffered owner batch cannot wait behind a schedule swap: the swap's drain includes that
-    /// batch, so waiting would hold the drain open. Reject it and let its source retry instead.
-    pub(in crate::runtime) fn try_acquire_dispatch(&self) -> Option<RelayDispatchPermit<'_>> {
-        if self.try_enter() {
+    /// Admits the hand-on of a batch the relay already accepted, an owner's fan-out or a routed
+    /// delivery, unless an engagement holds hand-on back. A hold that only holds producers lets
+    /// it through, so a hold waiting for the relay to empty sees it empty by delivery.
+    pub(in crate::runtime) fn try_acquire_hand_on(&self) -> Option<RelayDispatchPermit<'_>> {
+        if self.try_enter_hand_on() {
             Some(RelayDispatchPermit { gate: self })
         } else {
             self.clear_if_expired();
-            if self.try_enter() {
+            if self.try_enter_hand_on() {
                 Some(RelayDispatchPermit { gate: self })
             } else {
                 None
+            }
+        }
+    }
+
+    /// [`Self::try_acquire_hand_on`] with an owned permit, for a hand-on that holds the permits of
+    /// several gates at once.
+    pub(in crate::runtime) fn try_acquire_hand_on_owned(
+        gate: &Arc<Self>,
+    ) -> Option<OwnedRelayDispatchPermit> {
+        if !gate.try_enter_hand_on() {
+            gate.clear_if_expired();
+            if !gate.try_enter_hand_on() {
+                return None;
+            }
+        }
+        Some(OwnedRelayDispatchPermit { gate: gate.clone() })
+    }
+
+    /// Waits until no engagement holds hand-on back. It takes no permit, so a fence never waits
+    /// for it: the caller takes its permit with [`Self::try_acquire_hand_on`] once this returns.
+    pub(in crate::runtime) async fn wait_hand_on_open(&self) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            self.clear_if_expired();
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if !self.fanout_closed.load(Ordering::Acquire) {
+                return;
+            }
+            let deadline = {
+                let state = self.state.lock();
+                state
+                    .engagements
+                    .values()
+                    .filter(|engagement| {
+                        engagement.hold == RelayDispatchGateHold::ProducersAndHandOn
+                    })
+                    .filter_map(RelayDispatchGateEngagement::fence_deadline)
+                    .min()
+            };
+            if let Some(deadline) = deadline {
+                if timeout_at(deadline, changed.as_mut()).await.is_err() {
+                    self.clear_if_expired();
+                }
+            } else {
+                changed.await;
             }
         }
     }
@@ -269,6 +363,19 @@ impl RelayDispatchGate {
         // Acquire: a dispatch that observes the gate reopened by its last release also observes
         // what the protected mutation changed while the gate was closed.
         if !self.closed.load(Ordering::Acquire) {
+            return true;
+        }
+        self.leave();
+        false
+    }
+
+    /// Counts a hand-on in, unless an engagement holds hand-on back. The same read-modify-write
+    /// of the count orders it against every fence as [`Self::try_enter`] does.
+    fn try_enter_hand_on(&self) -> bool {
+        self.enter();
+        // Acquire: a hand-on that observes the flag cleared by the last release also observes
+        // what the protected mutation changed while hand-on was held.
+        if !self.fanout_closed.load(Ordering::Acquire) {
             return true;
         }
         self.leave();
@@ -504,6 +611,24 @@ impl RelayDispatchGateLease {
         reason: impl Into<String>,
     ) -> Self {
         let generation = gate.engage(deadline, reason);
+        Self { gate, generation }
+    }
+
+    /// Engages `gate` for a hold that waits for the relay to empty: producers wait, and what the
+    /// relay already accepted goes on to its consumers with the current routes.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the gate reason or a delivery callback; local callback \
+                      bodies remain analyzed"
+        )
+    )]
+    pub(in crate::runtime) fn engage_producers(
+        gate: Arc<RelayDispatchGate>,
+        deadline: Instant,
+        reason: impl Into<String>,
+    ) -> Self {
+        let generation = gate.engage_holding(deadline, reason, RelayDispatchGateHold::Producers);
         Self { gate, generation }
     }
 

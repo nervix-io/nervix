@@ -20,14 +20,9 @@ use nervix_consensus::{
     TransactionApplicationOutcome, TransactionApplyingStep, TransactionState,
     TransactionStepEffect,
 };
-use nervix_models::{
-    ActualExecutionStepImpact, DomainName, DomainStatus, ImpactAttribution, ImpactNodeCoverage,
-    ModelKind, PauseRequirement, QuiesceLevel, RebuildImpact, RebuildReason,
-    TransactionOperationRange,
-};
+use nervix_models::{ActualExecutionStepImpact, DomainName, DomainStatus, ModelKind, QuiesceLevel};
 use nervix_primitives::time::sleep;
 use nervix_recovery::Reported as _;
-use tracing::warn;
 
 use super::{TransactionApplicationAttempt, TransactionCommitError, TransactionStepImpactRecorder};
 use crate::{
@@ -153,20 +148,6 @@ impl SessionServiceImpl {
                 },
             }
         };
-        if !matches!(
-            applying.effect,
-            Some(
-                TransactionStepEffect::CreateResourceCatalog { .. }
-                    | TransactionStepEffect::EditResourceLabels { .. }
-            ) | None
-        ) {
-            self.record_runtime_recovery_expansions(
-                &actual,
-                applying.result.operation_range(),
-                applying.effect_revision,
-            )
-            .await;
-        }
         Box::pin(self.recover_applying_quiescence(transaction, &actual)).await?;
         let completed = self
             .record_transaction_application_completion(
@@ -257,56 +238,6 @@ impl SessionServiceImpl {
             }
         }
         Ok(())
-    }
-
-    pub(in crate::application) async fn record_runtime_recovery_expansions(
-        &self,
-        actual: &TransactionStepImpactRecorder,
-        operations: TransactionOperationRange,
-        revision: u64,
-    ) {
-        let attribution = ImpactAttribution::for_range(operations);
-        for expansion in self.inner.runtime.recovery_expansions(revision) {
-            nervix_primitives::task::consume_budget().await;
-            let rebuilds = expansion.scope.into_iter().map(|node| RebuildImpact {
-                node: ImpactNodeCoverage::all_executions(node),
-                reason: RebuildReason::Recovery,
-                attribution: attribution.clone(),
-            });
-            actual.record_recovery_expansion(
-                PauseRequirement::Domain {
-                    domain: expansion.domain.clone(),
-                },
-                rebuilds,
-            );
-            warn!(
-                domain = expansion.domain.as_str(),
-                reason = expansion.reason,
-                revision,
-                "recorded runtime recovery expansion in transaction impact"
-            );
-        }
-    }
-
-    pub(in crate::application) async fn apply_current_cluster_state_recording_recovery(
-        &self,
-        actual: &TransactionStepImpactRecorder,
-        transaction: &ReplicatedTransaction,
-    ) -> Option<Report<RuntimeError>> {
-        if let Err(error) = self.apply_current_cluster_state().await {
-            return Some(error);
-        }
-        if let TransactionState::Committing(progress) = &transaction.state
-            && let Some(applying) = &progress.applying
-        {
-            self.record_runtime_recovery_expansions(
-                actual,
-                applying.result.operation_range(),
-                applying.effect_revision,
-            )
-            .await;
-        }
-        None
     }
 
     /// How an applying step that found no other failure ends. A successful model step that

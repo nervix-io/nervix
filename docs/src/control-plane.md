@@ -280,10 +280,11 @@ records its request and then whether engagement was confirmed, definitively fail
 uncertain; a confirmed cleanup records release. A request timeout is uncertain when the remote node
 may already have engaged its gate, so it contributes its possible scope to the executed aggregate.
 A definitive failure before any engagement leaves the actual level `DYNAMIC`. If runtime activation
-cannot perform the planned entity swap and rebuilds the domain to recover, the report retains the
-entity attempt and appends the wider domain pause and recovery rebuild effects. Later validation,
-publication, activation, or leadership failure never erases engagement already observed. The
-transaction result derives its aggregate from these actual histories rather than the planned scopes.
+cannot perform the planned entity swap on a node, that node puts back what the swap had replaced and
+the report keeps the entity attempt with the activation's failure; nothing widens into a rebuild.
+Later validation, publication, activation, or leadership failure never erases engagement already
+observed. The transaction result derives its aggregate from these actual histories rather than the
+planned scopes.
 
 ### Inspecting A Transaction
 
@@ -813,7 +814,8 @@ therefore finish the obligations that make their state ready to capture. A held 
 that completed drain and the installed freeze; frozen owners retain their state until capture and
 activation finish. Preparation retains its original deadline, distinct from the gate lease that
 protects activation. Repeated engagement requests use the same coordination identity and scope;
-a bounded reply timeout does not create another flush or restart the lease.
+a bounded reply timeout does not create another flush, and an engagement that carries a later
+deadline renews the lease to it.
 
 The coordinator prepares the moves of one handoff at the same time, not one after another. It
 captures each moved unit's state and prepares it on its destination and replicas. A reader whose
@@ -848,9 +850,20 @@ the barrier [Command Completion](command-completion.md#all-live-node-barriers) d
 command. The ownership move of a graceful-shutdown drain waits only for the participants, within
 the stopping node's unit deadline, so a node that runs none of the unit cannot spend that node's
 drain budget. A fence or drain timeout releases the old graph without writing the candidate
-schedule. If activation fails after a schedule commit, the gate stays closed until its lease
-deadline rather than opening before the destination is ready. That holds on every node that keeps
-running; a node that stops ends the leases it holds with its runtime, as
+schedule.
+
+If activation fails after a schedule commit, because a participant cannot apply the committed
+revision or the destination does not confirm activation, the command answers with that failure,
+naming the node and its reason, and the moved unit stays held until every node has applied the
+move. The coordinator keeps the hold in the background: before each participant's lease ends it
+engages the participant again with the same identity and scope and a later deadline, which renews
+that lease, and once every participant has prepared the revision it activates the destination and
+releases the gate. The moved unit's records wait at its gate meanwhile, so none is routed to a node
+that does not run the unit, negatively acknowledged or sent again, and the participant that failed
+keeps its previous execution and retries on its reconciliation cadence. If the coordinator stops,
+a participant no longer holds the gate, or a participant restarted so the handoff can never
+activate, the renewals stop and each remaining hold ends at its lease deadline. A node that stops
+ends the leases it holds with its runtime, as
 [Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown) describes.
 
 Pending `REQUIRED WAIT` materialized records cannot finish a planned drain because the dependency is

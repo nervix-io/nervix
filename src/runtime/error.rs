@@ -54,12 +54,19 @@ pub enum RuntimeError {
     /// Building or changing the execution of a domain failed. The step that failed is beneath.
     #[error("failed to build domain execution for '{domain}'")]
     BuildDomainExecution { domain: DomainName },
+    /// An entity swap of `domain` failed, and putting its previous execution back failed for
+    /// some entity too: each such entity was reported where its restore failed.
+    #[error("domain '{domain}' did not get back every entity its failed swap had replaced")]
+    IncompleteSwapRestore { domain: DomainName },
     /// The committed schedule revision could not be planned against the one applied before it.
     #[error("failed to plan the committed schedule revision")]
     PlanScheduleRevision,
     /// This node could not apply the admitted runtime revision. Its failure is beneath.
-    #[error("failed to apply runtime revision {revision}")]
-    ApplyRevision { revision: u64 },
+    #[error("node '{node}' failed to apply runtime revision {revision}")]
+    ApplyRevision {
+        node: ClusterNodeName,
+        revision: u64,
+    },
     /// The ingestors of running domains did not start once the revision was prepared. The
     /// ingestor's start report is beneath.
     #[error("failed to start the ingestors of runtime revision {revision}")]
@@ -71,6 +78,16 @@ pub enum RuntimeError {
     RuntimeRevisionPreparation {
         revision: u64,
         pending_nodes: Vec<ClusterNodeName>,
+    },
+    /// A node failed to prepare runtime revision `failed_revision`, the revision the wait was for
+    /// or a later one. The reason is that node's own description, because the application ran
+    /// inside that node.
+    #[error("node '{node}' failed to prepare runtime revision {failed_revision}: {reason}")]
+    RuntimeRevisionFailed {
+        revision: u64,
+        node: ClusterNodeName,
+        failed_revision: u64,
+        reason: String,
     },
     #[error(
         "timed out waiting for runtime revision {revision} to become ready on nodes \

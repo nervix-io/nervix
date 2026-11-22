@@ -301,7 +301,7 @@ impl SessionServiceImpl {
                     .await
                     .change_context_lazy(moving)?,
                 Err(error) => {
-                    self.defer_planned_ownership_handoff_release(domain, handoff, error, None);
+                    self.hold_planned_ownership_handoff_until_applied(domain, handoff, error, None);
                 }
             }
         }
