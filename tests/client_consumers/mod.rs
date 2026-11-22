@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use arrow_array::{Int64Array, StringArray};
+use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_ipc::reader::StreamReader;
 use cucumber::{then, when};
 use nervix_client_core::{ClientError, EmitterConsumer, EmitterDelivery};
@@ -411,6 +411,7 @@ async fn open_refused(
         "invalid limits" => EmitterOpenRefusal::InvalidLimits,
         "domain stopped" => EmitterOpenRefusal::DomainStopped,
         "session capacity exhausted" => EmitterOpenRefusal::SessionCapacityExhausted,
+        "node capacity exhausted" => EmitterOpenRefusal::NodeCapacityExhausted,
         other => panic!("undeclared consumer refusal expectation '{other}'"),
     };
     assert_eq!(refusal, expected);
@@ -539,19 +540,14 @@ async fn when_consumer_finishes_read(world: &mut ScenarioWorld, consumer: String
     );
 }
 
-#[then(expr = "output batch {string} contains id {string} and cents {int}")]
-async fn then_output_batch_contains(
-    world: &mut ScenarioWorld,
-    batch: String,
-    id: String,
-    cents: i64,
-) {
+/// The one Arrow batch an output batch the scenario read carries.
+fn decoded_output_batch(world: &ScenarioWorld, batch: &str) -> RecordBatch {
     let received = world
         .consumers
         .received
-        .get(&batch)
+        .get(batch)
         .unwrap_or_else(|| panic!("output batch '{batch}' was not read"));
-    let decoded = match &received.attempt {
+    match &received.attempt {
         Attempt::Native(delivery) => delivery
             .record_batch()
             .expect("SDK verifies exact Arrow output"),
@@ -569,7 +565,17 @@ async fn then_output_batch_contains(
             );
             decoded
         }
-    };
+    }
+}
+
+#[then(expr = "output batch {string} contains id {string} and cents {int}")]
+async fn then_output_batch_contains(
+    world: &mut ScenarioWorld,
+    batch: String,
+    id: String,
+    cents: i64,
+) {
+    let decoded = decoded_output_batch(world, &batch);
     assert_eq!(decoded.num_rows(), 1);
     assert_eq!(decoded.schema().fields().len(), 2);
     let ids = decoded
@@ -584,6 +590,45 @@ async fn then_output_batch_contains(
         .expect("cents is I64");
     assert_eq!(ids.value(0), id);
     assert_eq!(values.value(0), cents);
+}
+
+/// The row a producer submitted with `producer ... submits batch ... with one N-byte id` arrives
+/// whole: its id of exactly that many `x` bytes and its amount of one.
+#[then(expr = "output batch {string} carries one {int}-byte id")]
+async fn then_output_batch_carries_long_id(
+    world: &mut ScenarioWorld,
+    batch: String,
+    length: usize,
+) {
+    let decoded = decoded_output_batch(world, &batch);
+    assert_eq!(
+        decoded.num_rows(),
+        1,
+        "output batch '{batch}' carries one row"
+    );
+    assert_eq!(decoded.schema().fields().len(), 2);
+    let ids = decoded
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("id is STRING");
+    let amounts = decoded
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("amount is I64");
+    let id = ids.value(0);
+    assert_eq!(
+        id.len(),
+        length,
+        "output batch '{batch}' carries an id of {} bytes",
+        id.len()
+    );
+    assert!(
+        id.bytes().all(|byte| byte == b'x'),
+        "output batch '{batch}' carries the id it was sent"
+    );
+    assert_eq!(amounts.value(0), 1);
 }
 
 #[then(expr = "output batches {string} cover both sources and concrete branches")]

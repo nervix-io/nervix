@@ -2,7 +2,8 @@
 //!
 //! Layer: edges.
 //! - **Owns.** The local attachment or authenticated interconnect stream for one consumer,
-//!   forwarding its Arrow attempts and settlement, and detaching it when either peer disappears.
+//!   forwarding its Arrow attempts in chunks one frame within both nodes' relay bounds carries,
+//!   its settlement, and detaching it when either peer disappears.
 //! - **Depends on.** The node's volatile emitter endpoint and the interconnect duplex contract.
 //! - **Must not know.** Session request frames, Plexus text, or graph processing.
 
@@ -11,8 +12,9 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 
+use arch_into::ArchInto as _;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -44,8 +46,9 @@ use crate::runtime::{
     ClientEmitterResponder, Runtime,
 };
 
-/// The largest delivery chunk of a consumer stream: the executing node splits a delivery at it,
-/// and the serving node refuses a larger chunk as a break of the stream contract.
+/// The most bytes one delivery chunk of a consumer stream carries. The executing node splits a
+/// delivery at it, or at less when a frame within either node's relay bound carries less, and the
+/// serving node refuses a chunk larger than it announced as a break of the stream contract.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -63,6 +66,9 @@ struct OpenConsumerStream {
     emitter: EmitterName,
     expected_fields: Vec<SchemaField>,
     limits: ClientConsumerLimits,
+    /// The largest delivery chunk the serving node takes in one frame: [`CHUNK_BYTES`], or what a
+    /// `DeliveryChunk` frame within its committed relay batch bound carries if that is less.
+    largest_chunk: NonZeroU32,
 }
 
 impl InterconnectDuplexRequest for OpenConsumerStream {
@@ -112,6 +118,33 @@ enum ConsumerEvent {
     },
     Ended,
     Heartbeat,
+}
+
+impl ConsumerEvent {
+    /// What a `DeliveryChunk` frame encodes besides its chunk. rkyv writes the chunk's bytes first
+    /// and then the archived frame as its root at the root's alignment, so the archive root and
+    /// that alignment bound everything else.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a delivery chunk frame stores its bytes and then its archive root at the \
+                      root's alignment"
+        )
+    )]
+    const CHUNK_ENVELOPE_BYTES: usize =
+        size_of::<ArchivedConsumerEvent>() + align_of::<ArchivedConsumerEvent>() - 1;
+
+    /// The largest chunk one `DeliveryChunk` frame carries within a frame bound of `frame_bytes`,
+    /// never more than [`CHUNK_BYTES`], or `None` when the bound cannot hold the frame's envelope
+    /// and a byte beside it.
+    fn largest_chunk_within(frame_bytes: u64) -> Option<NonZeroU32> {
+        let envelope: u64 = Self::CHUNK_ENVELOPE_BYTES.arch_into();
+        let room = frame_bytes.checked_sub(envelope)?;
+        let most: u64 = CHUNK_BYTES.arch_into();
+        let chunk = u32::try_from(room.min(most)).assured("a chunk of at most one MiB fits u32");
+        NonZeroU32::new(chunk)
+    }
 }
 
 pub(in crate::application) struct ConsumerDelivery {
@@ -256,6 +289,17 @@ impl ClientConsumerRouter {
                 deliveries: received,
             });
         }
+        // Peers rely on this node's committed relay batch bound, so the executing node splits a
+        // delivery into chunks that a frame within it carries.
+        let committed_bound = self
+            .interconnect
+            .local_receive_bounds()
+            .relay_batch_bytes
+            .get();
+        let Some(largest_chunk) = ConsumerEvent::largest_chunk_within(committed_bound) else {
+            debug!(%owner, "this node's relay batch bound cannot carry a delivery chunk");
+            return Err(EmitterOpenRefusal::NodeCapacityExhausted);
+        };
         let opening = OpenConsumerStream {
             serving_node: self.local_node.clone(),
             heartbeat: self.settings.announced_heartbeat(),
@@ -263,6 +307,7 @@ impl ClientConsumerRouter {
             emitter,
             expected_fields,
             limits,
+            largest_chunk,
         };
         let started = Instant::now();
         let deadline = started + self.settings.consumer_open_timeout();
@@ -331,12 +376,16 @@ impl ClientConsumerRouter {
         );
         let (commands, incoming) = mpsc::unbounded_channel();
         let (deliveries, received) = mpsc::unbounded_channel();
+        let bounds = DeliveryBounds {
+            grant: limits.bytes,
+            largest_chunk,
+        };
         nervix_primitives::task::spawn(serve_forwarded(
             sender,
             receiver,
             incoming,
             deliveries,
-            limits.bytes,
+            bounds,
             self.settings,
             peer_heartbeat,
         ));
@@ -429,6 +478,24 @@ async fn serve_owner(
     answers: mpsc::Sender<ConsumerEvent>,
     settings: ClientLinkCapabilities,
 ) {
+    // This node encodes every chunk within its relay encoded limit, and the serving node announced
+    // the largest chunk a frame within its committed relay batch bound carries.
+    let relay_encoded_bytes = PoolClass::Relay.payload_limit(runtime.executor());
+    let Some(largest_sent) = ConsumerEvent::largest_chunk_within(relay_encoded_bytes) else {
+        debug!(
+            domain = request.domain.as_str(),
+            emitter = request.emitter.as_str(),
+            serving_node = %request.serving_node,
+            "refused a consumer another node forwarded: this node's relay encoded limit cannot \
+             carry a delivery chunk"
+        );
+        answers
+            .send(ConsumerEvent::Refused(ClientEmitterRefusal::NodeBudgetFull))
+            .await
+            .means_peer_left("consumer stream opener");
+        return;
+    };
+    let largest_chunk = request.largest_chunk.min(largest_sent);
     let opened = async {
         let grant = runtime
             .client_emitter_budget()
@@ -481,8 +548,11 @@ async fn serve_owner(
         "attached a consumer another node forwarded"
     );
     let (responder, deliveries) = consumer.split();
-    let mut forward =
-        nervix_primitives::task::spawn(forward_deliveries(deliveries, answers.clone()));
+    let mut forward = nervix_primitives::task::spawn(forward_deliveries(
+        deliveries,
+        answers.clone(),
+        largest_chunk,
+    ));
     let mut heartbeat = nervix_primitives::time::interval(settings.heartbeat_interval());
     heartbeat.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
@@ -519,10 +589,13 @@ async fn serve_owner(
     responder.close();
 }
 
+/// Sends each delivery's header and then its bytes in chunks of at most `largest_chunk` bytes.
 async fn forward_deliveries(
     mut deliveries: mpsc::UnboundedReceiver<ClientEmitterDelivery>,
     answers: mpsc::Sender<ConsumerEvent>,
+    largest_chunk: NonZeroU32,
 ) {
+    let chunk_bytes: usize = largest_chunk.get().arch_into();
     while let Some(delivery) = deliveries.recv().await {
         let payload = delivery.payload;
         let Ok(bytes) = u32::try_from(payload.body.len()) else {
@@ -543,7 +616,7 @@ async fn forward_deliveries(
         if answers.send(event).await.is_err() {
             return;
         }
-        let chunks = payload.body.chunks(CHUNK_BYTES).collect::<Vec<_>>();
+        let chunks = payload.body.chunks(chunk_bytes).collect::<Vec<_>>();
         for (index, chunk) in chunks.iter().enumerate() {
             if answers
                 .send(ConsumerEvent::DeliveryChunk {
@@ -574,15 +647,25 @@ struct Assembly {
     bytes: Vec<u8>,
 }
 
+/// What the serving node holds a forwarded consumer's deliveries to.
+#[derive(Debug, Clone, Copy)]
+struct DeliveryBounds {
+    /// The consumer's granted bytes, which no delivery exceeds.
+    grant: NonZeroU64,
+    /// The largest chunk the serving node announced it takes in one frame.
+    largest_chunk: NonZeroU32,
+}
+
 async fn serve_forwarded(
     sender: nervix_interconnect::DuplexSender<OpenConsumerStream>,
     mut receiver: nervix_interconnect::DuplexReceiver<OpenConsumerStream>,
     mut commands: mpsc::UnboundedReceiver<ForwardedCommand>,
     deliveries: mpsc::UnboundedSender<ConsumerDelivery>,
-    grant: NonZeroU64,
+    bounds: DeliveryBounds,
     settings: ClientLinkCapabilities,
     peer_heartbeat: AnnouncedLinkHeartbeat,
 ) {
+    let largest_chunk: usize = bounds.largest_chunk.get().arch_into();
     let (outbound, mut queued) = mpsc::channel::<ConsumerItem>(
         usize::try_from(settings.consumer_writer_capacity().get())
             .assured("validated native writer capacity"),
@@ -614,7 +697,7 @@ async fn serve_forwarded(
                 match event {
                     ConsumerEvent::DeliveryStart { identity, reference, source, branch_fingerprint,
                         members, execution_now, bytes } => {
-                        if assembly.is_some() || bytes == 0 || u64::from(bytes) > grant.get() { break "a delivery broke the stream contract"; }
+                        if assembly.is_some() || bytes == 0 || u64::from(bytes) > bounds.grant.get() { break "a delivery broke the stream contract"; }
                         assembly = Some(Assembly {
                             identity: Uuid::from_bytes(identity), reference: Uuid::from_bytes(reference),
                             source, branch_fingerprint, members, execution_now,
@@ -626,7 +709,7 @@ async fn serve_forwarded(
                     }
                     ConsumerEvent::DeliveryChunk { bytes, last } => {
                         let Some(current) = assembly.as_mut() else { break "a delivery broke the stream contract"; };
-                        if bytes.is_empty() || bytes.len() > CHUNK_BYTES
+                        if bytes.is_empty() || bytes.len() > largest_chunk
                             || current.bytes.len().checked_add(bytes.len())
                                 .is_none_or(|total| total > current.expected)
                         { break "a delivery broke the stream contract"; }

@@ -12,7 +12,8 @@
 //!
 //! A local producer is attached to this node's endpoint directly. A forwarded one is attached by
 //! the owning node on behalf of this one, which counts the producer's granted bytes against the
-//! owning node's budget as well as this node's. Either way the session sees the same handle and
+//! owning node's budget as well as this node's, and grants no batch larger than one frame of the
+//! link carries within both nodes' relay bounds. Either way the session sees the same handle and
 //! the same events: one outcome per batch, admission changes, and at most one end, after which the
 //! events close. Losing a link ends every producer forwarded over it with `OwnerLost`, after its
 //! batches the owning node cannot have admitted are answered as not admitted.
@@ -27,7 +28,7 @@ mod link;
 use std::num::NonZeroU64;
 
 use bytes::Bytes;
-use nervix_interconnect::{HandlerRegistrationError, Transport};
+use nervix_interconnect::{HandlerRegistrationError, PoolClass, Transport};
 use nervix_models::{
     ClientProducerDescription, ClientProducerLimits, ClientProducerRefusal, ClusterNodeName,
     DomainName, IngestorName, SchemaField, UserName,
@@ -47,7 +48,8 @@ pub(in crate::application) struct ProducerOpen {
     pub(in crate::application) ingestor: IngestorName,
     pub(in crate::application) expected_fields: Vec<SchemaField>,
     pub(in crate::application) limits: ClientProducerLimits,
-    /// The largest batch one submission frame of the session carries.
+    /// The largest batch one submission frame of the session carries. A forwarded producer's link
+    /// lowers it to what one of its own frames carries where that is less.
     pub(in crate::application) max_batch_bytes: NonZeroU64,
 }
 
@@ -116,7 +118,15 @@ impl ClientProducerRouter {
         local_node: ClusterNodeName,
         settings: nervix_models::ClientLinkCapabilities,
     ) -> Self {
-        let links = ProducerLinks::new(interconnect, local_node.clone(), settings);
+        // The transport encodes a link's frames with this node's executor, within its relay
+        // pool's payload limit.
+        let relay_encoded_bytes = PoolClass::Relay.payload_limit(runtime.executor());
+        let links = ProducerLinks::new(
+            interconnect,
+            local_node.clone(),
+            settings,
+            relay_encoded_bytes,
+        );
         Self {
             runtime,
             local_node,
