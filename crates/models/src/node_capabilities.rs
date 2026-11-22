@@ -118,7 +118,6 @@ pub struct InterconnectCapabilities {
     pub request_quota: NonZeroU64,
     pub completion_quota: NonZeroU64,
     pub health_probes: NonZeroU64,
-    pub relay_watermarks: NonZeroU64,
     pub stream_window_bytes: u32,
     pub connection_window_bytes: u32,
     pub connection_setup_timeout: Duration,

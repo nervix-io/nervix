@@ -383,10 +383,11 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_` keyspaces and `ClusterState`
-metadata encoding 50 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_` keyspaces and `ClusterState`
+metadata encoding 51 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
-inferencer working memory, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, the database volume size each node record's capacity claim carries, and the partition
+inferencer working memory, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, the database volume size each node record's capacity claim carries, interconnect capabilities
+that carry no relay watermark count, and the partition
 count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity

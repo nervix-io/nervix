@@ -263,7 +263,6 @@ pub(crate) struct TransportObservations {
     request_nanos: [AtomicU64; RequestSubquota::COUNT],
     relay_outcomes: [AtomicU64; RelayAdmissionOutcome::COUNT],
     relay_admission_wait_nanos: AtomicU64,
-    relay_channel_watermarks_evicted: AtomicU64,
     relay_grant_refusals: [[AtomicU64; RelayGrantRefusal::COUNT]; ConnectionDirection::COUNT],
     bulk_bytes: [[AtomicU64; TransferDirection::COUNT]; PoolClass::COUNT],
 }
@@ -323,13 +322,6 @@ impl TransportObservations {
             .fetch_add(nanos(waited), Ordering::AcqRel);
     }
 
-    /// Count one relay channel watermark a peer's budget forgot before its retention ended, to make
-    /// room for another channel's.
-    pub(crate) fn relay_channel_watermark_evicted(&self) {
-        self.relay_channel_watermarks_evicted
-            .fetch_add(1, Ordering::AcqRel);
-    }
-
     /// Count one relay grant refused: one this node refused a peer, `Inbound`, or one a peer
     /// refused this node, `Outbound`.
     pub(crate) fn relay_grant_refused(
@@ -376,9 +368,6 @@ impl TransportObservations {
             relay_admission_wait: Duration::from_nanos(
                 self.relay_admission_wait_nanos.load(Ordering::Acquire),
             ),
-            relay_channel_watermarks_evicted: self
-                .relay_channel_watermarks_evicted
-                .load(Ordering::Acquire),
             relay_grant_refusals: std::array::from_fn(|direction| {
                 std::array::from_fn(|refusal| {
                     self.relay_grant_refusals[direction][refusal].load(Ordering::Acquire)
@@ -414,9 +403,6 @@ pub struct TransportCounters {
     pub relay_outcomes: [u64; RelayAdmissionOutcome::COUNT],
     /// Time relay attempts spent between an accepted reservation and their resolution.
     pub relay_admission_wait: Duration,
-    /// Relay channel watermarks forgotten before their retention ended, because their peer's
-    /// budget needed the position for another channel.
-    pub relay_channel_watermarks_evicted: u64,
     /// Relay grants refused, by direction and reason: `Inbound` counts the grants this node refused
     /// its peers, and `Outbound` the refusals its peers answered this node's deliveries with.
     pub relay_grant_refusals: [[u64; RelayGrantRefusal::COUNT]; ConnectionDirection::COUNT],
