@@ -129,6 +129,39 @@ async fn timely_second_sequences_survive_a_caller_stalled_after_the_first_row() 
     drop(observed.subscription);
 }
 
+/// Rows of different branches have no delivery order, so a scenario that expects one row of each
+/// branch waits for them in one sample, which completes whichever row arrives first.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_sample_completes_when_its_rows_arrive_in_the_opposite_order() {
+    let expected = [
+        r#"{"tenant":"acme","transaction_id":"txn-1"}"#,
+        r#"{"tenant":"beta","transaction_id":"txn-2"}"#,
+    ]
+    .map(String::from);
+    let first = r#"key={"tenant":"beta"} payload={"tenant":"beta","transaction_id":"txn-2"}"#;
+    let second = r#"key={"tenant":"acme"} payload={"tenant":"acme","transaction_id":"txn-1"}"#;
+    let (send, rows) = mpsc::channel(2);
+    let (reads, _read) = mpsc::channel(2);
+    for payload in [first, second] {
+        nervix_primitives::task::consume_budget().await;
+        send.send(payload.to_string())
+            .await
+            .assured("the observer owns the receiver");
+    }
+    let began_at = Instant::now();
+    let observed = SubscriptionPayloads::new(&expected)
+        .observe(ScriptedSubscription { rows, reads }, RECEIVE_BUDGET)
+        .await;
+    let mut received = Vec::new();
+    for receipt in &observed.receipts {
+        received.push(receipt.payload.as_str());
+    }
+    assert_eq!(received, [first, second]);
+    assert!(began_at.elapsed() < RECEIVE_BUDGET);
+    drop(observed.subscription);
+    drop(send);
+}
+
 #[nervix_primitives::test(start_paused = true)]
 async fn a_duplicate_first_row_cannot_replace_a_missing_second_sequence() {
     let expected = ["alpha:1", "beta:1", "alpha:2", "beta:2"].map(String::from);

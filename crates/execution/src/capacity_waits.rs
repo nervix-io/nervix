@@ -116,7 +116,8 @@ impl Drop for CapacityWait<'_> {
 
 // The ordinary tests build executors outside any model, so a Loom build, which runs only the
 // cancellation models, and a Shuttle build, whose check lives with the executor's other checks,
-// leave them out.
+// leave them out. They fill a class with the worker pool's owner hold, which parks no thread, so
+// they also complete on Turmoil's single-threaded simulated CPU strategy and run in its build.
 #[cfg(all(test, not(any(feature = "loom", feature = "shuttle"))))]
 #[path = "capacity_waits_tests.rs"]
 mod tests;
