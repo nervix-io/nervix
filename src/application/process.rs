@@ -59,9 +59,10 @@ pub fn run_server_process() -> Result<(), Report<AppError>> {
             RuntimeThreadSettings::resolve(RuntimeThreadOverrides::default(), cpus, workers, None)
                 .change_context(AppError::InvalidRuntimeCapacity)?;
         let runtime = settings.build().change_context(AppError::BuildRuntime)?;
+        // Completions read no settings, so they export no traces.
         let tracing_guard = {
             let _entered = runtime.enter();
-            init_tracing(&args.tracing)?
+            init_tracing(None)?
         };
         runtime.block_on(async {
             print_completions(shell);
@@ -69,7 +70,6 @@ pub fn run_server_process() -> Result<(), Report<AppError>> {
         drop(tracing_guard);
         return Ok(());
     }
-    let tracing_options = args.tracing.clone();
     let mut application = Application::try_from(args)?;
     let cpus = application
         .settings
@@ -92,7 +92,7 @@ pub fn run_server_process() -> Result<(), Report<AppError>> {
         .change_context(AppError::BuildRuntime)?;
     let tracing_guard = {
         let _entered = runtime.enter();
-        init_tracing(&tracing_options)?
+        init_tracing(application.trace_export())?
     };
     runtime.block_on(async {
         tracing::info!(

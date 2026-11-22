@@ -379,6 +379,67 @@ fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
 }
 
 #[test]
+fn resource_quotas_fit_each_node_database_volume_independently() {
+    const GIB: u64 = 1 << 30;
+    let node = crate::ClusterNodeName::parse("node-2").assured("fixture name");
+    let values = ClusterParameterValues::default();
+    let extracted = values.resource_max_extracted_bytes();
+    assert_eq!(values.resource_max_archive_bytes(), 4 * GIB);
+    assert_eq!(extracted, 16 * GIB);
+
+    values
+        .validate_resource_volume(&node, extracted)
+        .assured("a volume exactly as large as each quota holds it");
+    assert_eq!(values.resource_quota_beyond_volume(extracted), None);
+    assert_eq!(
+        values.resource_quota_beyond_volume(8 * GIB),
+        Some(ResourceQuotaBeyondVolume {
+            parameter: ClusterParameterKey::ResourceMaxExtractedBytes,
+            quota: extracted,
+        }),
+        "the archive quota fits, so the extracted quota is the one beyond the volume"
+    );
+    assert_eq!(
+        values.resource_quota_beyond_volume(GIB),
+        Some(ResourceQuotaBeyondVolume {
+            parameter: ClusterParameterKey::ResourceMaxArchiveBytes,
+            quota: 4 * GIB,
+        }),
+        "the archive quota is judged first"
+    );
+
+    let refused = values
+        .validate_resource_volume(&node, 8 * GIB)
+        .err()
+        .assured("an extracted quota above the volume is refused");
+    assert_eq!(
+        refused.current_context(),
+        &ClusterParameterError::NodeVolume {
+            parameter: ClusterParameterKey::ResourceMaxExtractedBytes,
+            node: node.clone(),
+            requested: extracted,
+            available: 8 * GIB,
+        }
+    );
+    assert_eq!(
+        refused.current_context().to_string(),
+        "resource-max-extracted-bytes (16GiB) exceeds node 'node-2' database volume (8GiB)"
+    );
+
+    let updates = ClusterParameterUpdates::try_from(vec![
+        ClusterParameterChange::ResourceMaxArchiveBytes(GIB),
+        ClusterParameterChange::ResourceMaxExtractedBytes(2 * GIB),
+    ])
+    .assured("two assignments");
+    let lowered = values
+        .changed(&updates)
+        .assured("smaller quotas are valid parameters");
+    lowered
+        .validate_resource_volume(&node, 2 * GIB)
+        .assured("both lowered quotas fit a 2 GiB volume");
+}
+
+#[test]
 fn bounded_durations_preserve_nanoseconds_at_both_ends_of_their_domain() {
     let definitions: [fn(Duration) -> ClusterParameterChange; 15] = [
         ClusterParameterChange::LicensingRequestTimeout,

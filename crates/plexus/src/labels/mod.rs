@@ -1,7 +1,8 @@
 //! Shared domain entity metadata grammar.
 //!
 //! Layer: language.
-//! - **Owns.** The common trailing creation clause and typed SET, DROP and SHOW LABELS statements.
+//! - **Owns.** The common trailing creation clause and the typed SET LABELS edit and SHOW LABELS
+//!   inspection statements.
 //! - **Depends on.** Shared tokens, typed entity references and metadata vocabulary constructors.
 //! - **Must not know.** Registry state, committed limits, sessions or execution behavior.
 
@@ -15,9 +16,9 @@ mod tests;
 
 use chumsky::prelude::*;
 use nervix_models::{
-    AdministrativeLabelTarget, CreateStatement, EntityLabelKeys, EntityLabelMutation,
-    EntityLabelTarget, EntityLabels, EntityMetadata, LabelAssignment, LabelKey, MutateEntityLabels,
-    ShowLabels, Statement,
+    AdministrativeLabelTarget, CreateStatement, EntityLabelMutation, EntityLabelTarget,
+    EntityLabels, EntityMetadata, LabelAssignment, LabelChange, LabelEdit, LabelKey,
+    MutateEntityLabels, ShowLabels, Statement,
 };
 
 use crate::{
@@ -50,6 +51,30 @@ fn labels<'src>()
         .delimited_by(tok(Token::LBrace), tok(Token::RBrace))
         .try_map(|entries, span| {
             EntityLabels::try_from(entries)
+                .map_err(|error| Rich::custom(span, format!("{error:#}")))
+        })
+        .boxed()
+}
+
+/// The entries of one edit: each sets a key, `'key' = 'value'`, or removes it, `'key' DROP`, and
+/// no key appears twice.
+fn label_edits<'src>()
+-> impl Parser<'src, &'src [Token], EntityLabelMutation, extra::Err<ParseError<'src>>> + Clone {
+    let change = boxed_choice!(
+        tok(Token::Eq)
+            .ignore_then(string_lit())
+            .map(LabelChange::Set),
+        kw(Identifier::Drop).to(LabelChange::Drop),
+    );
+    label_key()
+        .then(change)
+        .map(|(key, change)| LabelEdit { key, change })
+        .separated_by(tok(Token::Comma))
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(tok(Token::LBrace), tok(Token::RBrace))
+        .try_map(|entries, span| {
+            EntityLabelMutation::try_from(entries)
                 .map_err(|error| Rich::custom(span, format!("{error:#}")))
         })
         .boxed()
@@ -88,34 +113,15 @@ pub(crate) fn entity_labels_parser<'src>()
             .ignore_then(user_name())
             .map(|name| EntityLabelTarget::Administrative(AdministrativeLabelTarget::User(name))),
     );
-    let keys = label_key()
-        .separated_by(tok(Token::Comma))
-        .allow_trailing()
-        .collect::<Vec<_>>()
-        .delimited_by(tok(Token::LBrace), tok(Token::RBrace))
-        .try_map(|keys, span| {
-            EntityLabelKeys::try_from(keys)
-                .map_err(|error| Rich::custom(span, format!("{error:#}")))
-        });
     boxed_choice!(
         kw(Identifier::Set)
             .ignore_then(kw_phrase2(Identifier::Labels, Identifier::On))
             .ignore_then(target.clone())
-            .then(labels())
+            .then(label_edits())
             .map(
-                |(entity, labels)| Statement::MutateEntityLabels(MutateEntityLabels {
+                |(entity, mutation)| Statement::MutateEntityLabels(MutateEntityLabels {
                     entity,
-                    mutation: EntityLabelMutation::Set(labels)
-                })
-            ),
-        kw(Identifier::Drop)
-            .ignore_then(kw_phrase2(Identifier::Labels, Identifier::On))
-            .ignore_then(target.clone())
-            .then(keys)
-            .map(
-                |(entity, keys)| Statement::MutateEntityLabels(MutateEntityLabels {
-                    entity,
-                    mutation: EntityLabelMutation::Drop(keys)
+                    mutation
                 })
             ),
         kw(Identifier::Show)

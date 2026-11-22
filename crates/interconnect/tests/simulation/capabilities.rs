@@ -77,6 +77,7 @@ fn claim(incarnation: u64, bytes: u64) -> NodeCapabilityRecord {
                 .listener_bounds(),
             cpu_count: None,
             memory_bytes: None,
+            database_volume_bytes: 1 << 40,
             receive: receive(bytes).bounds(),
         },
     }

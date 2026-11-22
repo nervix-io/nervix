@@ -794,19 +794,7 @@ impl Arbitrary<'_> {
             }),
             StatementVariant::MutateEntityLabels => {
                 let entity = self.entity_label_target();
-                let labels = self.entity_labels();
-                let mutation = if self.entropy.flag() {
-                    nervix_models::EntityLabelMutation::Set(labels)
-                } else {
-                    let keys = labels
-                        .iter()
-                        .map(|(key, _)| key.clone())
-                        .collect::<Vec<_>>();
-                    nervix_models::EntityLabelMutation::Drop(
-                        nervix_models::EntityLabelKeys::try_from(keys)
-                            .assured("generated map keys are unique"),
-                    )
-                };
+                let mutation = self.entity_label_mutation();
                 Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
                     entity,
                     mutation,

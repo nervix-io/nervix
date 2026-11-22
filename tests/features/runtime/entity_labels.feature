@@ -27,8 +27,12 @@ Feature: Domain entity labels
       """
     When these Plexus commands are executed on the leader node
       """
-      SET LABELS ON SCHEMA labelled_event { 'owner' = 'Platform', 'region' = 'east' };
-      DROP LABELS ON SCHEMA labelled_event { 'empty', 'absent' };
+      SET LABELS ON SCHEMA labelled_event {
+        'owner' = 'Platform',
+        'region' = 'east',
+        'empty' DROP,
+        'absent' DROP
+      };
       """
     And these Plexus commands are executed on the leader node
       """
@@ -45,6 +49,58 @@ Feature: Domain entity labels
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: One SET LABELS statement sets and removes keys as one atomic change
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA labelled_event ( value U32 );
+      CREATE RESOURCE orders_schema;
+      CREATE USER orders_reader WITH PASSWORD 'reader-password';
+      ALTER CLUSTER SET ENTITY_LABELS_MAX_COUNT = 2;
+      SET LABELS ON <target> { 'one' = '1', 'two' = '2' };
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      SET LABELS ON <target> { 'three' = '3', 'two' DROP, 'absent' DROP };
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON <target> FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {"one":"1","three":"3"}
+      """
+    When these Plexus commands fail
+      """
+      SET LABELS ON <target> { 'four' = '4', 'five' = '5', 'one' DROP };
+      """
+    And these Plexus commands fail
+      """
+      SET LABELS ON <target> { 'one' = 'again', 'one' DROP };
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW LABELS ON <target> FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /labels = {"one":"1","three":"3"}
+      """
+
+    Examples:
+      | cluster_size | target                 |
+      | 1            | SCHEMA labelled_event  |
+      | 3            | SCHEMA labelled_event  |
+      | 1            | DOMAIN {{domain}}      |
+      | 3            | DOMAIN {{domain}}      |
+      | 1            | RESOURCE orders_schema |
+      | 3            | RESOURCE orders_schema |
+      | 1            | USER orders_reader     |
+      | 3            | USER orders_reader     |
 
   Scenario Outline: Metadata leaves buffered branches alone and mixed configuration still drains them
     Given HTTP receiver "emitter" is running
@@ -94,7 +150,7 @@ Feature: Domain entity labels
       SET LABELS ON RELAY orders { 'owner' = 'Platform' };
       COMMIT;
       SET LABELS ON INGESTOR orders_in { 'owner' = 'Platform' };
-      DROP LABELS ON RELAY orders { 'absent' };
+      SET LABELS ON RELAY orders { 'absent' DROP };
       """
     Then batch "buffered" remains pending for "200ms"
     And HTTP receiver "emitter" has captured exactly 0 requests
@@ -528,7 +584,11 @@ Feature: Domain entity labels
       """
     And these Plexus commands fail
       """
-      DROP LABELS ON SCHEMA missing_event { 'absent' };
+      SET LABELS ON SCHEMA missing_event { 'absent' DROP };
+      """
+    And these Plexus commands fail
+      """
+      SET LABELS ON SCHEMA labelled_event { 'owner' = 'Changed', 'owner' DROP };
       """
     And these Plexus commands are executed on the leader node
       """
@@ -594,7 +654,7 @@ Feature: Domain entity labels
       """
     And these Plexus commands are executed on the leader node
       """
-      DROP LABELS ON SCHEMA labelled_event { 'k2' };
+      SET LABELS ON SCHEMA labelled_event { 'k2' DROP };
       ALTER CLUSTER SET ENTITY_LABELS_MAX_COUNT = 1;
       """
     And these Plexus commands are executed on the leader node
@@ -698,8 +758,7 @@ Feature: Domain entity labels
       BEGIN;
       SET LABELS ON RESOURCE orders_schema { 'status' = 'checked' };
       CREATE RESOURCE imported_schema LABELS { 'team' = 'Orders' };
-      SET LABELS ON RESOURCE imported_schema { 'status' = 'pending' };
-      DROP LABELS ON RESOURCE imported_schema { 'team', 'absent' };
+      SET LABELS ON RESOURCE imported_schema { 'status' = 'pending', 'team' DROP, 'absent' DROP };
       CREATE SCHEMA orders_event (value U32);
       """
     And client "editor" executes these Plexus commands
@@ -736,7 +795,7 @@ Feature: Domain entity labels
     When client "editor" executes these Plexus commands
       """
       BEGIN;
-      DROP LABELS ON RESOURCE orders_schema { 'status' };
+      SET LABELS ON RESOURCE orders_schema { 'status' DROP };
       REVERT;
       """
     And client "observer" executes these Plexus commands
@@ -811,7 +870,7 @@ Feature: Domain entity labels
       """
       SET LABELS ON DOMAIN {{domain}} { 'team' = 'Platform' };
       SET LABELS ON RESOURCE orders_schema { 'status' = 'approved' };
-      DROP LABELS ON RESOURCE orders_schema { 'empty', 'absent' };
+      SET LABELS ON RESOURCE orders_schema { 'empty' DROP, 'absent' DROP };
       SET LABELS ON USER orders_reader { 'purpose' = 'Audit' };
       DESCRIBE DOMAIN;
       """
@@ -897,7 +956,7 @@ Feature: Domain entity labels
       """
     When client "editor" fails to execute these Plexus commands
       """
-      DROP LABELS ON USER labels_reader { 'team' };
+      SET LABELS ON USER labels_reader { 'team' DROP };
       """
     Then the last command error contains
       """
@@ -1034,7 +1093,7 @@ Feature: Domain entity labels
       """
     When these Plexus commands fail with "does not exist"
       """
-      DROP LABELS ON <missing> { 'absent' };
+      SET LABELS ON <missing> { 'absent' DROP };
       """
     And these Plexus commands fail
       """
@@ -1042,7 +1101,7 @@ Feature: Domain entity labels
       """
     And these Plexus commands are executed on the leader node
       """
-      DROP LABELS ON <target> { 'two', 'absent' };
+      SET LABELS ON <target> { 'two' DROP, 'absent' DROP };
       ALTER CLUSTER SET ENTITY_LABELS_MAX_COUNT = 1;
       """
     When these Plexus commands fail

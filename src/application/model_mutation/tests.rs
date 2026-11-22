@@ -37,7 +37,7 @@ async fn entity_label_commands_apply_and_inspect_the_candidate_without_queueing_
         for query in [
             "CREATE SCHEMA labelled ( value U32 ) LABELS { 'owner' = 'Operations', 'empty' = '' };",
             "SET LABELS ON SCHEMA labelled { 'owner' = 'Platform', 'region' = 'east' };",
-            "DROP LABELS ON SCHEMA labelled { 'region', 'absent' };",
+            "SET LABELS ON SCHEMA labelled { 'region' DROP, 'absent' DROP };",
         ] {
             let result = service
                 .test_command(test_command_request(query, "default"), &mut subscriptions)

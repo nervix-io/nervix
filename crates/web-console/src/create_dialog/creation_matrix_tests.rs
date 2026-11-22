@@ -93,6 +93,8 @@ fn the_menu_lists_and_the_dialog_opens_every_family_form() {
                     .session_generation(RwSignal::new(1))
                     .request_tx(RwSignal::new(None))
                     .submit(super::ignore_test_submission)
+                    .read_labels(super::ignore_test_label_read())
+                    .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
                     .build(),
             );
             any_spawner::Executor::poll_local();
