@@ -524,6 +524,13 @@ async fn input_memory_above(world: &ScenarioWorld, node: &str, threshold: f64) {
 /// A request whose retained input grows past the room another request holds waits for that room
 /// instead of being refused, and completes once the other request ends and gives its charge
 /// back.
+///
+/// In the scenario's 5 MiB intake class, each request holds its read scratch of four 408 KiB read
+/// buffers and its 16 KiB head, about 1.61 MiB, and the first request also the 900 KiB its
+/// declared body is admitted with: about 4.1 MiB together, so less than 1 MiB is left. The second
+/// request's undeclared 1 MiB body needs a 1 MiB copy at once, whatever the network's packets, so
+/// it waits for the room the first request holds. Once that request ends, the second request's
+/// whole input fits: its scratch, its read allocations and its copy while it moves, below 4.8 MiB.
 #[then(
     expr = "node {string} holds retained HTTP input growth for host {string} until other input \
             frees room"
@@ -535,11 +542,13 @@ async fn held_input_growth(world: &mut ScenarioWorld, node: String, host: String
         .await
         .assured("the first request connects");
     held.write_all(
-        format!("POST /ingest HTTP/1.1\r\nHost: {host}\r\nContent-Length: 1\r\n\r\n").as_bytes(),
+        format!("POST /ingest HTTP/1.1\r\nHost: {host}\r\nContent-Length: 921600\r\n\r\n")
+            .as_bytes(),
     )
     .await
     .assured("the first body stays incomplete");
-    input_memory_above(world, &node, 0.0).await;
+    // Its read scratch and the share admitted for its declared 900 KiB body.
+    input_memory_above(world, &node, 2_097_152.0).await;
     let (payloads, body) = mpsc::channel::<Result<Vec<u8>, io::Error>>(1);
     let client = reqwest::Client::new();
     let request = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
@@ -553,10 +562,8 @@ async fn held_input_growth(world: &mut ScenarioWorld, node: String, host: String
             .send()
             .await
     }));
-    // In the configured 4 MiB pool, two incomplete requests retain more than 3 MiB.
-    // The payload is below its 1 MiB cap but exceeds the remaining memory, independently
-    // of packetization, so its growth waits for room the first request holds.
-    input_memory_above(world, &node, 3_145_728.0).await;
+    // Both requests are admitted: more than 4 MiB of the 5 MiB class is held.
+    input_memory_above(world, &node, 4_194_304.0).await;
     payloads
         .send(Ok(vec![b'x'; 1_048_575]))
         .await

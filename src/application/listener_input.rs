@@ -119,6 +119,35 @@ struct ActiveInput {
     /// The room a read waits for before it reads into an allocation the charge does not cover
     /// yet. It ends with the request, which gives up its place in the class's queue.
     growth: Option<GrowthWait>,
+    /// The charge of the body's copy, which the request holds beside `reservation`.
+    copied: u64,
+}
+impl ActiveInput {
+    /// Everything the request holds of the class: its input and its body's copy.
+    fn held(&self) -> u64 {
+        self.reservation
+            .bytes()
+            .checked_add(self.copied)
+            .unwrap_or(u64::MAX)
+    }
+}
+
+/// Refuse at once input that could never be charged: what the request already holds and the
+/// `more` bytes it needs together pass the whole intake class, so no room the class frees is
+/// enough while the request keeps its input, and a wait would last until the body's deadline.
+/// The bytes the request received cannot be given back and read again, so it is refused instead.
+fn within_the_class(executor: &Executor, held: u64, more: u64) -> Result<(), Report<InputRefusal>> {
+    let capacity = executor.memory(MemoryClass::Intake).capacity_bytes;
+    let requested = held.checked_add(more).unwrap_or(u64::MAX);
+    if requested <= capacity {
+        return Ok(());
+    }
+    Err(Report::new(AdmissionError::ExceedsBudget {
+        class: MemoryClass::Intake.as_str(),
+        requested,
+        capacity,
+    })
+    .change_context(InputRefusal::MemoryCapacity))
 }
 
 /// A wait for the bytes a newly observed read allocation adds to the request's charge.
@@ -223,6 +252,7 @@ impl InputAccounting {
             refusal: None,
             executor: executor.clone(),
             growth: None,
+            copied: 0,
         });
         InputGuard {
             accounting: self.clone(),
@@ -318,6 +348,7 @@ impl InputAccounting {
                     let extra = charged
                         .checked_sub(active.reservation.bytes())
                         .assured("a charge that could not grow holds less than its target");
+                    within_the_class(&active.executor, active.held(), extra)?;
                     let executor = active.executor.clone();
                     active.growth = Some(Box::pin(async move {
                         executor.reserve(MemoryClass::Intake, extra).await
@@ -384,6 +415,24 @@ impl InputGuard {
             ..active
         });
         Some(body)
+    }
+
+    /// The input the request holds beside its body's copy: its read scratch and allocations.
+    fn input_bytes(&self) -> u64 {
+        self.accounting
+            .ledger
+            .lock()
+            .active
+            .as_ref()
+            .map_or(0, |active| active.reservation.bytes())
+    }
+
+    /// Record the charge of the body's copy, which the request holds beside its input, so a read
+    /// that could never fit beside both is refused at once.
+    fn record_copy(&self, bytes: u64) {
+        if let Some(active) = self.accounting.ledger.lock().active.as_mut() {
+            active.copied = bytes;
+        }
     }
 
     fn take(&self) -> Reservation {
@@ -468,6 +517,13 @@ impl BodyGrowth {
     }
 }
 
+/// What a request brings to its body's copy: the share admitted with a body whose length it
+/// declared, and the input it holds beside the copy.
+struct CopyAdmission {
+    share: Option<Reservation>,
+    held: u64,
+}
+
 /// A body copied out of the frames it arrived in, charged for its whole allocation.
 struct BodyBuffer {
     bytes: Vec<u8>,
@@ -477,9 +533,10 @@ impl BodyBuffer {
     /// Copy the first two data frames into a buffer sized to the declared length, or to twice
     /// what they hold when the request declared none. Each frame is at most one read buffer.
     ///
-    /// A declared body's copy uses the `share` admitted with the request. Any other copy waits
-    /// for its charge, holding the request's read scratch, until the body's deadline: the bytes
-    /// received so far cannot be given back and read again.
+    /// A declared body's copy uses the share admitted with the request. Any other copy waits for
+    /// its charge, holding the request's read scratch, until the body's deadline: the bytes
+    /// received so far cannot be given back and read again. A copy the class could never hold
+    /// beside the input the request holds is refused at once.
     async fn start(
         first: &Bytes,
         second: &Bytes,
@@ -487,8 +544,9 @@ impl BodyBuffer {
         growth: BodyGrowth,
         executor: &Executor,
         deadline: &InputDeadline,
-        share: Option<Reservation>,
+        admission: CopyAdmission,
     ) -> Result<Self, Report<InputRefusal>> {
+        let CopyAdmission { share, held } = admission;
         let needed = first
             .len()
             .checked_add(second.len())
@@ -504,6 +562,7 @@ impl BodyBuffer {
             Some(share) if share.bytes() >= charge => share,
             share => {
                 drop(share);
+                within_the_class(executor, held, charge)?;
                 timeout(
                     deadline.remaining(),
                     executor.reserve(MemoryClass::Intake, charge),
@@ -521,12 +580,14 @@ impl BodyBuffer {
     }
 
     /// Copy one more data frame into the buffer, after growing it when the frame does not fit.
+    /// `input` is what the request holds beside the copy.
     async fn append(
         self,
         frame: &Bytes,
         growth: BodyGrowth,
         executor: &Executor,
         deadline: &InputDeadline,
+        input: u64,
     ) -> Result<Self, Report<InputRefusal>> {
         let needed = self
             .bytes
@@ -534,7 +595,7 @@ impl BodyBuffer {
             .checked_add(frame.len())
             .ok_or_else(|| Report::new(InputRefusal::BodyCapacity))?;
         let mut buffer = if needed > self.bytes.capacity() {
-            self.grow(needed, growth, executor, deadline).await?
+            self.grow(needed, growth, executor, deadline, input).await?
         } else {
             self
         };
@@ -549,13 +610,15 @@ impl BodyBuffer {
     ///
     /// A class with no room for the larger allocation holds the body back until room frees or
     /// the body's deadline passes, while the body keeps what it holds: its bytes cannot be read
-    /// again. Only a body larger than the whole class is refused at once.
+    /// again. Only a move the whole class could never hold beside the request's `input` is
+    /// refused at once.
     async fn grow(
         self,
         needed: usize,
         growth: BodyGrowth,
         executor: &Executor,
         deadline: &InputDeadline,
+        input: u64,
     ) -> Result<Self, Report<InputRefusal>> {
         let Self {
             bytes,
@@ -577,6 +640,7 @@ impl BodyBuffer {
             let extra = overlap
                 .checked_sub(reservation.bytes())
                 .assured("a charge that could not grow holds less than its target");
+            within_the_class(executor, input, overlap)?;
             let granted = timeout(
                 deadline.remaining(),
                 executor.reserve(MemoryClass::Intake, extra),
@@ -669,13 +733,22 @@ impl ArrivedBody {
             Self::Empty => Ok(Self::Shared(frame)),
             Self::Shared(first) => {
                 let share = guard.take_body_share();
-                let buffer =
-                    BodyBuffer::start(&first, &frame, declared, growth, executor, deadline, share)
-                        .await?;
+                let admission = CopyAdmission {
+                    share,
+                    held: guard.input_bytes(),
+                };
+                let buffer = BodyBuffer::start(
+                    &first, &frame, declared, growth, executor, deadline, admission,
+                )
+                .await?;
+                guard.record_copy(buffer.reservation.bytes());
                 Ok(Self::Copied(buffer))
             }
             Self::Copied(buffer) => {
-                let buffer = buffer.append(&frame, growth, executor, deadline).await?;
+                let buffer = buffer
+                    .append(&frame, growth, executor, deadline, guard.input_bytes())
+                    .await?;
+                guard.record_copy(buffer.reservation.bytes());
                 Ok(Self::Copied(buffer))
             }
         }
@@ -1063,7 +1136,10 @@ mod tests {
             growth,
             &executor,
             &started,
-            None,
+            CopyAdmission {
+                share: None,
+                held: 0,
+            },
         )
         .await
         .assured("the first two frames are charged");
@@ -1076,6 +1152,7 @@ mod tests {
                 growth,
                 &executor,
                 &deadline,
+                0,
             )
             .await
             .assured("a body of at most one read buffer moves on the connection");
@@ -1108,7 +1185,10 @@ mod tests {
             growth,
             &executor,
             &started,
-            None,
+            CopyAdmission {
+                share: None,
+                held: 0,
+            },
         )
         .await
         .assured("the first two frames are charged");
@@ -1119,6 +1199,7 @@ mod tests {
                 growth,
                 &executor,
                 &deadline,
+                0,
             )
             .await;
         let Err(error) = result else {
@@ -1254,6 +1335,194 @@ mod tests {
             .try_reserve(MemoryClass::Intake, whole)
             .assured("the ended request left no waiter ahead and held nothing");
         drop(after);
+    }
+
+    /// An intake class of 4 MiB, and the growth of a body limited to `limit` bytes.
+    fn four_mebibyte_intake(limit: usize) -> (Executor, BodyGrowth) {
+        let mut config = ExecutionConfig::default();
+        config.budgets.intake = ubyte::ByteUnit::Mebibyte(4);
+        let executor = Executor::new(config).assured("positive independent input pool");
+        let growth = BodyGrowth {
+            limit,
+            inline_copy: 16,
+            copy_unit: 4096,
+        };
+        (executor, growth)
+    }
+
+    /// The refusal of input the class could never hold beside what its request holds: at once,
+    /// with the typed admission cause, a 503.
+    fn assert_refused_beyond_the_class(error: &Report<InputRefusal>) {
+        assert_eq!(*error.current_context(), InputRefusal::MemoryCapacity);
+        assert!(matches!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(AdmissionError::ExceedsBudget { .. })
+        ));
+        assert_eq!(
+            error.current_context().status(),
+            hyper::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// A body's copy the class could hold beside its request's input, but has no room for now,
+    /// waits for the room other input holds and starts once that input ends.
+    #[nervix_primitives::test]
+    async fn a_body_copy_waits_for_room_other_input_holds_and_starts_once_it_frees() {
+        let (executor, growth) = four_mebibyte_intake(1024 * 1024);
+        // The request holds 1 MiB and other input 2.5 MiB, so the 1 MiB copy of two 256 KiB
+        // frames fits the class beside the request, but not while the other input holds it.
+        let input = executor
+            .try_reserve(MemoryClass::Intake, 1024 * 1024)
+            .assured("the request's input fits");
+        let other = executor
+            .try_reserve(MemoryClass::Intake, 5 * 512 * 1024)
+            .assured("the other input fits");
+        let first = Bytes::from(vec![1; 256 * 1024]);
+        let second = Bytes::from(vec![2; 256 * 1024]);
+        let deadline = InputDeadline::start(std::time::Duration::from_secs(30));
+        let mut copy = Box::pin(BodyBuffer::start(
+            &first,
+            &second,
+            None,
+            growth,
+            &executor,
+            &deadline,
+            CopyAdmission {
+                share: None,
+                held: input.bytes(),
+            },
+        ));
+        let first_poll = std::future::poll_fn(|context| {
+            Poll::Ready(std::future::Future::poll(copy.as_mut(), context))
+        })
+        .await;
+        assert!(
+            first_poll.is_pending(),
+            "a full class holds the copy back instead of refusing it"
+        );
+        drop(other);
+        let buffer = timeout(std::time::Duration::from_secs(30), copy)
+            .await
+            .assured("the freed room reaches the waiting copy")
+            .assured("the copy starts once its charge is granted");
+        assert_eq!(buffer.bytes.len(), 512 * 1024);
+        assert_eq!(buffer.reservation.bytes(), 1024 * 1024);
+        drop(buffer);
+        drop(input);
+        assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
+    }
+
+    /// A body's copy the class could never hold beside the input its request holds is refused at
+    /// once, rather than held until the body's deadline for room no release could give it.
+    #[nervix_primitives::test]
+    async fn a_body_copy_the_class_could_never_hold_beside_its_input_is_refused_at_once() {
+        let (executor, growth) = four_mebibyte_intake(2 * 1024 * 1024);
+        // The request holds 3 MiB; its two 384 KiB frames start a 1.5 MiB copy.
+        let input = executor
+            .try_reserve(MemoryClass::Intake, 3 * 1024 * 1024)
+            .assured("the request's input fits");
+        let first = Bytes::from(vec![1; 384 * 1024]);
+        let second = Bytes::from(vec![2; 384 * 1024]);
+        let deadline = InputDeadline::start(std::time::Duration::from_secs(30));
+        let copy = BodyBuffer::start(
+            &first,
+            &second,
+            None,
+            growth,
+            &executor,
+            &deadline,
+            CopyAdmission {
+                share: None,
+                held: input.bytes(),
+            },
+        );
+        let Err(error) = timeout(std::time::Duration::from_secs(1), copy)
+            .await
+            .assured("a copy that could never fit is refused without waiting")
+        else {
+            panic!("a copy the class could never hold beside its input is refused");
+        };
+        assert_refused_beyond_the_class(&error);
+        assert_eq!(
+            executor.memory(MemoryClass::Intake).reserved_bytes,
+            3 * 1024 * 1024,
+            "the refused copy took no charge"
+        );
+        drop(input);
+        assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
+    }
+
+    /// Moving a body into a larger allocation keeps both while the bytes move. A move the class
+    /// could never hold beside the request's input is refused at once.
+    #[nervix_primitives::test]
+    async fn a_body_move_the_class_could_never_hold_beside_its_input_is_refused_at_once() {
+        let (executor, growth) = four_mebibyte_intake(4 * 1024 * 1024);
+        let input = executor
+            .try_reserve(MemoryClass::Intake, 2 * 1024 * 1024)
+            .assured("the request's input fits");
+        let held = input.bytes();
+        let first = Bytes::from(vec![1; 256 * 1024]);
+        let second = Bytes::from(vec![2; 256 * 1024]);
+        let deadline = InputDeadline::start(std::time::Duration::from_secs(30));
+        let buffer = BodyBuffer::start(
+            &first,
+            &second,
+            None,
+            growth,
+            &executor,
+            &deadline,
+            CopyAdmission { share: None, held },
+        )
+        .await
+        .assured("a 1 MiB copy fits beside the 2 MiB input");
+        // A 600 KiB frame moves the 1 MiB copy into 2 MiB: 3 MiB while both exist, beside 2 MiB
+        // of input in a 4 MiB class.
+        let frame = Bytes::from(vec![3; 600 * 1024]);
+        let grown = buffer.append(&frame, growth, &executor, &deadline, held);
+        let Err(error) = timeout(std::time::Duration::from_secs(1), grown)
+            .await
+            .assured("a move that could never fit is refused without waiting")
+        else {
+            panic!("a move the class could never hold beside its input is refused");
+        };
+        assert_refused_beyond_the_class(&error);
+        drop(input);
+        intake_returns_to_zero(&executor).await;
+    }
+
+    /// A read into a new allocation the class could never hold beside the request's input and its
+    /// body's copy is refused at once, and parks no wait.
+    #[nervix_primitives::test]
+    async fn a_read_the_class_could_never_hold_beside_its_input_and_copy_is_refused_at_once() {
+        let (executor, _) = four_mebibyte_intake(1024 * 1024);
+        let accounting = InputAccounting::new(ListenerSettings::default());
+        let guard = admitted(&accounting, &executor);
+        let copy = executor
+            .try_reserve(MemoryClass::Intake, 2 * 1024 * 1024)
+            .assured("the body's copy fits beside the read scratch");
+        guard.record_copy(copy.bytes());
+        let window = ReadAllocation {
+            start: 0,
+            end: 1048576,
+        };
+        let Poll::Ready(Err(error)) = observed(&accounting, window) else {
+            panic!("a read the class could never hold beside its request is refused at once");
+        };
+        assert_refused_beyond_the_class(&error);
+        assert!(
+            accounting
+                .ledger
+                .lock()
+                .active
+                .as_ref()
+                .assured("active input")
+                .growth
+                .is_none(),
+            "a refused read parks no wait"
+        );
+        drop(guard);
+        drop(copy);
+        assert_eq!(executor.memory(MemoryClass::Intake).reserved_bytes, 0);
     }
 }
 

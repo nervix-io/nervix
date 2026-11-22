@@ -136,7 +136,7 @@ The endpoint's public input outcomes are:
 | 413 | `http_body_capacity` | The declared length or accumulated chunked payload exceeds the cap |
 | 408 | `http_body_timeout` | The complete body did not arrive by its deadline |
 | 431 | HTTP header capacity | Hyper refuses an oversized request head and closes the connection |
-| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input before the body's deadline passes while the request waits for room, the input is larger than the whole pool, or the node stops |
+| 503 | `http_input_memory_capacity` | The intake pool cannot back retained input before the body's deadline passes while the request waits for room, the input could never fit in the whole pool beside what its request already holds, or the node stops |
 | 503 | `http_input_worker_capacity` | Moving a body larger than one read buffer waits for a data worker until the body's deadline passes, expires on it or finishes cancelled, or the node stops |
 | 400 | `http_body_invalid` | Malformed or interrupted HTTP body framing, including oversized chunked trailers |
 

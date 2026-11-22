@@ -4154,8 +4154,8 @@ the committed grant deadline later.
 The [Listener Bounds](node-settings.md#listener-bounds) table owns HTTP input status/reason pairs.
 Body size and completion deadline produce 413 and 408. Input memory and a body move wait for room
 and a data worker within the body's deadline, and produce 503 only when the deadline passes while
-the server waits, when the input is larger than the whole input memory class, or while the node
-stops; malformed body framing produces 400. Their typed causes remain attached until the HTTP reporting
+the server waits, when the input could never fit in the whole input memory class beside what its
+request already holds, or while the node stops; malformed body framing produces 400. Their typed causes remain attached until the HTTP reporting
 boundary. Hyper enforces header capacity with 431 and closes incomplete headers at their deadline.
 A read into an allocation the input charge does not cover yet waits for room before it reads;
 an input-memory refusal passes its complete admission report through the foreign I/O error, and
