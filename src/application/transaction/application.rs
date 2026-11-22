@@ -102,13 +102,7 @@ impl SessionServiceImpl {
                     .await
                 {
                     Ok(()) => None,
-                    Err(error)
-                        if matches!(
-                            error.current_context(),
-                            RuntimeError::RuntimeRevisionPreparation { .. }
-                                | RuntimeError::RuntimeRevisionReadiness { .. }
-                        ) =>
-                    {
+                    Err(error) if error.current_context().waits_for_readiness() => {
                         match self.apply_current_cluster_state().await {
                             Ok(()) => {
                                 if self
@@ -132,13 +126,7 @@ impl SessionServiceImpl {
                                 }
                                 None
                             }
-                            Err(error)
-                                if matches!(
-                                    error.current_context(),
-                                    RuntimeError::RuntimeRevisionPreparation { .. }
-                                        | RuntimeError::RuntimeRevisionReadiness { .. }
-                                ) =>
-                            {
+                            Err(error) if error.current_context().waits_for_readiness() => {
                                 sleep(
                                     self.inner
                                         .operational
@@ -164,17 +152,6 @@ impl SessionServiceImpl {
                     )),
                 },
             }
-        };
-        // A STOP step's effect began, or joined, the domain's stop; the step applies until that
-        // stop ends, and fails when the request's CANCEL withdrew it.
-        let application_failure = match (&application_failure, &applying.effect) {
-            (None, Some(TransactionStepEffect::StopDomain { inputs, request }))
-                if applying.result.result.success =>
-            {
-                Box::pin(self.wait_for_transaction_stop(transaction, applying, inputs, request))
-                    .await
-            }
-            _ => application_failure,
         };
         if !matches!(
             applying.effect,
@@ -202,45 +179,6 @@ impl SessionServiceImpl {
         Ok(TransactionApplicationAttempt::Completed(Box::new(
             completed,
         )))
-    }
-
-    /// Waits for the stop a STOP step requested to end. Returns the step's failure when the
-    /// request was withdrawn by its CANCEL or the stop could not be followed.
-    pub(in crate::application) async fn wait_for_transaction_stop(
-        &self,
-        transaction: &ReplicatedTransaction,
-        applying: &TransactionApplyingStep,
-        inputs: &nervix_consensus::DomainPlanningInputs,
-        request: &nervix_models::OperatorStopRequest,
-    ) -> Option<String> {
-        let first = applying.result.first_statement();
-        let Some(statement) = transaction.statements.get(first) else {
-            return Some(format!(
-                "transaction '{}' lost the STOP statement of its applying step",
-                transaction.id
-            ));
-        };
-        let Some(state) = inputs.state() else {
-            return Some(format!(
-                "transaction '{}' planned its STOP step without the state of domain '{}'",
-                transaction.id,
-                inputs.domain().as_str()
-            ));
-        };
-        let start_version = state.start_version;
-        let answer = self
-            .wait_for_stop_request(
-                inputs.domain(),
-                &statement.request_reference,
-                start_version,
-                request.limit,
-            )
-            .await;
-        if answer.succeeded() {
-            None
-        } else {
-            Some(answer.message)
-        }
     }
 
     async fn recover_applying_quiescence(

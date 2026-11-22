@@ -2313,8 +2313,8 @@ failure remains definitive. A failure with origin `Recovered`, or one carrying a
 settles the restore, including the steps a failed restore already applied.
 
 A domain whose restore has not published its complete runtime-state generation refuses `START`
-with a definitive command failure naming the incomplete installation. Planning rejects it before
-admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
+with a definitive command failure naming the incomplete installation. `START` refuses it before it
+places the domain's units, and consensus checks the same gate in the write that starts the domain. Failure of the
 restore, release of its mutation lease, and node restart do not release this gate. Only completion
 of the whole installation does.
 With `RESUME`, complete publication, gate release and the transition to `Running` at the archived

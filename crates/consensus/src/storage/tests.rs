@@ -2568,7 +2568,10 @@ async fn reclaimed_command_retry_fence_survives_snapshot_installation() -> TestR
 
 #[nervix_primitives::test]
 async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_position() -> TestResult {
-    use nervix_models::{StartDomain, Statement, Timestamp, UserName};
+    use nervix_models::{
+        DomainSchedule, DropModel, ModelKind, ModelName, Statement, Timestamp,
+        TransactionCommitStepKind, TransactionEntityGatePlan, UserName,
+    };
 
     use crate::{
         ReplicatedTransaction, TransactionActivity, TransactionCommandResult, TransactionOutcome,
@@ -2577,14 +2580,16 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
     };
     for boundary in [StorageBoundary::BeforeCommit, StorageBoundary::AfterSync] {
         nervix_primitives::task::consume_budget().await;
-        let mut harness = Harness::new().await?;
+        let mut harness = Harness::with_committed_parameters().await?;
         let domain = Harness::domain("tenant");
+        // The transaction's one model step drops a VHOST and publishes this schedule.
+        let schedule = DomainSchedule::new(domain.id.clone(), Vec::new(), Vec::new());
         let owner = UserName::parse("operator")?;
         let at = Timestamp::from_unix_nanos(1);
         let activity = TransactionActivity::from_timeout(at, Duration::from_secs(60));
         harness
             .apply(
-                1,
+                2,
                 ConsensusCommand::PutDomain {
                     domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(domain.clone()),
@@ -2594,7 +2599,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .await?;
         harness
             .apply(
-                2,
+                3,
                 ConsensusCommand::OpenTransaction {
                     transaction: Box::new(ReplicatedTransaction::open(
                         "transaction".into(),
@@ -2608,7 +2613,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .await?;
         harness
             .apply(
-                3,
+                4,
                 ConsensusCommand::QueueTransactionStatement {
                     id: "transaction".into(),
                     owner: owner.clone(),
@@ -2620,9 +2625,10 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                                 "request-0",
                             )?,
                             expected_position: 0,
-                            source: "START;".into(),
-                            statement: Statement::StartDomain(StartDomain {
-                                start: DomainStartPoint::Resume,
+                            source: "DROP VHOST edge;".into(),
+                            statement: Statement::Drop(DropModel {
+                                kind: ModelKind::Vhost,
+                                name: ModelName::try_from("edge")?,
                             }),
                         },
                     )),
@@ -2639,11 +2645,17 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             )
             .await?;
         let mut commit_plan = crate::transaction::test_commit_plan("transaction", 1);
-        commit_plan.steps[0].kind = nervix_models::TransactionCommitStepKind::StartDomain {
-            resolved: nervix_models::TransactionResolvedDomainStart {
-                start: DomainStartPoint::Resume,
-                clock: None,
-                authority: None,
+        commit_plan.steps[0].kind = TransactionCommitStepKind::Models {
+            transitions: Vec::new(),
+            schedule: Some(Box::new(schedule.clone())),
+            no_op_operations: Vec::new(),
+            model_gate: TransactionEntityGatePlan {
+                targets: nervix_models::EntityGateTargets::default(),
+                relays: Vec::new(),
+            },
+            ownership_gate: TransactionEntityGatePlan {
+                targets: nervix_models::EntityGateTargets::default(),
+                relays: Vec::new(),
             },
         };
         let preview = commit_plan.preview.clone();
@@ -2655,7 +2667,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
         );
         harness
             .apply(
-                4,
+                5,
                 ConsensusCommand::StartTransactionCommit {
                     id: "transaction".into(),
                     owner,
@@ -2686,7 +2698,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .and_then(ReplicatedTransaction::domain_mutation)
             .cloned()
             .ok_or("committing transaction mutation lease missing")?;
-        assert_eq!(mutation.recovery_fence().revision(), 4);
+        assert_eq!(mutation.recovery_fence().revision(), 5);
         assert_eq!(preceding.domain_mutations.get(&domain.id), Some(&mutation));
         let inputs = Box::new(
             harness
@@ -2706,17 +2718,15 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 impact: applying_impact,
                 result: TransactionCommandResult {
                     success: true,
-                    message: "started".into(),
+                    message: "dropped VHOST 'edge'".into(),
                     diagnostics: vec![],
                     already_existed: false,
                     admission: None,
                 },
             }),
-            effect: Some(Box::new(TransactionStepEffect::StartDomain {
+            effect: Some(Box::new(TransactionStepEffect::ReplaceDomainSchedule {
                 inputs,
-                start: DomainStartPoint::Resume,
-                clock: None,
-                authority: None,
+                schedule: Some(Box::new(schedule.clone())),
             })),
             completion: Some(TransactionOutcome::Committed),
         };
@@ -2725,7 +2735,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .inner
             .faults
             .fail_next(command.to_string(), boundary);
-        assert!(harness.apply(5, command).await.is_err());
+        assert!(harness.apply(6, command).await.is_err());
         assert_eq!(harness.store.inner.state(), preceding);
         let mut harness = harness.reopen().await?;
         let recovered = harness.store.inner.state();
@@ -2780,21 +2790,14 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                         .as_ref()
                         .ok_or("applying transaction step missing")?
                         .effect_revision,
-                    5
+                    6
                 );
-                assert_eq!(
-                    state
-                        .domains
-                        .get(&domain.id)
-                        .ok_or("domain missing")?
-                        .start_version,
-                    1
-                );
-                assert_eq!(state.runtime_revision, 5);
-                assert_eq!(state.last_applied_log_id, Some(Harness::log_id(5)));
+                assert_eq!(state.schedule.domain(&domain.id), Some(&schedule));
+                assert_eq!(state.runtime_revision, 6);
+                assert_eq!(state.last_applied_log_id, Some(Harness::log_id(6)));
                 harness
                     .apply(
-                        6,
+                        7,
                         ConsensusCommand::CompleteTransactionApplication {
                             id: "transaction".into(),
                             expected_next_statement: 0,
@@ -2825,7 +2828,7 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                 );
                 harness
                     .apply(
-                        7,
+                        8,
                         ConsensusCommand::RemoveFinishedTransactions {
                             finished_before: at,
                         },
@@ -2841,8 +2844,8 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
                         .step("transaction", 0)
                         .is_err()
                 );
-                assert_eq!(state.runtime_revision, 5);
-                assert_eq!(state.last_applied_log_id, Some(Harness::log_id(7)));
+                assert_eq!(state.runtime_revision, 6);
+                assert_eq!(state.last_applied_log_id, Some(Harness::log_id(8)));
             }
         }
     }

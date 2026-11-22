@@ -381,13 +381,14 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_` keyspaces and `ClusterState`
-metadata encoding 45 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_lifecycle_` keyspaces and `ClusterState`
+metadata encoding 46 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, node selector statements, placement node rules and the partition count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
-its domain from the transaction. The runtime state store's
+its domain from the transaction, a `START` command's execution with the revision of the start it committed and a durable
+transaction request's refusal of a queued `START` or `STOP`. The runtime state store's
 `inherited-partition-origin-checkpoint-index` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Inherited schedules also retain configuration-fenced source sets, common grouping and suspended
@@ -1275,7 +1276,7 @@ domains capture stored checkpoints. An empty generation still has its descriptor
 zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
-authority once its state generation is admitted. Neither state permits `START`, direct or transactional. Completion of the
+authority once its state generation is admitted. Neither state permits `START`. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at

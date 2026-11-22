@@ -30,7 +30,13 @@ The planner and executor partition that ordered sequence the same way:
 | Content | Execution boundary |
 | --- | --- |
 | Consecutive model `CREATE`, supported `ALTER`, `DROP`, `SET LABELS`, `DROP LABELS`, and `REBIND RESOURCE` operations | One atomic model run, evaluated in written order against one candidate graph. |
-| `START`, `STOP`, `CREATE RESOURCE`, or `RESET WASM PROCESSOR ... STATE` | One step each; each ends a preceding model run. |
+| `CREATE RESOURCE`, a resource's label edit, or `RESET WASM PROCESSOR ... STATE` | One step each; each ends a preceding model run. |
+
+`START` and `STOP` are never transaction content. They switch the domain's processing on and off
+and change none of its configuration, so queuing one is refused when it is queued, naming the
+statement, and the transaction keeps what it already holds. They run on their own, after
+`COMMIT`, and a transaction plans every step against the domain's committed lifecycle state:
+running, paused or stopped as the domain record says when the step is planned.
 
 A model run's configuration and schedule are published in one authoritative step. Its *base-to-final*
 diff determines the effective impact: an intermediate change can be cancelled, a drop followed by
@@ -55,14 +61,9 @@ reports its preview identity. The read does not advance the queue.
 
 Queue admission replays the accepted prefix in this exact order. An unfinished *final* model run
 may be admitted with an `INCOMPLETE` candidate and planning diagnostics when a later operation in
-that same run can make it valid. An intervening lifecycle, domain, resource-catalog, or reset step
-ends the run, so a later run cannot repair the earlier one. An incomplete candidate is never a
-complete empty scope, and `COMMIT` requires every step to plan completely.
-
-Planning captures the restored domain's installation gate with its authoritative control inputs.
-An incomplete restore refuses a queued or standalone `START` before lifecycle admission, naming
-the restore execution responsible for the gate. Consensus revalidates the gate at activation;
-releasing a failed restore's mutation lease does not make that domain startable.
+that same run can make it valid. An intervening resource-catalog or reset step ends the run, so a
+later run cannot repair the earlier one. An incomplete candidate is never a complete empty scope,
+and `COMMIT` requires every step to plan completely.
 
 ```mermaid
 stateDiagram-v2
@@ -100,7 +101,7 @@ pre-engagement failure or higher after recorded recovery expansion.
 
 | Required level | Typed scope | What it requires before the step's effect |
 | --- | --- | --- |
-| `DYNAMIC` | `NO_PAUSE` | No execution gate or domain drain. Configuration, lifecycle, listener, or activation work may still be required. |
+| `DYNAMIC` | `NO_PAUSE` | No execution gate or domain drain. Configuration, listener, or activation work may still be required. |
 | `ENTITY_PAUSE` | One named subgraph, its concrete branch coverage, and admission relay gates | Hold new admission at those boundaries and drain the affected work while unrelated graph traffic continues. |
 | `DOMAIN_PAUSE` | The owning domain | Stop domain intake and generators and drain all attached execution work before publication. |
 
@@ -181,8 +182,8 @@ the same retained-work and rollback boundaries as other emitters: the previous e
 the owner until the change commits, and a canceled attempt cannot resolve a new owner's ACK.
 
 The report keeps separate effect sets for configuration creation/change/drop, resource catalog and
-version bindings, domain lifecycle, ownership moves, activations and deactivations, rebuilds,
-state resets, force flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore
+version bindings, ownership moves, activations and deactivations, rebuilds, state resets, force
+flushes, and affected topology. An HTTPS `VHOST` version refresh can therefore
 be `DYNAMIC` while every live node still installs a new listener certificate. A running-domain
 primary move raises an otherwise dynamic model or placement change to `ENTITY_PAUSE`; replica-role
 changes alone do not. Schedule reassignments identify the moved node and unit, and so does each
@@ -198,16 +199,11 @@ see [Relay Partitions](./relay.md#changing-the-partition-count). The leader's re
 transition is an automatic `DYNAMIC` schedule change: every unit that keeps running ends its claims
 in place, and the holding units, which hold nothing by then, end without pausing anything. In a
 stopped domain, a model or resource rebinding has no running work to pause and reports
-`DYNAMIC`, although the changed configuration still matters at the next start. Explicit `START`
-and `STOP` are individual `NO_PAUSE` steps with lifecycle effects; they determine whether later
-model steps plan against a running or stopped domain. The transaction engages no pause for a `STOP`
-step, but the step drains: its effect makes the domain's stop request, under the transaction's
-mutation lease, and the step applies until that stop ends, which waits for the domain's work in
-motion as every graceful stop does ([Stopping A Domain](./domains-and-time.md#stopping-a-domain)).
-Its planned impact is the domain's lifecycle stop; it completes once the stop ended, enforced or
-not, and fails with the cancelled answer when its own `CANCEL AFTER` withdrew the request. Later
-steps plan against the stopped domain, whatever the stop cut. [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects)
-owns what each pinned resource version loads and which rebindings reset state.
+`DYNAMIC`, although the changed configuration still matters at the next start. A transaction
+holds no `START` or `STOP`, so whether its model steps plan against a running or stopped domain is
+the domain's committed state, not a step of the same transaction. [Resource Versions And
+Bindings](./resource-versions.md#classification-and-state-effects) owns what each pinned resource
+version loads and which rebindings reset state.
 
 An automatic schedule change that moves work away from a node the leader has marked unavailable
 retains its planned and actual impact. Completion waits for the leader's current required runtime
@@ -223,11 +219,10 @@ revision; it does not change the committed step's impact report.
 | Add an optional schema field, then drop that field in the same model run. | The base and final graph match. The run is a `DYNAMIC` no-op even though the operations keep their individual contributions and ordered reasons. |
 | Change the keys of two deduplicators on independent relay paths in one run. | Both contribute `ENTITY_PAUSE`; the step's subgraph is the union of the two path scopes. If both paths share an admission relay, that gate appears once with both operation numbers. Unrelated paths stay outside the paused subgraph. |
 | Reset one concrete branch of a WASM processor, then change an unrelated deduplicator key across its declared branch. | These are separate `ENTITY_PAUSE` steps. The reset retains selected-key coverage while the model step covers every key of its own branch; the transaction summary unions their two subgraphs without broadening the reset to all branches. |
-| `STOP`, change a schema, `START`, then change that schema again. | Four boundaries: stop, a stopped-domain dynamic model step, start, and a running-domain model step requiring `DOMAIN_PAUSE`. The summary is domain-wide even though the earlier schema step needed no pause. |
 
 The qualification scenarios in `tests/features/runtime/plexus_transactions.feature` and the
-planner checks in `src/registry/transaction/tests.rs` exercise the first, second, and lifecycle
-patterns. The scoped topology and shared-gate checks also exercise branch and relation identity.
+planner checks in `src/registry/transaction/tests.rs` exercise the first and second patterns. The
+scoped topology and shared-gate checks also exercise branch and relation identity.
 
 ## Affected Topology And Attribution
 

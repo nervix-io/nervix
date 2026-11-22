@@ -94,7 +94,7 @@ use super::{
     },
     session::outbound::{SessionOutbound, SubscriptionWithdrawal},
     session_service::SessionServiceImpl,
-    transaction::{InspectingSession, transaction_status},
+    transaction::{InspectingSession, TransactionQueueRefusal, transaction_status},
 };
 use crate::{
     runtime::{
@@ -1660,11 +1660,13 @@ impl SessionServiceImpl {
             nervix_primitives::task::consume_budget().await;
             let result = match operation {
                 CommandExecutionTransactionOperation::RefuseUnqueueable { statement_label } => {
-                    command_error(format!(
-                        "{statement_label} cannot be queued in a transaction; a transaction \
-                         applies to one existing domain and queues only that domain's \
-                         configuration statements"
-                    ))
+                    TransactionQueueRefusal::Unqueueable {
+                        statement: statement_label,
+                    }
+                    .answer()
+                }
+                CommandExecutionTransactionOperation::RefuseDomainLifecycle { command } => {
+                    TransactionQueueRefusal::DomainLifecycle { command }.answer()
                 }
                 CommandExecutionTransactionOperation::Queue(statement) => {
                     self.queue_identified_transaction_statement(

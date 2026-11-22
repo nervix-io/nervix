@@ -511,8 +511,10 @@ the same fingerprint as every other consensus and prerequisite shape.
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
 It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
-record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
-transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
+record retains, the typed `LicensingStop` refusal of a change that would run a domain, the start of
+a domain included, and the `stopped` admission refusal state. It fences the domain start a `START`
+command commits on its own, with the start revision its execution records, and transaction commit
+plans and step effects that carry no lifecycle step.
 
 The fingerprint also covers bounded entity labels on configuration Models and the typed label edits retained in transactions, with their committed acceptance limits. It identifies the combined label, inferencer-description, inferencer state page, listener-capability, licensing stop-gate, licensing transition, node-record and inherited partition-topology contract; metadata-only edits preserve the execution and state identities those reports observe.
 

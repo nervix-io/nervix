@@ -549,7 +549,7 @@ Feature: Node rules
     Then within "60s" the background Plexus execution reaches a successful outcome
     And within "10s" node "node-1" eventually reports scheduled "junction" "scorer" owner "node-3"
 
-  Scenario: START in the transaction that adds a rule no node satisfies is refused
+  Scenario: START queued beside a node rule is refused, and the rule commits without it
     Given the production sticky scheduler is configured
     And a 1 node nervix cluster is started
     When these Plexus commands are executed on the leader node
@@ -561,20 +561,30 @@ Feature: Node rules
       CREATE JUNCTION scorer FROM rule_input UNBRANCHED
         TO rule_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
-    And these Plexus commands fail with "cannot place its units under the node rules this transaction changes; commit the change first, then START"
+    Given client "operator" is connected to the leader node
+    When client "operator" fails to execute these Plexus commands
       """
       BEGIN;
       CREATE PLACEMENT mars_only FOR scorer REQUIRE NODES WHERE tag('zone') = 'mars';
       START;
+      """
+    Then the last command error contains
+      """
+      START cannot be queued in a transaction; START and STOP run on their own, after COMMIT
+      """
+    And client "operator" transaction state is "OPEN"
+    When client "operator" executes these Plexus commands
+      """
       COMMIT;
       """
-    And these Plexus commands are executed on the leader node
+    Then client "operator" transaction state is "COMMITTED"
+    When these Plexus commands are executed on the leader node
       """
       SHOW PLACEMENTS;
       """
     Then the last command output contains
       """
-      no placements
+      mars_only
       """
     When these Plexus commands are executed on the leader node
       """

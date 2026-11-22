@@ -142,6 +142,15 @@ impl Statement {
             )
     }
 
+    /// The lifecycle command this statement is, when it starts or stops its domain.
+    pub fn domain_lifecycle_command(&self) -> Option<DomainLifecycleCommand> {
+        match self {
+            Self::StartDomain(_) => Some(DomainLifecycleCommand::Start),
+            Self::StopDomain(_) => Some(DomainLifecycleCommand::Stop),
+            _ => None,
+        }
+    }
+
     pub fn is_model_mutation(&self) -> bool {
         match self {
             Self::MutateEntityLabels(edit) => {
@@ -592,6 +601,29 @@ pub struct StopDomain {
     /// How long the stop may wait for the work in motion before it is forced through or called
     /// off. Absent, the stop waits without a limit of its own.
     pub wait_limit: Option<crate::WaitLimit>,
+}
+
+/// A command that switches its domain's processing on or off. It changes no configuration and
+/// runs on its own: a transaction never queues one.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
+    strum::Display,
+)]
+pub enum DomainLifecycleCommand {
+    #[strum(serialize = "START")]
+    Start,
+    #[strum(serialize = "STOP")]
+    Stop,
 }
 
 #[derive(

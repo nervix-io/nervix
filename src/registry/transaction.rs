@@ -18,21 +18,20 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
     AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,
-    ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact,
-    DomainName, DomainSchedule, DomainState as ControlDomainState, DomainStatus,
-    DynamicModelUpdate, EntityLabelLimits, EntityLabelTarget, EntityLabels,
-    ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
-    ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
-    ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
-    ModelChangeAspect, ModelIndex, MutateEntityLabels, NodeRef, OperationImpactReason,
-    OperationImpactReport, OwnershipMoveImpact, ParametrizerName, ParametrizerPartitions,
-    PauseRequirement, PlannedExecutionStepImpact, QuiesceLevel, QuiesceSubgraph, RebuildImpact,
-    RebuildReason, RequestedResourceVersion, ResetWasmState, ResolvedParametrizerPartitions,
-    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
-    ResourceUploads, ResourceVersionResolutionError, StateBranchSelectionError, StateResetImpact,
-    Statement, TransactionCommitPlanStep, TransactionCommitStepKind, TransactionImpactReport,
-    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPosition,
+    ConfigurationImpact, ConfigurationTransition, DomainName, DomainSchedule,
+    DomainState as ControlDomainState, DomainStatus, DynamicModelUpdate, EntityLabelLimits,
+    EntityLabelTarget, EntityLabels, ExecutionStepImpactReport, ForceFlushImpact,
+    ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactReportError, ImpactTopology,
+    ImpactTopologyEdge, ModelChangeAspect, ModelIndex, MutateEntityLabels, NodeRef,
+    OperationImpactReason, OperationImpactReport, OwnershipMoveImpact, ParametrizerName,
+    ParametrizerPartitions, PauseRequirement, PlannedExecutionStepImpact, QuiesceLevel,
+    QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion, ResetWasmState,
+    ResolvedParametrizerPartitions, ResourceBindingImpact, ResourceCatalogAction,
+    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
+    StateBranchSelectionError, StateResetImpact, Statement, TransactionCommitPlanStep,
+    TransactionCommitStepKind, TransactionImpactReport, TransactionOperation,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
 };
 use thiserror::Error;
 
@@ -83,10 +82,6 @@ pub(crate) enum PlannedTransactionStepKind {
     Models {
         plan: Box<PlannedModelTransactionStep>,
     },
-    StartDomain {
-        previous: ControlDomainState,
-    },
-    StopDomain,
     CreateResource {
         resource: ResourceName,
         labels: EntityLabels,
@@ -97,9 +92,9 @@ pub(crate) enum PlannedTransactionStepKind {
         labels: EntityLabels,
     },
     ResetWasmState {
-        reset: ResetWasmState,
+        reset: Box<ResetWasmState>,
         request: CommandExecutionReference,
-        schedule: DomainSchedule,
+        schedule: Box<DomainSchedule>,
     },
 }
 
@@ -181,10 +176,6 @@ pub(crate) enum TransactionPlanningError {
     DomainStopping { domain: DomainName },
     #[error("domain '{domain}' already has a model alteration in progress")]
     ConcurrentDomainAlter { domain: DomainName },
-    #[error("domain '{domain}' is already running")]
-    DomainAlreadyRunning { domain: DomainName },
-    #[error("domain '{domain}' is already stopped")]
-    DomainAlreadyStopped { domain: DomainName },
     #[error(
         "parametrizer '{parametrizer}' in domain '{domain}' is still moving keys placed under its \
          previous partition count {previous} to its current count {current}; change its partition \
@@ -197,20 +188,6 @@ pub(crate) enum TransactionPlanningError {
         previous: u16,
         current: u16,
     },
-    #[error(
-        "domain '{domain}' restore state installation is incomplete for execution '{execution}'"
-    )]
-    RestoreInstallation {
-        domain: DomainName,
-        execution: CommandExecutionReference,
-    },
-    #[error("domain '{domain}' cannot start: licensing stopped processing: {reason}")]
-    LicensingStop {
-        domain: DomainName,
-        reason: nervix_models::LicensingStopReason,
-    },
-    #[error("domain '{domain}' start generation overflowed")]
-    DomainStartGenerationOverflow { domain: DomainName },
     #[error("resource '{resource}' already exists")]
     ResourceAlreadyExists { resource: ResourceName },
     #[error("resource '{resource}' does not exist")]
@@ -306,11 +283,6 @@ impl TransactionPlanningError {
             | Self::DomainPaused { .. }
             | Self::DomainStopping { .. }
             | Self::ConcurrentDomainAlter { .. }
-            | Self::DomainAlreadyRunning { .. }
-            | Self::DomainAlreadyStopped { .. }
-            | Self::RestoreInstallation { .. }
-            | Self::LicensingStop { .. }
-            | Self::DomainStartGenerationOverflow { .. }
             | Self::ResourceAlreadyExists { .. }
             | Self::ResourceNotFound { .. }
             | Self::RebindMemberNotFound { .. }
@@ -437,7 +409,6 @@ impl Registry {
     pub(crate) fn restore_transaction_commit_step(
         domain: &DomainName,
         current_models: ModelIndex,
-        previous: ControlDomainState,
         expected_schedule: Option<DomainSchedule>,
         step: TransactionCommitPlanStep,
     ) -> Result<PlannedTransactionStep, Report<TransactionPlanningError>> {
@@ -469,10 +440,6 @@ impl Registry {
                     }),
                 }
             }
-            TransactionCommitStepKind::StartDomain { .. } => {
-                PlannedTransactionStepKind::StartDomain { previous }
-            }
-            TransactionCommitStepKind::StopDomain => PlannedTransactionStepKind::StopDomain,
             TransactionCommitStepKind::CreateResource {
                 resource,
                 labels,
@@ -490,9 +457,9 @@ impl Registry {
                 request,
                 schedule,
             } => PlannedTransactionStepKind::ResetWasmState {
-                reset: *reset,
+                reset,
                 request,
-                schedule: *schedule,
+                schedule,
             },
         };
         Ok(PlannedTransactionStep {
@@ -548,7 +515,7 @@ impl Registry {
         let parameters = snapshot.parameters;
         let label_limits = EntityLabelLimits::from(&parameters);
         let domain = snapshot.domain.id.clone();
-        let mut domain_state = snapshot.domain;
+        let domain_state = snapshot.domain;
         let mut models = snapshot.models;
         let mut resources = snapshot.resources;
         let resource_uploads = snapshot.resource_uploads;
@@ -623,69 +590,6 @@ impl Registry {
             let kind;
             let pause;
             match statement {
-                Statement::StartDomain(start) => {
-                    ensure_domain_not_paused(&domain_state)?;
-                    if let DomainStatus::Running = domain_state.status {
-                        return Err(Report::new(
-                            TransactionPlanningError::DomainAlreadyRunning {
-                                domain: domain.clone(),
-                            },
-                        ));
-                    }
-                    operation = TransactionOperation::StartDomain {
-                        domain: domain.clone(),
-                    };
-                    let previous = domain_state.clone();
-                    domain_state.status = DomainStatus::Running;
-                    domain_state.clear_stop();
-                    domain_state.last_start = start.start.clone();
-                    domain_state.start_version =
-                        domain_state.start_version.checked_add(1).ok_or_else(|| {
-                            Report::new(TransactionPlanningError::DomainStartGenerationOverflow {
-                                domain: domain.clone(),
-                            })
-                        })?;
-                    reasons = vec![OperationImpactReason::DomainStart];
-                    contribution = ImpactEffects {
-                        lifecycle: CanonicalImpactSet::new([DomainLifecycleImpact {
-                            domain: domain.clone(),
-                            action: DomainLifecycleAction::Start,
-                            attribution,
-                        }]),
-                        ..ImpactEffects::default()
-                    };
-                    kind = PlannedTransactionStepKind::StartDomain { previous };
-                    pause = PauseRequirement::NoPause;
-                }
-                Statement::StopDomain(_) => {
-                    ensure_domain_not_paused(&domain_state)?;
-                    if let DomainStatus::Stopped = domain_state.status {
-                        return Err(Report::new(
-                            TransactionPlanningError::DomainAlreadyStopped {
-                                domain: domain.clone(),
-                            },
-                        ));
-                    }
-                    operation = TransactionOperation::StopDomain {
-                        domain: domain.clone(),
-                    };
-                    // The step's stop ends with the domain stopped; how it ended is decided while
-                    // the step applies, and no later step plans against it.
-                    domain_state.status = DomainStatus::Stopped;
-                    domain_state.clock = None;
-                    domain_state.clear_stop();
-                    reasons = vec![OperationImpactReason::DomainStop];
-                    contribution = ImpactEffects {
-                        lifecycle: CanonicalImpactSet::new([DomainLifecycleImpact {
-                            domain: domain.clone(),
-                            action: DomainLifecycleAction::Stop,
-                            attribution,
-                        }]),
-                        ..ImpactEffects::default()
-                    };
-                    kind = PlannedTransactionStepKind::StopDomain;
-                    pause = PauseRequirement::NoPause;
-                }
                 Statement::CreateResource(create) => {
                     operation = TransactionOperation::CreateResource {
                         domain: domain.clone(),
@@ -794,9 +698,9 @@ impl Registry {
                     pause = planned.pause;
                     current_schedule = Some(planned.schedule.clone());
                     kind = PlannedTransactionStepKind::ResetWasmState {
-                        reset: reset.clone(),
+                        reset: Box::new(reset.clone()),
                         request: request.clone(),
-                        schedule: planned.schedule,
+                        schedule: Box::new(planned.schedule),
                     };
                 }
                 _ => {

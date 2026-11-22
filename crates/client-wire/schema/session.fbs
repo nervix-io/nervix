@@ -501,14 +501,6 @@ table DropConfigurationOperation {
 }
 
 
-table StartDomainOperation {
-  domain: string (required);
-}
-
-table StopDomainOperation {
-  domain: string (required);
-}
-
 table CreateResourceOperation {
   domain: string (required);
   resource: string (required);
@@ -549,8 +541,6 @@ union TransactionOperation {
   CreateConfigurationOperation = 1,
   AlterConfigurationOperation = 2,
   DropConfigurationOperation = 3,
-  StartDomainOperation = 5,
-  StopDomainOperation = 6,
   CreateResourceOperation = 7,
   RebindResourceOperation = 8,
   ResetWasmStateOperation = 9,
@@ -646,10 +636,6 @@ table ConfigurationReason {
 }
 
 
-table DomainStartReason {}
-
-table DomainStopReason {}
-
 table ResourceCatalogReason {
   resource: string (required);
 }
@@ -667,8 +653,6 @@ table WasmStateResetReason {
 
 union OperationImpactReason {
   ConfigurationReason = 1,
-  DomainStartReason = 3,
-  DomainStopReason = 4,
   ResourceCatalogReason = 5,
   ResourceRebindingReason = 6,
   WasmStateResetReason = 7
@@ -752,19 +736,6 @@ table ResourceBindingImpact {
   requested: RequestedResourceVersion (required);
   /// The version the binding resolved to.
   version: ulong;
-  /// A non-empty set of operation numbers.
-  operations: [ulong] (required);
-}
-
-enum DomainLifecycleAction : ubyte {
-  Start,
-  Stop
-}
-
-table DomainLifecycleImpact {
-  domain: string (required);
-  /// Required.
-  action: DomainLifecycleAction = null;
   /// A non-empty set of operation numbers.
   operations: [ulong] (required);
 }
@@ -858,7 +829,6 @@ table ImpactEffects {
   changed_configuration: [ConfigurationImpact] (required);
   topology: AffectedTopology (required);
   ownership_moves: [OwnershipMoveImpact] (required);
-  lifecycle: [DomainLifecycleImpact] (required);
   activations: [ActivationImpact] (required);
   rebuilds: [RebuildImpact] (required);
   state_resets: [StateResetImpact] (required);

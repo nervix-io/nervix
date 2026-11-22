@@ -769,9 +769,8 @@ its rules admit. A unit stored on a node its rules no longer admit moves, with i
 the planned ownership handoff. While some unit has no admitted node, `START` waits, much as a
 Kubernetes pod stays Pending until a node matches. It holds the domain's mutation lease, so the domain's
 other changes are refused meanwhile, and it continues by itself once a node that satisfies the
-rules is live with a committed record. Nothing starts until every unit can be placed. A `START`
-in the same transaction as a node-rule change that would leave a breach is refused; commit the
-change first, then `START`.
+rules is live with a committed record. Nothing starts until every unit can be placed. `START`
+never runs inside a transaction, so it always places against the node rules already committed.
 
 The cluster can still change under an accepted rule:
 

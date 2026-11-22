@@ -136,6 +136,15 @@ pub enum ApplicationWait {
 }
 
 impl RuntimeError {
+    /// Whether the failure only says that some node has not prepared or readied a runtime revision
+    /// yet, which the change that committed the revision waits out instead of failing.
+    pub(crate) fn waits_for_readiness(&self) -> bool {
+        matches!(
+            self,
+            Self::RuntimeRevisionPreparation { .. } | Self::RuntimeRevisionReadiness { .. }
+        )
+    }
+
     /// The context of every failure to build or change `domain`'s execution.
     pub(super) fn build_domain_execution(domain: &DomainName) -> Self {
         Self::BuildDomainExecution {

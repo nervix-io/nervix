@@ -16,22 +16,20 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
-    CanonicalImpactSet, ClusterNodeIdentity, ClusterNodeIncarnation, CommandExecutionReference,
-    ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition, DomainClockState,
-    DomainLifecycleAction, DomainLifecycleImpact, DomainName, DomainSchedule, DomainStartPoint,
-    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
-    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
-    ImpactTopologyEdge, ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason,
-    OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlacementGroupSchedule,
-    PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
-    RelayName, RequestedResourceVersion, ResetWasmState, ResourceBindingImpact,
-    ResourceCatalogAction, ResourceCatalogImpact, ScheduledNode, SchemaFingerprint, StatePurge,
-    StateResetImpact, Statement, Timestamp, TransactionCommitPlan, TransactionCommitPlanStep,
-    TransactionCommitStepKind, TransactionEntityGatePlan, TransactionImpactReport,
-    TransactionModelTransition, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
-    TransactionResolvedDomainStart, WasmProcessorName,
+    CanonicalImpactSet, CommandExecutionReference, ConcreteBranchCoverage, ConfigurationImpact,
+    ConfigurationTransition, DomainName, DomainSchedule, ExecutionStepImpactReport,
+    ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
+    ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge,
+    ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason, OperationImpactReport,
+    OwnershipMoveImpact, PauseRequirement, PlacementGroupSchedule, PlannedExecutionStepImpact,
+    QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName,
+    RequestedResourceVersion, ResetWasmState, ResourceBindingImpact, ResourceCatalogAction,
+    ResourceCatalogImpact, ScheduledNode, SchemaFingerprint, StatePurge, StateResetImpact,
+    Statement, TransactionCommitPlan, TransactionCommitPlanStep, TransactionCommitStepKind,
+    TransactionEntityGatePlan, TransactionImpactReport, TransactionModelTransition,
+    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPosition, TransactionPreviewIdentity, WasmProcessorName,
 };
 
 use crate::{Arbitrary, ModelVariant, StatementVariant};
@@ -235,9 +233,7 @@ impl StepBoundary for TransactionOperation {
             | Self::AlterConfiguration { .. }
             | Self::DropConfiguration { .. }
             | Self::RebindResource { .. } => true,
-            Self::StartDomain { .. }
-            | Self::StopDomain { .. }
-            | Self::CreateResource { .. }
+            Self::CreateResource { .. }
             | Self::EditResourceLabels { .. }
             | Self::ResetWasmState { .. } => false,
         }
@@ -562,23 +558,6 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// `domain` starting or stopping.
-    fn domain_lifecycle_impact(
-        &mut self,
-        domain: &DomainName,
-        operations: TransactionOperationRange,
-    ) -> DomainLifecycleImpact {
-        let action = self
-            .entropy
-            .pick([DomainLifecycleAction::Start, DomainLifecycleAction::Stop]);
-        let attribution = self.impact_attribution(operations);
-        DomainLifecycleImpact {
-            domain: domain.clone(),
-            action,
-            attribution,
-        }
-    }
-
     /// An execution node activating or deactivating, or a VHOST whose HTTPS listener installs a new
     /// certificate on every live node.
     fn activation_impact(&mut self, operations: TransactionOperationRange) -> ActivationImpact {
@@ -687,21 +666,15 @@ impl Arbitrary<'_> {
 
     /// Effects of every family, up to three items each, attributed to operations of
     /// `operations`: configuration transitions, the topology before and after, ownership moves,
-    /// lifecycle changes of `domain`, activations, rebuilds, state resets, force flushes, and
-    /// resource catalog and binding changes.
-    pub fn impact_effects(
-        &mut self,
-        domain: &DomainName,
-        operations: TransactionOperationRange,
-    ) -> ImpactEffects {
+    /// activations, rebuilds, state resets, force flushes, and resource catalog and binding
+    /// changes.
+    pub fn impact_effects(&mut self, operations: TransactionOperationRange) -> ImpactEffects {
         let changed_configuration =
             self.impact_set(|arbitrary| arbitrary.configuration_impact(operations));
         let before = self.impact_topology(operations);
         let after = self.impact_topology(operations);
         let ownership_moves =
             self.impact_set(|arbitrary| arbitrary.ownership_move_impact(operations));
-        let lifecycle =
-            self.impact_set(|arbitrary| arbitrary.domain_lifecycle_impact(domain, operations));
         let activations = self.impact_set(|arbitrary| arbitrary.activation_impact(operations));
         let rebuilds = self.impact_set(|arbitrary| arbitrary.rebuild_impact(operations));
         let state_resets = self.impact_set(|arbitrary| arbitrary.state_reset_impact(operations));
@@ -714,7 +687,6 @@ impl Arbitrary<'_> {
             changed_configuration,
             topology: AffectedTopology { before, after },
             ownership_moves,
-            lifecycle,
             activations,
             rebuilds,
             state_resets,
@@ -807,7 +779,7 @@ impl Arbitrary<'_> {
             ExecutionStepOutcome::Unattempted => ImpactEffects::default(),
             ExecutionStepOutcome::Applying
             | ExecutionStepOutcome::Applied
-            | ExecutionStepOutcome::Failed { .. } => self.impact_effects(domain, operations),
+            | ExecutionStepOutcome::Failed { .. } => self.impact_effects(operations),
         };
         ActualExecutionStepImpact {
             outcome,
@@ -836,7 +808,7 @@ impl Arbitrary<'_> {
             ReportStage::Admitted => ImpactReportCompleteness::Complete,
         };
         let pause = self.pause_requirement(domain, operations);
-        let effects = self.impact_effects(domain, operations);
+        let effects = self.impact_effects(operations);
         let planned = PlannedExecutionStepImpact {
             completeness,
             pause,
@@ -868,30 +840,28 @@ impl Arbitrary<'_> {
     /// and a resource rebinding binds the version it names, or any version for `LATEST`.
     pub fn transaction_operation(&mut self, domain: &DomainName) -> TransactionOperation {
         let domain = domain.clone();
-        match self.entropy.byte() % 9 {
-            0 => TransactionOperation::StopDomain { domain },
-            1 => TransactionOperation::StartDomain { domain },
-            2 => TransactionOperation::CreateResource {
+        match self.entropy.byte() % 7 {
+            0 => TransactionOperation::CreateResource {
                 domain,
                 resource: self.name(),
             },
-            3 => TransactionOperation::ResetWasmState {
+            1 => TransactionOperation::ResetWasmState {
                 domain,
                 processor: self.name(),
             },
-            4 => TransactionOperation::CreateConfiguration {
+            2 => TransactionOperation::CreateConfiguration {
                 domain,
                 node: self.any_node_ref(),
             },
-            5 => TransactionOperation::AlterConfiguration {
+            3 => TransactionOperation::AlterConfiguration {
                 domain,
                 node: self.any_node_ref(),
             },
-            6 => TransactionOperation::DropConfiguration {
+            4 => TransactionOperation::DropConfiguration {
                 domain,
                 node: self.any_node_ref(),
             },
-            7 => TransactionOperation::EditResourceLabels {
+            5 => TransactionOperation::EditResourceLabels {
                 domain,
                 resource: self.name(),
             },
@@ -949,8 +919,6 @@ impl Arbitrary<'_> {
                 }
                 reasons
             }
-            TransactionOperation::StartDomain { .. } => vec![OperationImpactReason::DomainStart],
-            TransactionOperation::StopDomain { .. } => vec![OperationImpactReason::DomainStop],
             TransactionOperation::CreateResource { resource, .. }
             | TransactionOperation::EditResourceLabels { resource, .. } => {
                 if self.entropy.flag() {
@@ -980,7 +948,7 @@ impl Arbitrary<'_> {
         let reasons = self.operation_impact_reasons(&operation);
         let own = TransactionOperationRange::new(number, number)
             .assured("a range of one operation ends where it begins");
-        let contribution = self.impact_effects(operation.domain(), own);
+        let contribution = self.impact_effects(own);
         OperationImpactReport {
             number,
             operation,
@@ -1130,17 +1098,6 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// The start a `START DOMAIN` statement requests: where the domain stopped, now, or a logical
-    /// instant, each at any positive finite time rate.
-    fn requested_start(&mut self) -> DomainStartPoint {
-        let statement = self.statement_of(StatementVariant::StartDomain);
-        let start = match statement {
-            Statement::StartDomain(start) => Some(start.start),
-            _ => None,
-        };
-        start.assured("statement_of builds the statement form it is asked for")
-    }
-
     /// The reset a `RESET WASM PROCESSOR ... STATE` statement requests for `processor` in its
     /// transaction's domain: its unbranched state, every branch, or the branch its fields select.
     fn requested_reset(&mut self, processor: &WasmProcessorName) -> ResetWasmState {
@@ -1161,44 +1118,6 @@ impl Arbitrary<'_> {
         let text = self.transaction_id();
         CommandExecutionReference::parse(text)
             .assured("a UUID's text holds only hexadecimal digits and hyphens")
-    }
-
-    /// The node process that holds a paced domain's clock authority: any cluster node, in any
-    /// incarnation.
-    fn clock_authority(&mut self) -> ClusterNodeIdentity {
-        let node = self.cluster_node();
-        let incarnation = ClusterNodeIncarnation::new(self.entropy.any_u64());
-        ClusterNodeIdentity::new(node, incarnation)
-    }
-
-    /// The clock start and authority commit admission resolves for a `START DOMAIN`: a start that
-    /// asked for now becomes the logical instant it began at, and a paced domain records the clock
-    /// mapping it began with and the authority it selected, while an unpaced one records neither.
-    pub fn transaction_resolved_domain_start(&mut self) -> TransactionResolvedDomainStart {
-        let requested = self.requested_start();
-        let wall_started_at = Timestamp::from_unix_nanos(self.entropy.any_i64());
-        let (logical_start, time_rate) = requested.resolve_at(wall_started_at);
-        let start = match requested {
-            DomainStartPoint::Now { .. } => DomainStartPoint::At {
-                timestamp: logical_start,
-                time_rate,
-            },
-            DomainStartPoint::Resume | DomainStartPoint::At { .. } => requested,
-        };
-        if !self.entropy.flag() {
-            return TransactionResolvedDomainStart {
-                start,
-                clock: None,
-                authority: None,
-            };
-        }
-        let clock = DomainClockState::new(wall_started_at, logical_start, time_rate);
-        let authority = self.clock_authority();
-        TransactionResolvedDomainStart {
-            start,
-            clock: Some(clock),
-            authority: Some(authority),
-        }
     }
 
     /// One entry of a published schedule: a stored Model of an execution family, its schema
@@ -1351,10 +1270,6 @@ impl Arbitrary<'_> {
             | TransactionOperation::RebindResource { domain, .. } => {
                 self.models_commit_step(domain, operations)
             }
-            TransactionOperation::StartDomain { .. } => TransactionCommitStepKind::StartDomain {
-                resolved: self.transaction_resolved_domain_start(),
-            },
-            TransactionOperation::StopDomain { .. } => TransactionCommitStepKind::StopDomain,
             TransactionOperation::CreateResource { resource, .. } => {
                 let already_existed = self.entropy.flag();
                 TransactionCommitStepKind::CreateResource {
@@ -1420,15 +1335,15 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         ActivationAction, ActualExecutionStepImpact, ConcreteBranchCoverage,
-        ConfigurationTransition, DomainLifecycleAction, DomainName, DomainSchedule,
-        DomainStartPoint, ExecutionStepImpactReport, ExecutionStepOutcome, ImpactAttribution,
-        ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactNodeCoverage,
-        ImpactReportCompleteness, ImpactTopology, ModelChangeAspect, ModelKind,
-        OperationImpactReason, OperationImpactReport, PauseRequirement, QuiesceSubgraph,
-        QuiescenceOutcome, RebuildReason, RequestedResourceVersion, ResourceCatalogAction,
-        StatePurge, TransactionCommitPlan, TransactionCommitStepKind, TransactionEntityGatePlan,
-        TransactionImpactReport, TransactionModelTransition, TransactionOperation,
-        TransactionOperationNumber, TransactionOperationRange, TransactionResolvedDomainStart,
+        ConfigurationTransition, DomainName, DomainSchedule, ExecutionStepImpactReport,
+        ExecutionStepOutcome, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind,
+        ImpactEdgeKind, ImpactEffects, ImpactNodeCoverage, ImpactReportCompleteness,
+        ImpactTopology, ModelChangeAspect, ModelKind, OperationImpactReason, OperationImpactReport,
+        PauseRequirement, QuiesceSubgraph, QuiescenceOutcome, RebuildReason,
+        RequestedResourceVersion, ResourceCatalogAction, StatePurge, TransactionCommitPlan,
+        TransactionCommitStepKind, TransactionEntityGatePlan, TransactionImpactReport,
+        TransactionModelTransition, TransactionOperation, TransactionOperationNumber,
+        TransactionOperationRange,
     };
     use rkyv::{
         Archive, Deserialize,
@@ -1452,22 +1367,18 @@ mod tests {
     const BYTES: usize = 8192;
 
     /// Every variant, family and shape the generators promise to reach, as [`Walk`] names them.
-    const EXPECTED: [&str; 107] = [
+    const EXPECTED: [&str; 94] = [
         "TransactionImpactReport::empty",
         "TransactionOperationRange::single",
         "TransactionOperationRange::several",
         "TransactionOperation::CreateConfiguration",
         "TransactionOperation::AlterConfiguration",
         "TransactionOperation::DropConfiguration",
-        "TransactionOperation::StartDomain",
-        "TransactionOperation::StopDomain",
         "TransactionOperation::CreateResource",
         "TransactionOperation::EditResourceLabels",
         "TransactionOperation::RebindResource",
         "TransactionOperation::ResetWasmState",
         "OperationImpactReason::Configuration",
-        "OperationImpactReason::DomainStart",
-        "OperationImpactReason::DomainStop",
         "OperationImpactReason::ResourceCatalog",
         "OperationImpactReason::ResourceRebinding",
         "OperationImpactReason::WasmStateReset",
@@ -1503,7 +1414,6 @@ mod tests {
         "ImpactEffects::topology_before",
         "ImpactEffects::topology_after",
         "ImpactEffects::ownership_moves",
-        "ImpactEffects::lifecycle",
         "ImpactEffects::activations",
         "ImpactEffects::rebuilds",
         "ImpactEffects::state_resets",
@@ -1513,8 +1423,6 @@ mod tests {
         "ConfigurationTransition::Created",
         "ConfigurationTransition::Changed",
         "ConfigurationTransition::Dropped",
-        "DomainLifecycleAction::Start",
-        "DomainLifecycleAction::Stop",
         "ActivationAction::Activate",
         "ActivationAction::Deactivate",
         "ActivationAction::RefreshHttpsListener",
@@ -1542,8 +1450,6 @@ mod tests {
         "ExecutionStepOutcome::Applied",
         "ExecutionStepOutcome::Failed",
         "TransactionCommitStepKind::Models",
-        "TransactionCommitStepKind::StartDomain",
-        "TransactionCommitStepKind::StopDomain",
         "TransactionCommitStepKind::CreateResource",
         "TransactionCommitStepKind::EditResourceLabels",
         "TransactionCommitStepKind::ResetWasmState",
@@ -1556,10 +1462,6 @@ mod tests {
         "TransactionEntityGatePlan::relays",
         "DomainSchedule::entries",
         "DomainSchedule::placement_groups",
-        "TransactionResolvedDomainStart::Resume",
-        "TransactionResolvedDomainStart::At",
-        "TransactionResolvedDomainStart::paced",
-        "TransactionResolvedDomainStart::unpaced",
     ];
 
     /// Bytes that differ from seed to seed and from stream to stream. SplitMix64 spreads them
@@ -1836,14 +1738,9 @@ mod tests {
             }
         }
 
-        /// Every item is attributed within `within`, a lifecycle change names `domain`, and every
-        /// node but a refreshed VHOST is an execution node.
-        fn effects(
-            &mut self,
-            effects: &ImpactEffects,
-            domain: &DomainName,
-            within: TransactionOperationRange,
-        ) {
+        /// Every item is attributed within `within`, and every node but a refreshed VHOST is an
+        /// execution node.
+        fn effects(&mut self, effects: &ImpactEffects, within: TransactionOperationRange) {
             for change in &effects.changed_configuration {
                 self.see("ImpactEffects::changed_configuration");
                 match &change.transition {
@@ -1872,15 +1769,6 @@ mod tests {
                 assert_eq!(moved.node.branches, Some(ConcreteBranchCoverage::All));
                 self.execution(&moved.node);
                 self.attribution(&moved.attribution, within);
-            }
-            for lifecycle in &effects.lifecycle {
-                self.see("ImpactEffects::lifecycle");
-                assert_eq!(&lifecycle.domain, domain);
-                match lifecycle.action {
-                    DomainLifecycleAction::Start => self.see("DomainLifecycleAction::Start"),
-                    DomainLifecycleAction::Stop => self.see("DomainLifecycleAction::Stop"),
-                }
-                self.attribution(&lifecycle.attribution, within);
             }
             for activation in &effects.activations {
                 self.see("ImpactEffects::activations");
@@ -1994,7 +1882,7 @@ mod tests {
                     self.diagnostic(diagnostic, within);
                 }
             }
-            self.effects(&actual.effects, domain, within);
+            self.effects(&actual.effects, within);
         }
 
         /// Everything the step planned and did is attributed to its own operations.
@@ -2008,7 +1896,7 @@ mod tests {
             let planned = step.planned();
             self.completeness(&planned.completeness, within);
             self.pause(&planned.pause, domain, within);
-            self.effects(&planned.effects, domain, within);
+            self.effects(&planned.effects, within);
             self.actual(step.actual(), domain, within);
         }
 
@@ -2032,12 +1920,6 @@ mod tests {
                 TransactionOperation::DropConfiguration { .. } => {
                     self.see("TransactionOperation::DropConfiguration");
                 }
-                TransactionOperation::StartDomain { .. } => {
-                    self.see("TransactionOperation::StartDomain");
-                }
-                TransactionOperation::StopDomain { .. } => {
-                    self.see("TransactionOperation::StopDomain");
-                }
                 TransactionOperation::CreateResource { .. } => {
                     self.see("TransactionOperation::CreateResource");
                 }
@@ -2058,7 +1940,7 @@ mod tests {
                 self.reason(reason, &operation.operation);
             }
             let own = only(operation.number);
-            self.effects(&operation.contribution, operation.operation.domain(), own);
+            self.effects(&operation.contribution, own);
         }
 
         fn reason(&mut self, reason: &OperationImpactReason, operation: &TransactionOperation) {
@@ -2087,12 +1969,6 @@ mod tests {
                     self.see("OperationImpactReason::ResourceRebinding");
                     assert_eq!(resource, named);
                     assert_eq!(to_version, version);
-                }
-                (OperationImpactReason::DomainStart, TransactionOperation::StartDomain { .. }) => {
-                    self.see("OperationImpactReason::DomainStart");
-                }
-                (OperationImpactReason::DomainStop, TransactionOperation::StopDomain { .. }) => {
-                    self.see("OperationImpactReason::DomainStop");
                 }
                 (
                     OperationImpactReason::ResourceCatalog { resource },
@@ -2235,27 +2111,6 @@ mod tests {
             }
         }
 
-        /// A resolved start never reads the clock again, and a paced one maps the clock from the
-        /// start it records.
-        fn resolved_start(&mut self, resolved: &TransactionResolvedDomainStart) {
-            match &resolved.start {
-                DomainStartPoint::Resume => self.see("TransactionResolvedDomainStart::Resume"),
-                DomainStartPoint::At { .. } => self.see("TransactionResolvedDomainStart::At"),
-                DomainStartPoint::Now { .. } => panic!("a resolved start still asks for now"),
-            }
-            assert_eq!(resolved.clock.is_some(), resolved.authority.is_some());
-            match &resolved.clock {
-                Some(clock) => {
-                    self.see("TransactionResolvedDomainStart::paced");
-                    let wall_started_at = clock.wall_started_at();
-                    let (logical_start, time_rate) = resolved.start.resolve_at(wall_started_at);
-                    assert_eq!(clock.logical_start(), logical_start);
-                    assert_eq!(clock.time_rate(), time_rate);
-                }
-                None => self.see("TransactionResolvedDomainStart::unpaced"),
-            }
-        }
-
         /// The plan previews `report` and pairs each of its steps with the decision the step's
         /// first operation calls for, every value naming the report's domain.
         fn plan(&mut self, plan: &TransactionCommitPlan, report: &TransactionImpactReport) {
@@ -2299,17 +2154,6 @@ mod tests {
                         self.gates(model_gate);
                         self.gates(ownership_gate);
                     }
-                    (
-                        TransactionCommitStepKind::StartDomain { resolved },
-                        TransactionOperation::StartDomain { .. },
-                    ) => {
-                        self.see("TransactionCommitStepKind::StartDomain");
-                        self.resolved_start(resolved);
-                    }
-                    (
-                        TransactionCommitStepKind::StopDomain,
-                        TransactionOperation::StopDomain { .. },
-                    ) => self.see("TransactionCommitStepKind::StopDomain"),
                     (
                         TransactionCommitStepKind::CreateResource { resource, .. },
                         TransactionOperation::CreateResource {

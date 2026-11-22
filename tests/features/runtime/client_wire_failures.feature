@@ -398,7 +398,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE leader_batch_resource;
-      START;
+      CREATE SCHEMA leader_batch_record (value I64);
       COMMIT;
       """
     Then the command response delivery pause on node "{{old_leader}}" is reached
@@ -410,7 +410,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE leader_batch_resource;
-      START;
+      CREATE SCHEMA leader_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded
@@ -441,7 +441,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE finalized_batch_resource;
-      START;
+      CREATE SCHEMA finalized_batch_record (value I64);
       COMMIT;
       """
     Then the command finalization pause on node "{{old_leader}}" is reached
@@ -461,7 +461,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE finalized_batch_resource;
-      START;
+      CREATE SCHEMA finalized_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded
@@ -469,7 +469,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE finalized_batch_resource;
-      START;
+      CREATE SCHEMA finalized_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded
@@ -584,7 +584,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE restart_batch_resource;
-      START;
+      CREATE SCHEMA restart_batch_record (value I64);
       COMMIT;
       """
     Then the command response delivery pause on node "{{leader}}" is reached
@@ -595,7 +595,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE restart_batch_resource;
-      START;
+      CREATE SCHEMA restart_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded

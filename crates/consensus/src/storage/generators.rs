@@ -24,10 +24,9 @@ use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainSchedule, DomainStartPoint,
     DomainState, DomainStatus, ExistingUserPolicy, ResetWasmState, ResourceId, ResourceName,
     ResourceReplicaKey, ResourceUploadKey, RestoreMode, RestoreStateAuthority, RestoreStep,
-    Statement, Timestamp, TransactionCommitPlan, TransactionCommitStepKind,
-    TransactionImpactReport, TransactionLifecycle, TransactionOperationAdmission,
-    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
-    TransactionPreviewIdentity, UserName,
+    Statement, Timestamp, TransactionImpactReport, TransactionLifecycle,
+    TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPosition, TransactionPreviewIdentity, UserName,
 };
 use openraft::{BasicNode, Membership, StoredMembership, vote::RaftLeaderId as _};
 use strum::IntoEnumIterator as _;
@@ -541,38 +540,24 @@ fn wasm_state_reset(arbitrary: &mut Arbitrary<'_>) -> ResetWasmState {
 }
 
 /// The authoritative change a successful step of a transaction of `domain` made, with the inputs
-/// it was planned from: a schedule replaced, the domain started
-/// at the start, clock and authority admission resolved, the domain stopped, a resource catalog
-/// created, or a WASM processor's guest state reset.
+/// it was planned from: a schedule replaced, a resource catalog created, a resource's labels
+/// edited, or a WASM processor's guest state reset.
 fn transaction_step_effect(
     arbitrary: &mut Arbitrary<'_>,
     domain: &DomainName,
 ) -> TransactionStepEffect {
     let inputs = Box::new(domain_planning_inputs(arbitrary, domain.clone()));
-    match arbitrary.entropy().byte() % 6 {
+    match arbitrary.entropy().byte() % 4 {
         0 => TransactionStepEffect::ReplaceDomainSchedule {
             inputs,
             schedule: optional_schedule(arbitrary, domain),
         },
-        1 => {
-            let resolved = arbitrary.transaction_resolved_domain_start();
-            TransactionStepEffect::StartDomain {
-                inputs,
-                start: resolved.start,
-                clock: resolved.clock,
-                authority: resolved.authority,
-            }
-        }
-        2 => TransactionStepEffect::StopDomain {
-            inputs,
-            request: Box::new(arbitrary.operator_stop_request()),
-        },
-        3 => TransactionStepEffect::CreateResourceCatalog {
+        1 => TransactionStepEffect::CreateResourceCatalog {
             inputs,
             identifier: arbitrary.rule_name(),
             labels: arbitrary.entity_labels(),
         },
-        4 => TransactionStepEffect::EditResourceLabels {
+        2 => TransactionStepEffect::EditResourceLabels {
             inputs,
             identifier: arbitrary.rule_name(),
             labels: arbitrary.entity_labels(),
@@ -956,50 +941,21 @@ fn schedule_eligibility(
     )
 }
 
-/// Leaves room in the start generation of every state `decision` installs for each `START DOMAIN`
-/// that advances it afterwards, as the planner does: it never plans a start past the last
-/// generation. Returns how many starts advance the state captured before the first step, which precedes every step.
-fn leave_room_for_starts(decision: &mut TransactionCommitPlan) -> u64 {
-    let mut later_starts = 0_u64;
-    for step in decision.steps.iter_mut().rev() {
-        match &mut step.kind {
-            TransactionCommitStepKind::StartDomain { .. } => {
-                later_starts = later_starts
-                    .checked_add(1)
-                    .assured("a generated plan holds at most three steps");
-            }
-            TransactionCommitStepKind::Models { .. }
-            | TransactionCommitStepKind::StopDomain
-            | TransactionCommitStepKind::CreateResource { .. }
-            | TransactionCommitStepKind::EditResourceLabels { .. }
-            | TransactionCommitStepKind::ResetWasmState { .. } => {}
-        }
-    }
-    later_starts
-}
-
 /// The plan commit admission froze for `report`, a report of `domain` as admission freezes it: the
-/// decision for each of its steps, the inputs captured before its first step, whose domain state
-/// leaves room for every start the plan applies, and the schedule eligibility it was checked
-/// against. Every later step's inputs follow from the step before it.
+/// decision for each of its steps, the inputs captured before its first step and the schedule
+/// eligibility it was checked against. Every later step's inputs follow from the step before it.
 fn admission_plan_for(
     arbitrary: &mut Arbitrary<'_>,
     domain: DomainName,
     report: &TransactionImpactReport,
 ) -> TransactionCommitAdmissionPlan {
-    let mut decision = arbitrary.transaction_commit_plan_for(report);
-    let starts = leave_room_for_starts(&mut decision);
-    let latest = u64::MAX
-        .checked_sub(starts)
-        .assured("a generated plan holds at most three steps");
+    let decision = arbitrary.transaction_commit_plan_for(report);
     let mut state = arbitrary.domain_state_of(domain.clone());
-    state.start_version = arbitrary.entropy().boundary_biased(0..=latest);
+    state.start_version = arbitrary.entropy().boundary_biased(0..=u64::MAX);
     let first_inputs = planning_inputs_with(arbitrary, domain.clone(), Some(state));
     let eligibility = schedule_eligibility(arbitrary, domain);
-    TransactionCommitAdmissionPlan::capture(decision, first_inputs, eligibility).assured(
-        "the captured domain state exists and leaves room for every start the plan applies, and \
-         the eligibility names the same domain",
-    )
+    TransactionCommitAdmissionPlan::capture(decision, first_inputs, eligibility)
+        .assured("the eligibility names the domain the inputs were captured for")
 }
 
 /// Up to three plans admitted for new transactions, each stored through the production insert
@@ -1085,11 +1041,12 @@ fn transaction_target(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionTransact
 }
 
 /// One operation of a transaction request: a statement to queue at any position, a commit that
-/// expects a preview or none, or a revert.
+/// expects a preview or none, a revert, or a refused statement: one no transaction queues, or a
+/// `START` or `STOP`.
 fn transaction_request_operation(
     arbitrary: &mut Arbitrary<'_>,
 ) -> CommandExecutionTransactionOperation {
-    match arbitrary.entropy().byte() % 4 {
+    match arbitrary.entropy().byte() % 5 {
         0 => {
             let request_reference = arbitrary.execution_reference();
             let expected_position = any_count(arbitrary);
@@ -1101,6 +1058,12 @@ fn transaction_request_operation(
             expected_preview: optional(arbitrary, Arbitrary::transaction_preview_identity),
         },
         2 => CommandExecutionTransactionOperation::Revert,
+        3 => CommandExecutionTransactionOperation::RefuseDomainLifecycle {
+            command: arbitrary.entropy().pick([
+                nervix_models::DomainLifecycleCommand::Start,
+                nervix_models::DomainLifecycleCommand::Stop,
+            ]),
+        },
         _ => CommandExecutionTransactionOperation::RefuseUnqueueable {
             statement_label: arbitrary
                 .entropy()
@@ -1174,15 +1137,34 @@ fn create_domain_effect(arbitrary: &mut Arbitrary<'_>) -> CommandExecutionEffect
     }
 }
 
+/// Where a started domain started: where it stopped, or at a logical instant with any positive
+/// finite time rate. A start resolves a requested `NOW` to the instant it began at before it
+/// commits.
+fn resolved_start_point(arbitrary: &mut Arbitrary<'_>) -> DomainStartPoint {
+    match arbitrary.start_point() {
+        DomainStartPoint::Now { time_rate } => DomainStartPoint::At {
+            timestamp: Timestamp::from_unix_nanos(arbitrary.entropy().any_i64()),
+            time_rate,
+        },
+        resolved @ (DomainStartPoint::Resume | DomainStartPoint::At { .. }) => resolved,
+    }
+}
+
 /// What a command admitted under `reference` applies: a domain to create, a statement applied
-/// through a transaction of its own, a transaction request, any other statement, a user to create,
-/// a node to drop, or a restore. A statement of its own is a `BACKUP` as often as any other
-/// statement.
+/// through a transaction of its own, a transaction request, any other statement, a domain to stop
+/// or start, a user to create, a node to drop, or a restore. A statement of its own is a `BACKUP`
+/// as often as any other statement, and a start has recorded the revision of its start or not.
 fn command_execution_effect(
     arbitrary: &mut Arbitrary<'_>,
     reference: &CommandExecutionReference,
 ) -> CommandExecutionEffect {
-    match arbitrary.entropy().byte() % 13 {
+    match arbitrary.entropy().byte() % 14 {
+        13 => CommandExecutionEffect::StartDomain {
+            start: nervix_models::StartDomain {
+                start: arbitrary.start_point(),
+            },
+            started_at: optional(arbitrary, |arbitrary| arbitrary.entropy().any_u64()),
+        },
         12 => administrative_label_effect(arbitrary),
         11 => CommandExecutionEffect::StopDomain {
             source: arbitrary.string(),
@@ -1414,6 +1396,7 @@ fn command_execution_result(
         | CommandExecutionEffect::AlterCluster { .. }
         | CommandExecutionEffect::EditAdministrativeLabels { .. }
         | CommandExecutionEffect::StopDomain { .. }
+        | CommandExecutionEffect::StartDomain { .. }
         | CommandExecutionEffect::CreateUser { .. }
         | CommandExecutionEffect::RotateLicenseClusterKey { .. }
         | CommandExecutionEffect::ReleaseLicense { .. }
@@ -1968,6 +1951,7 @@ enum CommandVariant {
     ExpireTransaction,
     RemoveFinishedTransactions,
     RecoverOrphanedModelPause,
+    StartDomain,
 }
 
 impl CommandVariant {
@@ -2054,6 +2038,7 @@ impl CommandVariant {
             ConsensusCommand::ExpireTransaction { .. } => Self::ExpireTransaction,
             ConsensusCommand::RemoveFinishedTransactions { .. } => Self::RemoveFinishedTransactions,
             ConsensusCommand::RecoverOrphanedModelPause { .. } => Self::RecoverOrphanedModelPause,
+            ConsensusCommand::StartDomain { .. } => Self::StartDomain,
         }
     }
 }
@@ -2267,6 +2252,25 @@ fn command_of(arbitrary: &mut Arbitrary<'_>, variant: CommandVariant) -> Consens
             domain_id: arbitrary.rule_name(),
             mutation: Box::new(domain_mutation_lease(arbitrary)),
         },
+        CommandVariant::StartDomain => {
+            let domain = arbitrary.rule_name::<DomainName>();
+            let reference = arbitrary.execution_reference();
+            let inputs = Box::new(domain_planning_inputs(arbitrary, domain));
+            let start = resolved_start_point(arbitrary);
+            let clock = if arbitrary.entropy().flag() {
+                crate::DomainStartClock::Paced {
+                    mapping: arbitrary.domain_clock_state(),
+                    authority: arbitrary.node_identity(),
+                }
+            } else {
+                crate::DomainStartClock::Unpaced
+            };
+            ConsensusCommand::StartDomain {
+                reference,
+                inputs,
+                start: Box::new(crate::DomainStart { start, clock }),
+            }
+        }
         CommandVariant::ReconcileDomainClockAuthority => {
             let domain_id = arbitrary.rule_name();
             let expected_start_version = arbitrary.entropy().any_u64();
@@ -2407,7 +2411,7 @@ fn seeded_bytes(seed: u64, length: usize) -> Vec<u8> {
 
 /// Every variant and shape of the transaction, commit plan, report and command execution records
 /// [`state_machine`] promises to reach, as [`RecordWalk`] names them.
-const EXPECTED_RECORDS: [&str; 52] = [
+const EXPECTED_RECORDS: [&str; 54] = [
     "ReplicatedTransaction::session",
     "ReplicatedTransaction::command",
     "ReplicatedTransaction::latest_preview",
@@ -2442,6 +2446,8 @@ const EXPECTED_RECORDS: [&str; 52] = [
     "CommandExecutionEffect::TransactionRequest",
     "CommandExecutionEffect::Statement",
     "CommandExecutionEffect::StopDomain",
+    "CommandExecutionEffect::StartDomain",
+    "CommandExecutionEffect::StartDomain::started_at",
     "CommandExecutionEffect::CreateUser",
     "CommandExecutionEffect::ActivateLicense",
     "CommandExecutionEffect::RotateLicenseClusterKey",
@@ -2629,6 +2635,12 @@ impl RecordWalk {
             }
             CommandExecutionEffect::StopDomain { .. } => {
                 self.see("CommandExecutionEffect::StopDomain");
+            }
+            CommandExecutionEffect::StartDomain { started_at, .. } => {
+                self.see("CommandExecutionEffect::StartDomain");
+                if started_at.is_some() {
+                    self.see("CommandExecutionEffect::StartDomain::started_at");
+                }
             }
             CommandExecutionEffect::ActivateLicense { .. } => {
                 self.see("CommandExecutionEffect::ActivateLicense");

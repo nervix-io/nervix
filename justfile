@@ -1487,6 +1487,18 @@ test-cluster-parameter-completion-scenarios: build-web-console wasm-processor-gu
 test-environment *args:
     cargo test --package nervix-test-environment {{ args }}
 
+# Measure the domain lifecycle owners for a patch confined to them, through the configured compiler
+# cache: the START command and its consensus write, the transaction queue refusal and planner, and
+# the session impact codec, by their unit tests and the server's application and registry tests
+# that run a START or a transaction.
+coverage-domain-lifecycle output: coverage-clean-profiles download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-report --package nervix-consensus --package nervix-models --package nervix-arbitrary --package nervix-client-wire --lib
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- application::domain_start application::domain_lifecycle application::command_execution application::start_placement application::transaction registry::transaction
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
 # Measure native consensus transport regressions through the configured compiler cache.
 coverage-consensus output *args:
     cargo llvm-cov --no-clean --package nervix-consensus --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}

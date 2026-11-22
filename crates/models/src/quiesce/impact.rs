@@ -1042,12 +1042,6 @@ pub enum TransactionOperation {
         domain: DomainName,
         node: NodeRef,
     },
-    StartDomain {
-        domain: DomainName,
-    },
-    StopDomain {
-        domain: DomainName,
-    },
     CreateResource {
         domain: DomainName,
         resource: ResourceName,
@@ -1074,8 +1068,6 @@ impl TransactionOperation {
             Self::CreateConfiguration { domain, .. }
             | Self::AlterConfiguration { domain, .. }
             | Self::DropConfiguration { domain, .. }
-            | Self::StartDomain { domain }
-            | Self::StopDomain { domain }
             | Self::CreateResource { domain, .. }
             | Self::EditResourceLabels { domain, .. }
             | Self::RebindResource { domain, .. } => domain,
@@ -1108,8 +1100,6 @@ pub enum OperationImpactReason {
         node: NodeRef,
         aspect: ModelChangeAspect,
     },
-    DomainStart,
-    DomainStop,
     ResourceCatalog {
         resource: ResourceName,
     },
@@ -1332,48 +1322,6 @@ pub struct ResourceBindingImpact {
 #[derive(
     Debug,
     Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    AsRefStr,
-)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum DomainLifecycleAction {
-    Start,
-    Stop,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-pub struct DomainLifecycleImpact {
-    pub domain: DomainName,
-    pub action: DomainLifecycleAction,
-    pub attribution: ImpactAttribution,
-}
-
-#[derive(
-    Debug,
-    Clone,
     PartialEq,
     Eq,
     PartialOrd,
@@ -1538,7 +1486,6 @@ pub struct ImpactEffects {
     pub changed_configuration: CanonicalImpactSet<ConfigurationImpact>,
     pub topology: AffectedTopology,
     pub ownership_moves: CanonicalImpactSet<OwnershipMoveImpact>,
-    pub lifecycle: CanonicalImpactSet<DomainLifecycleImpact>,
     pub activations: CanonicalImpactSet<ActivationImpact>,
     pub rebuilds: CanonicalImpactSet<RebuildImpact>,
     pub state_resets: CanonicalImpactSet<StateResetImpact>,
@@ -2409,43 +2356,5 @@ mod impact_report_tests {
         let encoded_again = serde_json::to_vec(&restored)
             .assured("every restored report field has a JSON representation");
         assert_eq!(encoded_again, json);
-    }
-
-    #[test]
-    fn lifecycle_effects_remain_explicit_with_no_pause() {
-        let operation = TransactionOperationNumber::from_index(0)
-            .assured("operation one fits every target usize");
-        let effects = ImpactEffects {
-            lifecycle: CanonicalImpactSet::new([
-                DomainLifecycleImpact {
-                    domain: named("tenant"),
-                    action: DomainLifecycleAction::Stop,
-                    attribution: ImpactAttribution::single(operation),
-                },
-                DomainLifecycleImpact {
-                    domain: named("tenant"),
-                    action: DomainLifecycleAction::Start,
-                    attribution: ImpactAttribution::single(operation),
-                },
-            ]),
-            ..ImpactEffects::default()
-        };
-        let planned = PlannedExecutionStepImpact {
-            completeness: ImpactReportCompleteness::Complete,
-            pause: PauseRequirement::NoPause,
-            effects,
-        };
-        assert_eq!(planned.pause.level(), QuiesceLevel::Dynamic);
-        assert_eq!(planned.effects.lifecycle.len(), 2);
-        assert_eq!(
-            planned
-                .effects
-                .lifecycle
-                .as_slice()
-                .iter()
-                .map(|effect| effect.action)
-                .collect::<Vec<_>>(),
-            [DomainLifecycleAction::Start, DomainLifecycleAction::Stop]
-        );
     }
 }
