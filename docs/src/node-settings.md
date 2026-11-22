@@ -183,7 +183,11 @@ The receiver's local capacity options are:
 All are positive. The first three must fit the supplied executor's corresponding operation limit.
 The bulk window must fit HTTP/2's connection limit for every stream and have its dedicated memory
 budget behind it before listening. These options govern inter-node delivery independently of
-public client admission. Change a claim by restarting the node with new overrides.
+public client admission, with one link to it: a client producer or consumer attached through
+another node crosses the interconnect, so the relay batch bound also caps the batches a producer
+forwarded to this node is granted and the delivery chunks this node receives for a consumer it
+serves ([Client Producer Links](interconnect.md#client-producer-links)). Change a claim by
+restarting the node with new overrides.
 
 `DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes, four receive
 bounds and its engine/connector host capabilities, pending claims, and retained departed records. Its `cluster-effective receive bounds` are

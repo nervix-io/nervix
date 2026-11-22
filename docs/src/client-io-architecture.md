@@ -107,8 +107,9 @@ unresolved batches become `OutcomeUnknown(OwnerLost)`. Losing the serving node i
 every sent batch without an outcome uncertain to the application as `SessionLost`.
 
 A remote consumer has its own authenticated relay-class duplex stream. The owner sends attempt
-metadata and IPC bytes in ordered chunks of at most 1 MiB; the serving node checks the announced
-length and reassembles one delivery before answering the application read. Settlement and heartbeat
+metadata and IPC bytes in ordered chunks of at most 1 MiB, and never larger than both nodes' relay
+bounds carry in one frame; the serving node checks the announced length and reassembles one
+delivery before answering the application read. Settlement and heartbeat
 writes proceed beside response reads. Both forwarding forms use two-second idle heartbeats and a
 ten-second peer-silence limit. The [Interconnect](./interconnect.md#client-consumer-streams) owns
 setup budgets, peer identity, quotas and link-ending semantics.
@@ -462,7 +463,7 @@ Producer and consumer reservations are separate and cannot borrow from each othe
 | Native batch rows | The producer grant captures the committed client-row cap (65,536 by default); emitter `BATCH` has its own committed count cap |
 | Session frame | 4 MiB by default, including the complete FlatBuffers envelope |
 | Reassembled reply | 64 MiB by default, with each transfer part fitting the frame limit |
-| Producer IPC submission | One frame; the grant's `max_batch_bytes` is the smaller of byte credit and frame payload allowance |
+| Producer IPC submission | One frame; the grant's `max_batch_bytes` is the smaller of byte credit and frame payload allowance, and for a forwarded producer also of what one frame between the two nodes carries within their relay bounds |
 | Emitter IPC batch | Its declared `BATCH MAX SIZE`, within the committed consumer cap and the consumer's grant; replies above one frame use bounded transfer parts |
 
 These are scoped credit and retained-IPC budgets, not a bound on whole-process memory. Relay,

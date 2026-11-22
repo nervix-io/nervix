@@ -305,7 +305,8 @@ pub enum ClientProducerRefusal {
     #[strum(serialize = "session capacity exhausted")]
     SessionCapacityExhausted,
     /// The byte budget of the serving node, or of the node the producer is forwarded to, cannot
-    /// hold the requested window.
+    /// hold the requested window, or a relay bound of those two nodes cannot carry one forwarded
+    /// batch.
     #[strum(serialize = "node capacity exhausted")]
     NodeCapacityExhausted,
     /// The requested limits are zero or larger than one producer may ask for.

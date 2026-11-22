@@ -530,7 +530,8 @@ mutation lease, typed recovery reply and typed mutation-fence and restore-instal
 It also covers the node record announcement: the `consensus.announce_node_record` request and the
 Raft command that commit a node's capacity claim, detected properties and tags as one record.
 The subscription-interest visibility request includes the advertisement version, and its current
-wire fingerprint fences that request shape during connection setup.
+wire fingerprint fences that request shape during connection setup. The fingerprint also covers
+the opening of a client consumer stream with the largest delivery chunk its serving node announces.
 
 The fingerprint also fences typed PBKDF2-HMAC-SHA-512 credentials in consensus commands and the persisted uniform verification-work count in snapshot metadata. Cost validation occurs during decoding before any authentication work is admitted.
 
@@ -2167,8 +2168,28 @@ not come from submitted Arrow fields or the link's peer name.
 Frames of one producer keep their order in both directions, so its open precedes its batches and
 its outcomes, admission changes, and end follow the answer to its open. A batch travels at most once
 over the link, and the frames are validated and charged to the relay memory class like every other
-relay-pool operation. A frame is bounded by the relay pool's payload limit of 32 MiB, which the
-largest batch a session admits, 4 MiB less its submission envelope, fits with room to spare.
+relay-pool operation.
+
+Every frame stays within what both nodes carry. The serving node encodes it within its own relay
+encoded limit (`--execution-relay-encoded-bytes`), and the owning node accepts it within its
+committed relay batch bound (`--interconnect-relay-batch-bytes`), the receive bound of its
+capability record. A frame above either would end the link and every producer on it, so the
+largest batch a forwarded producer may submit never exceeds either bound less the envelope of a
+`Submit` frame, which the frame's archived layout fixes:
+
+- The serving node asks in `Open` for the largest batch its session's frame admits, or what its
+  own relay encoded limit carries if that is less.
+- The owning node grants at most what its committed relay batch bound carries, and never more
+  than the producer's credit.
+- The serving node answers a batch above the grant at once as `NotAdmitted` with
+  `InvalidBatch(TooLarge)`, the answer the owning node gives a batch above a grant it receives,
+  and never forwards it. The producer stays open, and so does the link.
+- A node whose bound cannot carry the envelope and one byte of batch beside it refuses the open as
+  `NodeCapacityExhausted`.
+
+A producer on the node that executes its ingestor crosses no link, so neither bound limits its
+batches: its session's frame and its credit do, and decoding holds a batch to the node's relay
+decoded limit.
 
 Two registered properties hold the link's frames to the stream's codec.
 `client-producer-link-frames` generates the opening message, every frame of the serving node and
@@ -2219,17 +2240,25 @@ node. The link adds no reservation of its own beyond the transport's per-frame c
 When a session opens a consumer of a `TO CLIENT` emitter executing on another node, the serving
 node opens one `client_consumer_stream` duplex stream for that attachment on the relay pool and
 shared subquota. The opening request names the authenticated serving node, domain, emitter, exact
-schema fields and granted credit. The owner checks the peer identity, reserves the grant in its
-own resolved consumer node budget and attaches to its local emitter endpoint before replying `Opened`
-with the endpoint description or `Refused` with a typed cause. The serving node has already
-reserved the same grant against its session and node budgets.
+schema fields, granted credit and the largest delivery chunk the serving node takes in one frame.
+The owner checks the peer identity, reserves the grant in its own resolved consumer node budget
+and attaches to its local emitter endpoint before replying `Opened` with the endpoint description
+or `Refused` with a typed cause. The serving node has already reserved the same grant against its
+session and node budgets.
 
 The owner sends each attempt's identity, fresh ACK reference, source relay, opaque branch
-fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes.
-It splits those bytes into ordered chunks of at most 1 MiB, each charged by the relay pool and
-well within its 32 MiB payload limit.
-The serving node checks the announced length against the grant and reassembles one delivery before
-answering a client read. It sends `Settle` frames with a stream-local correlation key and receives
+fingerprint, member count, execution snapshot and total byte count before its Arrow IPC bytes,
+which it splits into ordered chunks charged by the relay pool. Every chunk frame stays within what
+both nodes carry, as a producer link's frames do. A chunk is at most 1 MiB, never more than the
+serving node announced, and never more than the owner's own relay encoded limit carries beside a
+`DeliveryChunk` frame's envelope, which the frame's archived layout fixes. The serving node
+announces 1 MiB, or less when its committed relay batch bound carries less beside that envelope.
+A serving node whose bound cannot carry the envelope and one byte refuses the consumer as
+`NodeCapacityExhausted` without opening a stream. An owner whose limit cannot answers `Refused`
+with `NodeBudgetFull`, which the client also sees as `NodeCapacityExhausted`.
+The serving node checks the announced length against the grant, refuses a chunk larger than it
+announced as a break of the stream contract, and reassembles one delivery before answering a
+client read. It sends `Settle` frames with a stream-local correlation key and receives
 one typed result for each; an independent writer keeps settlement and heartbeat sends from
 blocking response reads. The opening request and the owner's first answer announce their
 respective heartbeat intervals. Each receiver tolerates five of the peer's intervals without

@@ -36,7 +36,7 @@ use nervix_models::{
 };
 use strum::{EnumIter, IntoEnumIterator as _};
 
-use super::{CHUNK_BYTES, ConsumerEvent, ConsumerItem, OpenConsumerStream};
+use super::{ArchivedConsumerEvent, CHUNK_BYTES, ConsumerEvent, ConsumerItem, OpenConsumerStream};
 use crate::{
     application::test_fixtures::duplex_frame_checks::{
         StreamFrame, assert_damaged_bytes_fail_typed_or_decode_to_a_frame,
@@ -153,6 +153,26 @@ fn description(arbitrary: &mut Arbitrary<'_>) -> ClientEmitterDescription {
     }
 }
 
+/// The most bytes one delivery chunk carries, as an opening announces it.
+fn most_chunk_bytes() -> NonZeroU32 {
+    let most = u32::try_from(CHUNK_BYTES).assured("one MiB fits u32");
+    NonZeroU32::new(most).assured("a chunk carries at least a byte")
+}
+
+/// The largest chunk an opening announces: the most a chunk carries, or any size from one byte
+/// below it.
+fn announced_chunk(arbitrary: &mut Arbitrary<'_>) -> NonZeroU32 {
+    if arbitrary.entropy().flag() {
+        return most_chunk_bytes();
+    }
+    let below = arbitrary.entropy().count(CHUNK_BYTES);
+    let chunk = u32::try_from(below)
+        .assured("a count below one MiB fits u32")
+        .checked_add(1)
+        .assured("one more than a count below one MiB fits u32");
+    NonZeroU32::new(chunk).assured("one more than a count is positive")
+}
+
 /// The bytes of one delivery chunk: none, a few of any value, or one byte repeated to the most
 /// bytes one chunk carries.
 fn chunk(arbitrary: &mut Arbitrary<'_>) -> Vec<u8> {
@@ -192,6 +212,7 @@ impl ConsumerFrameKind {
                 emitter: arbitrary.rule_name::<EmitterName>(),
                 expected_fields: arbitrary.schema_fields(0),
                 limits: arbitrary.client_consumer_limits(),
+                largest_chunk: announced_chunk(arbitrary),
             }),
             Self::Settle => ConsumerFrame::Item(ConsumerItem::Settle {
                 key: arbitrary.entropy().any_u64(),
@@ -392,15 +413,19 @@ fn boundary_frames() -> Vec<ConsumerFrame> {
     };
     for limits in [least, declared_most, largest] {
         for expected_fields in [Vec::new(), fields_of_every_type()] {
-            frames.push(ConsumerFrame::Opening(OpenConsumerStream {
-                serving_node: ClusterNodeName::parse("serving-node")
-                    .assured("a literal cluster node name"),
-                heartbeat: nervix_models::ClientLinkCapabilities::default().announced_heartbeat(),
-                domain: DomainName::parse("orders").assured("a literal domain name"),
-                emitter: EmitterName::parse("outlet").assured("a literal emitter name"),
-                expected_fields,
-                limits,
-            }));
+            for largest_chunk in [NonZeroU32::MIN, most_chunk_bytes()] {
+                frames.push(ConsumerFrame::Opening(OpenConsumerStream {
+                    serving_node: ClusterNodeName::parse("serving-node")
+                        .assured("a literal cluster node name"),
+                    heartbeat: nervix_models::ClientLinkCapabilities::default()
+                        .announced_heartbeat(),
+                    domain: DomainName::parse("orders").assured("a literal domain name"),
+                    emitter: EmitterName::parse("outlet").assured("a literal emitter name"),
+                    expected_fields: expected_fields.clone(),
+                    limits,
+                    largest_chunk,
+                }));
+            }
         }
     }
     let openings = frames
@@ -554,6 +579,83 @@ fn every_frame_kind_is_generated_as_asked() {
 fn the_refusals_a_frame_carries_are_every_refusal() {
     let positions: Vec<usize> = EVERY_REFUSAL.into_iter().map(refusal_position).collect();
     assert_eq!(positions, (0..EVERY_REFUSAL.len()).collect::<Vec<_>>());
+}
+
+/// The largest chunk a stream sends within a frame bound fits one frame of that bound through the
+/// codec of the stream, whichever alignment the bound has, and the envelope that leaves beside the
+/// chunk is the archived frame and at most one alignment of padding.
+#[nervix_primitives::test]
+async fn the_largest_chunk_sent_within_a_bound_fits_a_frame_of_that_bound() {
+    let archived_frame = size_of::<ArchivedConsumerEvent>();
+    for bound in NARROW_PAYLOAD_LIMIT..=NARROW_PAYLOAD_LIMIT + 16 {
+        let executor = executor_with_relay_payload_limit(bound);
+        let codec = DuplexCodec::of::<OpenConsumerStream>(&executor);
+        let largest = ConsumerEvent::largest_chunk_within(bound)
+            .assured("a frame of a few kibibytes carries a chunk");
+        let largest = usize::try_from(largest.get()).assured("a chunk length fits usize");
+        let encoded = chunk_of(largest)
+            .encoded(&codec)
+            .await
+            .assured("the largest chunk a bound carries encodes within it");
+        let encoded_bytes = u64::try_from(encoded.len()).assured("a frame length fits u64");
+        assert!(
+            encoded_bytes <= bound,
+            "a frame of {encoded_bytes} bytes carries the largest chunk of a {bound} byte bound"
+        );
+        assert!(
+            encoded.len() >= largest + archived_frame,
+            "the envelope a frame leaves beside its chunk holds the archived frame"
+        );
+        let received = through_the_stream(&codec, chunk_of(largest)).await;
+        assert_eq!(received, chunk_of(largest));
+        assert_nothing_stays_charged(&executor);
+    }
+}
+
+/// A chunk is never larger than the most a stream sends in one, however large the bound, and a
+/// bound that cannot hold a chunk frame's envelope and one byte carries no chunk at all.
+#[test]
+fn a_chunk_is_at_most_one_mebibyte_and_a_bound_below_its_envelope_carries_none() {
+    assert_eq!(
+        ConsumerEvent::largest_chunk_within(u64::MAX),
+        Some(most_chunk_bytes())
+    );
+    let envelope =
+        u64::try_from(ConsumerEvent::CHUNK_ENVELOPE_BYTES).assured("an envelope fits u64");
+    let at_most = u64::try_from(CHUNK_BYTES)
+        .assured("one MiB fits u64")
+        .checked_add(envelope)
+        .assured("one MiB beside an envelope fits u64");
+    assert_eq!(
+        ConsumerEvent::largest_chunk_within(at_most),
+        Some(most_chunk_bytes())
+    );
+    let one_less = at_most
+        .checked_sub(1)
+        .assured("the bound is above one byte");
+    let below_most = most_chunk_bytes()
+        .get()
+        .checked_sub(1)
+        .assured("the most a chunk carries is above one byte");
+    assert_eq!(
+        ConsumerEvent::largest_chunk_within(one_less),
+        NonZeroU32::new(below_most)
+    );
+    assert_eq!(ConsumerEvent::largest_chunk_within(0), None);
+    assert_eq!(ConsumerEvent::largest_chunk_within(envelope), None);
+    let one_more = envelope
+        .checked_add(1)
+        .assured("an envelope is far below u64::MAX");
+    assert_eq!(
+        ConsumerEvent::largest_chunk_within(one_more),
+        Some(NonZeroU32::MIN)
+    );
+    assert_eq!(
+        ConsumerEvent::largest_chunk_within(64),
+        None,
+        "a 64-byte relay batch bound, which the scenario of a node that refuses forwarded consumers \
+         sets, carries no chunk beside the {envelope}-byte envelope"
+    );
 }
 
 /// The codec of a stream carries a delivery chunk up to its class's payload limit and refuses the
