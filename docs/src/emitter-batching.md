@@ -225,9 +225,9 @@ members the transport actually identifies.
 | Failure | Attribution and next action |
 | --- | --- |
 | One member cannot be transformed or encoded | Reject that member through `ON MESSAGE ERROR`; seal its run and continue with neighbors |
-| A singleton's bounded encoding cannot fit | Reject that member as `validation` / `encode` |
+| A singleton's bounded encoding cannot fit | Reject that member as `limit` / `encode` |
 | The batch transformation fails, yields zero or multiple values, or writes an invalid format value | Reject the whole candidate with one shared error reference; do not subdivide to invent a culpable member |
-| The destination definitively refuses a payload | Reject every included member with one shared external-publication error reference |
+| The destination definitively refuses a payload | Reject every included member with one shared `refused` / `publish` error reference |
 | A native row write reports row-specific refusal | Preserve identified successes; isolate rows where the native contract requires it and reject only refused members |
 | The answer is missing or an infrastructure attempt fails | Keep unresolved membership and prepared bytes; apply physical retry backoff |
 

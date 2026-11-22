@@ -88,7 +88,7 @@ Feature: Ingestor branching
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR SEND TO branch_failures
           SET failed_id = input.id,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message,
               captured_amount = partial_output.amount

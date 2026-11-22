@@ -14,7 +14,7 @@
     )
 )]
 
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -25,6 +25,7 @@ use nervix_execution::{
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
 };
+use nervix_primitives::time::Instant;
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -60,8 +61,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0xfc, 0xa4, 0xee, 0x67, 0x4c, 0xa6, 0x61, 0x08, 0x01, 0x82, 0x43, 0xf7, 0xfd, 0x80, 0x48, 0xd7,
-    0x79, 0xf1, 0x3c, 0x59, 0x2e, 0x87, 0xfc, 0xcb, 0x52, 0xbb, 0x35, 0x7b, 0x48, 0xee, 0xa7, 0x7e,
+    0x38, 0xbd, 0x99, 0x66, 0x58, 0xe8, 0xf0, 0xcd, 0xdd, 0xec, 0xb9, 0x77, 0x72, 0x47, 0x54, 0x1d,
+    0xc9, 0xee, 0x92, 0x15, 0xde, 0xe1, 0x89, 0x73, 0x55, 0xc6, 0x46, 0xf5, 0x12, 0x7d, 0xa7, 0x43,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -394,6 +395,91 @@ where
 {
     let buffer = encode_rkyv_buffer(executor, class, cpu, limit, admission, value).await?;
     Ok(ChargedBytes::from_buffer(buffer))
+}
+
+/// What became of an answer [`encode_answer`] was asked to encode.
+pub(crate) enum AnswerEncoding {
+    /// The answer is encoded and ready to send.
+    Encoded(ChargedBytes),
+    /// The caller ended the exchange while the encoding waited for a place. No answer can reach it
+    /// any more, and the encoding gave back its place in line and its charge.
+    Ended,
+}
+
+/// Serialize the answer to a request whose handler already ran, as [`encode_rkyv_with`] does.
+///
+/// The answer carries work the handler already did, so a class whose queue is full holds the
+/// encoding back until a place frees rather than throwing that work away. `ended` resolves once
+/// the caller ends the exchange, by resetting its stream or closing its connection, and that ends
+/// the wait: the encoding is dropped with its place and its charge, and [`AnswerEncoding::Ended`]
+/// says nobody is left to answer. A failure `ended` reports instead is returned as it is.
+pub(crate) async fn encode_answer<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    limit: u64,
+    value: T,
+    ended: impl Future<Output = Result<(), Report<TransportError>>>,
+) -> Result<AnswerEncoding, Report<TransportError>>
+where
+    T: Send
+        + 'static
+        + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
+{
+    let encoding = encode_rkyv_with(
+        executor,
+        class,
+        cpu,
+        limit,
+        QueueAdmission::WaitForPlace,
+        value,
+    );
+    nervix_primitives::select! {
+        encoded = encoding => Ok(AnswerEncoding::Encoded(encoded?)),
+        ended = ended => {
+            ended?;
+            Ok(AnswerEncoding::Ended)
+        }
+    }
+}
+
+/// When the request whose answer [`decode_answer`] decodes stops waiting for it.
+pub(crate) struct AnswerDeadline<'a> {
+    /// The node that answered.
+    pub(crate) peer: &'a ClusterNodeName,
+    /// The request's own deadline.
+    pub(crate) at: Instant,
+    /// The whole time the request was given, which a timeout reports.
+    pub(crate) timeout: Duration,
+}
+
+/// Validate and deserialize the answer to a request this node sent, as [`decode_rkyv_with`] does.
+///
+/// The answer carries work its peer already did, so a class whose queue is full holds the decoding
+/// back until a place frees rather than throwing that work away, but no longer than the request's
+/// own deadline. Once the deadline passes the decoding is dropped with its place and its charge,
+/// and the request fails with [`TransportError::RequestTimeout`], as it would had the answer
+/// arrived late.
+pub(crate) async fn decode_answer<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    bytes: ChargedBytes,
+    deadline: AnswerDeadline<'_>,
+) -> Result<Decoded<T>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    let decoding = decode_rkyv_with(executor, class, cpu, QueueAdmission::WaitForPlace, bytes);
+    match nervix_primitives::time::timeout_at(deadline.at, decoding).await {
+        Ok(decoded) => decoded,
+        Err(_) => Err(Report::new(TransportError::RequestTimeout {
+            peer: deadline.peer.clone(),
+            timeout: deadline.timeout,
+        })),
+    }
 }
 
 /// Serialize a nested typed-request value while retaining its charge beside the resulting Vec, its

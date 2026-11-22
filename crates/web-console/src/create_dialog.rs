@@ -83,6 +83,14 @@ mod ingestor_route_draft;
 mod ingestor_route_editor;
 mod ingestor_source_draft;
 mod inserted_reference;
+mod labels_draft;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod labels_draft_tests;
+mod labels_editor;
 mod placement_draft;
 mod placement_editor;
 mod processor_assignment_editor;
@@ -164,7 +172,13 @@ use ingestor_draft::{IngestorDraft, IngestorDraftError, TimestampDraft};
 use ingestor_editor::IngestorEditor;
 use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
 use ingestor_source_draft::IngestorEntityDraftError;
-use placement_draft::{PlacementCoverage, PlacementDraft, PlacementDraftError};
+use labels_draft::{CreationLabelsDraft, LabelEditDraft, LabelsDraftError};
+pub(crate) use labels_draft::{LabelTarget, LabelTargetKind};
+#[cfg(test)]
+use labels_editor::ignore_test_label_read;
+use labels_editor::{CreationLabelsEditor, LabelEditEditor};
+pub(crate) use labels_editor::{KnownLabelTarget, LabelReadResponse};
+use placement_draft::{PlacementCoverage, PlacementDraft, PlacementDraftError, PlacementForm};
 use placement_editor::PlacementEditor;
 use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
 use processor_editor::ProcessorEditor;
@@ -189,6 +203,8 @@ pub(crate) enum ChoiceControl {
     PlacementFromMember,
     /// Adds a runtime node to the end of a corridor placement's `TO` members.
     PlacementToMember,
+    /// Adds a runtime node to the end of a node rule's `FOR` members.
+    PlacementForMember,
     BranchSchema,
     RelaySchema,
     RelayParametrizer,
@@ -278,9 +294,10 @@ impl ChoiceControl {
     fn form(self) -> CreateKind {
         match self {
             Self::DomainPace => CreateKind::Domain,
-            Self::PlacementPolicy | Self::PlacementFromMember | Self::PlacementToMember => {
-                CreateKind::Model(ModelKind::Placement)
-            }
+            Self::PlacementPolicy
+            | Self::PlacementFromMember
+            | Self::PlacementToMember
+            | Self::PlacementForMember => CreateKind::Model(ModelKind::Placement),
             Self::BranchSchema => CreateKind::Model(ModelKind::Parametrizer),
             Self::RelaySchema | Self::RelayParametrizer => CreateKind::Model(ModelKind::Relay),
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
@@ -401,6 +418,7 @@ struct ChoiceControls {
     placement_policy: ChoiceControlSignals,
     placement_from_member: ChoiceControlSignals,
     placement_to_member: ChoiceControlSignals,
+    placement_for_member: ChoiceControlSignals,
     branch_schema: ChoiceControlSignals,
     relay_schema: ChoiceControlSignals,
     relay_branch: ChoiceControlSignals,
@@ -478,6 +496,7 @@ impl ChoiceControls {
             placement_policy: ChoiceControlSignals::new(),
             placement_from_member: ChoiceControlSignals::new(),
             placement_to_member: ChoiceControlSignals::new(),
+            placement_for_member: ChoiceControlSignals::new(),
             branch_schema: ChoiceControlSignals::new(),
             relay_schema: ChoiceControlSignals::new(),
             relay_branch: ChoiceControlSignals::new(),
@@ -555,6 +574,7 @@ impl ChoiceControls {
             ChoiceControl::PlacementPolicy => self.placement_policy,
             ChoiceControl::PlacementFromMember => self.placement_from_member,
             ChoiceControl::PlacementToMember => self.placement_to_member,
+            ChoiceControl::PlacementForMember => self.placement_for_member,
             ChoiceControl::BranchSchema => self.branch_schema,
             ChoiceControl::RelaySchema => self.relay_schema,
             ChoiceControl::RelayParametrizer => self.relay_branch,
@@ -742,7 +762,10 @@ impl Default for DomainDraft {
 }
 
 impl DomainDraft {
-    fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+    fn submission(
+        &self,
+        labels: nervix_models::EntityLabels,
+    ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
         let name = DomainName::parse(self.name.trim())
             .map_err(|cause| cause.change_context(CreateDraftError::DomainName))?;
         let pace = match self.pace {
@@ -762,7 +785,7 @@ impl DomainDraft {
         };
         let statement = Statement::CreateDomain(CreateStatement::new(
             CreateDomain {
-                labels: nervix_models::EntityLabels::default(),
+                labels,
                 id: name.clone(),
                 config: DomainConfig { pace },
             },
@@ -794,7 +817,10 @@ struct UserDraft {
 impl UserDraft {
     /// The submitted statement carries the password; its presentation masks it, so the cleartext
     /// never reaches the preview or the terminal.
-    fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
+    fn submission(
+        &self,
+        labels: nervix_models::EntityLabels,
+    ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
         let name = UserName::parse(self.name.trim())
             .map_err(|cause| cause.change_context(CreateDraftError::UserName))?;
         if self.password.is_empty() {
@@ -802,7 +828,7 @@ impl UserDraft {
         }
         let statement = Statement::CreateUser(CreateStatement::new(
             CreateUser {
-                labels: nervix_models::EntityLabels::default(),
+                labels: labels.clone(),
                 name: name.clone(),
                 password: self.password.clone(),
             },
@@ -810,7 +836,7 @@ impl UserDraft {
         ));
         let presentation_statement = Statement::CreateUser(CreateStatement::new(
             CreateUser {
-                labels: nervix_models::EntityLabels::default(),
+                labels,
                 name,
                 password: "********".to_string(),
             },
@@ -843,6 +869,7 @@ impl ResourceDraft {
     fn submission(
         &self,
         captured_domain: Option<DomainName>,
+        labels: nervix_models::EntityLabels,
     ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
         let scope =
             captured_domain.ok_or_else(|| Report::new(CreateDraftError::ResourceDomainRequired))?;
@@ -850,7 +877,7 @@ impl ResourceDraft {
             .map_err(|cause| cause.change_context(CreateDraftError::ResourceName))?;
         let statement = Statement::CreateResource(CreateStatement::new(
             CreateResource {
-                labels: nervix_models::EntityLabels::default(),
+                labels,
                 identifier: name.clone(),
             },
             self.if_not_exists,
@@ -920,6 +947,8 @@ enum CreateDraftError {
     #[error("Load the endpoint's pause settings before saving")]
     EndpointPauseUnavailable,
     #[error("{0}")]
+    Labels(#[from] LabelsDraftError),
+    #[error("{0}")]
     Emitter(#[from] EmitterDraftError),
     #[error("{0}")]
     Processor(#[from] ProcessorDraftError),
@@ -986,14 +1015,15 @@ impl SubscriptionDispatch {
 }
 
 impl CreateSubmission {
-    /// A domain-owned Model created through the durable command path.
+    /// A domain-owned Model created through the durable command path, carrying `labels`.
     fn domain_model(
         kind: CreateKind,
         model: Model,
         if_not_exists: bool,
         scope: DomainName,
+        labels: nervix_models::EntityLabels,
     ) -> error_stack::Result<Self, CreateDraftError> {
-        Self::domain_requested_model(kind, model.into(), if_not_exists, scope)
+        Self::domain_requested_model(kind, model.into(), if_not_exists, scope, labels)
     }
 
     fn domain_requested_model(
@@ -1001,6 +1031,7 @@ impl CreateSubmission {
         model: Model<RequestedResourceVersion>,
         if_not_exists: bool,
         scope: DomainName,
+        labels: nervix_models::EntityLabels,
     ) -> error_stack::Result<Self, CreateDraftError> {
         let presentation = model.clone();
         Self::domain_requested_model_with_presentation(
@@ -1009,16 +1040,22 @@ impl CreateSubmission {
             presentation,
             if_not_exists,
             scope,
+            labels,
         )
     }
 
+    /// The created Model and the one the preview shows carry the same labels: a form's masked
+    /// presentation differs only in the secrets it hides.
     fn domain_requested_model_with_presentation(
         kind: CreateKind,
-        model: Model<RequestedResourceVersion>,
-        presentation_model: Model<RequestedResourceVersion>,
+        mut model: Model<RequestedResourceVersion>,
+        mut presentation_model: Model<RequestedResourceVersion>,
         if_not_exists: bool,
         scope: DomainName,
+        labels: nervix_models::EntityLabels,
     ) -> error_stack::Result<Self, CreateDraftError> {
+        *presentation_model.labels_mut() = labels.clone();
+        *model.labels_mut() = labels;
         let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
         let query = statement
             .to_canonical_plexus()
@@ -1097,6 +1134,10 @@ pub(crate) struct CreateSignals {
     generator: RwSignal<ProcessorDraft>,
     inferencer: RwSignal<ProcessorDraft>,
     wasm: RwSignal<ProcessorDraft>,
+    /// The labels each create form adds to the entity it creates, kept with that form.
+    creation_labels: RwSignal<BTreeMap<CreateKind, CreationLabelsDraft>>,
+    /// The edit of an existing entity's labels.
+    label_edit: RwSignal<LabelEditDraft>,
     /// The number the next generated subscription name carries. Numbers only increase, so no two
     /// generated names of one console coincide.
     next_subscription_name: RwSignal<u64>,
@@ -1132,19 +1173,20 @@ impl CreateSignals {
         Some(self.processor(family))
     }
 
-    /// The submission of one processor form: its complete Model in the captured domain, with any
-    /// resource binding at its requested version.
+    /// The submission of one processor form: its complete Model, with `labels`, in the captured
+    /// domain, with any resource binding at its requested version.
     fn processor_submission(
         self,
         kind: CreateKind,
         family: ProcessorFamily,
         captured_domain: Option<DomainName>,
+        labels: nervix_models::EntityLabels,
     ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
         let scope =
             captured_domain.ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
         let draft = self.processor(family).get_untracked();
         let model = draft.build().map_err(draft_error)?;
-        CreateSubmission::domain_requested_model(kind, model, draft.if_not_exists, scope)
+        CreateSubmission::domain_requested_model(kind, model, draft.if_not_exists, scope, labels)
     }
 
     pub(crate) fn new() -> Self {
@@ -1187,17 +1229,14 @@ impl CreateSignals {
             generator: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Generator)),
             inferencer: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Inferencer)),
             wasm: RwSignal::new(ProcessorDraft::new(ProcessorFamily::Wasm)),
+            creation_labels: RwSignal::new(BTreeMap::new()),
+            label_edit: RwSignal::new(LabelEditDraft::default()),
             next_subscription_name: RwSignal::new(2),
             choices: StoredValue::new(ChoiceControls::new()),
         }
     }
 
-    pub(crate) fn open(
-        self,
-        kind: CreateKind,
-        domain: Option<DomainName>,
-        return_focus: &'static str,
-    ) {
+    pub(crate) fn open(self, kind: CreateKind, domain: Option<DomainName>, return_focus: &str) {
         if self.reopen_pending(return_focus) {
             return;
         }
@@ -1224,7 +1263,7 @@ impl CreateSignals {
     }
 
     /// Every create entry point restores the pending form before it can replace any draft.
-    fn reopen_pending(self, return_focus: &'static str) -> bool {
+    fn reopen_pending(self, return_focus: &str) -> bool {
         if !self.progress.get_untracked().is_pending() {
             return false;
         }
@@ -1361,7 +1400,7 @@ impl CreateSignals {
         let Some(kind) = self.open.get_untracked() else {
             return;
         };
-        if !kind.domain_scoped() || kind == CreateKind::EndpointPause {
+        if !kind.domain_scoped() || kind.changes_existing() {
             return;
         }
         if self.captured_domain.get_untracked() != domain {
@@ -1434,6 +1473,7 @@ impl CreateSignals {
                 | CreateKind::User
                 | CreateKind::Resource
                 | CreateKind::EndpointPause
+                | CreateKind::EntityLabels
                 | CreateKind::Model(ModelKind::Schema)
                 | CreateKind::Model(ModelKind::WireJsonSchema)
                 | CreateKind::Model(ModelKind::WireCborSchema)
@@ -1506,11 +1546,15 @@ impl CreateSignals {
         true
     }
 
-    pub(crate) fn queued_transaction(self, attempt: u64, revision: u64, position: usize) {
-        if self.is_active_attempt(attempt, revision) {
-            self.progress
-                .set(CreateProgress::QueuedTransaction { position });
+    /// Records that the attempt's command waits in the attached transaction, and returns whether
+    /// it is still the form's current attempt.
+    pub(crate) fn queued_transaction(self, attempt: u64, revision: u64, position: usize) -> bool {
+        if !self.is_active_attempt(attempt, revision) {
+            return false;
         }
+        self.progress
+            .set(CreateProgress::QueuedTransaction { position });
+        true
     }
 
     pub(crate) fn failed(self, attempt: u64, revision: u64, reason: String) {
@@ -1601,11 +1645,12 @@ impl CreateSignals {
                 // Every policy fits one page, so the form offers all of them without paging.
                 page_size: 100,
             }),
-            ChoiceControl::PlacementFromMember | ChoiceControl::PlacementToMember => self
-                .domain_question(
-                    ChoiceTarget::PlacementMember,
-                    "Select a domain before choosing placement members",
-                ),
+            ChoiceControl::PlacementFromMember
+            | ChoiceControl::PlacementToMember
+            | ChoiceControl::PlacementForMember => self.domain_question(
+                ChoiceTarget::PlacementMember,
+                "Select a domain before choosing placement members",
+            ),
             ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => self.domain_question(
                 ChoiceTarget::Schema,
                 "Select a domain before choosing a schema",
@@ -1961,8 +2006,10 @@ impl CreateSignals {
             .get_untracked()
             .ok_or_else(|| Report::new(CreateDraftError::KindRequired))?;
         let captured_domain = self.captured_domain.get_untracked();
+        // The label rows of the open form; a form that stores no entity has none.
+        let labels = self.creation_labels_of(kind)?;
         match kind {
-            CreateKind::Domain => self.domain.get_untracked().submission(),
+            CreateKind::Domain => self.domain.get_untracked().submission(labels),
             CreateKind::Model(ModelKind::Placement) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -1972,10 +2019,14 @@ impl CreateSignals {
                     Model::Placement(draft.build().map_err(draft_error)?),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
-            CreateKind::User => self.user.get_untracked().submission(),
-            CreateKind::Resource => self.resource.get_untracked().submission(captured_domain),
+            CreateKind::User => self.user.get_untracked().submission(labels),
+            CreateKind::Resource => self
+                .resource
+                .get_untracked()
+                .submission(captured_domain, labels),
             CreateKind::Model(ModelKind::Schema)
             | CreateKind::Model(ModelKind::WireJsonSchema)
             | CreateKind::Model(ModelKind::WireCborSchema)
@@ -2004,7 +2055,7 @@ impl CreateSignals {
                         )
                     }
                 };
-                CreateSubmission::domain_model(kind, model, if_not_exists, scope)
+                CreateSubmission::domain_model(kind, model, if_not_exists, scope, labels)
             }
             CreateKind::Model(ModelKind::Relay) => {
                 let scope = captured_domain
@@ -2016,6 +2067,7 @@ impl CreateSignals {
                     Model::Relay(relay),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Codec) => {
@@ -2028,6 +2080,7 @@ impl CreateSignals {
                     Model::Codec(codec),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::SignalingProtocol) => {
@@ -2040,6 +2093,7 @@ impl CreateSignals {
                     Model::SignalingProtocol(protocol),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Client) => {
@@ -2053,6 +2107,7 @@ impl CreateSignals {
                     completed.presentation,
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Vhost) => {
@@ -2065,6 +2120,7 @@ impl CreateSignals {
                     Model::Vhost(vhost),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Endpoint) => {
@@ -2077,6 +2133,7 @@ impl CreateSignals {
                     Model::Endpoint(endpoint),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Lookup) => {
@@ -2089,6 +2146,7 @@ impl CreateSignals {
                     Model::Lookup(lookup),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Udf) => {
@@ -2096,7 +2154,13 @@ impl CreateSignals {
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
                 let draft = self.udf.get_untracked();
                 let udf = draft.build().map_err(draft_error)?;
-                CreateSubmission::domain_model(kind, Model::Udf(udf), draft.if_not_exists, scope)
+                CreateSubmission::domain_model(
+                    kind,
+                    Model::Udf(udf),
+                    draft.if_not_exists,
+                    scope,
+                    labels,
+                )
             }
             CreateKind::Model(ModelKind::Ingestor) => {
                 let scope = captured_domain
@@ -2108,6 +2172,7 @@ impl CreateSignals {
                     Model::Ingestor(ingestor),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Emitter) => {
@@ -2120,34 +2185,24 @@ impl CreateSignals {
                     Model::Emitter(emitter),
                     draft.if_not_exists,
                     scope,
+                    labels,
                 )
             }
-            CreateKind::Model(ModelKind::Junction) => {
-                self.processor_submission(kind, ProcessorFamily::Junction, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Deduplicator) => {
-                self.processor_submission(kind, ProcessorFamily::Deduplicator, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Reorderer) => {
-                self.processor_submission(kind, ProcessorFamily::Reorderer, captured_domain)
-            }
-            CreateKind::Model(ModelKind::WindowProcessor) => {
-                self.processor_submission(kind, ProcessorFamily::Window, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Correlator) => {
-                self.processor_submission(kind, ProcessorFamily::Correlator, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Reingestor) => {
-                self.processor_submission(kind, ProcessorFamily::Reingestor, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Generator) => {
-                self.processor_submission(kind, ProcessorFamily::Generator, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Inferencer) => {
-                self.processor_submission(kind, ProcessorFamily::Inferencer, captured_domain)
-            }
-            CreateKind::Model(ModelKind::WasmProcessor) => {
-                self.processor_submission(kind, ProcessorFamily::Wasm, captured_domain)
+            CreateKind::Model(
+                ModelKind::Junction
+                | ModelKind::Deduplicator
+                | ModelKind::Reorderer
+                | ModelKind::WindowProcessor
+                | ModelKind::Correlator
+                | ModelKind::Reingestor
+                | ModelKind::Generator
+                | ModelKind::Inferencer
+                | ModelKind::WasmProcessor,
+            ) => {
+                let family = kind
+                    .processor_family()
+                    .assured("every processor kind names its processor family");
+                self.processor_submission(kind, family, captured_domain, labels)
             }
             CreateKind::Subscription => {
                 let scope = captured_domain
@@ -2175,6 +2230,7 @@ impl CreateSignals {
                         .submission(scope)
                 })
             }
+            CreateKind::EntityLabels => self.label_edit_submission(),
         }
     }
 }
@@ -2303,15 +2359,28 @@ fn page_cursor(load: RwSignal<ChoiceLoad>) -> Option<String> {
 fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceControl> {
     match kind {
         CreateKind::Domain => vec![ChoiceControl::DomainPace],
-        CreateKind::EndpointPause => Vec::new(),
+        CreateKind::EndpointPause | CreateKind::EntityLabels => Vec::new(),
         CreateKind::Model(ModelKind::Placement) => {
-            match signals.placement.get_untracked().coverage {
-                PlacementCoverage::DomainWide => vec![ChoiceControl::PlacementPolicy],
-                PlacementCoverage::Corridor => vec![
+            let draft = signals.placement.get_untracked();
+            match (draft.form, draft.coverage) {
+                (PlacementForm::Colocation, PlacementCoverage::DomainWide) => {
+                    vec![ChoiceControl::PlacementPolicy]
+                }
+                (
+                    PlacementForm::Colocation,
+                    PlacementCoverage::Corridor | PlacementCoverage::Members,
+                ) => vec![
                     ChoiceControl::PlacementPolicy,
                     ChoiceControl::PlacementFromMember,
                     ChoiceControl::PlacementToMember,
                 ],
+                (PlacementForm::Nodes, PlacementCoverage::DomainWide) => Vec::new(),
+                (
+                    PlacementForm::Nodes,
+                    PlacementCoverage::Corridor | PlacementCoverage::Members,
+                ) => {
+                    vec![ChoiceControl::PlacementForMember]
+                }
             }
         }
         CreateKind::Model(ModelKind::Parametrizer) => vec![ChoiceControl::BranchSchema],
@@ -2443,6 +2512,10 @@ pub(crate) fn CreateDialog(
     session_generation: RwSignal<u64>,
     request_tx: RwSignal<Option<RequestSender>>,
     submit: impl Fn(CreateSubmission, u64, u64) + Copy + Send + Sync + 'static,
+    /// Reads the labels of the target the label editor shows.
+    read_labels: Callback<LabelTarget>,
+    /// The entities the label editor offers by name.
+    known_label_targets: Signal<Vec<KnownLabelTarget>>,
 ) -> impl IntoView {
     let name_input = NodeRef::<leptos::html::Input>::new();
     let close_button = NodeRef::<leptos::html::Button>::new();
@@ -2486,9 +2559,11 @@ pub(crate) fn CreateDialog(
             && signals
                 .open
                 .get()
-                .is_some_and(|kind| kind.domain_scoped() && kind != CreateKind::EndpointPause)
+                .is_some_and(|kind| kind.domain_scoped() && !kind.changes_existing())
     };
     let changes_pause = move || signals.open.get() == Some(CreateKind::EndpointPause);
+    let edits_labels = move || signals.open.get() == Some(CreateKind::EntityLabels);
+    let changes_existing = move || signals.open.get().is_some_and(CreateKind::changes_existing);
     // The drafts own validation and report it inline, so the form is `novalidate`: the browser's
     // constraint checks, such as a number input's minimum, never keep a submit from reaching them.
     let submit_form = move |event: ev::SubmitEvent| {
@@ -2532,21 +2607,30 @@ pub(crate) fn CreateDialog(
                 >
                     <header class="create-head">
                         <div>
-                            <span>{move || if changes_pause() { "Change" } else { "Create" }}</span>
+                            <span>{move || if changes_existing() { "Change" } else { "Create" }}</span>
                             <h2 id="create-dialog-title">{move || {
                                 match signals.open.get() {
                                     Some(CreateKind::EndpointPause) => "Change pause settings".to_string(),
+                                    Some(CreateKind::EntityLabels) => "Edit labels".to_string(),
                                     Some(kind) => format!("Create {}", kind.label()),
                                     None => "Create entity".to_string(),
                                 }
                             }}</h2>
                         </div>
-                        <button node_ref=close_button class="dialog-close create-close" type="button" title="Close" aria-label=move || if changes_pause() { "Close pause settings" } else { "Close create dialog" } on:click=move |_| signals.close()>"×"</button>
+                        <button node_ref=close_button class="dialog-close create-close" type="button" title="Close" aria-label=move || match signals.open.get() {
+                            Some(CreateKind::EndpointPause) => "Close pause settings",
+                            Some(CreateKind::EntityLabels) => "Close label editor",
+                            Some(_) | None => "Close create dialog",
+                        } on:click=move |_| signals.close()>"×"</button>
                     </header>
                     <form novalidate on:submit=submit_form>
                         <div class="create-scope-row">
                             <span>"Scope"</span>
                             <strong class="create-scope">{move || match signals.open.get() {
+                                // A domain or a user is addressed by its own name, in no domain.
+                                Some(CreateKind::EntityLabels) if !signals.label_edit.with(|draft| {
+                                    draft.chosen_kind.is_some_and(LabelTargetKind::domain_scoped)
+                                }) => "Cluster".to_string(),
                                 Some(kind) if kind.domain_scoped() => match signals.captured_domain.get() {
                                     Some(domain) => domain.to_string(),
                                     None => "No domain selected".to_string(),
@@ -2567,9 +2651,11 @@ pub(crate) fn CreateDialog(
                             </Show>
                         </div>
 
-                        <CreateKindFields signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
+                        <CreateKindFields signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation read_labels=read_labels known_label_targets=known_label_targets />
 
                         <IfNotExistsField signals=signals />
+
+                        <CreationLabelsEditor signals=signals />
 
                         <div class="create-preview-block">
                             <span>"Canonical Plexus preview"</span>
@@ -2596,7 +2682,8 @@ pub(crate) fn CreateDialog(
                             <button class="create-submit" type="submit" disabled=move || {
                                 signals.progress.get().blocks_repeat_submit()
                                     || (changes_pause() && !signals.endpoint_pause.with(|draft| draft.as_ref().is_some_and(EndpointPauseDraft::ready)))
-                            }>{move || if changes_pause() { "Save" } else { "Create" }}</button>
+                                    || (edits_labels() && !signals.label_edit.with(|draft| matches!(draft.read(), labels_draft::LabelRead::Read(_))))
+                            }>{move || if changes_existing() { "Save" } else { "Create" }}</button>
                         </footer>
                     </form>
                 </section>
@@ -2612,6 +2699,8 @@ fn CreateKindFields(
     name_input: NodeRef<leptos::html::Input>,
     request_tx: RwSignal<Option<RequestSender>>,
     session_generation: RwSignal<u64>,
+    read_labels: Callback<LabelTarget>,
+    known_label_targets: Signal<Vec<KnownLabelTarget>>,
 ) -> impl IntoView {
     view! {
         <Show when=move || signals.open.get() == Some(CreateKind::Domain) fallback=|| ()>
@@ -2713,6 +2802,9 @@ fn CreateKindFields(
         <Show when=move || signals.open.get() == Some(CreateKind::EndpointPause) fallback=|| ()>
             <EndpointPauseEditor signals=signals />
         </Show>
+        <Show when=move || signals.open.get() == Some(CreateKind::EntityLabels) fallback=|| ()>
+            <LabelEditEditor signals=signals name_input=name_input read_labels=read_labels known_targets=known_label_targets />
+        </Show>
         <Show when=move || signals.open.get() == Some(CreateKind::Model(ModelKind::Codec)) fallback=|| ()>
             <CodecEditor signals=signals name_input=name_input request_tx=request_tx session_generation=session_generation />
         </Show>
@@ -2809,7 +2901,7 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                         Some(CreateKind::Model(ModelKind::Generator)) => signals.generator.get().if_not_exists,
                         Some(CreateKind::Model(ModelKind::Inferencer)) => signals.inferencer.get().if_not_exists,
                         Some(CreateKind::Model(ModelKind::WasmProcessor)) => signals.wasm.get().if_not_exists,
-                        Some(CreateKind::Subscription | CreateKind::EndpointPause) | None => false,
+                        Some(CreateKind::Subscription | CreateKind::EndpointPause | CreateKind::EntityLabels) | None => false,
                     }
                     disabled=move || signals.progress.get().is_pending()
                     on:change=move |event| {
@@ -2843,7 +2935,7 @@ fn IfNotExistsField(signals: CreateSignals) -> impl IntoView {
                             Some(CreateKind::Model(ModelKind::Generator)) => signals.generator.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::Inferencer)) => signals.inferencer.update(|draft| draft.if_not_exists = checked),
                             Some(CreateKind::Model(ModelKind::WasmProcessor)) => signals.wasm.update(|draft| draft.if_not_exists = checked),
-                            Some(CreateKind::Subscription | CreateKind::EndpointPause) | None => {}
+                            Some(CreateKind::Subscription | CreateKind::EndpointPause | CreateKind::EntityLabels) | None => {}
                         }
                         signals.edit();
                     }

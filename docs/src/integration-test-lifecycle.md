@@ -2033,6 +2033,21 @@ The harness keeps these boundaries explicit.
   diagnostics and node stop, including when occupation or an assertion fails; explicit release
   removes that node from the retained set. These are harness bounds for class-isolation evidence,
   not additional product deadlines.
+- **Worker class saturation.** `<class> execution is saturated on every node`, and its form for
+  one node, hold every worker and every wait-queue place of one CPU class (`control`,
+  `credentials`, `data`, `extension`, `bulk`) or storage class (`consensus storage`,
+  `filesystem storage`, `connector storage`), so the next request job of that class is refused and
+  accepted work waits for a place. Filling one node's class has a 60-second harness bound: it
+  waits only for the jobs already running there to leave their workers. Once the class is full,
+  the step records the node's public refusal count for it.
+  `no node refused a <class> job while it was saturated` compares each saturated node's count
+  with that record, and `a <class> job waits for a place on node …` (or `on some node`) reads the
+  public waiting gauge, `nervix_execution_jobs_waiting`. A node's own maintenance can already wait
+  in a full class, as the restore staging sweep does in the filesystem class, so
+  `another <class> job waits for a place on node …` waits for one more job than the node's last
+  waiting step saw. A release names its class and keeps the node's holds of other classes.
+  Scenario cleanup releases every class still held on every node before diagnostics and node stop,
+  including after a failed step, so held workers never outlast the scenario into a node's shutdown.
 - **Cleanup.** Scenario cleanup runs after the scenario's assertions, so it spends the harness
   cleanup budget rather than waiting for a product shutdown deadline. A scenario whose subject is
   shutdown, drain, or deadline expiry stops its nodes itself, inside its body, under the product
@@ -3552,8 +3567,10 @@ goes back with the scenario's other fixture ports at the end of cleanup.
 
 ## gRPC Receivers
 
-The node trace-export scenarios start one or three real server processes with `--otel-enabled`,
-separate service names and the scenario's DNS configuration. A local gRPC collector captures their
+The node trace-export scenarios start one or three real server processes with a collector
+endpoint, given as `--otel-otlp-endpoint` or as its environment twin, separate service names and
+the scenario's DNS configuration. One scenario also sets every OpenTelemetry environment variable
+and requires that none of them reaches the export. A local gRPC collector captures their
 OTLP trace requests; the steps decode the current trace schema and require spans from every node
 and a query for the collector's fixture name. This uses the process cluster's existing readiness
 and failure diagnostics. Processes are dropped before the DNS authority, resolver files and

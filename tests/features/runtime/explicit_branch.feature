@@ -5,7 +5,7 @@ Feature: Explicit branches
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail with "branch name 'by_output_tenant' does not match relay 'input_notifications' branch name 'by_input_tenant'"
+    When these Plexus commands fail with "parametrizer 'by_output_tenant' does not match relay 'input_notifications' parametrizer 'by_input_tenant'"
       """
       CREATE SCHEMA notification (
         tenant STRING,

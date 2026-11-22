@@ -384,12 +384,16 @@ fn validate_bytes(name: &'static str, bytes: ByteUnit) -> Result<(), Report<Exec
     Ok(())
 }
 
+// The management class's minimum working set is one consensus vote or metadata write, which the
+// executor validates every management budget against.
 memory_setting!(
     ManagementMemory,
     "execution-management-memory-bytes",
     8,
     128,
-    64 * 1024
+    OperationLimits::default()
+        .management_storage_working_bytes()
+        .assured("one default management event times the storage multiplier fits a u64")
 );
 memory_setting!(
     CommandsMemory,

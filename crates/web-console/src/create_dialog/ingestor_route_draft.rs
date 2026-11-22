@@ -277,7 +277,7 @@ pub(super) enum RouteBranchDraft {
     Unselected,
     Unbranched,
     Branched {
-        branch: Option<SelectedReference<ParametrizerName>>,
+        parametrizer: Option<SelectedReference<ParametrizerName>>,
         assignments: Vec<AssignmentDraft>,
     },
 }
@@ -290,7 +290,7 @@ impl RouteBranchDraft {
     pub(super) fn choose_branched(&mut self) {
         if !matches!(self, Self::Branched { .. }) {
             *self = Self::Branched {
-                branch: None,
+                parametrizer: None,
                 assignments: Vec::new(),
             };
         }
@@ -301,29 +301,33 @@ impl RouteBranchDraft {
             return;
         }
         if let Self::Branched {
-            branch,
+            parametrizer,
             assignments,
         } = self
         {
             let selected = ParametrizerName::from(&node.identifier);
-            if branch.as_ref().and_then(SelectedReference::current_name) != Some(&selected) {
+            if parametrizer
+                .as_ref()
+                .and_then(SelectedReference::current_name)
+                != Some(&selected)
+            {
                 for assignment in assignments {
                     assignment.invalidate();
                 }
             }
-            *branch = Some(SelectedReference::chosen(selected));
+            *parametrizer = Some(SelectedReference::chosen(selected));
         }
     }
 
     pub(super) fn current_parametrizer(&self) -> Option<&ParametrizerName> {
         let Self::Branched {
-            branch: Some(branch),
+            parametrizer: Some(parametrizer),
             ..
         } = self
         else {
             return None;
         };
-        branch.current_name()
+        parametrizer.current_name()
     }
 
     pub(super) fn add_assignment(&mut self, field: FieldName) {
@@ -334,12 +338,12 @@ impl RouteBranchDraft {
 
     pub(super) fn invalidate(&mut self) {
         if let Self::Branched {
-            branch,
+            parametrizer,
             assignments,
         } = self
         {
-            if let Some(branch) = branch {
-                branch.invalidate();
+            if let Some(parametrizer) = parametrizer {
+                parametrizer.invalidate();
             }
             for assignment in assignments {
                 assignment.invalidate();
@@ -352,11 +356,11 @@ impl RouteBranchDraft {
             Self::Unselected => Err(Report::new(IngestRouteDraftError::Branching)),
             Self::Unbranched => Ok(OutputBranch::Unbranched),
             Self::Branched {
-                branch,
+                parametrizer,
                 assignments,
             } => {
-                let branch = match branch {
-                    Some(branch) => branch
+                let parametrizer = match parametrizer {
+                    Some(parametrizer) => parametrizer
                         .current_name()
                         .ok_or_else(|| Report::new(IngestRouteDraftError::BranchChanged))?,
                     None => return Err(Report::new(IngestRouteDraftError::Branch)),
@@ -369,7 +373,7 @@ impl RouteBranchDraft {
                     built.push(assignment.build()?);
                 }
                 Ok(OutputBranch::BranchedBy {
-                    parametrizer: branch.clone(),
+                    parametrizer: parametrizer.clone(),
                     assignments: built,
                 })
             }

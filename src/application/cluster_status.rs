@@ -19,14 +19,17 @@ use std::collections::BTreeSet;
 use nervix_consensus::{GossipState, Observer};
 use nervix_models::{ClusterNodeName, ScheduledUnit};
 
+use super::node_rule_observation::NodeRuleAnnotations;
 use crate::cluster;
 
 /// Renders the cluster's report; `stops` are the lines of every stopping domain, which only the
-/// stop's owner can complete with what each stop waits for.
+/// stop's owner can complete with what each stop waits for, and `node_rules` names the units
+/// that break a node rule.
 pub(in crate::application) async fn render_cluster_status(
     cluster: &cluster::ClusterHandle,
     consensus: &Observer,
     stops: Vec<String>,
+    node_rules: &NodeRuleAnnotations,
 ) -> String {
     let gossip = cluster.gossip_state().await;
     let mut lines = Vec::new();
@@ -53,6 +56,7 @@ pub(in crate::application) async fn render_cluster_status(
     lines.push("[schedule]".to_string());
     lines.extend(render_cluster_schedule_lines(
         &consensus.current_schedule().await,
+        node_rules,
     ));
     lines.push(String::new());
     lines.push("[warnings]".to_string());
@@ -117,7 +121,10 @@ fn render_membership_warnings(
     lines
 }
 
-fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> Vec<String> {
+fn render_cluster_schedule_lines(
+    schedule: &nervix_models::ClusterSchedule,
+    node_rules: &NodeRuleAnnotations,
+) -> Vec<String> {
     if schedule.domains.is_empty() {
         return vec!["- none".to_string()];
     }
@@ -138,13 +145,17 @@ fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> V
                     None => "-",
                 };
                 lines.push(format!(
-                    "- domain={} kind={} name={}{} owner={owner} replicas={}{}",
+                    "- domain={} kind={} name={}{} owner={owner} replicas={}{}{}",
                     domain.domain.as_str(),
                     node.kind().as_str(),
                     node.identifier.as_str(),
                     unit.status_field(),
                     format_schedule_status_replicas(scheduled),
-                    format_ownership_transition(scheduled)
+                    format_ownership_transition(scheduled),
+                    node_rules.fields(
+                        &domain.domain,
+                        &nervix_models::NodeUnitRef::new(node.identity(), *unit)
+                    )
                 ));
             }
         }

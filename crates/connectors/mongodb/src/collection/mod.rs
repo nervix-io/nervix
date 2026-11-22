@@ -1380,7 +1380,7 @@ mod tests {
         error::{BulkWriteError, InsertManyError, WriteConcernError, WriteError},
         results::{DeleteResult, InsertOneResult, UpdateResult, VerboseBulkWriteResult},
     };
-    use nervix_models::{MessageErrorCode, MessageErrorOperation};
+    use nervix_models::{MessageErrorOperation, RejectedErrorClass};
     use nervix_primitives::sync::StdArc;
 
     use super::*;
@@ -1588,7 +1588,7 @@ mod tests {
                 row_index: 5,
             }
         );
-        assert_eq!(record.error.code, MessageErrorCode::Validation);
+        assert_eq!(record.error.class, RejectedErrorClass::Validation);
         assert_eq!(record.error.operation, MessageErrorOperation::Values);
         assert_eq!(
             record

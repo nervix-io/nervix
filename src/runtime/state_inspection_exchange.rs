@@ -14,7 +14,9 @@ use arrow_array::RecordBatch;
 use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Reservation};
+use nervix_execution::{
+    BudgetedBuffer, ChargedBytes, Executor, MemoryClass, QueueAdmission, Reservation,
+};
 use nervix_interconnect::{
     MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
     PoolClass, ProcessorStatePageDescriptor, ProcessorStatePageReply,
@@ -45,6 +47,9 @@ pub(crate) enum StatePageExchangeError {
 }
 
 /// The identity of `body`, computed on the bulk executor beside the body it names.
+///
+/// The body is a page the owner already read and encoded, so a full bulk queue holds the digest
+/// back rather than throwing the page away. The caller's reset of the page stream ends the wait.
 async fn identified_body(
     executor: &Executor,
     body: ChargedBytes,
@@ -53,8 +58,9 @@ async fn identified_body(
         .try_reserve(MemoryClass::Bulk, 1)
         .map_err(StreamHandlerError::with_cause)?;
     executor
-        .run_cpu(
+        .run_cpu_with(
             nervix_execution::CpuClass::Bulk,
+            QueueAdmission::WaitForPlace,
             charge,
             move |_charge, cancellation| {
                 cancellation.check()?;
@@ -176,11 +182,14 @@ pub(crate) async fn stream_materialized_page(
         }
         Err(reason) => (Err(reason), None),
     };
-    let (header, charge) = MaterializedStatePageReply::encode_rkyv(
+    // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
+    // encoding back; the caller's reset of the page stream ends the wait.
+    let (header, charge) = MaterializedStatePageReply::encode_rkyv_with(
         reply,
         executor.clone(),
         PoolClass::Bulk,
         PoolClass::Bulk.payload_limit(executor),
+        QueueAdmission::WaitForPlace,
     )
     .await
     .map_err(StreamHandlerError::with_cause)?;
@@ -232,6 +241,8 @@ pub(crate) async fn stream_processor_page(
             }
         },
     };
+    // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
+    // encoding back; the caller's reset of the page stream ends the wait.
     let encoded = match descriptor {
         Some(charge) => {
             reply
@@ -239,14 +250,19 @@ pub(crate) async fn stream_processor_page(
                     executor.clone(),
                     PoolClass::Bulk,
                     limit,
-                    nervix_execution::QueueAdmission::RefuseWhenFull,
+                    QueueAdmission::WaitForPlace,
                     charge,
                 )
                 .await
         }
         None => {
             reply
-                .encode_rkyv(executor.clone(), PoolClass::Bulk, limit)
+                .encode_rkyv_with(
+                    executor.clone(),
+                    PoolClass::Bulk,
+                    limit,
+                    QueueAdmission::WaitForPlace,
+                )
                 .await
         }
     };
@@ -255,17 +271,20 @@ pub(crate) async fn stream_processor_page(
 }
 
 /// The page stream of an owner's typed refusal, which carries no body. It holds nothing else
-/// while it waits for the room its descriptor takes.
+/// while it waits for the room its descriptor takes. The refusal is the owner's answer to a read
+/// it already served, so a full bulk queue holds its encoding back; the caller's reset of the page
+/// stream ends the wait.
 async fn stream_refusal(
     executor: &Executor,
     reason: StateInspectionRejection,
 ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
     let reply: ProcessorStatePageReply = Err(reason);
     let (header, charge) = reply
-        .encode_rkyv(
+        .encode_rkyv_with(
             executor.clone(),
             PoolClass::Bulk,
             PoolClass::Bulk.payload_limit(executor),
+            QueueAdmission::WaitForPlace,
         )
         .await
         .map_err(StreamHandlerError::with_cause)?;
@@ -405,14 +424,13 @@ impl BodyCharges {
         limit: u64,
         first: bool,
     ) -> Result<PartBody, Report<StreamHandlerError>> {
+        // The part holds rows the owner already read, so a full bulk queue holds its encoding
+        // back; the caller's reset of the page stream ends the wait.
         let encoded = match self {
             Self::Pool { framing } => {
                 if first {
-                    part.encode_arrow_snapshot_section(
-                        executor,
-                        nervix_execution::QueueAdmission::RefuseWhenFull,
-                    )
-                    .await
+                    part.encode_arrow_snapshot_section(executor, QueueAdmission::WaitForPlace)
+                        .await
                 } else {
                     let wanted = body_charge(payload, *framing, limit);
                     let charge = match executor.try_reserve(MemoryClass::Bulk, wanted) {
@@ -421,7 +439,7 @@ impl BodyCharges {
                     };
                     part.encode_arrow_snapshot_section_within(
                         executor,
-                        nervix_execution::QueueAdmission::RefuseWhenFull,
+                        QueueAdmission::WaitForPlace,
                         charge,
                     )
                     .await
@@ -434,7 +452,7 @@ impl BodyCharges {
                 };
                 part.encode_arrow_snapshot_section_within(
                     executor,
-                    nervix_execution::QueueAdmission::RefuseWhenFull,
+                    QueueAdmission::WaitForPlace,
                     charge,
                 )
                 .await
@@ -613,6 +631,10 @@ fn descriptor_end(
 }
 
 /// Decodes the reply a page stream frames before `end`.
+///
+/// The reply is the owner's answer to a read it already served, so a full bulk queue holds the
+/// decoding back rather than discarding that answer; the caller's own read deadline bounds the
+/// wait.
 async fn decode_reply<R: RkyvMessage>(
     executor: &Executor,
     bytes: &ChargedBytes,
@@ -627,16 +649,23 @@ async fn decode_reply<R: RkyvMessage>(
     let header_charge = executor
         .try_reserve(MemoryClass::Bulk, header_length.max(1))
         .change_context(StatePageExchangeError::Admission)?;
-    let (reply, _decoded_charge) =
-        R::decode_rkyv(executor.clone(), PoolClass::Bulk, bytes[8..end].to_vec())
-            .await
-            .change_context(StatePageExchangeError::Descriptor)?;
+    let (reply, _decoded_charge) = R::decode_rkyv_with(
+        executor.clone(),
+        PoolClass::Bulk,
+        QueueAdmission::WaitForPlace,
+        bytes[8..end].to_vec(),
+    )
+    .await
+    .change_context(StatePageExchangeError::Descriptor)?;
     drop(header_charge);
     Ok(reply)
 }
 
 /// Checks `body` against the digest its descriptor names on the bulk executor, before anything
 /// decodes it.
+///
+/// The body is a page the owner already read, so a full bulk queue holds the check back rather
+/// than discarding it; the caller's own read deadline bounds the wait.
 async fn verified_body(
     executor: &Executor,
     body: ChargedBytes,
@@ -646,8 +675,9 @@ async fn verified_body(
         .try_reserve(MemoryClass::Bulk, 1)
         .change_context(StatePageExchangeError::Admission)?;
     executor
-        .run_cpu(
+        .run_cpu_with(
             nervix_execution::CpuClass::Bulk,
+            QueueAdmission::WaitForPlace,
             charge,
             move |_charge, cancellation| {
                 cancellation
@@ -877,9 +907,11 @@ impl ProcessorPageBodies<'_> {
             let body = self.bytes.slice(self.offset, end).ok_or_else(framing)?;
             self.offset = end;
             let body = verified_body(executor, body, identity.clone()).await?;
+            // The body holds rows the owner already read, so a full bulk queue holds its decoding
+            // back; the caller's own read deadline bounds the wait.
             let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
-                nervix_execution::QueueAdmission::RefuseWhenFull,
+                QueueAdmission::WaitForPlace,
                 StdArc::clone(&schema),
                 body,
             )

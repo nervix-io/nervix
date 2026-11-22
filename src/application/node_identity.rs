@@ -20,7 +20,7 @@ use nervix_dns::DnsConfiguration;
 use nervix_models::{ClusterNodeName, NodeEndpoint, NodeTags};
 use typed_builder::TypedBuilder;
 
-use super::{InternalTransportMode, authentication::DEFAULT_USER};
+use super::{InternalTransportMode, authentication::DEFAULT_USER, tracing_setup::TraceCollector};
 
 /// The provisioned native session transport. HTTPS carries every address and TLS file it needs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -53,6 +53,9 @@ pub struct NodeIdentity {
     pub http_listen_addr: SocketAddr,
     pub https_listen_addr: SocketAddr,
     pub observability_listen_addr: SocketAddr,
+    /// The collector the node exports its own traces to; a node without one exports none.
+    #[builder(default)]
+    pub trace_collector: Option<TraceCollector>,
     /// An in-process node a test builds listens on a port the system chooses unless it says
     /// otherwise; the command line's default is a fixed public port.
     #[builder(default = SocketAddr::from(([127, 0, 0, 1], 0)))]

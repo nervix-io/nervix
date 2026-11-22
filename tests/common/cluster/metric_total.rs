@@ -1,7 +1,8 @@
 //! Public metric aggregation across a node's independently labeled series.
 //!
 //! Outside the layer order: a scenario harness.
-//! - **Owns.** Summing every matching public sample and distinguishing absent metric families.
+//! - **Owns.** Summing every matching public sample and distinguishing absent metric families, or
+//!   reporting them as undeclared for a family a node declares only once it counts a series.
 //! - **Depends on.** The cluster's HTTP metric reader and Prometheus sample parsing.
 //! - **Must not know.** Product metric storage, runtime instances or placement implementation.
 
@@ -16,6 +17,26 @@ impl Cluster {
         metric_name: &str,
         label_fragments: &[String],
     ) -> io::Result<f64> {
+        match self
+            .sum_declared_observability_metric(node_id, metric_name, label_fragments)
+            .await?
+        {
+            Some(total) => Ok(total),
+            None => Err(io::Error::other(format!(
+                "node '{node_id}' exposed no metric family '{metric_name}'"
+            ))),
+        }
+    }
+
+    /// The total of every matching sample of `metric_name` on the node, or `None` when the node
+    /// declares no such family, as a family whose series appear only once the node counts one
+    /// leaves it undeclared on a node that has counted nothing.
+    pub(crate) async fn sum_declared_observability_metric(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        label_fragments: &[String],
+    ) -> io::Result<Option<f64>> {
         let response = self.observability_metric_text(node_id).await?;
         let declaration = format!("# TYPE {metric_name} ");
         let counter_declaration = metric_name
@@ -43,12 +64,6 @@ impl Cluster {
                 total += value;
             }
         }
-        if present {
-            Ok(total)
-        } else {
-            Err(io::Error::other(format!(
-                "node '{node_id}' exposed no metric family '{metric_name}'"
-            )))
-        }
+        if present { Ok(Some(total)) } else { Ok(None) }
     }
 }

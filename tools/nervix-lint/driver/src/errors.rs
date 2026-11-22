@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use ahash::{HashSet, HashSetExt};
+use rustc_attr_ir::AttrItem;
 use rustc_hir::{Expr, ExprKind, HirId, PatKind, StmtKind, def::DefKind};
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::LateContext;
@@ -18,13 +19,15 @@ use rustc_span::{
 };
 use rustc_trait_selection::traits::type_known_to_meet_bound_modulo_regions;
 
-use crate::contracts::{Flow, INVALID_CONTRACT, Message, contract_attribute};
+use crate::contracts::{
+    Flow, INVALID_CONTRACT, Message, contract_attribute, meta_items, tool_attributes,
+};
 
-declare_tool_lint! { pub nervix::BARE_ERROR_SIGNATURE, Deny, "Nervix failure contracts require contextual reports", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::DISCARDED_OUTCOME, Deny, "discarded failure outcomes require explicit classification", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::BARE_PANIC, Deny, "Option and Result panic operations require a stated guarantee", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::REPLACED_ERROR, Deny, "informative failures retain their typed cause beneath replacement context", report_in_external_macro: true }
-declare_tool_lint! { pub nervix::PARTIAL_REPORT_FIELD, Deny, "a report recorded as a tracing field renders its whole context chain", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::BARE_ERROR_SIGNATURE, Deny, "Nervix failure contracts require contextual reports", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::DISCARDED_OUTCOME, Deny, "discarded failure outcomes require explicit classification", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::BARE_PANIC, Deny, "Option and Result panic operations require a stated guarantee", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::REPLACED_ERROR, Deny, "informative failures retain their typed cause beneath replacement context", @report_in_external_macro = true }
+declare_tool_lint! { pub nervix::PARTIAL_REPORT_FIELD, Deny, "a report recorded as a tracing field renders its whole context chain", @report_in_external_macro = true }
 
 #[derive(Clone, Copy)]
 enum Boundary {
@@ -60,8 +63,8 @@ pub(crate) fn implements_trait<'tcx>(
     type_known_to_meet_bound_modulo_regions(&infcx, environment, value, trait_id)
 }
 
-fn parse_boundary(attribute: &rustc_hir::Attribute) -> Option<Boundary> {
-    let arguments = attribute.meta_item_list()?;
+fn parse_boundary(attribute: &AttrItem) -> Option<Boundary> {
+    let arguments = meta_items(attribute)?;
     if arguments.len() != 2 {
         return None;
     }
@@ -86,7 +89,7 @@ fn parse_boundary(attribute: &rustc_hir::Attribute) -> Option<Boundary> {
     }
 }
 
-pub fn validate_boundary(cx: &LateContext<'_>, node: HirId, attribute: &rustc_hir::Attribute) {
+pub fn validate_boundary(cx: &LateContext<'_>, node: HirId, attribute: &AttrItem) {
     let placement = matches!(
         cx.tcx.hir_node(node),
         rustc_hir::Node::Item(rustc_hir::Item {
@@ -103,17 +106,12 @@ pub fn validate_boundary(cx: &LateContext<'_>, node: HirId, attribute: &rustc_hi
         })
     );
     let path = [Symbol::intern("nervix"), Symbol::intern("error_boundary")];
-    let count = cx
-        .tcx
-        .hir_attrs(node)
-        .iter()
-        .filter(|attr| attr.path_matches(&path))
-        .count();
+    let count = tool_attributes(cx.tcx, node, &path).len();
     if !placement || parse_boundary(attribute).is_none() || count != 1 {
         cx.tcx.emit_node_span_lint(
             INVALID_CONTRACT,
             node,
-            attribute.span(),
+            attribute.span,
             Message {
                 message: "error_boundary requires outcome or library and a meaningful reason on \
                           its exact error type or return contract"
@@ -422,7 +420,8 @@ impl ErrorRules {
             let mut holds_report = false;
             for field in &variant.fields {
                 let mut path = seen.clone();
-                if self.report_carrier(cx, field.ty(cx.tcx, arguments).skip_norm_wip(), &mut path) {
+                if self.report_carrier(cx, field.ty(cx.tcx, *arguments).skip_norm_wip(), &mut path)
+                {
                     holds_report = true;
                     break;
                 }
@@ -625,8 +624,11 @@ impl ErrorRules {
                         continue;
                     }
                     for field in &variant.fields {
-                        if self.loses_outcome(cx, field.ty(cx.tcx, arguments).skip_norm_wip(), seen)
-                        {
+                        if self.loses_outcome(
+                            cx,
+                            field.ty(cx.tcx, *arguments).skip_norm_wip(),
+                            seen,
+                        ) {
                             return true;
                         }
                     }
@@ -754,7 +756,7 @@ impl ErrorRules {
         cx: &LateContext<'tcx>,
         expression: &Expr<'_>,
         definition: DefId,
-        arguments: ty::GenericArgsRef<'tcx>,
+        arguments: ty::GenericArgs<'tcx>,
         flow: &mut Flow,
     ) {
         if !self.authored_type(cx.tcx, definition) || boundary(cx.tcx, definition).is_some() {

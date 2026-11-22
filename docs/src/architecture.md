@@ -239,10 +239,10 @@ are the exception because each format is a separate Model kind and their names c
 uses the format already selected by its head.
 
 All persisted domain Models share the optional trailing `LABELS` creation clause. Common
-`SET LABELS ON`, `DROP LABELS ON` and `SHOW LABELS ON` statements use those same typed entity
-references, including the distinct wire-schema kinds. They edit or inspect descriptive metadata
-without selecting another configuration grammar or introducing configuration `ALTER` for a kind
-that lacks it. Shared reference and label clauses have one grammar implementation. The
+`SET LABELS ON` and `SHOW LABELS ON` statements use those same typed entity references, including
+the distinct wire-schema kinds; one `SET LABELS` sets and removes keys in a single edit. They edit
+or inspect descriptive metadata without selecting another configuration grammar or introducing
+configuration `ALTER` for a kind that lacks it. Shared reference and label clauses have one grammar implementation. The
 [Entity Labels](entity-labels.md) chapter owns their validation, transactions and execution
 independence.
 

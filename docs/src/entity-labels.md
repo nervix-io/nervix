@@ -50,13 +50,19 @@ CREATE USER orders_reader WITH PASSWORD 'example-password' LABELS { 'purpose' = 
 Omission creates an empty set. `CREATE IF NOT EXISTS` leaves an existing entity and its labels
 unchanged.
 
-`SET LABELS` merges assignments, replacing the values of named keys and preserving other keys.
-`DROP LABELS` removes named keys; an absent key is already removed. Both commands require the
-target entity to exist and validate the complete result before any effect.
+`SET LABELS` edits an existing entity's labels. Each entry either sets a key, `'key' = 'value'`,
+which adds the key or replaces its value, or removes it, `'key' DROP`; removing a key that is absent
+is not an error, because the key is already removed. Keys the statement does not name keep their
+values. A key appears at most once in one statement, so a key both set and removed is refused
+like any repeated key. The command requires the target entity to exist and applies all of its
+entries as one change: it validates the complete result against the committed limits before any
+effect, and either every entry applies or none does. Because the limits judge the result, one
+statement can remove a label and add another even when the entity already has as many labels as
+`ENTITY_LABELS_MAX_COUNT` allows.
 
 ```plexus
 SET LABELS ON SCHEMA readings { 'owner' = 'Platform', 'empty' = '' };
-DROP LABELS ON SCHEMA readings { 'team/path', 'already-absent' };
+SET LABELS ON SCHEMA readings { 'region' = 'east', 'team/path' DROP, 'already-absent' DROP };
 ```
 
 Inspect the result in a separate request:
@@ -65,8 +71,11 @@ Inspect the result in a separate request:
 SHOW LABELS ON SCHEMA readings FORMAT JSON;
 SHOW LABELS ON DOMAIN orders;
 SET LABELS ON RESOURCE orders_schema { 'status' = 'approved' };
-DROP LABELS ON USER orders_reader { 'purpose' };
+SET LABELS ON USER orders_reader { 'purpose' DROP };
 ```
+
+The [web console](client-tools-web-console.md#entity-labels) adds labels in its create forms and
+edits an existing entity's labels with the same statement, one `SET LABELS` per save.
 
 Targets use the entity's established addressing phrase. For example, a connector is addressed
 as `INGESTOR intake` or `EMITTER archive`; a wire schema retains its kind as
@@ -104,7 +113,10 @@ preserves every key and exact value.
 
 Labels are control-plane metadata. A label-only commit leaves execution and state fingerprints,
 tasks, branch state, allowances, resource bindings, connections, buffered work and acknowledgement
-outcomes intact. It requires no pause, force flush, rebuild, reconnection or relocation. A mixed
+outcomes intact. It requires no pause, force flush, rebuild, reconnection or relocation. It keeps
+every unit on the node the current schedule placed it on, even while that node is down or
+cordoned, so it needs no ownership handoff and commits while a unit's owner is unavailable.
+Placement changes only through configuration changes, relocation, drain and failover. A mixed
 transaction still applies the normal safety contract for its actual configuration changes.
 Client endpoint contracts and resolved branch-key schemas use configuration only. Later
 configuration edits retain attachments and state whenever their actual execution contracts allow it,

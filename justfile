@@ -416,6 +416,15 @@ test-unfolding-backpressure *args: build-deps build-plexus-format build-test-cli
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/bounded_execution.feature {{ quote(args) }}
 
+# Work the node already accepted that waits for a place in a full worker class: relay slices and
+# subscription deliveries, checkpoints, captures and partition moves, committed compilation, and
+# the resource store, each seen waiting and then completing once after its class is released.
+test-full-queue-waits *args: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/full_queue_waits.feature {{ quote(args) }}
+
 # Exercise fixed window collection and its sampled-sequence tensor consumer.
 test-window-collection-arrays *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
@@ -4586,12 +4595,12 @@ typed-ratchet-source-build:
     set -euo pipefail
     source_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
-        source_toolchain="nightly-2026-09-17"
+        source_toolchain="nightly-2026-11-21"
     fi
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$source_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --package nervix-ratchet
 
 typed-ratchet-build: build-ratchet-runner
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-11-21 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
 
 typed-ratchet *args: typed-ratchet-build
     #!/usr/bin/env bash
@@ -4682,7 +4691,7 @@ test-typed-ratchet-docs:
         doctest_flags+=" -C instrument-coverage"
     fi
     RUSTDOCFLAGS="$doctest_flags" CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/docs \
-        cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
+        cargo +nightly-2026-11-21 test --manifest-path tools/nervix-lint/fixtures/Cargo.toml --doc
 
 # Current API examples compile alongside their compile_fail counterparts on the product toolchain.
 test-typed-ratchet-product-docs:
@@ -4703,11 +4712,11 @@ qualify-typed-ratchet-cache: typed-ratchet-build
     exec "${qualification_command[@]}"
 
 test-typed-ratchet-reports:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-11-21 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
 # Run one deterministic source-contract regression through its existing report-test build.
 test-typed-source-contract filter:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib -- {{ quote(filter) }} --exact --nocapture
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-11-21 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib -- {{ quote(filter) }} --exact --nocapture
 
 # Focused deterministic tests of the analysis runner and host memory admission.
 test-ratchet-runner *args:
@@ -4732,7 +4741,7 @@ ratchet-tests selection *args:
     set -euo pipefail
     runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
-        runner_toolchain="nightly-2026-09-17"
+        runner_toolchain="nightly-2026-11-21"
     fi
     if [[ {{ quote(selection) }} == lib ]]; then
         targets=(--lib)
@@ -4757,19 +4766,19 @@ build-ratchet-runner:
     set -euo pipefail
     runner_toolchain="1.100"
     if [[ -n "${NERVIX_NATIVE_COVERAGE_ATTEMPT:-}" ]]; then
-        runner_toolchain="nightly-2026-09-17"
+        runner_toolchain="nightly-2026-11-21"
     fi
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/source cargo +"$runner_toolchain" build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-ratchet
 
 fmt-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml
+    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet
+    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures
+    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml
 
 fmt-check-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet --check
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures --check
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml --check
+    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --package nervix-ratchet --check
+    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures --check
+    cargo +nightly-2026-11-21 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml --check
 
 # Tooling packages use the same bounded scheduler and command, with their pinned compiler.
 lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
@@ -4779,7 +4788,7 @@ typed-ratchet-clippy-targets: typed-ratchet-clippy-packages
 
 # The compiler tooling is a workspace of its own on the analysis nightly, so it is a lane of its own.
 [private]
-typed-ratchet-clippy-packages: *(clippy-target "typed-ratchet" *["nervix-lint-driver", "nervix-lint-report", "nervix-ratchet"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-09-17")
+typed-ratchet-clippy-packages: *(clippy-target "typed-ratchet" *["nervix-lint-driver", "nervix-lint-report", "nervix-ratchet"] ["--manifest-path", "tools/nervix-lint/Cargo.toml", "--all-targets"] "nightly-2026-11-21")
 
 coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap test-typed-ratchet-compiler test-typed-ratchet-modeled
     #!/usr/bin/env bash
@@ -5084,7 +5093,7 @@ validate-typed-errors:
 
 toolchains-install:
     rustup toolchain install
-    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools --target wasm32-unknown-unknown
+    rustup toolchain install nightly-2026-11-21 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools --target wasm32-unknown-unknown
 
 # Run every test target of the Plexus language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `plexus-completion-walk`.

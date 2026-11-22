@@ -278,13 +278,13 @@ impl BranchedProcessorSpec {
 fn branch_declarations<'a>(
     models: impl Iterator<Item = &'a Model>,
 ) -> HashMap<ParametrizerName, CreateParametrizer> {
-    let mut branches = HashMap::default();
+    let mut parametrizers = HashMap::default();
     for model in models {
-        if let Model::Parametrizer(branch) = model {
-            branches.insert(branch.name.clone(), branch.clone());
+        if let Model::Parametrizer(parametrizer) = model {
+            parametrizers.insert(parametrizer.name.clone(), parametrizer.clone());
         }
     }
-    branches
+    parametrizers
 }
 
 fn internal_processor_error_policies(general: GeneralErrorPolicy) -> ErrorPolicies {
@@ -654,7 +654,7 @@ mod tests {
     }
 
     fn scheduled_junction(schema_byte: u8, input: &str, branch_ttl: &str) -> ScheduledNodes {
-        let branch_name = named::<ParametrizerName>("by_tenant");
+        let parametrizer_name = named::<ParametrizerName>("by_tenant");
         let branch_schema = CreateSchema {
             labels: Default::default(),
             name: named("tenant_key"),
@@ -665,10 +665,10 @@ mod tests {
                 sensitive: false,
             }],
         };
-        let branch = ScheduledNode::new(
+        let parametrizer = ScheduledNode::new(
             Model::Parametrizer(CreateParametrizer {
                 labels: Default::default(),
-                name: branch_name.clone(),
+                name: parametrizer_name.clone(),
                 schema: branch_schema.name.clone(),
                 ttl: branch_ttl.to_string(),
                 partitions: nervix_models::ParametrizerPartitions::ONE,
@@ -694,7 +694,7 @@ mod tests {
                         FlushPolicy::Immediate,
                     ),
                 ]),
-                branched_by: BranchSelection::branched_by(branch_name.clone()),
+                branched_by: BranchSelection::branched_by(parametrizer_name.clone()),
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),
@@ -702,11 +702,11 @@ mod tests {
             SchemaFingerprint::from_digest([schema_byte; 32]),
         )
         .with_resolved_branching(Some(ResolvedBranching::branched(
-            branch_name,
+            parametrizer_name,
             branch_schema,
             nervix_models::ResolvedParametrizerPartitions::ONE,
         )));
-        [branch, junction]
+        [parametrizer, junction]
             .into_iter()
             .map(|node| (node.identity(), node))
             .collect()

@@ -120,6 +120,6 @@ async fn when_a_forwarding_failure_releases_the_paced_publication(
          server_error_level={:?} server_error={}",
         failure.event.level, failure.event.message
     ));
-    world.last_server_error = Some(failure.event.message);
+    world.last_server_error = Some(crate::CapturedServerError::from(failure.event));
     world.active_session = Some(failure.session);
 }

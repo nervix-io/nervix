@@ -242,6 +242,8 @@ pub struct SettingsArgs {
     pub operational: OperationalArgs,
     #[command(flatten)]
     pub listeners: super::listeners::ListenerArgs,
+    #[command(flatten)]
+    pub trace_export: super::trace_export::TraceExportArgs,
 }
 
 impl TryFrom<SettingsArgs> for NodeSettings {
@@ -309,6 +311,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .engines
             .wasm_settings()
             .change_context(AppError::InvalidWasmEngineSettings)?;
+        let traces = args
+            .trace_export
+            .settings()
+            .change_context(AppError::InvalidTraceExportSettings)?;
         Ok(Self {
             node_database: args
                 .database
@@ -327,7 +333,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             interconnect,
             operational: args
                 .operational
-                .settings()
+                .settings(traces)
                 .change_context(AppError::InvalidOperationalCapabilities)?,
             listeners: args
                 .listeners
@@ -397,6 +403,9 @@ impl From<&NodeSettings> for SettingsArgs {
             resources: ResourceArgs::from_settings(&settings.resources),
             capacity: CapacityArgs::from_settings(&settings.capacity, &settings.peer_receive),
             listeners: super::listeners::ListenerArgs::from_settings(&settings.listeners),
+            trace_export: super::trace_export::TraceExportArgs::from_settings(
+                &settings.operational.traces,
+            ),
             execution: ExecutionArgs::from_overrides(
                 &settings.execution,
                 &settings.client_endpoints,
@@ -429,6 +438,7 @@ impl SettingsArgs {
         self.execution.render(&mut command_line);
         self.operational.render(&mut command_line);
         self.listeners.render(&mut command_line);
+        self.trace_export.render(&mut command_line);
         command_line.arguments
     }
 }

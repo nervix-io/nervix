@@ -22,18 +22,19 @@ use nervix_models::{
     ExistingUserPolicy, Expression, FieldName, FieldReference, FieldScope, HttpIngestorEntity,
     IngestorAlteration, IngestorEntityKind, IngestorEntityModel, IngestorReferenceKind,
     InspectionFormat, KafkaIngestorEntity, Literal, LookupQuery, ModelKind, ModelName,
-    MqttIngestorEntity, NODE_TAG_FUNCTION, NatsIngestorEntity, NodeRef, NodeSelectorField,
-    PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity,
-    RebindResource, RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity,
-    RelayBranching, RelayName, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, ResetWasmState, Restore, RestoreLifecycle,
-    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowEmitters,
-    ShowIngestors, ShowNodes, ShowPlacements, ShowProcessorState, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, ShowWasmProcessorState, SqsIngestorEntity, StartDomain,
-    StateBranchField, StateBranchSelection, StateInspectedProcessor, Statement, StopDomain,
-    SubscriptionBinding, SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
-    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
-    WebsocketsIngestorEntity, ZeroMqIngestorEntity,
+    MqttIngestorEntity, NODE_TAG_FUNCTION, NatsIngestorEntity, NodePolicy, NodeRef,
+    NodeSelectorField, PlacementPolicy, PrometheusIngestorEntity, PulsarIngestorEntity,
+    RabbitMqIngestorEntity, RebindResource, RebindResourceMembers, RebindResourceSelection,
+    RedisIngestorEntity, RelayBranching, RelayName, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResetWasmState, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowNodes, ShowPlacements,
+    ShowProcessorState, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    ShowWasmProcessorState, SqsIngestorEntity, StartDomain, StateBranchField, StateBranchSelection,
+    StateInspectedProcessor, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral,
+    SyslogIngestorEntity, TransactionInspectionRequest, TransactionInspectionTarget,
+    TransactionOperationNumber, UncordonNode, UploadResource, WebsocketsIngestorEntity,
+    ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
@@ -793,19 +794,7 @@ impl Arbitrary<'_> {
             }),
             StatementVariant::MutateEntityLabels => {
                 let entity = self.entity_label_target();
-                let labels = self.entity_labels();
-                let mutation = if self.entropy.flag() {
-                    nervix_models::EntityLabelMutation::Set(labels)
-                } else {
-                    let keys = labels
-                        .iter()
-                        .map(|(key, _)| key.clone())
-                        .collect::<Vec<_>>();
-                    nervix_models::EntityLabelMutation::Drop(
-                        nervix_models::EntityLabelKeys::try_from(keys)
-                            .assured("generated map keys are unique"),
-                    )
-                };
+                let mutation = self.entity_label_mutation();
                 Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
                     entity,
                     mutation,
@@ -924,23 +913,36 @@ impl Arbitrary<'_> {
         operations
     }
 
-    /// A node preview with no selector, a declared property read or a literal tag comparison.
+    /// A node preview with no selector or with one.
     fn show_nodes(&mut self) -> ShowNodes {
+        let selector = if self.entropy.byte().is_multiple_of(4) {
+            None
+        } else {
+            Some(self.node_selector())
+        };
+        ShowNodes {
+            selector,
+            format: self.inspection_format(),
+        }
+    }
+
+    /// A node selector: a declared property read, or a literal comparison of a node's name or of
+    /// one of its tags.
+    pub(crate) fn node_selector(&mut self) -> Expression {
         let field = |field: NodeSelectorField| {
             let name = FieldName::parse(field.name()).assured("a selector field has a valid name");
             Expression::Field(FieldReference::scoped(FieldScope::Node, name))
         };
-        let selector = match self.entropy.byte() % 4 {
-            0 => None,
-            1 => Some(field(NodeSelectorField::CudaAvailable)),
-            2 => Some(Expression::Binary {
+        match self.entropy.byte() % 3 {
+            0 => field(NodeSelectorField::CudaAvailable),
+            1 => Expression::Binary {
                 operator: BinaryOperator::Equal,
                 left: Box::new(field(NodeSelectorField::Name)),
                 right: Box::new(Expression::Literal(Literal::String(
                     self.non_empty_string(),
                 ))),
-            }),
-            _ => Some(Expression::Binary {
+            },
+            _ => Expression::Binary {
                 operator: BinaryOperator::Equal,
                 left: Box::new(Expression::Call {
                     function: BuiltinFunctionName::parse(NODE_TAG_FUNCTION)
@@ -952,11 +954,16 @@ impl Arbitrary<'_> {
                 right: Box::new(Expression::Literal(Literal::String(
                     self.non_empty_string(),
                 ))),
-            }),
-        };
-        ShowNodes {
-            selector,
-            format: self.inspection_format(),
+            },
+        }
+    }
+
+    /// Any of a node rule's three policies, a selector for the two that read one.
+    pub(crate) fn node_policy(&mut self) -> NodePolicy {
+        match self.entropy.byte() % 3 {
+            0 => NodePolicy::Require(self.node_selector()),
+            1 => NodePolicy::Prefer(self.node_selector()),
+            _ => NodePolicy::Any,
         }
     }
 
@@ -1726,26 +1733,28 @@ impl Arbitrary<'_> {
         }
     }
 
+    /// Any `ALTER PLACEMENT` operation of either rule form. A statement may mix the forms, as a
+    /// parser does; applying it to a stored rule is what refuses an operation of the other form.
     fn alter_placement_operation(&mut self) -> AlterPlacementOperation {
-        match self.entropy.byte() % 5 {
+        match self.entropy.byte() % 8 {
             0 => AlterPlacementOperation::SetPolicy {
                 policy: self.placement_policy(),
             },
-            1 => AlterPlacementOperation::SetRank {
+            1 => AlterPlacementOperation::SetNodePolicy {
+                policy: self.node_policy(),
+            },
+            2 => AlterPlacementOperation::SetRank {
                 rank: self.positive_u64(),
             },
-            2 => AlterPlacementOperation::DropRank,
-            3 => {
-                let placement = self.create_placement();
-                match placement.scope {
-                    nervix_models::PlacementScope::Corridor { from, to } => {
-                        AlterPlacementOperation::SetMembers { from, to }
-                    }
-                    nervix_models::PlacementScope::DomainWide => {
-                        AlterPlacementOperation::SetDomainWide
-                    }
-                }
-            }
+            3 => AlterPlacementOperation::DropRank,
+            4 => AlterPlacementOperation::SetMembers {
+                from: self.placement_members(),
+                to: self.placement_members(),
+            },
+            5 => AlterPlacementOperation::SetNodeMembers {
+                members: self.placement_members(),
+            },
+            6 => AlterPlacementOperation::SetDomainWide,
             _ => AlterPlacementOperation::RenameTo { name: self.name() },
         }
     }

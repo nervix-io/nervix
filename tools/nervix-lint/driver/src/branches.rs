@@ -19,7 +19,7 @@ use crate::{contracts::Flow, definition_path};
 mod origin;
 mod payload;
 
-declare_tool_lint! { pub nervix::BRANCH_INVERSION, Deny, "a branch owns its runtime and the parametrizer partition owns its membership", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::BRANCH_INVERSION, Deny, "a branch owns its runtime and the parametrizer partition owns its membership", @report_in_external_macro = true }
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 enum BranchRole {
@@ -479,7 +479,7 @@ impl BranchRules {
                     }
                     return false;
                 }
-                self.instantiated_fields(cx, *adt, arguments, visited)
+                self.instantiated_fields(cx, *adt, *arguments, visited)
             }
             ty::Tuple(values) => values
                 .into_iter()
@@ -496,7 +496,7 @@ impl BranchRules {
         &mut self,
         cx: &LateContext<'tcx>,
         adt: ty::AdtDef<'tcx>,
-        arguments: ty::GenericArgsRef<'tcx>,
+        arguments: ty::GenericArgs<'tcx>,
         visited: &mut HashSet<DefId>,
     ) -> bool {
         if !visited.insert(adt.did()) {
@@ -563,7 +563,7 @@ impl BranchRules {
             return false;
         }
         let found = adt.all_fields().any(|field| {
-            let value = field.ty(cx.tcx, arguments).skip_norm_wip();
+            let value = field.ty(cx.tcx, *arguments).skip_norm_wip();
             self.branch_key(cx, value, visited)
         });
         visited.remove(&adt.did());
@@ -606,7 +606,7 @@ impl BranchRules {
                     match (fields.next(), fields.next()) {
                         (Some(field), None) => self.element_role(
                             cx,
-                            field.ty(cx.tcx, arguments).skip_norm_wip(),
+                            field.ty(cx.tcx, *arguments).skip_norm_wip(),
                             visited,
                         ),
                         _ => None,
@@ -618,7 +618,7 @@ impl BranchRules {
                 match found {
                     Some(BranchRole::Key)
                         if definition.wrapper
-                            && Self::is_branch_row_outcome(cx, *adt, arguments) =>
+                            && Self::is_branch_row_outcome(cx, *adt, *arguments) =>
                     {
                         None
                     }
@@ -650,7 +650,7 @@ impl BranchRules {
     fn is_branch_row_outcome(
         cx: &LateContext<'_>,
         adt: ty::AdtDef<'_>,
-        arguments: ty::GenericArgsRef<'_>,
+        arguments: ty::GenericArgs<'_>,
     ) -> bool {
         definition_path(cx.tcx, adt.did()) == "core::result::Result"
             && matches!(arguments.type_at(1).kind(), ty::Adt(error, _)

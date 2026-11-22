@@ -32,7 +32,8 @@ In practice, the control plane covers:
 
 - domain creation and selection
 - model creation and deletion
-- scheduling decisions, including named corridor and domain-wide placement rules
+- scheduling decisions, including named corridor and domain-wide placement rules and the node rules
+  that select the cluster nodes runtime nodes may run on
 - explicit node removal with `DROP NODE <node_id>`
 - node cordon and uncordon with `CORDON NODE <node_id>` and `UNCORDON NODE <node_id>`
 - node drain with `DRAIN NODE <node_id>`, which cordons the node and moves scheduled graph nodes away one at a time
@@ -130,7 +131,7 @@ Only the bound domain's replicated configuration effects may be queued:
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `START` and `STOP`;
-- `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, `DROP LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
+- `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
 
 Completion on the bound session resolves identifiers against the configuration the queued
 statements produce, applied in written order, so a client is offered the models and resources its
@@ -446,6 +447,26 @@ Every relay unit is scheduled with one primary owner. Several declared partition
 independent units. Ordinary relays have no replicas.
 Materialized relays use the same relay schedule entry: additional assigned nodes are replicas of
 materialized state only, not relay buffers, branch presence, fan-out, or metrics.
+
+Node rules are a scheduling input of their own. The planning snapshot captures the committed
+record of every schedulable node alongside its capacity claim, and the scheduler evaluates each
+node rule's selector over those records once per candidate. Each unit's candidates are restricted
+to the nodes its winning requirements admit, for every assignment slot, and ranked by node
+preference before the colocation score, upstream locality, capacity-weighted load, round robin and
+name. A hard colocation group is restricted to the intersection of its members' admitted nodes.
+Failover and drain choose destinations within that restriction. A unit whose owner is lost with no
+admitted destination keeps its last assignment and is reported `waiting_for=<rule>`, and the
+stickiness merge keeps a live assignment whose owner no longer qualifies, reported
+`violates=<rule>`.
+
+On a running domain, a candidate schedule that would put an executing unit on a node its rules do
+not admit, or leave a unit with no admitted node, refuses the change that produced it, naming the
+rule and the unit; a breach the schedule already held does not refuse an unrelated change. On a
+stopped domain a node rule is accepted, and the `START` step places every unit on an admitted node
+before the transaction prepares, moving a misplaced unit with its state through the planned
+ownership handoff. While a unit has no admitted node, `START` waits under the domain's mutation
+lease and checks again every scheduling interval. See
+[Placement Policies](placement.md#node-rules).
 
 Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
 through the normal ownership handoff path, and failover or drain moves the exact unit group
@@ -1052,7 +1073,9 @@ waiting operator's signal. Failed refreshes retain their pending work and respec
 The coalesced hint retains its activation and the revisions reported by a sync. After acquiring
 the request turn, an automatic refresh compares that requirement with the fresh committed
 observation. A foreground response that already covers those decision, conditions and trust
-revisions satisfies the sync without another service request. An explicit refresh still runs.
+revisions satisfies the sync without another service request. A refused response commits nothing
+and covers nothing, so a sync that reports the decision the service issued for it still
+refreshes. An explicit refresh still runs.
 A notification-revision gap, decision or trust event remains an invalidation, including a change
 that arrived after an in-flight response was issued; a due deadline or revoked signing key also
 continues to require refresh.

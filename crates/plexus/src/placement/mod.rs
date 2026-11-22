@@ -1,9 +1,10 @@
 //! Named placement grammar.
 //!
 //! Layer: language.
-//! - **Owns.** Corridor and domain-wide rule syntax, policies and completion.
-//! - **Depends on.** Shared language tokens and semantic placement Models.
-//! - **Must not know.** Graph topology, unit correspondence or scheduling.
+//! - **Owns.** Colocation and node rule syntax, their policies, node selectors and completion.
+//! - **Depends on.** Shared language tokens, the shared expression grammar and semantic placement
+//!   Models.
+//! - **Must not know.** Graph topology, unit correspondence, node records or scheduling.
 
 #![cfg_attr(
     nervix_lint,
@@ -16,17 +17,76 @@ use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
     AlterPlacement, AlterPlacementOperation, CreatePlacement, CreateStatement, DescribePlacement,
-    ModelName, PlacementPolicy, PlacementScope, ShowPlacements,
+    ModelName, NodePolicy, NodeRuleScope, PlacementPolicy, PlacementScope, ShowPlacements,
 };
 
 use crate::{
-    lexer::{Identifier, Token},
+    lexer::{Identifier, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, alter_op_separator, if_not_exists_clause,
-        into_parse_error, kw, kw_phrase2, lex_input, nonzero_u64_value, placement_name,
-        placement_ref, runtime_node_ref, suggest_from, tok,
+        LexedInput, ParseError, ParseFromSourceError, alter_op_separator, embedded_expression,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase, kw_phrase2, lex_input,
+        nonzero_u64_value, placement_name, placement_ref, runtime_node_ref, suggest_from, tok,
     },
 };
+
+/// The completion label of a node rule's selector, an expression over the `node` scope.
+pub(crate) const NODE_SELECTOR_LABEL: &str = "node_selector_expression";
+
+/// What a rule body declares once its coverage and policy are read.
+enum PlacementBody {
+    Colocation {
+        scope: PlacementScope,
+        policy: PlacementPolicy,
+    },
+    Nodes {
+        scope: NodeRuleScope,
+        policy: NodePolicy,
+    },
+}
+
+/// Whether a statement prefix writes a node rule's selector, so an expression position offers the
+/// `node` scope and the node selector builtins.
+pub(crate) fn selects_nodes(tokens: &[Token]) -> bool {
+    let [
+        Token::Word(Word::KnownWord {
+            iden: Identifier::Create | Identifier::Alter,
+            ..
+        }),
+        rest @ ..,
+    ] = tokens
+    else {
+        return false;
+    };
+    // `CREATE [IF NOT EXISTS] PLACEMENT` and `ALTER PLACEMENT` name the kind within their first
+    // four words.
+    let names_placement = rest.iter().take(4).any(|token| {
+        matches!(
+            token,
+            Token::Word(Word::KnownWord {
+                iden: Identifier::Placement,
+                ..
+            })
+        )
+    });
+    if !names_placement {
+        return false;
+    }
+    tokens.windows(2).any(|pair| {
+        matches!(
+            pair,
+            [
+                Token::Word(Word::KnownWord {
+                    iden: Identifier::Nodes,
+                    ..
+                }),
+                Token::Word(Word::KnownWord {
+                    iden: Identifier::Where,
+                    ..
+                }),
+            ]
+        )
+    })
+}
 
 pub fn placement_policy_parser<'src>()
 -> impl Parser<'src, &'src [Token], PlacementPolicy, extra::Err<ParseError<'src>>> + Clone {
@@ -38,6 +98,22 @@ pub fn placement_policy_parser<'src>()
         kw(Identifier::Neutral).to(PlacementPolicy::Neutral),
         kw_phrase2(Identifier::Suggest, Identifier::Separation)
             .to(PlacementPolicy::SuggestSeparation),
+    ))
+    .boxed()
+}
+
+/// A node rule's policy: `REQUIRE NODES WHERE <selector>`, `PREFER NODES WHERE <selector>` or
+/// `ANY NODE`, each phrase one completion item.
+pub fn node_policy_parser<'src>()
+-> impl Parser<'src, &'src [Token], NodePolicy, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw_phrase([Identifier::Require, Identifier::Nodes, Identifier::Where])
+            .ignore_then(embedded_expression(NODE_SELECTOR_LABEL))
+            .map(NodePolicy::Require),
+        kw_phrase([Identifier::Prefer, Identifier::Nodes, Identifier::Where])
+            .ignore_then(embedded_expression(NODE_SELECTOR_LABEL))
+            .map(NodePolicy::Prefer),
+        kw_phrase2(Identifier::Any, Identifier::Node).to(NodePolicy::Any),
     ))
     .boxed()
 }
@@ -87,22 +163,46 @@ pub fn create_placement_parser<'src>()
             .then_ignore(kw(Identifier::Placement))
             .then(placement_name())
             .then(choice((
-                kw_phrase2(Identifier::Domain, Identifier::Wide).to(PlacementScope::DomainWide),
+                kw_phrase2(Identifier::Domain, Identifier::Wide).ignore_then(choice((
+                    placement_policy_parser().map(|policy| PlacementBody::Colocation {
+                        scope: PlacementScope::DomainWide,
+                        policy,
+                    }),
+                    node_policy_parser().map(|policy| PlacementBody::Nodes {
+                        scope: NodeRuleScope::DomainWide,
+                        policy,
+                    }),
+                ))),
                 kw(Identifier::From)
                     .ignore_then(placement_members())
                     .then_ignore(kw(Identifier::To))
                     .then(placement_members())
-                    .map(|(from, to)| PlacementScope::Corridor { from, to }),
+                    .then(placement_policy_parser())
+                    .map(|((from, to), policy)| PlacementBody::Colocation {
+                        scope: PlacementScope::Corridor { from, to },
+                        policy,
+                    }),
+                kw(Identifier::For)
+                    .ignore_then(placement_members())
+                    .then(node_policy_parser())
+                    .map(|(members, policy)| PlacementBody::Nodes {
+                        scope: NodeRuleScope::Members(members),
+                        policy,
+                    }),
             )))
-            .then(placement_policy_parser())
             .then(placement_rank().or_not())
-            .try_map(|((((if_not_exists, name), scope), policy), rank), span| {
-                let mapping_input = match scope {
-                    PlacementScope::Corridor { from, to } => {
-                        CreatePlacement::new(name, from, to, policy, rank)
-                    }
-                    PlacementScope::DomainWide => {
-                        Ok(CreatePlacement::domain_wide(name, policy, rank))
+            .try_map(|(((if_not_exists, name), body), rank), span| {
+                let mapping_input = match body {
+                    PlacementBody::Colocation {
+                        scope: PlacementScope::Corridor { from, to },
+                        policy,
+                    } => CreatePlacement::new(name, from, to, policy, rank),
+                    PlacementBody::Colocation {
+                        scope: PlacementScope::DomainWide,
+                        policy,
+                    } => Ok(CreatePlacement::domain_wide(name, policy, rank)),
+                    PlacementBody::Nodes { scope, policy } => {
+                        CreatePlacement::node_rule(name, scope, policy, rank)
                     }
                 }
                 .map(|placement| CreateStatement::new(placement, if_not_exists));
@@ -119,8 +219,10 @@ pub fn alter_placement_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterPlacement, extra::Err<ParseError<'src>>> + Clone {
     let set_policy = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Policy))
-        .ignore_then(placement_policy_parser())
-        .map(|policy| AlterPlacementOperation::SetPolicy { policy });
+        .ignore_then(choice((
+            placement_policy_parser().map(|policy| AlterPlacementOperation::SetPolicy { policy }),
+            node_policy_parser().map(|policy| AlterPlacementOperation::SetNodePolicy { policy }),
+        )));
     let set_rank = kw(Identifier::Set)
         .ignore_then(placement_rank())
         .map(|rank| AlterPlacementOperation::SetRank { rank });
@@ -140,11 +242,16 @@ pub fn alter_placement_parser<'src>()
     let set_domain_wide = kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Domain, Identifier::Wide))
         .to(AlterPlacementOperation::SetDomainWide);
+    let set_node_members = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::For))
+        .ignore_then(alter_placement_members())
+        .map(|members| AlterPlacementOperation::SetNodeMembers { members });
     let operation = choice((
         set_policy,
         set_rank,
         drop_rank,
         set_members,
+        set_node_members,
         set_domain_wide,
         rename,
     ))
@@ -247,7 +354,7 @@ pub fn suggest_alter_placement(input: &str, cursor: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use nervix_models::{Model, Statement};
+    use nervix_models::{Model, PlacementRule, Statement};
     use nonzero_ext::nonzero;
 
     use super::*;
@@ -263,8 +370,12 @@ mod tests {
 
         assert!(parsed.if_not_exists);
         assert_eq!(parsed.name.as_str(), "critical");
-        let PlacementScope::Corridor { from, .. } = &parsed.scope else {
-            panic!("expected corridor scope");
+        let PlacementRule::Colocation {
+            scope: PlacementScope::Corridor { from, .. },
+            policy,
+        } = &parsed.rule
+        else {
+            panic!("expected a corridor colocation rule");
         };
         assert_eq!(
             from.iter()
@@ -272,7 +383,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ingest", "enrich"]
         );
-        assert_eq!(parsed.policy, PlacementPolicy::RequireColocation);
+        assert_eq!(*policy, PlacementPolicy::RequireColocation);
         assert_eq!(parsed.rank, Some(nonzero!(1u64)));
     }
 
@@ -289,7 +400,13 @@ mod tests {
                 u64::MAX
             ))
             .assured("domain-wide form parses case-insensitively");
-            assert_eq!(parsed.scope, PlacementScope::DomainWide);
+            assert_eq!(
+                parsed.rule,
+                PlacementRule::Colocation {
+                    scope: PlacementScope::DomainWide,
+                    policy,
+                }
+            );
             assert_eq!(parsed.rank.map(|rank| rank.get()), Some(u64::MAX));
             let text = parsed
                 .body
@@ -364,7 +481,280 @@ mod tests {
             let Model::Placement(placement) = create.body.as_ref() else {
                 panic!("expected placement model");
             };
-            assert_eq!(placement.policy, expected);
+            let PlacementRule::Colocation { policy, .. } = &placement.rule else {
+                panic!("expected a colocation rule");
+            };
+            assert_eq!(*policy, expected);
+        }
+    }
+
+    fn node_rule(source: &str) -> CreatePlacement {
+        parse_create_placement(source)
+            .unwrap_or_else(|error| panic!("{source} must parse: {error:?}"))
+            .body
+    }
+
+    #[test]
+    fn parses_every_node_rule_form_and_round_trips_its_canonical_text() {
+        for source in [
+            "CREATE PLACEMENT eu_only FOR scorer, enrich REQUIRE NODES WHERE tag('zone') = 'eu';",
+            "CREATE PLACEMENT eu_only FOR scorer PREFER NODES WHERE tag('zone') = 'eu' AND NOT \
+             node.cuda.available RANK 4;",
+            "CREATE PLACEMENT anywhere FOR scorer ANY NODE RANK 1;",
+            "CREATE PLACEMENT everywhere DOMAIN WIDE REQUIRE NODES WHERE tag('zone') IN ('eu', \
+             'uk');",
+            "CREATE PLACEMENT everywhere DOMAIN WIDE PREFER NODES WHERE node.name = 'node-1' RANK \
+             2;",
+            "CREATE PLACEMENT everywhere DOMAIN WIDE ANY NODE;",
+        ] {
+            let placement = node_rule(source);
+            assert!(placement.is_node_rule(), "{source}");
+            let text = placement
+                .to_canonical_plexus()
+                .assured("a parsed node rule renders");
+            assert_eq!(text, source, "each source is written canonically");
+            assert_eq!(
+                node_rule(&text),
+                placement,
+                "{text} must parse to its source"
+            );
+            assert_eq!(
+                node_rule(&text)
+                    .to_canonical_plexus()
+                    .assured("a parsed node rule renders"),
+                text,
+                "canonical text is stable"
+            );
+        }
+
+        let placement = node_rule(
+            "create placement EU_ONLY for scorer, scorer require nodes where tag('zone') = 'eu' \
+             rank 3;",
+        );
+        assert_eq!(placement.rank, Some(nonzero!(3u64)));
+        let PlacementRule::Nodes {
+            scope: NodeRuleScope::Members(members),
+            policy: NodePolicy::Require(_),
+        } = &placement.rule
+        else {
+            panic!("expected a REQUIRE node rule over members");
+        };
+        assert_eq!(
+            members
+                .iter()
+                .map(nervix_models::ModelName::as_str)
+                .collect::<Vec<_>>(),
+            vec!["scorer"],
+            "duplicate members collapse"
+        );
+        assert_eq!(
+            placement
+                .to_canonical_plexus()
+                .assured("a parsed node rule renders"),
+            "CREATE PLACEMENT eu_only FOR scorer REQUIRE NODES WHERE tag('zone') = 'eu' RANK 3;"
+        );
+    }
+
+    #[test]
+    fn a_node_selector_ends_before_the_rank_and_before_the_next_alter_operation() {
+        let alter = parse_alter_placement(
+            "ALTER PLACEMENT eu_only SET POLICY REQUIRE NODES WHERE tag('zone') IN ('eu', 'uk'), \
+             SET FOR scorer, enrich, SET POLICY ANY NODE, SET DOMAIN WIDE, SET RANK 2;",
+        )
+        .assured("ordered node rule edits parse");
+        assert_eq!(alter.operations.len(), 5);
+        let AlterPlacementOperation::SetNodePolicy {
+            policy: NodePolicy::Require(selector),
+        } = &alter.operations[0]
+        else {
+            panic!("expected a REQUIRE node policy");
+        };
+        assert_eq!(
+            nervix_models::expression_to_plexus(selector).assured("the selector renders"),
+            "tag('zone') IN ('eu', 'uk')"
+        );
+        assert_eq!(
+            alter.operations[1],
+            AlterPlacementOperation::SetNodeMembers {
+                members: vec![
+                    ModelName::try_from("scorer").assured("valid name"),
+                    ModelName::try_from("enrich").assured("valid name"),
+                ],
+            }
+        );
+        assert_eq!(
+            alter.operations[2],
+            AlterPlacementOperation::SetNodePolicy {
+                policy: NodePolicy::Any
+            }
+        );
+        assert_eq!(alter.operations[3], AlterPlacementOperation::SetDomainWide);
+        assert_eq!(
+            alter.operations[4],
+            AlterPlacementOperation::SetRank {
+                rank: nonzero!(2u64)
+            }
+        );
+        let text = alter
+            .to_canonical_plexus()
+            .assured("the alteration renders");
+        assert_eq!(
+            parse_alter_placement(&text).assured("canonical alteration parses"),
+            alter
+        );
+    }
+
+    #[test]
+    fn rejects_a_policy_of_the_other_form_and_an_empty_member_list() {
+        for source in [
+            "CREATE PLACEMENT p FOR scorer REQUIRE COLOCATION;",
+            "CREATE PLACEMENT p FROM a TO b ANY NODE;",
+            "CREATE PLACEMENT p FROM a TO b REQUIRE NODES WHERE node.cuda.available;",
+            "CREATE PLACEMENT p FOR REQUIRE NODES WHERE node.cuda.available;",
+            "CREATE PLACEMENT p FOR scorer ANY NODES;",
+            "CREATE PLACEMENT p FOR scorer REQUIRE NODES node.cuda.available;",
+            "CREATE PLACEMENT p FOR scorer PREFER NODES WHERE;",
+        ] {
+            assert!(
+                parse_create_placement(source).is_err(),
+                "{source} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn completes_node_policy_phrases_as_single_items_without_branch_leakage() {
+        let input = "CREATE PLACEMENT eu_only FOR scorer ";
+        let suggestions = suggest_statement(input, input.len());
+        for expected in ["REQUIRE NODES WHERE", "PREFER NODES WHERE", "ANY NODE"] {
+            assert!(
+                suggestions.contains(&expected.to_owned()),
+                "{expected} after FOR members: {suggestions:?}"
+            );
+        }
+        for leaked in ["REQUIRE COLOCATION", "NEUTRAL", "TO", "REQUIRE", "NODES"] {
+            assert!(
+                !suggestions.contains(&leaked.to_owned()),
+                "{leaked} must not follow FOR members: {suggestions:?}"
+            );
+        }
+
+        let input = "CREATE PLACEMENT eu_only DOMAIN WIDE ";
+        let suggestions = suggest_statement(input, input.len());
+        for expected in [
+            "REQUIRE COLOCATION",
+            "SUGGEST SEPARATION",
+            "REQUIRE NODES WHERE",
+            "ANY NODE",
+        ] {
+            assert!(
+                suggestions.contains(&expected.to_owned()),
+                "{expected} after DOMAIN WIDE: {suggestions:?}"
+            );
+        }
+
+        let input = "CREATE PLACEMENT eu_only FROM a TO b ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(
+            !suggestions.contains(&"ANY NODE".to_owned()),
+            "{suggestions:?}"
+        );
+        assert!(
+            !suggestions.contains(&"REQUIRE NODES WHERE".to_owned()),
+            "{suggestions:?}"
+        );
+
+        for input in ["CREATE PLACEMENT eu_only ", "ALTER PLACEMENT eu_only SET "] {
+            assert!(
+                suggest_statement(input, input.len()).contains(&"FOR".to_owned()),
+                "{input}"
+            );
+        }
+        let input = "ALTER PLACEMENT eu_only SET POLICY ";
+        let suggestions = suggest_statement(input, input.len());
+        for expected in ["REQUIRE NODES WHERE", "PREFER COLOCATION", "ANY NODE"] {
+            assert!(
+                suggestions.contains(&expected.to_owned()),
+                "{expected} after SET POLICY: {suggestions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn completes_the_node_scope_inside_a_node_rule_selector_only() {
+        use nervix_models::{BuiltinFunctionScope, SemanticReference};
+
+        use crate::client_statement::{CompletionExpectation, suggest_client_expectations};
+
+        let expectations = |input: &str| suggest_client_expectations(input, input.len());
+        let selector_functions = CompletionExpectation::Semantic(
+            SemanticReference::BuiltinFunction(BuiltinFunctionScope::NodeSelector),
+        );
+        for input in [
+            "CREATE PLACEMENT eu_only FOR scorer REQUIRE NODES WHERE ",
+            "CREATE PLACEMENT eu_only DOMAIN WIDE PREFER NODES WHERE ",
+            "ALTER PLACEMENT eu_only SET RANK 2, SET POLICY REQUIRE NODES WHERE ",
+        ] {
+            let start = expectations(input);
+            assert!(start.contains(&selector_functions), "{input:?}: {start:?}");
+            assert!(
+                start.contains(&CompletionExpectation::Literal("node.".to_owned())),
+                "{input:?}: {start:?}"
+            );
+        }
+        for (input, expected) in [
+            (
+                "CREATE PLACEMENT eu_only FOR scorer REQUIRE NODES WHERE node.",
+                "name",
+            ),
+            (
+                "ALTER PLACEMENT eu_only SET POLICY PREFER NODES WHERE node.gpu.",
+                "count",
+            ),
+        ] {
+            let choices = expectations(input);
+            assert!(
+                choices.contains(&CompletionExpectation::Literal(expected.to_owned())),
+                "{input:?}: {choices:?}"
+            );
+        }
+        assert!(
+            !expectations("CREATE JUNCTION j FROM r UNBRANCHED TO s WHERE ")
+                .contains(&selector_functions),
+            "a route filter is no node selector"
+        );
+        assert!(
+            !expectations("CREATE PLACEMENT eu_only FOR scorer REQUIRE NODES WHERE udf::")
+                .contains(&CompletionExpectation::Semantic(SemanticReference::Model(
+                    nervix_models::ModelKind::Udf,
+                ))),
+            "a node selector calls no UDF"
+        );
+        let tokens = |input: &str| {
+            crate::parser_support::lex_input(input)
+                .assured("the prefix lexes")
+                .tokens
+        };
+        assert!(super::selects_nodes(&tokens(
+            "CREATE IF NOT EXISTS PLACEMENT p FOR a REQUIRE NODES WHERE "
+        )));
+        assert!(!super::selects_nodes(&tokens(
+            "CREATE PLACEMENT p FROM a TO b NEUTRAL "
+        )));
+        assert!(!super::selects_nodes(&tokens("SHOW NODES WHERE ")));
+    }
+
+    #[test]
+    fn completes_optional_rank_after_a_node_policy() {
+        for input in [
+            "CREATE PLACEMENT rule FOR a ANY NODE ",
+            "CREATE PLACEMENT rule DOMAIN WIDE ANY NODE ",
+        ] {
+            assert_eq!(
+                suggest_statement(input, input.len()),
+                [";", "LABELS", "RANK"],
+                "{input}"
+            );
         }
     }
 

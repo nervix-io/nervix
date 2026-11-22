@@ -208,6 +208,16 @@ tier = "cluster"
 
 [[test]]
 host = "python"
+identity = "cluster/test_notices.py::test_a_failed_row_reaches_the_session_as_a_runtime_notice_with_its_class_and_node"
+tier = "cluster"
+
+[[test]]
+host = "python"
+identity = "cluster/test_notices.py::test_a_notice_wait_ends_at_its_deadline_and_by_cancellation"
+tier = "cluster"
+
+[[test]]
+host = "python"
 identity = "cluster/test_completion.py::test_a_statement_is_completed_by_the_cluster"
 tier = "cluster"
 
@@ -573,6 +583,16 @@ tier = "cluster"
 
 [[test]]
 host = "java"
+identity = "io.nervix.client.suite.NoticeTests#aLoggedJunctionErrorReachesTheSessionAsARuntimeNoticeWithItsClassAndNode"
+tier = "cluster"
+
+[[test]]
+host = "java"
+identity = "io.nervix.client.suite.NoticeTests#noticeWaitsEndAtTheirDeadlineOrCancellation"
+tier = "cluster"
+
+[[test]]
+host = "java"
 identity = "io.nervix.client.suite.RecoveryTests#aLostConsumerRestoresTheDeliveryIdentityAndFencesItsEarlierAttempt"
 tier = "cluster"
 
@@ -778,6 +798,16 @@ tier = "cluster"
 
 [[test]]
 host = "ruby"
+identity = "RubySuite::NoticesTest#test_a_junction_message_error_is_a_classified_runtime_notice"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
+identity = "RubySuite::NoticesTest#test_notice_waits_end_at_their_deadline_or_from_another_thread"
+tier = "cluster"
+
+[[test]]
+host = "ruby"
 identity = "RubySuite::SubscriptionsTest#test_dropping_a_relay_ends_its_subscription"
 tier = "cluster"
 
@@ -816,6 +846,11 @@ tier = "boundary"
 [[test]]
 host = "c"
 identity = "test_boundary_public_enumeration_domains"
+tier = "boundary"
+
+[[test]]
+host = "c"
+identity = "test_boundary_notice_reads_refuse_a_missing_session_or_result"
 tier = "boundary"
 
 [[test]]
@@ -901,6 +936,11 @@ tier = "cluster"
 [[test]]
 host = "c"
 identity = "test_b11_read_the_attached_clock_before_ticks_and_project_it"
+tier = "cluster"
+
+[[test]]
+host = "c"
+identity = "test_b17_runtime_notices_report_the_class_and_node_of_a_junction_error"
 tier = "cluster"
 
 [[test]]
@@ -947,6 +987,11 @@ tier = "boundary"
 
 [[test]]
 host = "cpp"
+identity = "test_boundary_notice_reads_refuse_a_missing_session_or_result"
+tier = "boundary"
+
+[[test]]
+host = "cpp"
 identity = "test_boundary_silent_peer_deadline"
 tier = "boundary"
 
@@ -1032,6 +1077,11 @@ tier = "cluster"
 
 [[test]]
 host = "cpp"
+identity = "test_b17_runtime_notices_report_the_class_and_node_of_a_junction_error"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
 identity = "test_b12_exact_fields_and_typed_open_refusals"
 tier = "cluster"
 
@@ -1073,6 +1123,11 @@ tier = "cluster"
 [[test]]
 host = "cpp"
 identity = "test_cpp_application_owns_endpoints_and_delivery_with_typed_deleters"
+tier = "cluster"
+
+[[test]]
+host = "cpp"
+identity = "test_cpp_owned_notices_are_routed_by_kind_and_read_on_another_thread"
 tier = "cluster"
 
 [[test]]

@@ -160,6 +160,10 @@ pub(super) fn selected_choice(
             .placement
             .get()
             .selects_member(CorridorSide::To, node),
+        (ChoiceControl::PlacementForMember, ChoiceValue::Model(node)) => signals
+            .placement
+            .get()
+            .selects_member(CorridorSide::For, node),
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
             signals.structured.get().parametrizer.selects_schema(node)
         }
@@ -408,6 +412,11 @@ pub(super) fn select_choice(signals: CreateSignals, control: ChoiceControl, valu
             signals
                 .placement
                 .update(|draft| draft.add_member(CorridorSide::To, &node));
+        }
+        (ChoiceControl::PlacementForMember, ChoiceValue::Model(node)) => {
+            signals
+                .placement
+                .update(|draft| draft.add_member(CorridorSide::For, &node));
         }
         (ChoiceControl::BranchSchema, ChoiceValue::Model(node)) => {
             signals

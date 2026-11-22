@@ -706,7 +706,7 @@ pub(super) fn correlator_output_batch_errors(
     matched: &CorrelatorMatchedBatch,
     acks: Vec<AckSet>,
     execution_now: Timestamp,
-    code: MessageErrorCode,
+    class: MessageErrorClass,
     reason: &str,
     operation: MessageErrorOperation,
 ) -> Vec<CorrelatorOutputOutcome> {
@@ -716,11 +716,11 @@ pub(super) fn correlator_output_batch_errors(
             let source = matched.source_message(row, acks).verified(
                 "the correlator output batch is built row-aligned with the ACKs it was given",
             );
-            Err(Box::new(planned_structured_message_error(
+            Err(Box::new(planned_message_error(
                 source,
-                structured_message_error(
+                raised_message_error(
                     execution_now,
-                    code,
+                    class,
                     format!("correlator '{}' {reason}", processor.as_str()),
                     operation,
                     None,
@@ -788,7 +788,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 matched,
                 acks,
                 execution_now,
-                MessageErrorCode::Evaluation,
+                MessageErrorClass::EVALUATION,
                 &format!("failed to prepare TO output lookup inputs: {error}"),
                 MessageErrorOperation::Set,
             ));
@@ -826,7 +826,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 matched,
                 acks,
                 execution_now,
-                MessageErrorCode::Internal,
+                MessageErrorClass::INTERNAL,
                 &format!("failed to build TO output input batch: {error}"),
                 MessageErrorOperation::Set,
             ));
@@ -854,7 +854,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 matched,
                 acks,
                 execution_now,
-                MessageErrorCode::Internal,
+                MessageErrorClass::INTERNAL,
                 &format!("failed to evaluate TO output: {error}"),
                 MessageErrorOperation::Set,
             ));
@@ -866,7 +866,7 @@ pub(super) async fn evaluate_correlator_output_batch(
             matched,
             acks,
             execution_now,
-            MessageErrorCode::Internal,
+            MessageErrorClass::INTERNAL,
             &format!(
                 "TO output produced {} rows for {} selected correlations",
                 result.batch.row_count(),
@@ -884,7 +884,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 matched,
                 acks,
                 execution_now,
-                MessageErrorCode::Internal,
+                MessageErrorClass::INTERNAL,
                 &format!("TO output selected row {input_row} outside its {row_count} correlations"),
                 MessageErrorOperation::Finalize,
             ));
@@ -895,7 +895,7 @@ pub(super) async fn evaluate_correlator_output_batch(
                 matched,
                 acks,
                 execution_now,
-                MessageErrorCode::Internal,
+                MessageErrorClass::INTERNAL,
                 &format!("TO output selected correlation row {input_row} more than once"),
                 MessageErrorOperation::Finalize,
             ));
@@ -922,7 +922,7 @@ pub(super) async fn evaluate_correlator_output_batch(
             "the correlator output batch is built row-aligned with the ACKs it was given",
         );
         if let Some(side_error) = result.batch.errors().row(output_row).first() {
-            outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+            outcomes[input_row] = Some(Err(Box::new(planned_message_error(
                 source,
                 program.program.structured_side_error(
                     execution_now,
@@ -944,11 +944,11 @@ pub(super) async fn evaluate_correlator_output_batch(
         }
         let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
-            outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+            outcomes[input_row] = Some(Err(Box::new(planned_message_error(
                 source,
-                structured_message_error(
+                raised_message_error(
                     execution_now,
-                    MessageErrorCode::Validation,
+                    MessageErrorClass::VALIDATION,
                     format!(
                         "correlator '{}' failed to finalize TO output row",
                         processor.as_str()
@@ -997,21 +997,20 @@ pub(super) async fn evaluate_correlator_output_batch(
                                 Some(Ok(Some(RelayMessage { key, record, acks })));
                         }
                         Err(error) => {
-                            outcomes[input_row] =
-                                Some(Err(Box::new(planned_structured_message_error(
-                                    correlation.source,
-                                    structured_message_error(
-                                        execution_now,
-                                        MessageErrorCode::Internal,
-                                        error.to_string(),
-                                        MessageErrorOperation::Finalize,
-                                        None,
-                                        std::iter::empty(),
-                                    ),
-                                    None,
-                                    matched.materialized_state[input_row].snapshot(),
+                            outcomes[input_row] = Some(Err(Box::new(planned_message_error(
+                                correlation.source,
+                                raised_message_error(
                                     execution_now,
-                                ))));
+                                    MessageErrorClass::INTERNAL,
+                                    error.to_string(),
+                                    MessageErrorOperation::Finalize,
+                                    None,
+                                    std::iter::empty(),
+                                ),
+                                None,
+                                matched.materialized_state[input_row].snapshot(),
+                                execution_now,
+                            ))));
                         }
                     }
                 }
@@ -1020,11 +1019,11 @@ pub(super) async fn evaluate_correlator_output_batch(
                 for correlation in successful {
                     let output_row = correlation.output_row;
                     let input_row = correlation.input_row;
-                    outcomes[input_row] = Some(Err(Box::new(planned_structured_message_error(
+                    outcomes[input_row] = Some(Err(Box::new(planned_message_error(
                         correlation.source,
-                        structured_message_error(
+                        raised_message_error(
                             execution_now,
-                            MessageErrorCode::Validation,
+                            MessageErrorClass::VALIDATION,
                             format!(
                                 "correlator '{}' failed to finalize TO output row: {error}",
                                 processor.as_str()
@@ -1100,8 +1099,11 @@ pub(super) async fn enqueue_correlator_output(
                         },
                         &policy,
                         message,
+                        // Its output relay's schema is installed with the correlator, so a missing
+                        // one is Nervix breaking its own contract.
                         MessageErrorFailure::new(
                             Some(&output_relay),
+                            MessageErrorClass::INTERNAL,
                             error.to_string(),
                             MessageErrorOperation::Finalize,
                         ),
@@ -1264,7 +1266,12 @@ pub(super) async fn handle_correlator_timeout_action(
                             },
                             error_policies,
                             message,
-                            MessageErrorFailure::publish(None, error.to_string()),
+                            MessageErrorFailure::new(
+                                None,
+                                MessageErrorClass::INTERNAL,
+                                error.to_string(),
+                                MessageErrorOperation::Publish,
+                            ),
                         )
                         .await;
                     return;

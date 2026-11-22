@@ -5,7 +5,7 @@
 //! - **Depends on.** The shared licensing protocol and explicit fixture time.
 //! - **Must not know.** Cluster policy, Raft or scenario step implementation.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use axum::{body::Body, response::Response};
 use base64::Engine as _;
@@ -132,6 +132,32 @@ struct Challenge {
     until: DateTime<Utc>,
 }
 
+/// How the catalog of the service the model plays differs from the cluster's, so a scenario can
+/// sign decisions as a service built from an older or a newer protocol revision would.
+#[derive(Default)]
+struct CatalogSkew {
+    /// Capabilities the played service does not know, so no decision it signs lists them.
+    unknown_to_service: BTreeSet<String>,
+    /// Capabilities only the played service knows, with the state its active decisions give them.
+    unknown_to_cluster: BTreeMap<String, Capability>,
+}
+
+impl CatalogSkew {
+    fn apply(&self, status: DecisionStatus, usage: &mut UsageConditions) {
+        for name in &self.unknown_to_service {
+            usage.capabilities.remove(name);
+        }
+        if status != DecisionStatus::Active {
+            return;
+        }
+        for (name, state) in &self.unknown_to_cluster {
+            usage
+                .capabilities
+                .insert(name.clone(), ConditionValue::Known(*state));
+        }
+    }
+}
+
 pub struct Model {
     notifications: notifications::Notifications,
     pub(crate) bundle: EmbeddedTrustBundle,
@@ -144,6 +170,7 @@ pub struct Model {
     root_epoch: u64,
     documents: TrustDocuments,
     plan: Conditions,
+    catalog_skew: CatalogSkew,
     conditions_revision: u64,
     challenges: BTreeMap<String, Challenge>,
     activations: BTreeMap<Uuid, HeldActivation>,
@@ -215,6 +242,7 @@ impl Model {
             root_epoch: 0,
             documents,
             plan: default_plan(),
+            catalog_skew: CatalogSkew::default(),
             conditions_revision: 1,
             challenges: BTreeMap::new(),
             activations: BTreeMap::new(),
@@ -259,6 +287,13 @@ impl Model {
     pub fn fault_observations(&self) -> Vec<FaultObservation> {
         self.fault_observations.clone()
     }
+    /// The genuine decision the service holds for an activation, which a scripted fault only
+    /// alters on the copy it sends.
+    pub fn held_decision(&self, activation_id: Uuid) -> Option<Decision> {
+        self.activations
+            .get(&activation_id)
+            .map(|held| held.decision.clone())
+    }
     pub fn refuse(&mut self, refusal: Option<ProblemKind>) {
         self.refusal = refusal;
     }
@@ -284,6 +319,16 @@ impl Model {
             .checked_add(1)
             .assured("a bounded scenario cannot exhaust revisions");
         self.notify_change();
+    }
+    /// Signs every decision as a service whose catalog lacks the capability `name` would: none
+    /// lists it, whatever the plan holds.
+    pub fn sign_without_capability(&mut self, name: String) {
+        self.catalog_skew.unknown_to_service.insert(name);
+    }
+    /// Signs every active decision as a service whose catalog has the capability `name`, which the
+    /// cluster's catalog lacks, would: the decision carries it in `state`.
+    pub fn sign_unknown_capability(&mut self, name: String, state: Capability) {
+        self.catalog_skew.unknown_to_cluster.insert(name, state);
     }
     pub fn activation_count(&self) -> usize {
         self.activations.len()
@@ -823,6 +868,9 @@ impl Model {
                 limits().bytes,
             )
             .assured("fixture facts resolve through shared protocol");
+        let mut conditions = resolved.values().clone();
+        self.catalog_skew
+            .apply(resolved.status(), &mut conditions.usage);
         let refreshed = timing::RefreshTiming::new(self.now, &self.plan.operating);
         Decision {
             doc: DecisionKind::LicenseDecision,
@@ -845,9 +893,9 @@ impl Model {
             },
             status: resolved.status(),
             conditions: DecisionConditions {
-                conditions_revision: self.conditions_revision(previous, resolved.values()),
-                usage: resolved.values().usage.clone(),
-                operating: resolved.values().operating.clone(),
+                conditions_revision: self.conditions_revision(previous, &conditions),
+                usage: conditions.usage,
+                operating: conditions.operating,
             },
             timing: DecisionTiming {
                 refresh_after: refreshed.refresh_after,

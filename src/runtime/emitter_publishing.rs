@@ -112,73 +112,64 @@ impl EmitterCommitReason {
 #[derive(Debug)]
 pub(super) struct RejectedEmitterRecord {
     pub(super) position: EmitterRecordPosition,
-    code: EmitterRejectionCode,
     error: RejectedEmitterError,
 }
 
-/// A rejection owns one error body; a structured error already owns its display message.
+/// A rejection owns one error body; a structured error already owns its display message. Either way
+/// its class belongs to the `REJECTED` group, which the emitter's rejection counter is labelled by.
 #[derive(Debug)]
 enum RejectedEmitterError {
-    Message(String),
-    Structured(StructuredMessageError),
+    /// A rejection whose message the host names, and whose operation its batch's failing step
+    /// supplies.
+    Message {
+        class: RejectedErrorClass,
+        reason: String,
+    },
+    Structured(RaisedMessageError<RejectedErrorClass>),
 }
 
 impl RejectedEmitterRecord {
     pub(super) fn message(
         position: EmitterRecordPosition,
-        code: EmitterRejectionCode,
+        class: RejectedErrorClass,
         reason: String,
     ) -> Self {
         Self {
             position,
-            code,
-            error: RejectedEmitterError::Message(reason),
+            error: RejectedEmitterError::Message { class, reason },
         }
     }
 
     pub(super) fn structured(
         position: EmitterRecordPosition,
-        code: EmitterRejectionCode,
-        error: StructuredMessageError,
+        error: RaisedMessageError<RejectedErrorClass>,
     ) -> Self {
         Self {
             position,
-            code,
             error: RejectedEmitterError::Structured(error),
         }
     }
 
-    /// The connector contract's constructors distinguish external, oversized and invalid members.
-    pub(super) fn member(position: EmitterRecordPosition, error: StructuredMessageError) -> Self {
-        let code = match (error.code, error.operation) {
-            (MessageErrorCode::Validation, MessageErrorOperation::Encode) => {
-                EmitterRejectionCode::Oversize
-            }
-            (_, MessageErrorOperation::Encode) => EmitterRejectionCode::Encode,
-            (MessageErrorCode::External, MessageErrorOperation::Publish) => {
-                EmitterRejectionCode::External
-            }
-            _ => EmitterRejectionCode::Invalid,
-        };
-        Self::structured(position, code, error)
+    /// A member a connector or a payload preparation rejected, with the class it named.
+    pub(super) fn member(
+        position: EmitterRecordPosition,
+        error: RaisedMessageError<RejectedErrorClass>,
+    ) -> Self {
+        Self::structured(position, error)
     }
 
-    pub(super) fn preparation(
-        position: EmitterRecordPosition,
-        error: StructuredMessageError,
-    ) -> Self {
-        let code = match error.operation {
-            MessageErrorOperation::Encode => EmitterRejectionCode::Encode,
-            MessageErrorOperation::Values => EmitterRejectionCode::Invalid,
-            _ => EmitterRejectionCode::External,
-        };
-        Self::structured(position, code, error)
+    /// The class the record's message error carries and its rejection is counted under.
+    pub(super) fn class(&self) -> RejectedErrorClass {
+        match &self.error {
+            RejectedEmitterError::Message { class, .. } => *class,
+            RejectedEmitterError::Structured(error) => error.class,
+        }
     }
 
     #[cfg(test)]
-    pub(super) fn structured_error(&self) -> Option<&StructuredMessageError> {
+    pub(super) fn structured_error(&self) -> Option<&RaisedMessageError<RejectedErrorClass>> {
         match &self.error {
-            RejectedEmitterError::Message(_) => None,
+            RejectedEmitterError::Message { .. } => None,
             RejectedEmitterError::Structured(error) => Some(error),
         }
     }
@@ -187,12 +178,12 @@ impl RejectedEmitterRecord {
         self,
         execution_now: Timestamp,
         operation: MessageErrorOperation,
-    ) -> StructuredMessageError {
+    ) -> RaisedMessageError {
         match self.error {
-            RejectedEmitterError::Structured(error) => error,
-            RejectedEmitterError::Message(reason) => structured_message_error(
+            RejectedEmitterError::Structured(error) => error.widen(),
+            RejectedEmitterError::Message { class, reason } => raised_message_error(
                 execution_now,
-                MessageErrorCode::External,
+                MessageErrorClass::from(class),
                 reason,
                 operation,
                 None,
@@ -1369,7 +1360,7 @@ pub(super) async fn finish_rejected_records(
             ))
         })?;
         let execution_now = batch.execution_now();
-        let code = rejected.code;
+        let class = rejected.class();
         let error = rejected.into_error(execution_now, operation);
         let RejectedRecordInput {
             record,
@@ -1418,7 +1409,7 @@ pub(super) async fn finish_rejected_records(
             )
             .await?;
         if newly_rejected {
-            outcomes.reject(code);
+            outcomes.reject(class);
         }
     }
     Ok(())
