@@ -492,7 +492,7 @@ async fn attempt_once(
     last_persisted_lru_lsm: &mut u64,
 ) -> error_stack::Result<(), ProcessorBranchTaskError> {
     let mut attempt = restore.begin(context, template);
-    while let RestoreProgress::Waiting = attempt.run_until_waiting().await {
+    while let AttemptProgress::Waiting = attempt.run_until_waiting().await {
         attempt.until_no_longer_waiting().await;
     }
     restore.finish(
@@ -1175,7 +1175,7 @@ async fn a_lifecycle_that_names_no_branch_restores_at_once_and_installs_nothing(
     let mut attempt = restore.begin(&context, &fixture.template);
     let progress = attempt.run_until_waiting().await;
     assert!(
-        matches!(progress, RestoreProgress::Built),
+        matches!(progress, AttemptProgress::Ended),
         "a lifecycle that names no branch has nothing to build"
     );
     restore

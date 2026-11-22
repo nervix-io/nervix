@@ -220,6 +220,7 @@ mod branch_key;
 mod branch_lifecycle_state;
 mod branch_lru_state;
 mod branch_runtime;
+mod capacity_attempt;
 mod client_endpoint_capacity;
 pub use client_endpoint_capacity::{
     ClientConsumerNodeBytes, ClientEndpointCapacityError, ClientEndpointOverrides,
@@ -420,6 +421,7 @@ use branch_runtime::{
     branch_lru_placement, flush_branch_junction, internal_processor_error_policies,
     persist_branch_instance_lru_snapshot, publish_branch_instance_lru_snapshot,
 };
+use capacity_attempt::AttemptProgress;
 pub(crate) use client_emitter::{
     ClientEmitterAnswer, ClientEmitterDelivery, ClientEmitterDescription, ClientEmitterEndpoint,
     ClientEmitterGrant, ClientEmitterPayload, ClientEmitterRefusal, ClientEmitterResponder,
@@ -592,9 +594,7 @@ use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,
     materialize_ingestor_route_template, parse_branch_flush_policy, parse_input_collect_policy,
 };
-use processor_branch_restore::{
-    PendingProcessorBranchRestore, ProcessorBranchRestoreAttempt, RestoreProgress,
-};
+use processor_branch_restore::{PendingProcessorBranchRestore, ProcessorBranchRestoreAttempt};
 use processor_branch_task::{
     PreparedProcessorBranch, ProcessorBranchCommand, ProcessorBranchHandoff,
     ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,

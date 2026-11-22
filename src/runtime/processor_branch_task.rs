@@ -462,7 +462,7 @@ pub(super) async fn run_processor_node_runtime(
             ),
             None => None,
         };
-        if let Some(RestoreProgress::Built) = restore_progress {
+        if let Some(AttemptProgress::Ended) = restore_progress {
             let attempt = restore_attempt
                 .take()
                 .verified("the attempt whose build just ended is the one in progress");
