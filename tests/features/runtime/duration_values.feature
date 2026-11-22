@@ -45,7 +45,7 @@ Feature: Duration values
       CREATE VHOST edge duration-values-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/jobs';
       CREATE HTTP ENDPOINT INGESTOR job_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING job_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING job_codec
         TO jobs INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -129,7 +129,7 @@ Feature: Duration values
       CREATE VHOST edge duration-branches-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/samples';
       CREATE HTTP ENDPOINT INGESTOR sample_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sample_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING sample_codec
         TO timed_samples
           SET id = input.id,
               window = CASE WHEN input.priority > 5 THEN 5m ELSE 1h END
@@ -191,7 +191,7 @@ Feature: Duration values
       CREATE VHOST edge duration-keys-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/requests';
       CREATE HTTP ENDPOINT INGESTOR request_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING request_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING request_codec
         TO timed_requests
           SET tenant = input.tenant,
               id = input.id,
@@ -237,7 +237,7 @@ Feature: Duration values
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Window aggregates order, count and collect DURATION values in each branch
+  Scenario Outline: Window aggregates and sketches order, count and collect DURATION values in each branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -257,18 +257,19 @@ Feature: Duration values
         waits <duration_list>,
         quickest_id STRING OPTIONAL,
         slowest_id STRING OPTIONAL,
-        distinct_waits I64,
         attempts I64
       );
+      CREATE SCHEMA wait_sketch (tenant STRING, distinct_waits I64, frequent_waits <duration_list>);
       CREATE JAQ JSON CODEC attempt_codec TO SCHEMA attempt WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE SCHEMA tenant_branch (tenant STRING);
-      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m MAX INSTANCES 4 EVICT LRU;
       CREATE RELAY timed_attempts SCHEMA timed_attempt BRANCHED BY by_tenant;
       CREATE RELAY wait_summaries SCHEMA wait_summary BRANCHED BY by_tenant;
+      CREATE RELAY wait_sketches SCHEMA wait_sketch BRANCHED BY by_tenant;
       CREATE VHOST edge duration-windows-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/attempts';
       CREATE HTTP ENDPOINT INGESTOR attempt_ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING attempt_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING attempt_codec
         TO timed_attempts
           SET tenant = input.tenant,
               id = input.id,
@@ -279,7 +280,7 @@ Feature: Duration values
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE WINDOW PROCESSOR summarize_waits FROM timed_attempts WIDTH 3 MESSAGES STEP 3 MESSAGES
-        MAX STATE SIZE 1MiB BRANCHED BY by_tenant TO wait_summaries
+        BRANCHED BY by_tenant TO wait_summaries
         SET tenant = FIRST(input.tenant),
             shortest = MIN(input.wait),
             longest = MAX(input.wait),
@@ -288,20 +289,28 @@ Feature: Duration values
             waits = COLLECT_VEC(input.wait),
             quickest_id = ARG_MIN(input.id, input.wait),
             slowest_id = ARG_MAX(input.id, input.wait),
-            distinct_waits = APPROX_COUNT_DISTINCT(input.wait, 10),
             attempts = COUNT(input.wait)
         ON MESSAGE ERROR LOG;
+      CREATE WINDOW PROCESSOR sketch_waits FROM timed_attempts WIDTH 10s DURATION STEP 5s DURATION
+        MAX STATE SIZE 1MiB BRANCHED BY by_tenant TO wait_sketches
+        SET tenant = FIRST(input.tenant),
+            distinct_waits = APPROX_COUNT_DISTINCT(input.wait, 10),
+            frequent_waits = APPROX_TOP_K(input.wait, 2, 16)
+        ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION wait_summaries_subscription TO wait_summaries;
+      CREATE SUBSCRIPTION wait_sketches_subscription TO wait_sketches;
       START;
       """
     And http payload is posted to node "node-1" with host "duration-windows-{{test_id}}.example.com" path "/attempts"
       """
       [{"tenant":"acme","id":"a1","priority":3},{"tenant":"beta","id":"b1","priority":1},{"tenant":"acme","id":"a2","priority":1},{"tenant":"beta","id":"b2","priority":1},{"tenant":"acme","id":"a3","priority":2},{"tenant":"beta","id":"b3","priority":3}]
       """
-    Then within "30s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
-      key={"tenant":"acme"} payload={"attempts":3,"distinct_waits":3,"first_wait":"45s","last_wait":"750ms","longest":"2m","quickest_id":"a3","shortest":"750ms","slowest_id":"a2","tenant":"acme","waits":["45s","2m","750ms"]}
-      key={"tenant":"beta"} payload={"attempts":3,"distinct_waits":2,"first_wait":"2m","last_wait":"45s","longest":"2m","quickest_id":"b3","shortest":"45s","slowest_id":"b1","tenant":"beta","waits":["2m","2m","45s"]}
+      key={"tenant":"acme"} payload={"attempts":3,"first_wait":"45s","last_wait":"750ms","longest":"2m","quickest_id":"a3","shortest":"750ms","slowest_id":"a2","tenant":"acme","waits":["45s","2m","750ms"]}
+      key={"tenant":"beta"} payload={"attempts":3,"first_wait":"2m","last_wait":"45s","longest":"2m","quickest_id":"b3","shortest":"45s","slowest_id":"b1","tenant":"beta","waits":["2m","2m","45s"]}
+      key={"tenant":"acme"} | "distinct_waits":3
+      key={"tenant":"beta"} | "distinct_waits":2 | "frequent_waits":["2m","45s"]
       """
 
     Examples:
@@ -333,7 +342,7 @@ Feature: Duration values
       CREATE HTTP ENDPOINT policy_ingress ON edge PATH '/policies';
       CREATE HTTP ENDPOINT call_ingress ON edge PATH '/calls';
       CREATE HTTP ENDPOINT INGESTOR policy_ingestor FROM policy_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING policy_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING policy_codec
         TO policies
           SET tenant = input.tenant,
               timeout = IF input.level > 1 THEN 1m 30s ELSE 10s END
@@ -343,7 +352,7 @@ Feature: Duration values
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE HTTP ENDPOINT INGESTOR call_ingestor FROM call_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING call_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING call_codec
         TO calls INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
         FLUSH IMMEDIATE

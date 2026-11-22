@@ -17,7 +17,7 @@ Feature: Backup and restore of DURATION values
       CREATE VHOST edge backup-duration-{{test_id}}.example.com;
       CREATE HTTP ENDPOINT ingress ON edge PATH '/state';
       CREATE HTTP ENDPOINT INGESTOR ingestor FROM ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING policy_codec
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING policy_codec
         TO state
           SET tenant = input.tenant,
               timeout = IF input.level > 1 THEN 1m 30s ELSE 10s END,

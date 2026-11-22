@@ -23,6 +23,9 @@ use nervix_primitives::sync::Arc;
 use super::{Shared, handle, name, schema, succeeded};
 use crate::{Event, Part, nx_event_frame, nx_event_release, nx_event_retain};
 
+/// The test schema's `wait` field, a fixed-width DURATION after its list column.
+const DURATION_COLUMN: usize = 16;
+
 fn check(bytes: &[u8]) {
     let mut arbitrary =
         nervix_arbitrary::Arbitrary::new(bytes, nervix_arbitrary::Domain::Vocabulary);
@@ -194,7 +197,7 @@ fn check(bytes: &[u8]) {
                     .assured("exact buffers fit");
                 assert_eq!(copied, content);
                 assert_eq!(actual_offsets, offsets);
-            } else if column < 12 {
+            } else if column < 12 || column == DURATION_COLUMN {
                 let mut expected_bytes = Vec::new();
                 for cell in cells {
                     match cell {

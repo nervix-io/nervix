@@ -643,7 +643,7 @@ fn reading_a_column_as_the_wrong_type_or_shape_is_refused() {
         assert_eq!(failure_kind(past_rows), FailureKind::InvalidArgument);
         let past_key = nx_event_cell_varlen(event.0, BRANCH_KEY, 1, 0, &mut value, &mut value_len);
         assert_eq!(failure_kind(past_key), FailureKind::InvalidArgument);
-        let past_columns = nx_event_column_states(event.0, ROWS, 16, values.as_mut_ptr(), 2);
+        let past_columns = nx_event_column_states(event.0, ROWS, 17, values.as_mut_ptr(), 2);
         assert_eq!(failure_kind(past_columns), FailureKind::InvalidArgument);
         let unknown_part = nx_event_column_states(event.0, 3, 0, values.as_mut_ptr(), 2);
         assert_eq!(failure_kind(unknown_part), FailureKind::InvalidArgument);
@@ -709,7 +709,7 @@ fn retained_references_keep_the_frame_until_the_last_one_is_released() {
         succeeded(nx_schema_field_count(schema, ROWS, &mut count));
         nx_schema_free(schema);
     }
-    assert_eq!(count, 16);
+    assert_eq!(count, 17);
     // SAFETY: releasing null is allowed and does nothing.
     unsafe { nx_event_release(ptr::null_mut()) };
 }
@@ -1120,11 +1120,30 @@ unsafe fn read_schema(schema: *mut Schema) {
             &mut sensitive,
         ));
         assert_eq!(field_type, FieldType::List);
+        succeeded(nx_schema_field(
+            schema,
+            ROWS,
+            16,
+            &mut name,
+            &mut name_len,
+            &mut field_type,
+            &mut nullable,
+            &mut sensitive,
+        ));
+        assert_eq!(
+            (
+                slice::from_raw_parts(name, name_len),
+                field_type,
+                nullable,
+                sensitive
+            ),
+            (&b"wait"[..], FieldType::Duration, false, false)
+        );
         assert_eq!(
             failure_kind(nx_schema_field(
                 schema,
                 ROWS,
-                16,
+                17,
                 &mut name,
                 &mut name_len,
                 &mut field_type,
