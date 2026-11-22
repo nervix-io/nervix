@@ -83,6 +83,9 @@ pub(super) enum CommandPausePoint {
     ProcessorFlushCompletion(DomainNodeRef),
     ProcessorPartitionInstall(DomainNodeRef),
     ProcessorPartitionForget(DomainNodeRef),
+    MaterializedRowRelease(DomainNodeRef),
+    MaterializedRowTake(DomainNodeRef),
+    MaterializedCheckpointSeal(DomainNodeRef),
     OwnershipHandoffActivation(DomainName),
     GracefulDrain(ClusterNodeName),
     TransactionCommit {
