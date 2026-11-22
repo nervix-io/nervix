@@ -1626,8 +1626,9 @@ pub(super) async fn spawn_processor_branch_task(
     lifetime: ProcessorBranchLifetime,
     incarnation: u64,
 ) -> error_stack::Result<ProcessorBranchTask, ProcessorBranchTaskError> {
-    // The record path, a partition move and a guest-state reset report or retry a refused build,
-    // so the branch opens its retained state refused when a worker class is full.
+    // A WASM reset's rebuilds build branches whose guest their task instantiates later, so a build
+    // here waits for no capacity in the unit's loop; the record path and a partition move build
+    // theirs as attempts instead.
     let branch = PreparedProcessorBranch::prepare(
         context,
         template,
