@@ -560,7 +560,8 @@ descriptors, so checkpoint identity and inspection operations advance as one wir
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the `parametrizer`
-Model kind, the typed `payload` expression scope, typed materialized relay inspection, ingestor read interactions,
+Model kind, an inferencer's required `WORKING MEMORY` policy, the typed `payload` expression scope,
+typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and

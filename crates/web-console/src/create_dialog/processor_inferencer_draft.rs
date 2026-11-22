@@ -2,10 +2,11 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Browser editing of an inferencer's ordered `INPUTS` mappings, `STATE` bindings and
+//! - **Owns.** Browser editing of an inferencer's required `WORKING MEMORY` choice with the
+//!   consequence each choice has, its ordered `INPUTS` mappings, `STATE` bindings and
 //!   `OUTPUT SCHEMA` declarations with their dense tensor shapes, the input fields its mapping
 //!   picker inserts, the generated fields its routes may read, the execution mode its shapes
-//!   imply, and their conversion to the inferencer Model's tensors.
+//!   imply, and their conversion to the inferencer Model's working memory and tensors.
 //! - **Depends on.** Typed tensor vocabulary and its execution-mode rule, expression parsing, and
 //!   the shared processor binding draft.
 //! - **Must not know.** ONNX inspection, tensor conversion or model execution.
@@ -22,7 +23,7 @@ use nervix_models::{
     FieldName, FieldReference, FieldScope, InferencerExecutionMode, InferencerStateBinding,
     InferencerStateInitial, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, InferencerTensorSchemaError,
+    InferencerTensorSchema, InferencerTensorSchemaError, InferencerWorkingMemory,
 };
 use nervix_plexus::parse_expression;
 use strum::Display;
@@ -329,21 +330,26 @@ impl<T: Default> OrderedDrafts<T> {
     }
 }
 
-/// What only an inferencer declares: the model it loads and the tensors it exchanges with it.
+/// What only an inferencer declares: the model it loads, the working memory its branches keep and
+/// the tensors it exchanges with the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InferencerDraft {
     pub(super) binding: ProcessorBindingDraft,
+    /// The `WORKING MEMORY` the author chose, none until they choose one: the language gives it
+    /// no default.
+    pub(super) working_memory: Option<InferencerWorkingMemory>,
     pub(super) inputs: OrderedDrafts<TensorMappingDraft>,
     pub(super) state: OrderedDrafts<StateBindingDraft>,
     pub(super) outputs: OrderedDrafts<TensorDeclarationDraft>,
 }
 
 impl Default for InferencerDraft {
-    /// One input and one output tensor to fill, since the language requires both lists, and no
-    /// state, which only a stateful model declares.
+    /// One input and one output tensor to fill, since the language requires both lists, no
+    /// state, which only a stateful model declares, and no working memory until it is chosen.
     fn default() -> Self {
         Self {
             binding: ProcessorBindingDraft::default(),
+            working_memory: None,
             inputs: OrderedDrafts::one(),
             state: OrderedDrafts::empty(),
             outputs: OrderedDrafts::one(),
@@ -351,9 +357,31 @@ impl Default for InferencerDraft {
     }
 }
 
-/// The checked binding and tensors of an inferencer.
+/// What `working_memory` keeps from one model run to the next, stated in the inferencer's own
+/// terms, or what the author still has to choose.
+pub(super) fn working_memory_consequence(
+    working_memory: Option<InferencerWorkingMemory>,
+) -> &'static str {
+    match working_memory {
+        None => {
+            "Choose what each branch's model keeps between runs; WORKING MEMORY has no default."
+        }
+        Some(InferencerWorkingMemory::Released) => {
+            "RELEASED frees a run's working memory when the run ends, so between runs each branch \
+             holds only its model. Every run allocates its intermediate tensors again."
+        }
+        Some(InferencerWorkingMemory::Retained) => {
+            "RETAINED keeps each branch's working memory for its next run, up to the largest \
+             run's, until the branch ends. No memory budget counts it; choose it only for a model \
+             you measured to need it."
+        }
+    }
+}
+
+/// The checked binding, working memory and tensors of an inferencer.
 pub(super) struct InferencerParts {
     pub(super) binding: ProcessorBinding,
+    pub(super) working_memory: InferencerWorkingMemory,
     pub(super) inputs: Vec<InferencerTensorMapping>,
     pub(super) state: Vec<InferencerStateBinding>,
     pub(super) output_schema: Vec<InferencerTensorDeclaration>,
@@ -376,11 +404,15 @@ impl InferencerDraft {
     /// form shows through `execution_mode` and the server applies.
     pub(super) fn build(&self) -> error_stack::Result<InferencerParts, ProcessorDraftError> {
         let binding = self.binding.build()?;
+        let Some(working_memory) = self.working_memory else {
+            return Err(Report::new(ProcessorDraftError::WorkingMemory));
+        };
         let inputs = self.build_inputs()?;
         let state = self.build_state()?;
         let output_schema = self.build_outputs()?;
         Ok(InferencerParts {
             binding,
+            working_memory,
             inputs,
             state,
             output_schema,
@@ -615,6 +647,7 @@ mod tests {
             .pin
             .select_version(RequestedResourceVersion::Number(1));
         draft.binding.file = "models/score.onnx".into();
+        draft.working_memory = Some(InferencerWorkingMemory::Released);
         let input = draft.inputs.active_mut().assured("one input exists");
         input.tensor = "features".into();
         input.shape.dimensions = vec![DimensionDraft::Size("2".into())];
@@ -650,6 +683,32 @@ mod tests {
     }
 
     #[test]
+    fn the_working_memory_has_no_default_and_is_chosen_right_after_the_file() {
+        assert_eq!(InferencerDraft::default().working_memory, None);
+        let mut draft = complete();
+        draft.working_memory = None;
+        assert_eq!(refusal(&draft), ProcessorDraftError::WorkingMemory);
+        // The binding comes first in form order, so an unfinished FILE is reported before it.
+        draft.binding.file = String::new();
+        assert_eq!(refusal(&draft), ProcessorDraftError::File);
+        for policy in [
+            InferencerWorkingMemory::Released,
+            InferencerWorkingMemory::Retained,
+        ] {
+            let mut draft = complete();
+            draft.working_memory = Some(policy);
+            let parts = draft.build().assured("a complete draft builds");
+            assert_eq!(parts.working_memory, policy);
+        }
+        let unchosen = working_memory_consequence(None);
+        let released = working_memory_consequence(Some(InferencerWorkingMemory::Released));
+        let retained = working_memory_consequence(Some(InferencerWorkingMemory::Retained));
+        assert!(unchosen.contains("no default"), "{unchosen}");
+        assert!(released.starts_with("RELEASED"), "{released}");
+        assert!(retained.starts_with("RETAINED"), "{retained}");
+    }
+
+    #[test]
     fn tensors_need_names_readable_axes_and_expressions_in_form_order() {
         let mut draft = InferencerDraft::default();
         draft
@@ -661,6 +720,7 @@ mod tests {
             .pin
             .select_version(RequestedResourceVersion::Latest);
         draft.binding.file = "score.onnx".into();
+        draft.working_memory = Some(InferencerWorkingMemory::Retained);
         assert_eq!(
             refusal(&draft),
             ProcessorDraftError::TensorName {
