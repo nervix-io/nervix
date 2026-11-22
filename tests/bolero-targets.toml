@@ -2683,7 +2683,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 87
+domain_version = 88
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules with their branch partition epochs, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2698,7 +2698,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 87
+domain_version = 88
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2713,7 +2713,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 87
+domain_version = 88
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2728,7 +2728,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 69
+domain_version = 70
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -3031,7 +3031,7 @@ corpus = "crates/interconnect/src/connection/__fuzz__/connection__relay_owner__t
 domain_version = 2
 features = []
 id = "relay-admission-owners"
-invariant = "Bounded reservation, body, admission, rejection, cancellation, peer epoch and owner ending sequences preserve every terminal verdict and reclaim configured capacity."
+invariant = "Bounded reservation, body, admission, rejection, cancellation, peer epoch and owner ending sequences preserve every terminal verdict, keep the watermarks charged exactly what they hold, and reclaim configured capacity and relay memory."
 manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-interconnect"
@@ -3043,10 +3043,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/connection/__fuzz__/connection__relay_owner__tests__bolero_relay_channel_turnover_never_admits_an_identity_twice/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "relay-channel-watermark-turnover"
-invariant = "Channel openings, decided outcomes whose deliveries return at once or later, continuations asked for in the receiver's grant order, delayed repeats, idle sweeps and late outcome returns through a peer owner whose three watermarks are fewer than its turnover never admit one delivery identity twice, always admit a channel opened after every forgotten one, give a channel whose latest outcome is decided its next position before that outcome's delivery returns, and keep the retained watermarks within the budget."
+invariant = "Channel openings and continuations whose deliveries capture a short or the default total admission budget, decided outcomes whose deliveries return at once or later, continuations asked for in the receiver's grant order, delayed repeats carrying the budget their delivery captured, sweeps past either retention and late outcome returns through a peer owner never admit one delivery identity twice, always admit a channel opened after every forgotten one, give a channel whose latest outcome is decided its next position before that outcome's delivery returns and answer one it forgot as retired or unopened, keep its watermarks and retired-channel floors charged exactly what they hold, and return all relay memory once the peer ends."
 manifest = "Cargo.toml"
 max_input_bytes = 96
 package = "nervix-interconnect"
@@ -3163,7 +3163,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_relay_messages_reach_the_receiver_whole/corpus"
-domain_version = 27
+domain_version = 28
 features = []
 id = "relay-wire-messages"
 invariant = "Every relay grant request with its captured coherent acknowledgement timing group, delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, its typed refusals included, admission exchange, acknowledgement resolution, connection hello with its prerequisite record and accepted or refused connection answer round trip through the bounded codec, and nothing stays charged."
@@ -3208,7 +3208,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message/corpus"
-domain_version = 27
+domain_version = 28
 features = []
 id = "relay-wire-messages-malformed"
 invariant = "Truncated, bit-flipped or overwritten encodings of every relay message, and arbitrary bytes, fail with the codec's typed decode failure within the depth bound, or decode to a message that encodes and decodes back to itself, and either way leave no charge and no allocation of the decoder behind."
@@ -5115,7 +5115,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/__fuzz__/node_records__tests__bolero_node_records_preserve_every_committed_value/corpus"
-domain_version = 13
+domain_version = 14
 features = []
 id = "node-records"
 invariant = "Every bounded current committed node record, its incarnation-bound capacity claim with unknown host measurements and complete transport, DNS, database, consensus, engine, connector host, runtime, shutdown, receive and listener bounds, every detected and undetected property outcome, and tags at their key, value and count bounds, preserves every value through the production canonical storage codec, as do its announcement requests and every publication outcome."

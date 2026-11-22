@@ -68,8 +68,9 @@ impl TransportState {
         &self,
         node_id: &ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
     ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
-        self.relay_admission_operation(node_id, delivery, RELAY_CANCEL_PATH)
+        self.relay_admission_operation(node_id, delivery, timing, RELAY_CANCEL_PATH)
             .await
     }
 
@@ -77,23 +78,31 @@ impl TransportState {
         &self,
         node_id: &ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
     ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
-        self.relay_admission_operation(node_id, delivery, RELAY_STATUS_PATH)
+        self.relay_admission_operation(node_id, delivery, timing, RELAY_STATUS_PATH)
             .await
     }
 
+    /// Ask `node_id` to cancel `delivery`, whose sender captured `timing`, until it answers a
+    /// terminal status, the transport stops admitting, or the delivery's cancellation window
+    /// passes: its receiver keeps nothing of the delivery to cancel after that.
     pub(super) async fn cancel_relay_until_resolved(
         &self,
         node_id: ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
     ) {
+        let window = self
+            .options
+            .relay_cancellation_retry_window(RelayChannelRetention::captured_by(timing));
         let deadline = Instant::now()
-            .checked_add(self.options.relay_cancellation_retry_window())
-            .assured("the fixed relay cancellation retry window fits the monotonic clock");
+            .checked_add(window)
+            .assured("a delivery's relay cancellation retry window fits the monotonic clock");
         let mut backoff = self.options.reconnect_backoff;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match self.cancel_relay(&node_id, delivery).await {
+            match self.cancel_relay(&node_id, delivery, timing).await {
                 Ok(
                     RelayAdmissionStatus::Admitted
                     | RelayAdmissionStatus::Rejected(_)
@@ -142,6 +151,7 @@ impl TransportState {
         &self,
         node_id: &ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
         path: &str,
     ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
         let timeout_duration = self.options.request_timeout;
@@ -187,6 +197,7 @@ impl TransportState {
                 sender_epoch: self.process_epoch,
                 receiver_epoch,
                 delivery,
+                ack_timing: timing,
             },
         )
         .await?;
@@ -536,23 +547,31 @@ impl TransportState {
         }
     }
 
+    /// Forget what every peer's owner retains past its own retention. Each pass waits a tenth of
+    /// the shortest retention it must honour: the installed committed one, which an owner still
+    /// awaiting membership keeps, and that of everything an owner retains. An installed retention
+    /// or a registration that needs an earlier pass wakes it.
     pub(super) async fn retire_idle_relay_channels(self) {
         loop {
             nervix_primitives::task::consume_budget().await;
             let changed = self.relay_retention_changed.notified();
             let mut changed = std::pin::pin!(changed);
             changed.as_mut().enable();
+            let committed = self.committed_relay_retention();
+            let mut shortest = committed;
             let owners = self.relay_owners.load_full();
-            let mut cadence = self.options.relay_retention.sweep();
             for owner in owners.owners.values() {
-                owner.sweep(Instant::now());
-                cadence = cadence.min((owner.retention() / 10).max(Duration::from_nanos(1)));
+                if let Some(retained) = owner.sweep(Instant::now(), committed)
+                    && retained < shortest
+                {
+                    shortest = retained;
+                }
             }
             self.prune_ended_relay_owners();
             nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => return,
                 _ = changed => {},
-                _ = nervix_primitives::time::sleep(cadence) => {},
+                _ = nervix_primitives::time::sleep(shortest.sweep_interval()) => {},
             }
         }
     }
@@ -587,18 +606,48 @@ impl TransportState {
                 .await?;
             return Ok(());
         }
+        request
+            .ack_timing
+            .validate()
+            .change_context(TransportError::RelayAckTiming)?;
+        let retention = RelayChannelRetention::captured_by(request.ack_timing);
         let attempt = self.relay_attempt_key(peer_node_id, request.sender_epoch, request.delivery);
-        let (status, record_to_retire) = relay_owner.control(&attempt, cancel);
+        let control = if cancel {
+            // A cancellation that fences a position this node never granted records a watermark
+            // there, so it reserves that watermark's charge first. Without room the fence is not
+            // recorded and the sender, answered `Unknown`, asks again.
+            let note = self.executor.try_reserve(
+                MemoryClass::Relay,
+                RelayChannelWatermarks::watermark_charge(),
+            );
+            let fence = match note {
+                Ok(note) => Some(note),
+                Err(refusal) => {
+                    debug!(
+                        error = %format_args!("{refusal:#}"),
+                        "relay memory has no room to fence a cancelled position"
+                    );
+                    None
+                }
+            };
+            RelayControl::Cancel { fence }
+        } else {
+            RelayControl::Status
+        };
+        let answer = relay_owner.control(&attempt, retention, control);
+        if answer.shortens_sweep {
+            self.relay_retention_changed.notify_one();
+        }
         let answered = self
-            .send_relay_admission_response(respond, status.clone())
+            .send_relay_admission_response(respond, answer.status.clone())
             .await?;
         // A terminal status the sender never received stays answerable, so the query it repeats
         // finds the same status rather than an attempt this node already forgot.
         if let RelayAnswer::Sent = answered
-            && let Some(record) = record_to_retire
-            && status.is_terminal()
+            && let Some(record) = answer.record
+            && answer.status.is_terminal()
         {
-            self.retire_relay_record(&record, status);
+            self.retire_relay_record(&record, answer.status);
         }
         Ok(())
     }
@@ -745,7 +794,15 @@ impl TransportState {
                 .send_relay_grant_response(respond, RelayGrantDisposition::Cancelled)
                 .await;
         }
-        if let Some(status) = relay_owner.retired_status(&attempt) {
+        // The retention the delivery captured decides which retired-channel floors refuse it, so a
+        // timing that gives none is refused before the channel is consulted.
+        grant
+            .metadata
+            .ack_timing
+            .validate()
+            .change_context(TransportError::RelayAckTiming)?;
+        let retention = RelayChannelRetention::captured_by(grant.metadata.ack_timing);
+        if let Some(status) = relay_owner.retired_status(&attempt, retention) {
             let disposition = match status {
                 RelayAdmissionStatus::Admitted => RelayGrantDisposition::Admitted,
                 RelayAdmissionStatus::Rejected(reason) => RelayGrantDisposition::Rejected(reason),
@@ -773,7 +830,7 @@ impl TransportState {
             }
             return Ok(());
         }
-        match relay_owner.grant_position(&attempt) {
+        match relay_owner.grant_position(&attempt, retention) {
             RelayGrantPosition::Next => {}
             RelayGrantPosition::Busy => {
                 return self
@@ -814,9 +871,18 @@ impl TransportState {
             .ok_or_else(|| {
                 TransportError::RelayGrant("relay operation limits overflow".to_string())
             })?;
+        // The watermark the delivery's outcome records is part of what the delivery needs, so its
+        // charge is reserved with the delivery's own room: without room for both, the grant is
+        // refused as a capacity refusal the sender holds its delivery back on.
+        let watermark_charge = RelayChannelWatermarks::watermark_charge();
+        let reserved_bytes = operation_bytes
+            .checked_add(watermark_charge)
+            .ok_or_else(|| {
+                TransportError::RelayGrant("relay operation limits overflow".to_string())
+            })?;
         let reservation = match self
             .executor
-            .try_reserve(MemoryClass::Relay, operation_bytes)
+            .try_reserve(MemoryClass::Relay, reserved_bytes)
         {
             Ok(reservation) => reservation,
             Err(error) => {
@@ -826,6 +892,9 @@ impl TransportState {
                     .await;
             }
         };
+        let (note, reservation) = reservation
+            .split(watermark_charge)
+            .verified("the reservation above includes the watermark's charge");
         let Ok(item) = StdArc::clone(&self.relay_items).try_acquire_owned() else {
             return self
                 .refuse_relay_grant(respond, RelayGrantRefusal::QueueItem)
@@ -842,11 +911,6 @@ impl TransportState {
                 .await;
         }
         let grant_id = self.next_grant_id(&relay_owner);
-        grant
-            .metadata
-            .ack_timing
-            .validate()
-            .change_context(TransportError::RelayAckTiming)?;
         let first_report = Instant::now() + grant.metadata.ack_timing.remote_ack_alive_interval;
         let record = StdArc::new(RelayAdmissionRecord {
             attempt: attempt.clone(),
@@ -864,6 +928,7 @@ impl TransportState {
                     _item: item,
                     _terminal: terminal,
                 }),
+                note: Some(note),
                 last_progress: Instant::now(),
             }),
             cancellation: CancellationToken::new(),
@@ -881,9 +946,9 @@ impl TransportState {
             _expiry: CancelOnDrop::new(expiry.clone()),
         };
         match relay_owner.register(grant_id, grant) {
-            RelayGrantRegistration::Registered { retention_changed } => {
+            RelayGrantRegistration::Registered { shortens_sweep } => {
                 self.relay_progress_changed.notify_one();
-                if retention_changed {
+                if shortens_sweep {
                     self.relay_retention_changed.notify_one();
                 }
             }

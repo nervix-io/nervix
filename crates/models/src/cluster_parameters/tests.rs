@@ -529,3 +529,23 @@ fn bounded_counts_preserve_their_complete_public_and_stored_value_domains() {
         ));
     }
 }
+
+/// A delivery's relay channel rotates at its total admission budget and its receiver keeps the
+/// channel for twice that budget, so a sender always resumes a channel its receiver still holds.
+#[test]
+fn a_relay_channel_rotates_before_its_retention_ends() {
+    let default_budget = RemoteAckTiming::default().remote_relay_total_timeout;
+    for budget in [
+        Duration::from_millis(50),
+        default_budget,
+        Duration::from_secs(u64::from(u32::MAX)),
+    ] {
+        let timing = RemoteAckTiming {
+            remote_relay_total_timeout: budget,
+            ..RemoteAckTiming::default()
+        };
+        assert_eq!(timing.relay_channel_idle_rotation(), budget);
+        assert_eq!(timing.relay_channel_retention(), budget * 2);
+        assert!(timing.relay_channel_idle_rotation() < timing.relay_channel_retention());
+    }
+}

@@ -501,8 +501,8 @@ fn interconnect_line(record: &NodeCapabilityRecord) -> String {
     let capacity = record.capabilities.interconnect;
     format!(
         "  interconnect: max-peers={} request-quota={} health-probes={} max-connections={} \
-         handshakes={} queue={} completion={} watermarks={} stream-window={} connection-window={} \
-         setup={} request={} progress={} backoff={} max-backoff={} jitter-permille={}",
+         handshakes={} queue={} completion={} stream-window={} connection-window={} setup={} \
+         request={} progress={} backoff={} max-backoff={} jitter-permille={}",
         capacity.max_peers,
         capacity.request_quota,
         capacity.health_probes,
@@ -510,7 +510,6 @@ fn interconnect_line(record: &NodeCapabilityRecord) -> String {
         capacity.concurrent_handshakes,
         capacity.incoming_queue_capacity,
         capacity.completion_quota,
-        capacity.relay_watermarks,
         capacity.stream_window_bytes,
         capacity.connection_window_bytes,
         timing_text(capacity.connection_setup_timeout),

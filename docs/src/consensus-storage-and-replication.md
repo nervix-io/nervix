@@ -536,10 +536,10 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_watermarks_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_watermarks_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_watermarks_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_watermarks_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement

@@ -646,6 +646,7 @@ fn bolero_relay_messages_reach_the_receiver_whole() {
                     sender_epoch: case.sender_epoch,
                     receiver_epoch: case.receiver_epoch,
                     delivery: case.payload.delivery,
+                    ack_timing: case.payload.ack_timing,
                 };
                 assert_eq!(
                     management_round_trip(&executor, management_limit, admission_request.clone())
@@ -1062,6 +1063,7 @@ fn bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message() {
                             sender_epoch: case.sender_epoch,
                             receiver_epoch: case.receiver_epoch,
                             delivery: case.payload.delivery,
+                            ack_timing: case.payload.ack_timing,
                         };
                         encode_rkyv(
                             &executor,

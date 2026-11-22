@@ -239,9 +239,9 @@ are at most 2³¹−1 bytes. The options are validated before opening stores or 
 Database cache capacities count alongside executor budgets in the startup memory check.
 
 Connection capacity derives from both directions of every pool: twelve connections per declared
-peer, 768 by default. Watermark capacity is eight times the incoming queue. Health-probe fan-out
-and DNS lookup concurrency each equal `interconnect-max-peers`. Completion reserves are at least
-one and otherwise one per sixteen peers, bounded by the incoming queue.
+peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
+`interconnect-max-peers`. Completion reserves are at least one and otherwise one per sixteen peers,
+bounded by the incoming queue.
 
 The default ordinary and append request reserves are now 128, replacing eight for the whole node.
 An append stream retains its admission throughout its lifetime, so eight cannot serve nine
@@ -262,11 +262,16 @@ future probes. A policy update adjusts an outstanding ping's deadline while reta
 The per-node line derives from its published running revision, so an unapplied commit is not
 presented as installed.
 
-Relay reconciliation retains channels for twice the host's total admission bound and sweeps at
-one tenth of that retention: 600s and 60s under the current 300s host contract. These are
-projections of the host's one policy input, without independent flags. An idle sender rotates its
-channel at the host bound, before its receiver can forget the watermark. The runtime settings
-owner retains authority over host admission and acknowledgement cadence.
+Relay reconciliation keeps each retained attempt and outbound correlation for twice the
+`REMOTE_RELAY_TOTAL_TIMEOUT` its delivery captured, each channel watermark for twice the longest one
+among the deliveries it recorded, and an owner still awaiting membership for twice the installed
+committed value. Its sweep passes at one tenth of the shortest retention it must honour: 600s and
+60s at the defaults. These are derivations of the cluster parameter, without flags of their own;
+installing a committed revision moves the owner and sweep values, and a delivery keeps the
+retention it captured. An idle sender rotates its channel at the smallest total admission budget
+its deliveries on that incarnation captured, before its receiver can forget the watermark. Channel
+watermarks and the retired-channel floors forgotten channels leave are charged to the relay memory
+class while they are retained, never counted against a budget of their own.
 
 ### Consensus Capacities
 
@@ -776,8 +781,9 @@ removing its membership first.
 Each remote delivery captures the complete timing group once. Its receiver reports and its sender
 sweeps with that group for the delivery's lifetime. Live changes govern new deliveries; they do
 not shorten an earlier delivery's reporting window. A late sweep counts once and skips missed
-ticks. Channel retention covers the largest accepted admission budget within the peer incarnation,
-and a sender rotates before the shortest retained channel budget can expire.
+ticks. Each retained relay attempt and correlation keeps twice the admission budget of its delivery,
+and a channel watermark twice the longest budget among the deliveries it recorded; a sender rotates
+its channel before that channel's watermark can expire.
 
 The following are node capabilities, resolved through `RuntimeSettings` and announced with the
 node's immutable incarnation-bound claim. Restart to change them. Each has its `NERVIX_`
