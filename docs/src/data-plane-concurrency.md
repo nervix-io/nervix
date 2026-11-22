@@ -843,20 +843,29 @@ supervisor loop, which dispatches the unit's input to its branches and handles e
 `ProcessorNodeCommand`. A checkpoint, a handoff and a WASM reset's preparation drain that input
 before they are handled, which orders them within the data stream.
 
-Until the planes are separate there, each heavy step that loop starts runs as an attempt:
+Until the planes are separate there, the loop runs two heavy steps as attempts: restoring the
+unit's branches, and building a claimed key's branch. Both reopen the retained window state of the
+lifetime they resume, and its decode waits for a place on the bulk workers or for room in a memory
+class. An attempt runs alone while it makes progress, so commands keep their order behind work that
+moves. Once it waits, the loop answers its commands beside it:
 
-- restoring the unit's branches;
-- installing a claimed key's branch;
-- rebuilding branches for a WASM reset;
-- building the branch of a key the unit has not seen.
+- While the restore waits, the loop answers commands that need the branches as unrestored, as
+  [Restoring Processor Branches](./shutdown.md#restoring-processor-branches) states. Those answers
+  are light, so the loop is soon back driving the restore.
+- A claimed key's build that waits goes on on a task of its own and reports the built branch back
+  through the unit's commands. The executor hands a freed place, or freed room, to the waiter first
+  in line, and only that waiter's own progress uses it. A build the loop stopped driving while it
+  handled a heavier command could therefore hold that capacity while the command waited for it.
+  Meanwhile the loop goes on with everything else, further claims build beside it, and the key's
+  input stays parked until the report installs the branch ([Partition transitions and key
+  claims](#partition-transitions-and-key-claims)).
 
-An attempt runs alone while it makes progress, so commands keep their order behind work that moves.
-While it waits for capacity, the loop keeps answering its commands beside it. Data work in a loop
-that still serves both planes, such as a batch a branch task processes, waits for capacity as
-backpressure, and commands queued behind it wait with it until the planes are separate tasks. What each command
-answers meanwhile is stated with its owner: [Restoring Processor
-Branches](./shutdown.md#restoring-processor-branches) for the restore and [Partition transitions and
-key claims](#partition-transitions-and-key-claims) for a claim.
+The loop's other builds reopen no retained window. A new key's branch begins a lifetime of its own,
+so the window state another lifetime left behind is set aside by its header alone, and a WASM
+reset's branches carry guest state. What those builds wait for, such as a guest's instantiation, is
+data work in a loop that still serves both planes, like a batch dispatched to a branch whose input
+is full. It waits for capacity as backpressure, and commands queued behind it wait with it until the
+planes are separate tasks.
 
 ## Mutable Execution State
 
@@ -1902,9 +1911,15 @@ it in. Its key is `(domain, entity, epoch, branch key)`.
    checkpoint. Batches the branch held for `REQUIRED WAIT` are refused, since their
    acknowledgements cannot move between nodes. A materialized holder answers with the key's row.
 3. A processor claimant fetches each checkpoint through `FetchStateCheckpoint` on the bulk pool,
-   writes it under its own placement as the placement's newest revision, starts the branch as a
-   restored lifetime with the holder's incarnation, persists its lifecycle and runs the parked
-   input in arrival order. A materialized claimant takes the released row as one Arrow section of
+   writes it under its own placement as the placement's newest revision, and builds the branch as
+   a restored lifetime with the holder's incarnation. The build reopens the branch's retained state
+   on the node's bulk workers and memory classes, and when they are full it waits for a place or
+   for room rather than being refused and the claim tried again. It runs as an attempt: alone in
+   the unit's supervisor while it makes progress, and once it waits, on a task of its own that
+   reports the built branch back through the unit's commands. Meanwhile the unit answers its
+   commands and takes its other keys' input, the key's input stays parked, and further claims
+   build beside it. The claimant then starts the branch, persists its lifecycle and runs the
+   parked input in arrival order. A materialized claimant takes the released row as one Arrow section of
    the relay's schema, installs it in its state task before anything else of the key, and applies
    the parked batches in arrival order, keeping each key's latest record by timestamp.
 4. Only then does the claimant ask the holder to forget the key: a processor claimant once its
@@ -1917,7 +1932,11 @@ retries the claim, and a holder that restarted restores the released key as a li
 releases it again. A released slot or row expires by the branch TTL counted from its release. Claim
 results reach the claimant's supervisor or state task through its own command channel, so a unit
 keeps answering its holders' requests while its own claims are in flight and two units claiming
-from each other cannot deadlock. A failed step is tried again after the runtime's reconnect backoff,
+from each other cannot deadlock. A claimed branch's build that waits for capacity reports the same
+way, and the end of the unit's moves (its stop, its handoff or its retired transition) ends that
+wait. A retained branch that resumes once its origin is confirmed builds the same way, and a
+forget or the expiry of its released slot while the build waits drops what was built: the key's
+location then resolves as if the slot had never been retained. A failed step is tried again after the runtime's reconnect backoff,
 which grows with each failure; each request is bounded by the partition-transition request's
 deadline.
 
