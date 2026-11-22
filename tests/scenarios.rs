@@ -38785,6 +38785,72 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     }
 }
 
+/// Bounds a payload's delivery from the instant its publishing request began, the anchor of the
+/// "no sooner than" step above. A budget that opened at this step's start would grow by however
+/// long the publishing request took, so a scenario that compares the budget with a route's
+/// cadence could not rely on the two windows staying apart.
+#[then(expr = "the relay subscription receives a payload within {string} after it was published")]
+async fn then_stream_subscription_receives_payload_within_publication_budget(
+    world: &mut ScenarioWorld,
+    budget: String,
+    #[step] step: &Step,
+) {
+    let budget = parse_duration_text(&budget).assured("the receive budget is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("a delivery-budget assertion follows a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step))
+        .trim()
+        .to_string();
+    append_cucumber_log_line(&format!(
+        "awaiting subscription payload containing {} within {budget:?} after publishing",
+        expected_payload.replace('\n', "\\n")
+    ));
+    let deadline = published_at
+        .checked_add(budget)
+        .assured("a scenario's receive budget lies seconds after a recent instant");
+    let mut observed = Vec::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for subscription payload containing {expected_payload} within \
+             {budget:?} after publishing. observed {observed:?}"
+        );
+        let event = world
+            .active_session
+            .as_mut()
+            .assured("the scenario opened its subscription before publishing")
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .unwrap_or_else(|error| panic!("the subscription session failed: {error}"));
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for subscription payload containing {expected_payload} within \
+                 {budget:?} after publishing. observed {observed:?}"
+            );
+        };
+        let read_after = published_at.elapsed();
+        let payload = event.payload;
+        observed.push(payload.clone());
+        world.last_subscription_payload = Some(payload.clone());
+        if !payload.contains(&expected_payload) {
+            continue;
+        }
+        append_cucumber_log_line(&format!(
+            "subscription payload containing {} read {read_after:?} after publishing",
+            expected_payload.replace('\n', "\\n")
+        ));
+        assert!(
+            read_after <= budget,
+            "expected the payload within {budget:?} after publishing, but it was read after \
+             {read_after:?}"
+        );
+        break;
+    }
+}
+
 #[when("the next relay subscription payload is timed")]
 async fn when_the_next_subscription_payload_is_timed(world: &mut ScenarioWorld) {
     assert!(
