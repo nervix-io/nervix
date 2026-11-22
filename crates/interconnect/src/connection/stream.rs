@@ -247,15 +247,19 @@ impl TransportState {
                 return Ok(());
             }
         };
-        let decoded = wire::decode_rkyv_within::<StreamRequestEnvelope>(
-            &self.executor,
-            class.cpu_class(),
-            received.bytes,
-            received.decoding,
+        let decoded = until_reset(
+            &mut respond,
+            wire::decode_rkyv_within::<StreamRequestEnvelope>(
+                &self.executor,
+                class.cpu_class(),
+                received.bytes,
+                received.decoding,
+            ),
         )
         .await;
         let decoded = match decoded {
-            Ok(decoded) => decoded,
+            Ok(Some(decoded)) => decoded,
+            Ok(None) => return Ok(()),
             Err(error) => {
                 send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
                     .await?;

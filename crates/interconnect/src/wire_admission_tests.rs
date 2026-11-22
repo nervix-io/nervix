@@ -785,6 +785,157 @@ fn shuttle_an_answer_waiting_for_a_place_ends_with_its_exchange_or_takes_the_fre
     });
 }
 
+/// Invariant: a received body whose decoding waits for a place on a full class ends in exactly one
+/// of two ways, whichever comes first: the place frees and the whole body is decoded, or the peer
+/// ends the exchange and the decoding gives back its place in line together with the body's charge
+/// and the room its decoding took. While the class stays full the end of the exchange alone ends
+/// the wait, so a decoding that ignored it would never finish. In every interleaving of a place
+/// freeing with an exchange ending, the class refuses nothing, and every job leaves its worker
+/// with its charge: a job the end finds already on its worker finishes its bounded decoding first,
+/// as every running job does.
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_a_received_body_waiting_for_a_place_ends_with_its_exchange_or_takes_the_freed_place() {
+    /// A body as a receiver holds it once it has read it: the encoded answer, charged, with room
+    /// for its decoding as large as the body. Encoded while the class still has a free place.
+    struct ReceivedBody {
+        bytes: ChargedBytes,
+        decoding: nervix_execution::Reservation,
+    }
+
+    async fn received(executor: &Executor) -> ReceivedBody {
+        let bytes = super::encode_rkyv(
+            executor,
+            MemoryClass::Bulk,
+            CpuClass::Bulk,
+            1024 * 1024,
+            answer(),
+        )
+        .await
+        .assured("an idle class encodes the answer");
+        let decoding = executor
+            .reserve(
+                MemoryClass::Bulk,
+                u64::try_from(bytes.len()).assured("an encoded answer's length fits u64"),
+            )
+            .await
+            .assured("an idle class holds the answer's decoding room");
+        ReceivedBody { bytes, decoding }
+    }
+
+    fn decoding(
+        executor: &Executor,
+        body: ReceivedBody,
+    ) -> (
+        nervix_primitives::sync::oneshot::Sender<()>,
+        nervix_primitives::task::JoinHandle<
+            Result<
+                Option<super::Decoded<crate::request::ResponseEnvelope>>,
+                error_stack::Report<crate::TransportError>,
+            >,
+        >,
+    ) {
+        let (end, ended) = nervix_primitives::sync::oneshot::channel::<()>();
+        let executor = executor.clone();
+        let decoding = nervix_primitives::task::spawn(async move {
+            super::until_ended(
+                async move {
+                    ended
+                        .await
+                        .discarded("a decoding that finished first stops waiting for the end");
+                    Ok(())
+                },
+                super::decode_rkyv_within::<crate::request::ResponseEnvelope>(
+                    &executor,
+                    CpuClass::Bulk,
+                    body.bytes,
+                    body.decoding,
+                ),
+            )
+            .await
+        });
+        (end, decoding)
+    }
+
+    nervix_model_harness::shuttle::check_spinning_interleavings(|| {
+        shuttle::future::block_on(async {
+            let executor = one_place_executor();
+            let first = received(&executor).await;
+            // The executor is fresh, so everything it counts is the first body's charge.
+            let first_charge = executor.memory(MemoryClass::Bulk).reserved_bytes;
+            let second = received(&executor).await;
+            let full = FullBulkClass::fill(&executor).await;
+            let held = executor.memory(MemoryClass::Bulk).reserved_bytes;
+
+            // The class stays full, so only the end of the exchange can end this wait.
+            let (end, waiting) = decoding(&executor, first);
+            let ending = nervix_primitives::task::spawn(async move {
+                end.send(())
+                    .assured("the decoding waits for its exchange while its class stays full");
+            });
+            let outcome = waiting
+                .await
+                .assured("the decoding task is joined")
+                .assured("an exchange that ends is not a failure");
+            ending.await.assured("the ending task is joined");
+            assert!(
+                outcome.is_none(),
+                "a class that stays full frees no place for the decoding"
+            );
+            let given_back = held
+                .checked_sub(first_charge)
+                .assured("the held class still counts the first body and its decoding room");
+            assert_eq!(
+                executor.memory(MemoryClass::Bulk).reserved_bytes,
+                given_back,
+                "the ended decoding gave back its body and its decoding room"
+            );
+
+            // A freed place races the end of the next exchange.
+            let (end, waiting) = decoding(&executor, second);
+            let ending = nervix_primitives::task::spawn(async move {
+                end.send(())
+                    .discarded("a decoding that finished first no longer waits for the end");
+            });
+            full.release().await;
+            ending.await.assured("the ending task is joined");
+            let outcome = waiting
+                .await
+                .assured("the decoding task is joined")
+                .assured("neither a freed place nor an ended exchange is a failure");
+            if let Some(decoded) = outcome {
+                let decoded = decoded.into_value();
+                assert_eq!(decoded.class, answer().class);
+                assert_eq!(decoded.request, answer().request);
+                assert_eq!(decoded.result, answer().result);
+            }
+            // The end of an exchange can find the decoding's job already on the class's worker.
+            // Dropping the decoding cannot stop a running job: it finishes its bounded decoding and
+            // only then gives back its worker and its charge, as every running job does. So the
+            // class is idle once a charge of its whole capacity is granted and a job then runs on
+            // its one worker.
+            let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+            let whole_class = executor
+                .reserve(MemoryClass::Bulk, capacity)
+                .await
+                .assured("every charge returns once the last job leaves its worker");
+            executor
+                .run_cpu(CpuClass::Bulk, whole_class, |_charge, _cancellation| ())
+                .await
+                .assured("the last job gives back its worker");
+            let class = executor.snapshot().cpu_class(CpuClass::Bulk);
+            assert_eq!(class.waiting, 0, "no decoding still waits for a place");
+            assert_eq!(class.running, 0, "every job left its worker");
+            assert_eq!(class.pending, 0, "no job keeps a place");
+            assert_eq!(
+                executor.memory(MemoryClass::Bulk).reserved_bytes,
+                0,
+                "no charge remains"
+            );
+        });
+    });
+}
+
 #[cfg(feature = "shuttle")]
 #[test]
 fn shuttle_bulk_receive_admission_releases_held_input_and_cancelled_jobs() {

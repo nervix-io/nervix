@@ -185,6 +185,141 @@ Feature: Work no caller waits on waits for a place in a full worker class
       | 1            |
       | 3            |
 
+  # A state inspection reads its page on the window's owner, whose bulk workers capture and encode
+  # it. With every bulk place on the owner taken, the inspection waits for one instead of answering
+  # that the owner is unavailable, and answers with the window's rows once the class frees.
+  Scenario Outline: A window state inspection waits for a bulk place on the window's owner and answers once it frees on a <cluster_size> node cluster
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( value I64 );
+      CREATE SCHEMA reading_summary ( samples I64, total I64 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY reading_summaries SCHEMA reading_summary UNBRANCHED;
+      CREATE VHOST edge inspection-wait-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
+        TO readings INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR sliding_readings FROM readings
+        WIDTH 2 MESSAGES STEP 1 MESSAGES UNBRANCHED
+        TO reading_summaries SET samples = COUNT(input.value), total = SUM(input.value)
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION reading_summaries_subscription TO reading_summaries;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "window_processor" "sliding_readings" is saved as placeholder "window_owner"
+    And node "node-1" eventually accepts http traffic for host "inspection-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":10}
+      """
+    When http payload is posted to node "node-1" with host "inspection-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":20}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "samples":2,"total":30
+      """
+    When bulk execution on node "{{window_owner}}" is saturated
+    And these Plexus commands begin executing in the background
+      """
+      SHOW WINDOW PROCESSOR sliding_readings STATE FOR UNBRANCHED FORMAT JSON;
+      """
+    Then within "30s" a bulk job waits for a place on node "{{window_owner}}"
+    And the background Plexus execution is still running after "1s"
+    When bulk execution is released on every node
+    Then the background Plexus execution succeeds
+    And the last command output contains
+      """
+      "outcome": "page"
+      """
+    And the last command output contains
+      """
+      "value": 20
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A backup captures each primary's state on the node that owns it and then fetches every captured
+  # section from that node. With every bulk place on the window's owner taken, the capture and the
+  # fetch wait for a place instead of failing the backup, which completes once the class frees.
+  Scenario Outline: A backup waits for bulk places on the window's owner and completes once they free on a <cluster_size> node cluster
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( value I64 );
+      CREATE SCHEMA reading_summary ( samples I64, total I64 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC reading_codec FROM WIRE SCHEMA reading_wire TO SCHEMA reading;
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY reading_summaries SCHEMA reading_summary UNBRANCHED;
+      CREATE VHOST edge backup-wait-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/readings';
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING reading_codec
+        TO readings INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR sliding_readings FROM readings
+        WIDTH 2 MESSAGES STEP 1 MESSAGES UNBRANCHED
+        TO reading_summaries SET samples = COUNT(input.value), total = SUM(input.value)
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION reading_summaries_subscription TO reading_summaries;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "window_processor" "sliding_readings" is saved as placeholder "window_owner"
+    And node "node-1" eventually accepts http traffic for host "backup-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":10}
+      """
+    When http payload is posted to node "node-1" with host "backup-wait-{{test_id}}.example.com" path "/readings"
+      """
+      {"value":20}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "samples":2,"total":30
+      """
+    And the current leader node is saved as placeholder "leader"
+    When bulk execution on node "{{window_owner}}" is saturated
+    And the CLI begins backing up "domain {{domain}} --timeout 2m --backup-wait-timeout 3m" from node "{{leader}}" into "held-bulk.nvxb" in the background
+    Then within "30s" a bulk job waits for a place on node "{{window_owner}}"
+    And the background CLI backup remains pending for "1s"
+    When bulk execution is released on every node
+    Then the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "held-bulk.nvxb" as text
+    Then the CLI output contains "sliding_readings"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   # A materialized relay's checkpoint writer seals its rows into snapshot staging files and
   # publishes them to the owner's state store, on the filesystem workers, at each snapshot interval
   # its state changed in. The node's own maintenance also waits in a full filesystem class, so the

@@ -19,7 +19,7 @@ use nervix_primitives::time::timeout;
 use super::BODY_CHUNK_BYTES;
 use crate::{
     PoolClass, RemoteOperationFailureKind, TransportError, operation::OPERATION_FAILURE_HEADER,
-    request::RemoteRequestFailure,
+    request::RemoteRequestFailure, wire,
 };
 
 /// Read a refused opening under its body and progress bounds, retaining a reported operation
@@ -349,20 +349,20 @@ pub(super) fn declared_length(
     Ok(declared)
 }
 
-/// Run `operation` until it completes or the peer resets the exchange it serves. A receiver that
-/// waits for room to charge a request to ends that wait with the request: `None` once the peer
-/// reset it.
+/// Run `operation` until it completes or the peer resets the exchange it serves, as
+/// [`wire::until_ended`] does. A receiver that waits for room to charge a request to, or for a
+/// place to decode it, ends that wait with the request: `None` once the peer reset it.
 pub(super) async fn until_reset<T>(
     respond: &mut server::SendResponse<Bytes>,
     operation: impl Future<Output = Result<T, Report<TransportError>>>,
 ) -> Result<Option<T>, Report<TransportError>> {
-    nervix_primitives::select! {
-        result = operation => result.map(Some),
-        reset = poll_fn(|context| respond.poll_reset(context)) => {
-            reset.map_err(TransportError::from)?;
-            Ok(None)
-        }
-    }
+    let reset = async {
+        poll_fn(|context| respond.poll_reset(context))
+            .await
+            .map_err(TransportError::from)?;
+        Ok::<(), Report<TransportError>>(())
+    };
+    wire::until_ended(reset, operation).await
 }
 
 /// A body read whole, and the room its decoding takes, charged together with it.

@@ -589,14 +589,20 @@ impl TransportState {
         let Some(received) = until_reset(&mut respond, reading).await? else {
             return Ok(());
         };
-        let request = wire::decode_rkyv_within::<RelayAdmissionRequest>(
-            &self.executor,
-            CpuClass::Control,
-            received.bytes,
-            received.decoding,
+        let Some(request) = until_reset(
+            &mut respond,
+            wire::decode_rkyv_within::<RelayAdmissionRequest>(
+                &self.executor,
+                CpuClass::Control,
+                received.bytes,
+                received.decoding,
+            ),
         )
         .await?
-        .into_value();
+        else {
+            return Ok(());
+        };
+        let request = request.into_value();
         if request.sender_epoch != peer_epoch || request.receiver_epoch != self.process_epoch {
             self.send_relay_admission_response(respond, RelayAdmissionStatus::Indeterminate)
                 .await?;
@@ -751,9 +757,11 @@ impl TransportState {
                 received.decoding,
             ),
         );
-        let decoded = match decoding.await {
-            Ok(decoded) => decoded?,
-            Err(_) => {
+        let decoding = async { Ok::<_, Report<TransportError>>(decoding.await) };
+        let decoded = match until_reset(&mut respond, decoding).await? {
+            None => return Ok(()),
+            Some(Ok(decoded)) => decoded?,
+            Some(Err(_)) => {
                 debug!("relay grant held back: no worker decoded its request within its wait");
                 return self
                     .refuse_relay_grant(respond, RelayGrantRefusal::Memory)

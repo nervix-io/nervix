@@ -825,7 +825,8 @@ and its decoding until the request's own deadline. Each protocol's waits end as 
 | Connection handshake | The dialing node's hello and the accepting node's reading of it, then the accepting node's answer, accepted or refused, and the dialing node's reading of it | The dialing node's setup deadline, which closes the connection |
 | Relay admission status and cancellation | The sender's query, the receiver's reading of it, the receiver's status and the sender's reading of it | The sender's reset; the query's deadline |
 | Relay grant | The sender's grant request, the receiver's reading of it and the whole charge of the operation it grants, then the receiver's disposition and the sender's reading of it | The sender's reset; the wait the sender declared, after which the receiver answers a capacity refusal; the delivery's deadline |
-| Ack resolution | The sender's encoding of the ack and the registrar's reading of it | The send's deadline |
+| Ack resolution | The sender's encoding of the ack and the registrar's reading and decoding of it | The sender's reset; the send's deadline |
+| One-way control frame | The sender's encoding of the frame and the receiver's reading and decoding of it | The sender's reset; the send's deadline |
 | Duplex stream | The opening and every frame either side submits, encoded and decoded | The stream's reset or end; the leader's answer deadline on a Raft append stream, and either side's heartbeat silence limit on a client consumer stream or producer link |
 | Byte stream | The opening, encoded and decoded, every job of the answer once the handler has done its work, and the caller's reading of it | The caller's reset; the stream's progress timeout; the caller's own deadline |
 
@@ -875,9 +876,14 @@ The reasons, protocol by protocol:
   page together with the room its descriptor's decoding takes. Checkpoint, offset, captured-section, snapshot and resource-archive transfers
   already wait for a place on every job of their answers.
 
-A one-way control frame, such as a state replication ack, a checkpoint announcement or a runtime
-error event, waits like every frame: the receiving node reads and decodes it under one charge, which
-stays with the frame until the application takes it.
+A one-way control frame waits like every frame: a replica's state replication ack
+(`StateReplicationAck`), a checkpoint announcement (`StateCheckpointAvailable`), a runtime error
+event (`RuntimeErrorEvent`) and a termination notice (`Terminate`). Each carries a fact its sender
+already established and nobody sends again, so a full class holds the frame back rather than losing
+it. The receiving node reads and decodes the frame under one charge, its body and the room its
+decoding takes, while it holds nothing else of the class, and the charge stays with the frame until
+the application takes it. The sender's reset ends the wait for room and the wait for a place alike
+and gives the charge back, so a frame waits no longer than the exchange that carries it.
 
 The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
 bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of

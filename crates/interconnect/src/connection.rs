@@ -2592,13 +2592,19 @@ impl TransportState {
             let Some(received) = until_reset(&mut respond, reading).await? else {
                 return Ok(());
             };
-            let decoded = wire::decode_rkyv_within::<nervix_models::RemoteAckResolution>(
-                &self.executor,
-                CpuClass::Control,
-                received.bytes,
-                received.decoding,
+            let Some(decoded) = until_reset(
+                &mut respond,
+                wire::decode_rkyv_within::<nervix_models::RemoteAckResolution>(
+                    &self.executor,
+                    CpuClass::Control,
+                    received.bytes,
+                    received.decoding,
+                ),
             )
-            .await?;
+            .await?
+            else {
+                return Ok(());
+            };
             let (ack, reservation) = decoded.into_parts();
             let terminal_admission = if ack.outcome.is_progress() {
                 None
@@ -2722,13 +2728,21 @@ impl TransportState {
         let Some(received) = until_reset(&mut respond, reading).await? else {
             return Ok(());
         };
-        let decoded = wire::decode_rkyv_within::<ControlEnvelope>(
-            &self.executor,
-            peer.class.cpu_class(),
-            received.bytes,
-            received.decoding,
+        // The decoding waits for a place on the class while it holds the body's charge, so the
+        // peer's reset ends that wait too and gives the charge back.
+        let Some(decoded) = until_reset(
+            &mut respond,
+            wire::decode_rkyv_within::<ControlEnvelope>(
+                &self.executor,
+                peer.class.cpu_class(),
+                received.bytes,
+                received.decoding,
+            ),
         )
-        .await?;
+        .await?
+        else {
+            return Ok(());
+        };
         let (control, reservation) = decoded.into_parts();
         if control.pool_class() != peer.class {
             send_response(

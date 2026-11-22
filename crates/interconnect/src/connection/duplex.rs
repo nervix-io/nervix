@@ -49,7 +49,7 @@ use nervix_primitives::{
 
 use super::{
     BODY_CHUNK_BYTES, ClientConnection, DUPLEX_PATH, RawDuplexRequest, StreamLease, TransportState,
-    declared_length, read_body, send_decode_refusal, send_static_error,
+    declared_length, read_body, send_decode_refusal, send_static_error, until_reset,
 };
 
 #[cfg(test)]
@@ -817,9 +817,18 @@ impl TransportState {
         mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
         let frame_limit = class.control_body_limit(&self.executor);
-        let mut reader =
-            FrameReader::open(&self.executor, class.memory_class(), frame_limit, body).await?;
-        let Some(opening) = reader.next_frame().await? else {
+        // The opening's reader, its frame and its decoding each wait for room or a place while the
+        // opening holds part of the class, so the peer's reset ends those waits with the stream.
+        let receiving = async {
+            let mut reader =
+                FrameReader::open(&self.executor, class.memory_class(), frame_limit, body).await?;
+            let opening = reader.next_frame().await?;
+            Ok::<_, Report<TransportError>>((reader, opening))
+        };
+        let Some((reader, opening)) = until_reset(&mut respond, receiving).await? else {
+            return Ok(());
+        };
+        let Some(opening) = opening else {
             send_static_error(
                 &mut respond,
                 StatusCode::BAD_REQUEST,
@@ -829,15 +838,19 @@ impl TransportState {
             .await?;
             return Ok(());
         };
-        let opening = wire::decode_rkyv_payload::<RequestEnvelope>(
-            &self.executor,
-            class.memory_class(),
-            class.cpu_class(),
-            opening,
+        let opening = until_reset(
+            &mut respond,
+            wire::decode_rkyv_payload::<RequestEnvelope>(
+                &self.executor,
+                class.memory_class(),
+                class.cpu_class(),
+                opening,
+            ),
         )
         .await;
         let opening = match opening {
-            Ok(opening) => opening,
+            Ok(Some(opening)) => opening,
+            Ok(None) => return Ok(()),
             Err(error) => {
                 send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
                     .await?;

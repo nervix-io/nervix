@@ -359,6 +359,25 @@ pub(crate) enum AnswerEncoding {
     Ended,
 }
 
+/// Run `operation` until it completes or its exchange ends, whichever comes first.
+///
+/// `ended` resolves once the other side ends the exchange the operation serves, by resetting its
+/// stream or closing its connection. An operation that still waits for a place or for room then
+/// ends with the exchange: it is dropped with its place in line and its charge, and the result is
+/// `None`. A failure `ended` reports instead is returned as it is.
+pub(crate) async fn until_ended<T>(
+    ended: impl Future<Output = Result<(), Report<TransportError>>>,
+    operation: impl Future<Output = Result<T, Report<TransportError>>>,
+) -> Result<Option<T>, Report<TransportError>> {
+    nervix_primitives::select! {
+        result = operation => result.map(Some),
+        ended = ended => {
+            ended?;
+            Ok(None)
+        }
+    }
+}
+
 /// Serialize the answer to a request whose handler already ran, as [`encode_rkyv`] does.
 ///
 /// The answer carries work the handler already did, so a full class holds the encoding back until
@@ -378,12 +397,9 @@ where
     T: Send + 'static + for<'a, 'b> Serialize<MessageSerializer<'a, 'b>>,
 {
     let encoding = encode_rkyv(executor, class, cpu, limit, value);
-    nervix_primitives::select! {
-        encoded = encoding => Ok(AnswerEncoding::Encoded(encoded?)),
-        ended = ended => {
-            ended?;
-            Ok(AnswerEncoding::Ended)
-        }
+    match until_ended(ended, encoding).await? {
+        Some(encoded) => Ok(AnswerEncoding::Encoded(encoded)),
+        None => Ok(AnswerEncoding::Ended),
     }
 }
 
