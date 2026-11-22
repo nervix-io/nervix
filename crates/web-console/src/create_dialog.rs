@@ -174,6 +174,8 @@ use ingestor_route_draft::{InheritDraft, MessageErrorDraft, RouteBranchDraft};
 use ingestor_source_draft::IngestorEntityDraftError;
 use labels_draft::{CreationLabelsDraft, LabelEditDraft, LabelsDraftError};
 pub(crate) use labels_draft::{LabelTarget, LabelTargetKind};
+#[cfg(test)]
+use labels_editor::ignore_test_label_read;
 use labels_editor::{CreationLabelsEditor, LabelEditEditor};
 pub(crate) use labels_editor::{KnownLabelTarget, LabelReadResponse};
 use placement_draft::{PlacementCoverage, PlacementDraft, PlacementDraftError, PlacementForm};
@@ -1171,25 +1173,20 @@ impl CreateSignals {
         Some(self.processor(family))
     }
 
-    /// The submission of one processor form: its complete Model in the captured domain, with any
-    /// resource binding at its requested version.
+    /// The submission of one processor form: its complete Model, with `labels`, in the captured
+    /// domain, with any resource binding at its requested version.
     fn processor_submission(
         self,
         kind: CreateKind,
         family: ProcessorFamily,
         captured_domain: Option<DomainName>,
+        labels: nervix_models::EntityLabels,
     ) -> error_stack::Result<CreateSubmission, CreateDraftError> {
         let scope =
             captured_domain.ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
         let draft = self.processor(family).get_untracked();
         let model = draft.build().map_err(draft_error)?;
-        CreateSubmission::domain_requested_model(
-            kind,
-            model,
-            draft.if_not_exists,
-            scope,
-            self.creation_labels_of(kind)?,
-        )
+        CreateSubmission::domain_requested_model(kind, model, draft.if_not_exists, scope, labels)
     }
 
     pub(crate) fn new() -> Self {
@@ -2009,11 +2006,10 @@ impl CreateSignals {
             .get_untracked()
             .ok_or_else(|| Report::new(CreateDraftError::KindRequired))?;
         let captured_domain = self.captured_domain.get_untracked();
+        // The label rows of the open form; a form that stores no entity has none.
+        let labels = self.creation_labels_of(kind)?;
         match kind {
-            CreateKind::Domain => self
-                .domain
-                .get_untracked()
-                .submission(self.creation_labels_of(kind)?),
+            CreateKind::Domain => self.domain.get_untracked().submission(labels),
             CreateKind::Model(ModelKind::Placement) => {
                 let scope = captured_domain
                     .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
@@ -2023,17 +2019,14 @@ impl CreateSignals {
                     Model::Placement(draft.build().map_err(draft_error)?),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
-            CreateKind::User => self
-                .user
-                .get_untracked()
-                .submission(self.creation_labels_of(kind)?),
+            CreateKind::User => self.user.get_untracked().submission(labels),
             CreateKind::Resource => self
                 .resource
                 .get_untracked()
-                .submission(captured_domain, self.creation_labels_of(kind)?),
+                .submission(captured_domain, labels),
             CreateKind::Model(ModelKind::Schema)
             | CreateKind::Model(ModelKind::WireJsonSchema)
             | CreateKind::Model(ModelKind::WireCborSchema)
@@ -2062,13 +2055,7 @@ impl CreateSignals {
                         )
                     }
                 };
-                CreateSubmission::domain_model(
-                    kind,
-                    model,
-                    if_not_exists,
-                    scope,
-                    self.creation_labels_of(kind)?,
-                )
+                CreateSubmission::domain_model(kind, model, if_not_exists, scope, labels)
             }
             CreateKind::Model(ModelKind::Relay) => {
                 let scope = captured_domain
@@ -2080,7 +2067,7 @@ impl CreateSignals {
                     Model::Relay(relay),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Codec) => {
@@ -2093,7 +2080,7 @@ impl CreateSignals {
                     Model::Codec(codec),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::SignalingProtocol) => {
@@ -2106,7 +2093,7 @@ impl CreateSignals {
                     Model::SignalingProtocol(protocol),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Client) => {
@@ -2120,7 +2107,7 @@ impl CreateSignals {
                     completed.presentation,
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Vhost) => {
@@ -2133,7 +2120,7 @@ impl CreateSignals {
                     Model::Vhost(vhost),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Endpoint) => {
@@ -2146,7 +2133,7 @@ impl CreateSignals {
                     Model::Endpoint(endpoint),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Lookup) => {
@@ -2159,7 +2146,7 @@ impl CreateSignals {
                     Model::Lookup(lookup),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Udf) => {
@@ -2172,7 +2159,7 @@ impl CreateSignals {
                     Model::Udf(udf),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Ingestor) => {
@@ -2185,7 +2172,7 @@ impl CreateSignals {
                     Model::Ingestor(ingestor),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
             CreateKind::Model(ModelKind::Emitter) => {
@@ -2198,35 +2185,24 @@ impl CreateSignals {
                     Model::Emitter(emitter),
                     draft.if_not_exists,
                     scope,
-                    self.creation_labels_of(kind)?,
+                    labels,
                 )
             }
-            CreateKind::Model(ModelKind::Junction) => {
-                self.processor_submission(kind, ProcessorFamily::Junction, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Deduplicator) => {
-                self.processor_submission(kind, ProcessorFamily::Deduplicator, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Reorderer) => {
-                self.processor_submission(kind, ProcessorFamily::Reorderer, captured_domain)
-            }
-            CreateKind::Model(ModelKind::WindowProcessor) => {
-                self.processor_submission(kind, ProcessorFamily::Window, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Correlator) => {
-                self.processor_submission(kind, ProcessorFamily::Correlator, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Reingestor) => {
-                self.processor_submission(kind, ProcessorFamily::Reingestor, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Generator) => {
-                self.processor_submission(kind, ProcessorFamily::Generator, captured_domain)
-            }
-            CreateKind::Model(ModelKind::Inferencer) => {
-                self.processor_submission(kind, ProcessorFamily::Inferencer, captured_domain)
-            }
-            CreateKind::Model(ModelKind::WasmProcessor) => {
-                self.processor_submission(kind, ProcessorFamily::Wasm, captured_domain)
+            CreateKind::Model(
+                ModelKind::Junction
+                | ModelKind::Deduplicator
+                | ModelKind::Reorderer
+                | ModelKind::WindowProcessor
+                | ModelKind::Correlator
+                | ModelKind::Reingestor
+                | ModelKind::Generator
+                | ModelKind::Inferencer
+                | ModelKind::WasmProcessor,
+            ) => {
+                let family = kind
+                    .processor_family()
+                    .assured("every processor kind names its processor family");
+                self.processor_submission(kind, family, captured_domain, labels)
             }
             CreateKind::Subscription => {
                 let scope = captured_domain
@@ -2988,12 +2964,6 @@ fn event_target_checked(event: &ev::Event) -> bool {
 /// one named function lets all of those tests render a single instantiation of the dialog's views.
 #[cfg(test)]
 fn ignore_test_submission(_submission: CreateSubmission, _attempt: u64, _revision: u64) {}
-
-/// The label read of every test that renders the dialog and never reads labels.
-#[cfg(test)]
-fn ignore_test_label_read() -> Callback<LabelTarget> {
-    Callback::new(|_target: LabelTarget| {})
-}
 
 #[cfg(test)]
 #[cfg_attr(

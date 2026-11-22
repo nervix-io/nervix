@@ -592,3 +592,9 @@ fn AddedLabelsEditor(signals: CreateSignals) -> impl IntoView {
     }
     .into_any()
 }
+
+/// The label read of every test that renders the dialog and never reads labels.
+#[cfg(test)]
+pub(super) fn ignore_test_label_read() -> Callback<LabelTarget> {
+    Callback::new(|_target: LabelTarget| {})
+}
