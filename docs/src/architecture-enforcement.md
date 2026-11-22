@@ -237,8 +237,8 @@ constant is diagnosed once, at its name, together with its whole initializer.
 A call is a site when a numeric literal appears anywhere in its arguments, arithmetic included,
 and its resolved callee constructs a `Duration` (`Duration::new` or a `Duration::from_*`
 constructor), chooses a `with_capacity*` capacity, constructs a `channel` (not a watch
-channel, whose argument is its initial value), `bounded` or `sync_channel` channel, constructs a
-`Semaphore` or an `ArrayQueue`, or calls `add_permits`. A capacity supplied entirely by a named
+channel, whose argument is its initial value), `bounded` or `sync_channel` channel through its
+channel module's function, constructs a `Semaphore` or an `ArrayQueue`, or calls `add_permits`. A capacity supplied entirely by a named
 value or computed from typed input, such as `header.len() + size_of::<u32>()`, is not a site. A
 call is diagnosed at its callee's token. The same names on an unrelated owner choose nothing.
 
@@ -254,8 +254,9 @@ These are outside the rule:
   `#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "..."))]` contract. The contract
   validation refuses a missing or empty reason, another kind, a duplicate and any placement but a
   constant, as `nervix::invalid_contract`.
-- The `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates, whose numbers shape
-  test inputs and measurements.
+- Every target of the `arbitrary`, `benchmark`, `model-harness` and `test-environment` packages
+  and of the `paced-simulation` example, whose numbers shape test inputs, measurements and a
+  demonstration, the benchmark's load binaries included.
 - Code the matrix does not compile: test targets and `cfg(test)` modules, and any configuration
   that `configurations.toml` does not declare, as for every compiler rule.
 - Items a derive or attribute macro generates, which are the macro's rather than authored, also

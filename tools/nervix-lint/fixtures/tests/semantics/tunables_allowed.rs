@@ -77,6 +77,17 @@ pub fn current() -> watch::Receiver<u32> {
     receiver
 }
 
+/// A method named after a channel constructor on another owner constructs no channel.
+pub struct Mixer;
+impl Mixer {
+    pub fn channel(&self, index: usize) -> usize {
+        index
+    }
+}
+pub fn mixed(mixer: &Mixer) -> usize {
+    mixer.channel(3)
+}
+
 /// A derive's generated items are the derive's, even when it names one with an authored token:
 /// bytecheck declares each variant's discriminant as a `u8` constant named after the variant.
 #[derive(nervix_lint_fixtures::bytecheck::CheckBytes)]

@@ -16,7 +16,7 @@ use rustc_lint_defs::declare_tool_lint;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::{
     Span, Symbol,
-    def_id::{DefId, LOCAL_CRATE, LocalDefId},
+    def_id::{DefId, LocalDefId},
     hygiene::{ExpnKind, MacroKind},
 };
 
@@ -24,18 +24,25 @@ use crate::contracts::{Flow, contract_attribute, meta_items};
 
 declare_tool_lint! { pub nervix::HIDDEN_TUNABLE, Deny, "numeric policy belongs to a class-typed setting, a derivation from typed input or a fixed-value contract", @report_in_external_macro = true }
 
-/// Generators, benchmarks, model checks and test services: their numbers shape test inputs and
-/// measurements, never node or client policy.
-const EXCLUDED_CRATES: [&str; 4] = [
-    "nervix_arbitrary",
-    "nervix_benchmark",
-    "nervix_model_harness",
-    "nervix_test_environment",
+/// Generators, benchmarks, model checks, test services and the client example: their numbers
+/// shape test inputs, measurements and a demonstration, never node or client policy. Every target
+/// of such a package is outside the rule, its binaries included.
+const EXCLUDED_PACKAGES: [&str; 5] = [
+    "nervix-arbitrary",
+    "nervix-benchmark",
+    "nervix-model-harness",
+    "nervix-paced-simulation",
+    "nervix-test-environment",
 ];
 
-fn excluded(tcx: TyCtxt<'_>) -> bool {
-    let name = tcx.crate_name(LOCAL_CRATE);
-    EXCLUDED_CRATES.contains(&name.as_str())
+/// Whether the crate being checked is a target of an excluded package. A package's binaries
+/// compile as crates of their own names, so the package is the one Cargo names in
+/// `CARGO_PKG_NAME` for every crate it compiles.
+fn excluded() -> bool {
+    match std::env::var("CARGO_PKG_NAME") {
+        Ok(package) => EXCLUDED_PACKAGES.contains(&package.as_str()),
+        Err(_) => false,
+    }
 }
 
 /// The governed numeric types, resolved through aliases, imports and reexports.
@@ -326,7 +333,7 @@ impl TunableRules {
         node: HirId,
         flow: &mut Flow,
     ) {
-        if excluded(cx.tcx) {
+        if excluded() {
             return;
         }
         let definition = definition.to_def_id();
@@ -389,7 +396,7 @@ fn owner_type(cx: &LateContext<'_>, definition: DefId) -> Option<DefId> {
 }
 
 fn policy(cx: &LateContext<'_>, definition: DefId) -> Option<Policy> {
-    let name = cx.tcx.item_name(definition);
+    let name = cx.tcx.opt_item_name(definition)?;
     let name = name.as_str();
     if name.starts_with("with_capacity") {
         return Some(Policy::Capacity);
@@ -397,13 +404,18 @@ fn policy(cx: &LateContext<'_>, definition: DefId) -> Option<Policy> {
     if name == "add_permits" {
         return Some(Policy::Permits);
     }
-    if matches!(name, "bounded" | "sync_channel") {
-        return Some(Policy::Channel);
-    }
-    if name == "channel" {
-        // A watch channel's argument is its initial value, not a capacity.
+    if matches!(name, "bounded" | "sync_channel" | "channel") {
+        // A channel constructor is a function of its channel's module; a method of the same name
+        // on another owner constructs no channel.
         let module = cx.tcx.opt_parent(definition)?;
-        if cx.tcx.item_name(module).as_str() == "watch" {
+        if !matches!(cx.tcx.def_kind(module), DefKind::Mod) {
+            return None;
+        }
+        // A watch channel's argument is its initial value, not a capacity.
+        if name == "channel"
+            && let Some(module_name) = cx.tcx.opt_item_name(module)
+            && module_name.as_str() == "watch"
+        {
             return None;
         }
         return Some(Policy::Channel);
@@ -485,7 +497,7 @@ fn callee<'tcx>(cx: &LateContext<'tcx>, expression: &'tcx Expr<'tcx>) -> Option<
 }
 
 pub fn expression<'tcx>(cx: &LateContext<'tcx>, expression: &'tcx Expr<'tcx>, flow: &mut Flow) {
-    if excluded(cx.tcx) {
+    if excluded() {
         return;
     }
     let Some(call) = callee(cx, expression) else {

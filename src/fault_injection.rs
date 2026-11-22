@@ -69,6 +69,7 @@ mod execution;
 mod explicit_commit;
 mod forced_recovery;
 mod handoff_gate_link;
+mod ingestor_fault;
 mod interest_visibility;
 mod licensing;
 mod listener_accept;
@@ -1193,21 +1194,6 @@ impl FaultInjection {
         keyspace.rotate_memtable_and_wait()
     }
 
-    /// Holds `ingestor` failed until [`Self::clear_ingestor_fault`]. Its task reports the failed
-    /// intake with `recheck` as its retry backoff and checks every `recheck` whether it may run
-    /// again.
-    pub fn fail_ingestor(&self, ingestor: &str, recheck: Duration) {
-        self.inner
-            .failed_ingestors
-            .insert(ingestor.to_ascii_lowercase(), recheck);
-    }
-
-    pub fn clear_ingestor_fault(&self, ingestor: &str) {
-        self.inner
-            .failed_ingestors
-            .remove(&ingestor.to_ascii_lowercase());
-    }
-
     pub fn fail_emitter_client_unavailable(&self, emitter: &str) {
         self.inner
             .unavailable_emitter_clients
@@ -2185,40 +2171,6 @@ impl FaultInjection {
                 to_node_id,
             })
             .means_shutdown("leadership transfer watcher");
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the scenario selects one retained ingestor failure seam",
-            key = "one test ingestor",
-            bound = "one keyed presence read with no retained guard"
-        )
-    )]
-    pub(crate) fn ingestor_is_failed(&self, ingestor: &IngestorName) -> bool {
-        self.inner
-            .failed_ingestors
-            .contains_key(&ingestor.as_str().to_ascii_lowercase())
-    }
-
-    /// How often `ingestor` rechecks whether it may run again while the scenario holds it failed,
-    /// absent while it is not failed.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the scenario selects one retained ingestor failure seam",
-            key = "one test ingestor",
-            bound = "one keyed read of a copied recheck cadence with no retained guard"
-        )
-    )]
-    pub(crate) fn failed_ingestor_recheck(&self, ingestor: &IngestorName) -> Option<Duration> {
-        let recheck = self
-            .inner
-            .failed_ingestors
-            .get(&ingestor.as_str().to_ascii_lowercase())?;
-        Some(*recheck)
     }
 
     #[cfg_attr(

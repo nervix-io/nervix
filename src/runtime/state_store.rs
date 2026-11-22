@@ -37,6 +37,7 @@ pub(super) mod checkpoint_reader;
 mod checkpoint_stream;
 mod durability;
 pub(super) mod generation;
+mod key_segments;
 mod maintenance;
 
 #[cfg(test)]
@@ -72,63 +73,10 @@ mod wasm_properties;
 
 use durability::DurabilityBarrier;
 use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
-
-/// The byte that opens the generation segment of a WASM guest state key. A key without it was not
-/// written in the current shape and fails to decode instead of addressing the current lifetime.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the stored WASM guest state key format opens its generation segment with g"
-    )
-)]
-const STATE_GENERATION_KEY_MARKER: u8 = b'g';
-
-/// The byte that opens the pinned model fingerprint segment of an inferencer state key.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the stored inferencer key format prefixes its model with m"
-    )
-)]
-const STATE_MODEL_KEY_MARKER: u8 = b'm';
-
-/// The byte that opens the schema fingerprint segment of every schema-bound state key.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the stored state key format opens a schema-bound key's fingerprint segment with \
-                  s"
-    )
-)]
-const STATE_SCHEMA_KEY_MARKER: u8 = b's';
-/// The current key's unit segment. A missing marker is an invalid stored shape.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(fixed, reason = "unit identity is part of the stored key format")
-)]
-const STATE_UNIT_KEY_MARKER: u8 = b'U';
-
-fn append_unit_key(key: &mut Vec<u8>, unit: Unit) {
-    key.push(0);
-    key.push(STATE_UNIT_KEY_MARKER);
-    match unit.kind() {
-        nervix_models::UnitKind::Single => {
-            key.push(0);
-            key.extend_from_slice(&0_u32.to_be_bytes());
-        }
-        nervix_models::UnitKind::Partition(partition) => {
-            key.push(1);
-            key.extend_from_slice(&partition.to_be_bytes());
-        }
-        nervix_models::UnitKind::Instance(instance) => {
-            key.push(2);
-            key.extend_from_slice(&instance.to_be_bytes());
-        }
-    }
-}
+use key_segments::{
+    STATE_GENERATION_KEY_MARKER, STATE_MODEL_KEY_MARKER, STATE_SCHEMA_KEY_MARKER,
+    STATE_UNIT_KEY_MARKER, append_unit_key,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
