@@ -192,23 +192,23 @@ mod tests {
     /// failure, the deadline that bounds the readiness wait included, ends the change that waits.
     #[test]
     fn only_a_revision_some_node_has_not_prepared_or_readied_is_waited_out() {
-        let pending_nodes =
-            vec![ClusterNodeName::parse("node-2").assured("the test node name is valid")];
+        let node = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let preparation = RuntimeError::RuntimeRevisionPreparation {
             revision: 7,
-            pending_nodes: pending_nodes.clone(),
+            pending_nodes: vec![node.clone()],
         };
         let readiness = RuntimeError::RuntimeRevisionReadiness {
             revision: 7,
-            pending_nodes,
+            pending_nodes: vec![node.clone()],
         };
+        let apply = RuntimeError::ApplyRevision { node, revision: 7 };
         let deadline = RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
             node_unavailability_timeout: Duration::MAX,
             readiness_propagation_bound: Duration::from_secs(1),
         };
         assert!(preparation.waits_for_readiness());
         assert!(readiness.waits_for_readiness());
-        assert!(!RuntimeError::ApplyRevision { revision: 7 }.waits_for_readiness());
+        assert!(!apply.waits_for_readiness());
         assert!(!RuntimeError::StartIngestors { revision: 7 }.waits_for_readiness());
         assert!(!deadline.waits_for_readiness());
     }

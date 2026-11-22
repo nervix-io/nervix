@@ -378,6 +378,7 @@ impl SessionServiceImpl {
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
+    use nervix_models::ClusterNodeName;
 
     use super::*;
 
@@ -386,15 +387,16 @@ mod tests {
     #[test]
     fn an_activation_failure_names_the_started_domain_and_its_cause() {
         let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+        let node = ClusterNodeName::parse("node-2").assured("the test node name is valid");
         let answer = DomainStartError::activation_failure(
             &domain,
-            Report::new(RuntimeError::ApplyRevision { revision: 3 }),
+            Report::new(RuntimeError::ApplyRevision { node, revision: 3 }),
         );
         assert!(!answer.succeeded());
         assert_eq!(
             answer.message,
-            "started domain 'tenant', but runtime activation did not complete: failed to apply \
-             runtime revision 3"
+            "started domain 'tenant', but runtime activation did not complete: node 'node-2' \
+             failed to apply runtime revision 3"
         );
     }
 

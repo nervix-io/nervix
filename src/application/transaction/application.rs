@@ -25,10 +25,7 @@ use nervix_primitives::time::sleep;
 use nervix_recovery::Reported as _;
 
 use super::{TransactionApplicationAttempt, TransactionCommitError, TransactionStepImpactRecorder};
-use crate::{
-    application::{domain_clock::current_timestamp, session_service::SessionServiceImpl},
-    runtime::RuntimeError,
-};
+use crate::application::{domain_clock::current_timestamp, session_service::SessionServiceImpl};
 
 impl SessionServiceImpl {
     pub(super) async fn complete_transaction_application(
