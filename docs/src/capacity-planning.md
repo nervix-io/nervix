@@ -135,6 +135,9 @@ views leave live relay capacity available for evaluation, encoding and dispatch,
 count in the startup memory total.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
+The node refuses to start unless the budget holds a follower's whole resident replication window
+beside that working set, 8 MiB and 16 MiB at the defaults, so a follower's durable append never
+waits for room its own window holds.
 Consensus storage operations that need that working set queue at the store rather than in the
 budget, so the rest of it stays with command and replication traffic and with ingestor control calls
 while they wait; see

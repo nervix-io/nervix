@@ -513,10 +513,11 @@ async fn a_credentials_budget_below_one_password_hash_fails_to_start() {
     );
 }
 
-/// A follower charges every decoded replication batch until its Raft core answers it, and encodes
-/// that answer against the same class. A budget that cannot hold the whole resident window beside
-/// one batch being encoded would let a full window leave no room to produce the answer that
-/// releases it, so the node refuses to start instead of deadlocking on its first catch-up.
+/// A follower charges every decoded replication batch until its Raft core answers it, and the
+/// durable append of those entries takes one command state storage working set from the same class.
+/// A budget that cannot hold the whole resident window beside that working set would let a full
+/// window leave no room for the append that releases it, so the node refuses to start instead of
+/// deadlocking on its first catch-up.
 #[nervix_primitives::test]
 async fn a_commands_budget_below_the_resident_replication_window_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
@@ -535,9 +536,9 @@ async fn a_commands_budget_below_the_resident_replication_window_fails_to_start(
         *error.current_context(),
         ExecutionConfigError::BudgetBelowOperation {
             class: "commands",
-            operation: "resident replication batches beside one being encoded",
+            operation: "resident replication batches beside one command state storage working set",
             budget: ByteUnit::Mebibyte(16).as_u64(),
-            required: ByteUnit::Mebibyte(18).as_u64(),
+            required: ByteUnit::Mebibyte(32).as_u64(),
         }
     );
 }
@@ -556,9 +557,33 @@ async fn a_commands_budget_below_one_normalized_state_write_fails_to_start() {
         *error.current_context(),
         ExecutionConfigError::BudgetBelowOperation {
             class: "commands",
-            operation: "normalized command state storage",
+            operation: "resident replication batches beside one command state storage working set",
             budget: ByteUnit::Mebibyte(15).as_u64(),
-            required: ByteUnit::Mebibyte(16).as_u64(),
+            required: ByteUnit::Mebibyte(24).as_u64(),
+        }
+    );
+}
+
+/// A commands budget that holds a follower's full resident window, or one command state storage
+/// working set, but not both, lets a follower whose window is full wait for room only its own
+/// window releases, so the node refuses to start.
+#[nervix_primitives::test]
+async fn a_commands_budget_holding_the_window_or_one_state_write_but_not_both_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            commands: ByteUnit::Mebibyte(20),
+            ..MemoryBudgets::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("a commands budget below the window beside one state write is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::BudgetBelowOperation {
+            class: "commands",
+            operation: "resident replication batches beside one command state storage working set",
+            budget: ByteUnit::Mebibyte(20).as_u64(),
+            required: ByteUnit::Mebibyte(24).as_u64(),
         }
     );
 }

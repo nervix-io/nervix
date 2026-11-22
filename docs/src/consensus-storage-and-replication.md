@@ -347,7 +347,9 @@ window is four decoded batches per live stream. Reaching the window stops frame 
 batch is decoded, closes the HTTP/2 flow-control window, and makes the leader wait.
 
 The default 24 MiB Commands budget is validated to hold the complete resident window beside one
-maximum-size 2 MiB batch being encoded. Other command and replication work shares that aggregate
+command state storage working set, the room the durable append of those entries waits for, and
+beside one maximum-size 2 MiB batch being encoded. A follower whose window is full therefore never
+waits for room only its own window can release: its append waits only for room other work frees. Other command and replication work shares that aggregate
 budget, so concurrent or superseded streams cannot grow memory without admission. Ending a stream
 releases its queued batches and reservations; batches from a generation the leader abandoned do not
 remain uncharged in the Raft core.
