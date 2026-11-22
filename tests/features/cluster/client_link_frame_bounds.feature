@@ -185,3 +185,30 @@ Feature: Client link frames within both nodes' relay bounds
     # node-2 serves this consumer, so it would receive every delivery chunk.
     Given client "reader" is connected to node "node-2"
     Then client "reader" cannot open a consumer on emitter "output" expecting fields "id STRING, amount I64" because "node capacity exhausted"
+
+  # A node encodes every frame it sends within its relay encoded limit, and 64 bytes cannot hold a
+  # Submit frame's envelope beside a byte of batch.
+  @client_link_frame_bound
+  Scenario: A node whose relay encoded limit cannot carry one batch refuses to forward a producer as node capacity exhausted
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And node-2 starts with execution-relay-encoded-bytes = 64B
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA records (id STRING, amount I64);
+      CREATE RELAY outbox SCHEMA records UNBRANCHED;
+      CREATE CLIENT PRODUCER INGESTOR input
+        FROM SCHEMA records MODE ACK SEQUENTIAL ACK TIMEOUT 1m
+          RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND TIMESTAMP NOW
+        TO outbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      RELOCATE INGESTOR input ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY outbox ONTO NODE node-1 IGNORE PREFERENCES;
+      """
+    Then within "30s" node "node-2" eventually reports scheduled "ingestor" "input" owner "node-1"
+    # node-2 serves this producer, so it would send every batch to node-1.
+    Given client "app" is connected to node "node-2"
+    Then client "app" cannot open a producer on ingestor "input" expecting fields "id STRING, amount I64" because "node capacity exhausted"
