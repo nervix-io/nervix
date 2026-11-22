@@ -526,7 +526,7 @@ generation as committed. Successful replies build no failure context.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical Plexus cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | Plexus language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), request work refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. Already accepted data waits for a CPU place under its owner's lifetime. A refusal judged nothing, so it stays retryable: an endpoint answers a body its sender still holds as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. Work a source or a peer already handed over, and every planned step of the node's own lifecycle, is never refused for a full queue: it waits for a place, and whatever feeds it is held back meanwhile. That covers every payload an ingestor takes, acknowledged or not, a payload a quiesce buffer retained, a paced poll, a WebSocket frame in `MODE NO ACK`, a consensus log write, checkpoints, state transfers and partition moves, relay slicing, subscription fan-out, every answer one node sends another once its handler ran (a typed response, a duplex answer, a state inspection page, a connection answer, a relay status or grant answer) and an ack resolution, module and UDF compilation, the resource store's file work, and the job that admits one key group into a keyspace a restore is converting. A processor task's restore of its branches is the one lifecycle step still refused: it runs inline before the task answers its commands, so a full bulk queue fails the attempt, the task keeps answering as unrestored and retries after a backoff, and the checkpoint stays where it is ([Restoring Processor Branches](./shutdown.md#restoring-processor-branches)). An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a budgeted buffer whose growth its class did not back (`BufferGrowthError::NotCharged`, with that `AdmissionError` beneath it) or that would pass its operation's limit (`BufferGrowthError::LimitExceeded`), request work refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. Already accepted data waits for a CPU place under its owner's lifetime. A refusal judged nothing, so it stays retryable: an endpoint answers a body its sender still holds as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. Work a source or a peer already handed over, and every planned step of the node's own lifecycle, is never refused for a full queue: it waits for a place, and whatever feeds it is held back meanwhile. That covers every payload an ingestor takes, acknowledged or not, a payload a quiesce buffer retained, a paced poll, a WebSocket frame in `MODE NO ACK`, a consensus log write, checkpoints, state transfers and partition moves, relay slicing, subscription fan-out, every answer one node sends another once its handler ran (a typed response, a duplex answer, a state inspection page, a connection answer, a relay status or grant answer) and an ack resolution, module and UDF compilation, the resource store's file work, and the job that admits one key group into a keyspace a restore is converting. A processor task's restore of its branches waits too: its executor handle tells the task while the restore waits for a place or for room, and the task answers its commands as unrestored meanwhile instead of waiting with it ([Restoring Processor Branches](./shutdown.md#restoring-processor-branches)). An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. The executor catches it at that callback, reports `JobPanicked` to its caller, completes its service accounting and continues draining its admitted successors. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external ingestor and emitter outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from an ingestor or emitter failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -667,7 +667,7 @@ reported; this conversion does not turn them into report allocations per row.
 
 A compile failure fails validation or binding as a report. An evaluation failure of one row is a
 row error in the batch's outcome, which the route's `ON MESSAGE ERROR` policy receives as a message
-error with the `evaluation` code, and only a failure of the batch as a whole is a runtime report.
+error with the `evaluation` class, and only a failure of the batch as a whole is a runtime report.
 [Row Errors And Batch Errors](./vm-functions.md#row-errors-and-batch-errors) owns which failure is
 which.
 
@@ -975,7 +975,7 @@ emitter reports that description as its transient error and runtime event for as
 request stays pending, which `DESCRIBE EMITTER` shows. It names the status or the cause of the
 connection and never the evaluated target, a redirect's `Location`, a header value, a credential,
 the proxy's credentials or a body. A refused request is not an attempt failure: it is a record
-rejection with code `external`, operation `publish` and its numeric status, and so is a redirect
+rejection with class `refused`, operation `publish` and its numeric status, and so is a redirect
 its client does not follow.
 
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
@@ -1044,13 +1044,13 @@ already confirmed or requeued on that connection.
 A RabbitMQ publish that ends with the broker closing the emitter's channel is classified by the
 broker's own reason, which the emitter reads from its connection. A refusal of a message body larger
 than `max_message_size` is a `RabbitMqRecordError`, owned by the RabbitMQ emitter, which carries the
-body size and the limit as typed fields and becomes a record rejection of that message with code
-`external` and operation `publish`, reaching every member of a batch message. Any other close, a
+body size and the limit as typed fields and becomes a record rejection of that message with class
+`refused` and operation `publish`, reaching every member of a batch message. Any other close, a
 lost connection, and a close whose reason never arrives fail the attempt as an infrastructure
 failure, which the emitter retries on its backoff.
 
 A message the broker returns unrouted under `MANDATORY`, carried by a publisher confirm under `ACK` or
-before the round trip that ends a `NO ACK` write, is a record rejection with code `external` and
+before the round trip that ends a `NO ACK` write, is a record rejection with class `refused` and
 operation `publish` whose message names the broker's reply code and text, such as `rabbitmq
 returned the message unrouted with reply code 312: NO_ROUTE`. A routing key longer than an AMQP
 short string carries is a `RabbitMqRecordError` keeping the driver's `ShortStringError` as its
@@ -1296,7 +1296,7 @@ prefix. Both refusals sit beneath the same client context and carry no configure
 A Kafka record timestamp outside the instants a `DATETIME` holds is not an ingestor failure. The
 message hands it over as an unrepresentable `metadata.timestamp` value described by its
 milliseconds, never as a wrapped or absent instant, and the host refuses the record as a message
-error with code `validation` and operation `admit` only where a route or `TIMESTAMP AT` reads that
+error with class `validation` and operation `admit` only where a route or `TIMESTAMP AT` reads that
 field. A record at the last offset Kafka's signed offsets reach has no next position, which is
 `KafkaTopicIngestorError::OffsetOverflow`, naming the topic and partition, beneath
 `IngestorError::Read`: an ingestor read failure, not a codec rejection. When a later record in a
@@ -1395,7 +1395,7 @@ metadata and payload and the limit as typed fields, a message the broker answere
 `NotAllowedError`, which carries the broker's reason, or a record whose envelope sets a time its
 message cannot carry, which carries the `PulsarMessageTimeError` naming that time: a `TIMESTAMP`
 before the Unix epoch's first millisecond, or a `DELIVER AFTER` past the last timestamp, with the
-batch's execution time and the delay. Each becomes a record rejection with code `external` and
+batch's execution time and the delay. Each becomes a record rejection with class `refused` and
 operation `publish`. Every other failure of the client, its connection or the broker stays an
 infrastructure failure of the attempt, which the emitter retries.
 
@@ -1475,11 +1475,11 @@ send it on is `Disconnected`. A
 NATS STREAM opening reports `EmitterOpenError::MissingExternalEntity` with the stream name if its
 lookup finds no stream; its public emitter status uses that typed error's value-free display text
 to name the missing stream. Other lookup failures keep the driver's typed cause beneath `Initialize`.
-A stream publish whose subject the named stream does not capture is a per-record external rejection.
+A stream publish whose subject the named stream does not capture is a per-record `refused` rejection.
 Other NATS JetStream publish failures keep the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the
-server's `max_payload` becomes a record rejection with code `external` and operation `publish`, and a
+server's `max_payload` becomes a record rejection with class `refused` and operation `publish`, and a
 missed `ACK TIMEOUT` is the confirmation window's `ConfirmationWindowError`.
 
 A ZeroMQ ingestor keeps the driver's `ZmqError` as the typed cause of its `ZeroMqPullIngestorError`. `Bind`
@@ -1977,7 +1977,7 @@ An Iceberg emitter with `BATCH` also lays out the selected rows against the tabl
 staging, so a projection failure there remains an `IcebergColumnError` beneath
 `EmitterWriteError::Publish`. Its Parquet size measurement retains the Parquet cause beneath that
 publish error if encoding fails. A successfully measured row whose complete Parquet file exceeds
-the declared `MAX SIZE` is instead a definitive per-row `validation` message error of the `encode`
+the declared `MAX SIZE` is instead a definitive per-row `limit` message error of the `encode`
 operation; `ON MESSAGE ERROR` routes it before the other rows are staged. A data file whose
 physical count or byte length violates a bound after a table schema change is a commit failure:
 the emitter does not append it and keeps the staged rows and acknowledgements for retry.
@@ -2157,14 +2157,87 @@ refusal into their existing installation, staging or read failure with its full 
 ### The Message Error Record
 
 A record-specific failure can become a structured message error. It carries a stable reference,
-machine-readable code, operation, affected field paths, occurrence timestamp, and a non-sensitive
-message. The code classifies evaluation, validation, external, or internal failure; the operation
-names the work that failed. This record is the route-policy view of the failure, rather than a copy
-of the internal report. The route may inspect the eligible original input, its captured
-materialized-state snapshot, and an all-optional `partial_output` of construction completed before
-failure. An error handler whose own construction fails does not recursively invoke itself.
+its class, the node that produced it, the operation, affected field paths, an occurrence timestamp,
+a non-sensitive message and, when an outside system refused the data with a code of its own, that
+code. This record is the route-policy view of the failure, rather than a copy of the internal
+report. The route may inspect the eligible original input, its captured materialized-state
+snapshot, and an all-optional `partial_output` of construction completed before failure. An error
+handler whose own construction fails does not recursively invoke itself.
 
-Paced ingest admission reports a rejected event timestamp as a message error with code
+Every error has one of ten classes, a fixed tree that users cannot extend. `MessageErrorClass` in
+the vocabulary is that tree, and `MessageErrorClass::group` names the half a class belongs to,
+beneath the root `ANY`:
+
+| Group | Class | What went wrong |
+| --- | --- | --- |
+| `REJECTED`: the data itself is the problem; sending it again fails the same way | `codec` | A payload could not be decoded, or a row could not be encoded |
+| | `validation` | A value did not fit |
+| | `evaluation` | An expression could not be computed |
+| | `limit` | The data is fine but larger than a declared limit |
+| | `refused` | An outside system, a model or a guest said no to this data, for good |
+| `FAILED`: the data may be fine; sending it again may work | `unavailable` | An outside system kept failing and the node gave up retrying |
+| | `throttled` | Over a rate limit |
+| | `timeout` | No node reports the work alive any more |
+| | `interrupted` | Nervix itself cut the work, such as an enforced operation or a shutdown |
+| | `internal` | Nervix, a connector, a model or a guest broke its contract |
+
+What each failure gets:
+
+| Failure | Class |
+| --- | --- |
+| An expression of any clause (`SET`, `INHERIT`, route `WHERE`, `FILTER WHERE`, `FROM ... WHERE`, `INVOKE`, `VALUES`, an envelope or ordering-group expression, an HTTP request field, a window aggregate argument, a `RATE LIMIT` measure) | `evaluation` |
+| A payload its codec refuses (a [decode rejection](#decode-rejections)), a row its codec cannot encode, a batch container the codec cannot write | `codec` |
+| A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL` or `MAX MEMORY` | `limit` |
+| A required field left unset, a value a connector or an admission check refuses, an invalid HTTP request field | `validation` |
+| A destination that refuses a record, a model that refuses a row, a guest's declared message error, an emitter publish that fails for good | `refused` |
+| Emitter work cut at a stop or shutdown deadline, and an ingested payload whose domain is not running or whose branch Nervix closed before it was routed | `interrupted` |
+| A model output of the wrong shape, a guest trap or invalid output, and every failure of Nervix's own processing | `internal` |
+
+When a publish fails for a whole batch, every row of the batch takes the class of that failure: a
+publish its destination or connector fails for good is `refused`, a batch its codec cannot encode
+is `codec`, a source filter that cannot be evaluated is `evaluation`, work cut at a stop or
+shutdown deadline is `interrupted`, and a broken invariant of the emitter's own bookkeeping is
+`internal`. A failure that a node's `ON GENERAL ERROR` or a WASM processor's `ON GLOBAL ERROR`
+reports holds no record, but it carries a class too, which the step that failed names: a decode
+rejection is `codec`, a payload over a `RATE LIMIT` burst is `limit`, a guest trap is `internal`,
+and a general error that an emitter's connector reports itself carries the class the connector
+names. When a route cannot deliver an error record to its `DLQ` relay, the event that reports the
+failed delivery carries the class and node of the error it could not deliver.
+
+At this stage `unavailable`, `throttled` and `timeout` are defined but never produced: the
+retry-policy give-up, the rate-limit rework and the lost-work timeout of the [error
+handling](https://app.clickup.com/t/86bd54b3d) epic produce them.
+
+The operation that failed raises the error without knowing which graph node it ran for, because
+VM programs, codecs and connectors are engines shared by every node. The node that handles the
+error names itself on it: `RaisedMessageError` is what the operation raised, and
+`RaisedMessageError::attributed_to` gives the `StructuredMessageError` carrying the node's
+`NodeRef`, which the route, the log, the counter and the notice read. Inside Nervix the node stays
+one typed `NodeRef`; only the expression scope projects it into the two text fields `error.node`
+(the name) and `error.node_kind` (the kind's canonical snake_case name, the one `DESCRIBE` and the
+metrics use), because Plexus has no record values and node names are unique only per kind.
+`error.external_code` is the outside system's own spelling (PostgreSQL's SQLSTATE is the first
+one), filled only where the connector's failure already carries a typed code, and null otherwise.
+`StructuredMessageError::scope_arrow_schema` is the one definition of the `error` scope that both
+the registry's validation and the runtime's compiled error programs read.
+
+`nervix_message_errors_total` counts every message error a node handles, whatever its route's
+policy does with it: every record a route's `ON MESSAGE ERROR` receives, and every payload an
+ingestor's codec or `RATE LIMIT` rejects. A failure that ends a node's work without a record, which
+only `ON GENERAL ERROR` reports, is not counted. Its labels are `domain`, `node_kind`, `node`,
+`class` and `operation`; no label carries a branch key or a payload value. The domain's routing snapshot resolves each node's counters when the revision is
+installed, and a counter cell is registered the first time its class and operation occur, so a node
+exposes only the series it produced; the series leave with the node.
+
+A route's `LOG` and a node's `ON GENERAL ERROR LOG` publish their error as a runtime event that
+carries the class and the producing node as typed fields beside its text. The node fans the event
+out to every peer through the interconnect's `RuntimeErrorEvent`, and every session receives it as a
+`Runtime` [server notice](./client-session-protocol.md) whose optional error holds the class and the
+node's kind and name. A runtime event that reports no classified error, such as a connector failure
+the emitter recovered from, carries none. The log line beside it records `error_class`, `node_kind`
+and `node` as fields.
+
+Paced ingest admission reports a rejected event timestamp as a message error with class
 `validation` and operation `admit`. A null declared timestamp has the same classification and
 names its field. So does a transport metadata value its connector hands over as unrepresentable,
 with a description of it, such as an AMQP or Kafka timestamp after the last `DATETIME` instant,
@@ -2214,16 +2287,17 @@ is returned as the batch's own failure, which the ingestor host reports beneath 
 failure.
 
 The ingestor host, or the endpoint that received the payload, turns each codec refusal into a
-`DecodeRejection`: a UUIDv7 reference, the code `validation`, the operation `decode`, the codec,
+`DecodeRejection`: a UUIDv7 reference, the class `codec`, the operation `decode`, the codec,
 the fields its `MissingField`, `UnexpectedField` and `ParseField` contexts name at fault, including
 those of a failed message an unfolding kept as a report of its own, the instant the ingestor took the
 payload in, the transport position the payload's ingest metadata row names, and the codec report's
-whole chain rendered once as its message. The code and the operation are the same for every decode
+whole chain rendered once as its message. The class and the operation are the same for every decode
 rejection, so the record does not store them. The record never holds the payload, and the codec's
 contexts name the codec and the field, never a value. The ingestor's `ON GENERAL ERROR` policy then
 reports the rejection: `LOG` publishes `ingestor '<name>' general error in domain '<domain>': decode
-rejection <record>` as a runtime event and logs the reference, code, operation and codec as fields,
-and `IGNORE` reports nothing. Unlike a node failure under `LOG`, a decode rejection is never
+rejection <record>` as a runtime event whose typed error names the class `codec` and the ingestor,
+and logs the reference, class, operation and codec as fields; `IGNORE` reports nothing. Either way
+`nervix_message_errors_total` counts it under the ingestor. Unlike a node failure under `LOG`, a decode rejection is never
 negatively acknowledged, because an ingestor that presented the payload again would only be refused
 again. In an acknowledged mode the host resolves the payload's acknowledgement root at once. In
 every mode it counts the payload in `nervix_ingestor_decode_rejections_total` and publishes the
@@ -2232,14 +2306,16 @@ runs the ingestor through the typed fields of its describe envelope.
 
 A payload an ingestor's [`RATE LIMIT`](./ingestors.md#rate-limits) can never admit, because it
 costs more than a clause's `BURST`, or whose measure fails, is consumed the same way as a
-`RateLimitRejection`: a UUIDv7 reference, the code `validation`, the operation `rate_limit`, the
+`RateLimitRejection`: a UUIDv7 reference, the class `limit` for a payload above the burst or
+`evaluation` for a failed measure, the operation `rate_limit`, the
 position of the clause from 1, the instant the host rejected it, the transport position its ingest
 metadata row names, and its cause, either the cost and the burst it exceeds or the measure's typed
 failure rendered once. The cause carries `nervix::error_boundary(outcome, ...)`, since the
 rejection is a record outcome the host performs. `LOG` publishes `ingestor '<name>' general error in
 domain '<domain>': rate limit rejection <record>`, such as `a payload costing 40 exceeds the burst 16
-of RATE LIMIT clause 1 from Kafka topic 'orders' partition 0 offset 1`, and logs the reference,
-code and operation as fields; `IGNORE` reports nothing. The payload is never presented again, its
+of RATE LIMIT clause 1 from Kafka topic 'orders' partition 0 offset 1`, with its class and the
+ingestor as the event's typed error, and logs the reference, class and operation as fields;
+`IGNORE` reports nothing. The payload is never presented again, its
 acknowledgement root resolves with the rest of its batch, and `nervix_ingestor_rate_limit_rejected_total`
 or `nervix_ingestor_rate_limit_program_rejections_total` counts it. A `CLIENT PRODUCER` batch
 rejected this way is answered `processing_failed` with cause `rejected` and the same record as its
@@ -2274,16 +2350,16 @@ row whose own request exceeds `MAX SIZE`, that row receives a `validation` messa
 `encode` operation naming the measured size and the limit, such as
 `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`, and the other rows are sent
 in bounded requests. A row within `MAX SIZE` that its destination could never
-accept is the destination's `external` rejection of the `publish` operation, named with the
+accept is the destination's `refused` rejection of the `publish` operation, named with the
 destination's limit: a MongoDB document above its 16 MiB document limit, which is rejected before
 the write that would carry it. A Postgres emitter cannot declare a `MAX SIZE` above the largest
 protocol message the server reads, which `CREATE` refuses, so its rows never reach that limit. A
 SQL write that fails for a reason specific to its rows is written again one row at a time, and
-each row the destination still refuses receives an `external` `publish` error with the
+each row the destination still refuses receives a `refused` `publish` error with the
 destination's reason. That includes a violated MySQL `CHECK` constraint, which the server reports
 under the generic SQLSTATE `HY000`, and a Postgres cardinality violation, which is how
 `ON CONFLICT DO UPDATE` refuses one insert that carries a key twice. A MongoDB write answers for
-each document even when it fails: a document the server refused for good receives an `external`
+each document even when it fails: a document the server refused for good receives a `refused`
 `publish` error with the server's code, a document it applied is delivered, and every other
 document stays unresolved. A write concern the deployment could not satisfy is an infrastructure
 failure the host retries, named with the server's code, such as
@@ -2310,7 +2386,7 @@ The ingestor host applies its general-error policy and may poll again on its nex
 
 An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
 them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
-code and an invalid value has the `validation` code. Method and path failures report the `publish`
+class and an invalid value has the `validation` class. Method and path failures report the `publish`
 operation and name their request field, `method` or `path`, beside the fields the expression reads;
 a header write reports `invoke` with its zero-based invocation position. A body the codec cannot
 encode rejects its record with the `encode` operation when a flush releases it. The message names
@@ -2321,7 +2397,7 @@ attempted codec record that a request-field failure does.
 
 An HTTP endpoint's complete final `2xx` headers deliver the record. Other `3xx`/`4xx` statuses,
 except `401`, `403`, `407`, `408`, `425` and `429` and a redirect the client follows, reject only
-their record with code `external` and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
+their record with class `refused` and operation `publish`; `101` has the same outcome. The rejection message includes the numeric
 status but no evaluated destination, headers or body. The exception statuses and `5xx` keep the
 request pending as infrastructure failures; `401`, `403` and `407` name authentication or
 authorization in their typed cause. DNS, connection, TLS, timeout, malformed or oversized response
@@ -2367,7 +2443,7 @@ acknowledgements. That report already names the node, so the planned failure doe
 Branch construction keeps the outcome of each row as a typed value. A row whose branch `SET`
 recorded an error holds that `SideError`, and a row the program did not select says so; neither
 builds a report or a message until the row is reported. An ingestor route reports such a row
-through its `ON MESSAGE ERROR` policy with the `evaluation` code and the `set` operation. A
+through its `ON MESSAGE ERROR` policy with the `evaluation` class and the `set` operation. A
 reingestor route fails its whole batch with a `PlannedGeneralError` naming the input row, with the
 row's failure beneath it. On either kind of route, a branch field that cannot be read or is null,
 and a program that writes no branch field, fail the whole batch.

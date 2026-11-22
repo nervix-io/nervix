@@ -1173,6 +1173,7 @@ pub(crate) fn uniform_capabilities() -> NodeCapabilities {
         listeners: crate::application::ListenerSettings::default().bounds(),
         cpu_count: Some(std::num::NonZeroU64::MIN),
         memory_bytes: Some(std::num::NonZeroU64::MIN),
+        database_volume_bytes: 1 << 40,
         receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
     }
 }

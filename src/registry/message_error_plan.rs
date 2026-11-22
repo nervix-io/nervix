@@ -355,7 +355,7 @@ mod tests {
         let policy = MessageErrorPolicy::Dlq {
             relay: named("errors"),
             assignments: nervix_plexus::parse_route_construction(
-                "SET value = error.code, operation = error.operation",
+                "SET value = error.class, operation = error.operation",
             )
             .expect("error assignments should parse")
             .assignments,
@@ -429,9 +429,9 @@ mod tests {
             )),
             with_dlq(parsed_model(
                 "CREATE INFERENCER infer FROM events USING RESOURCE model VERSION 1 FILE \
-                 'model.onnx' INPUTS { \"features\" DENSE TENSOR<F32>[1] = input.value } OUTPUT \
-                 SCHEMA { \"score\" DENSE TENSOR<F32>[1] } UNBRANCHED TO out SET value = score \
-                 FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+                 'model.onnx' WORKING MEMORY RELEASED INPUTS { \"features\" DENSE TENSOR<F32>[1] \
+                 = input.value } OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] } UNBRANCHED TO \
+                 out SET value = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
             )),
         ];
         // The planner only needs the route declarations and activation surfaces of these current

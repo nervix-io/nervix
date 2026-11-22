@@ -806,13 +806,15 @@ impl RelayProcessorNode {
                                         },
                                         &self.error_policies,
                                         message,
-                                        MessageErrorFailure::publish(
+                                        MessageErrorFailure::new(
                                             None,
+                                            MessageErrorClass::EVALUATION,
                                             format!(
                                                 "window processor '{}' aggregate input failed: \
                                                  {failure:#}",
                                                 self.processor.as_str(),
                                             ),
+                                            MessageErrorOperation::Window,
                                         ),
                                     )
                                     .await;
@@ -839,12 +841,14 @@ impl RelayProcessorNode {
                                 },
                                 &self.error_policies,
                                 message,
-                                MessageErrorFailure::publish(
+                                MessageErrorFailure::new(
                                     None,
+                                    MessageErrorClass::EVALUATION,
                                     format!(
                                         "window processor '{}' aggregate input failed: {refusal:#}",
                                         self.processor.as_str(),
                                     ),
+                                    MessageErrorOperation::Window,
                                 ),
                             )
                             .await;
@@ -886,12 +890,16 @@ impl RelayProcessorNode {
                                         },
                                         &self.error_policies,
                                         admission.message,
-                                        MessageErrorFailure::publish(
+                                        // The row is fine, but the window's retention bound
+                                        // cannot hold it.
+                                        MessageErrorFailure::new(
                                             None,
+                                            MessageErrorClass::LIMIT,
                                             format!(
                                                 "window processor '{}' cannot admit row: {error:#}",
                                                 self.processor.as_str(),
                                             ),
+                                            MessageErrorOperation::Window,
                                         ),
                                     )
                                     .await;
@@ -2225,7 +2233,13 @@ mod tests {
                 );
             }
             let mut branch = template
-                .instantiate(&runtime, &domain, None, 1)
+                .instantiate(
+                    &runtime,
+                    &domain,
+                    None,
+                    1,
+                    &RetainedStateOpening::RefusedWhenFull,
+                )
                 .await
                 .assured("the branch instantiates on the test domain")
                 .into_inner();
@@ -2280,7 +2294,7 @@ mod tests {
                 .recv()
                 .await
                 .assured("the processor reports the failure to the node's observers");
-            message
+            message.message
         }
     }
 

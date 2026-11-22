@@ -1415,6 +1415,8 @@ pub enum Literal {
     Float64(f64),
     Bool(bool),
     String(String),
+    /// A duration literal, as its signed count of nanoseconds.
+    Duration(i64),
     Null,
 }
 
@@ -1427,7 +1429,8 @@ impl Literal {
             Self::Float64(_) => 1,
             Self::Bool(_) => 2,
             Self::String(_) => 3,
-            Self::Null => 4,
+            Self::Duration(_) => 4,
+            Self::Null => 5,
         }
     }
 }
@@ -1439,6 +1442,7 @@ impl Ord for Literal {
             (Self::Float64(left), Self::Float64(right)) => left.to_bits().cmp(&right.to_bits()),
             (Self::Bool(left), Self::Bool(right)) => left.cmp(right),
             (Self::String(left), Self::String(right)) => left.cmp(right),
+            (Self::Duration(left), Self::Duration(right)) => left.cmp(right),
             (Self::Null, Self::Null) => Ordering::Equal,
             _ => self.discriminant().cmp(&other.discriminant()),
         }

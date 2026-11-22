@@ -441,6 +441,8 @@ function renderValue(cell: wire.Cell): string {
       return `bytes:${hex(member(value(new wire.BytesCell()).valueArray()))}`;
     case wire.CellValue.DatetimeCell:
       return `datetime:${wide(value(new wire.DatetimeCell()).unixNanos())}`;
+    case wire.CellValue.DurationCell:
+      return `duration:${wide(value(new wire.DurationCell()).nanoseconds())}`;
     case wire.CellValue.ListCell: {
       const list = value(new wire.ListCell());
       const elements: string[] = [];
@@ -1392,8 +1394,14 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
     }
     case wire.ServerBody.ServerNotice: {
       const notice = member(message.body(new wire.ServerNotice()) as wire.ServerNotice | null);
+      const noticeError = notice.error();
+      let reported = '';
+      if (noticeError !== null) {
+        const node = member(noticeError.node());
+        reported = ` error=${wire.ErrorClass[member(noticeError.class_())]} node=${wire.ModelKind[member(node.kind())]}/${node.name()}`;
+      }
       return [
-        `EVENT NOTICE level=${wire.NoticeLevel[member(notice.level())]} kind=${wire.NoticeKind[member(notice.kind())]} message=${text(bytesOf((encoding) => notice.message(encoding)))}`,
+        `EVENT NOTICE level=${wire.NoticeLevel[member(notice.level())]} kind=${wire.NoticeKind[member(notice.kind())]} message=${text(bytesOf((encoding) => notice.message(encoding)))}${reported}`,
       ];
     }
     default:

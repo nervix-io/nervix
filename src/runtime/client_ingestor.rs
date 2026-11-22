@@ -813,6 +813,10 @@ impl Runtime {
                         ingestor: ingestor.name.clone(),
                         policy: ingestor.general_error_policy.clone(),
                         counters,
+                        errors: self.inner.metrics.node_message_errors(
+                            domain,
+                            &NodeRef::new(ModelKind::Ingestor, ingestor.name.clone()),
+                        ),
                     },
                 ))
             }

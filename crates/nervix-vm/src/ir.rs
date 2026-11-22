@@ -11,7 +11,7 @@ use crate::{
 };
 
 macro_rules! declare_register_types {
-    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, [$($data_type:tt)+];)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::Display)]
         pub enum RegisterType {
             $($Variant,)+
@@ -22,7 +22,7 @@ macro_rules! declare_register_types {
         impl RegisterType {
             pub fn from_data_type(data_type: &DataType) -> Option<Self> {
                 match data_type {
-                    $($data_type => Some(Self::$Variant),)+
+                    $($($data_type)+ => Some(Self::$Variant),)+
                     DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone))
                         if timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC" =>
                     {
@@ -35,7 +35,7 @@ macro_rules! declare_register_types {
 
             pub fn data_type(self) -> DataType {
                 match self {
-                    $(Self::$Variant => $data_type,)+
+                    $(Self::$Variant => $($data_type)+,)+
                     Self::Datetime => {
                         DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
                     }
@@ -77,7 +77,7 @@ impl fmt::Display for RegisterRef {
 }
 
 macro_rules! declare_register_layout {
-    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
+    ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, [$($data_type:tt)+];)+) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
         pub struct RegisterLayout {
             $(pub $field: usize,)+
@@ -128,6 +128,8 @@ pub enum ScalarValue {
     Float64(f64),
     Boolean(bool),
     Utf8(String),
+    /// A `DURATION`, as its signed count of nanoseconds.
+    Duration(i64),
 }
 
 #[derive(Debug, Clone, PartialEq)]

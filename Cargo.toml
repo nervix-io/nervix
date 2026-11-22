@@ -203,10 +203,7 @@ nonzero_ext = { workspace = true }
 num-rational = { workspace = true }
 nvml-wrapper = { workspace = true }
 opentelemetry = { workspace = true }
-opentelemetry-otlp = { workspace = true, default-features = false, features = [
-  "grpc-tonic",
-  "trace",
-] }
+opentelemetry-proto = { workspace = true, features = ["gen-tonic", "trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 ordered-float = { workspace = true }
 ort = { workspace = true, features = [
@@ -705,7 +702,6 @@ openraft = { version = "=0.10.0-alpha.33", default-features = false, features = 
   "tokio-rt",
 ] }
 opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry-proto = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
 ordered-float = "4"

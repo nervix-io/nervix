@@ -11,7 +11,7 @@ use nervix_primitives::sync::{
 };
 use thiserror::Error;
 
-use crate::{MemoryClass, executor::SemaphoreRef};
+use crate::{CapacityWaits, MemoryClass, executor::SemaphoreRef};
 
 /// The smallest charge an incremental writer takes. Charging every byte would put a semaphore
 /// acquisition in the middle of a serializer's inner loop; charging at least this much keeps the
@@ -125,7 +125,13 @@ impl MemoryBudget {
     /// queued for more than the class currently has; within a class every request is bounded by
     /// the same operation limit, so what is overtaken is a request the class could not have
     /// admitted anyway.
-    pub(crate) async fn reserve(&self, bytes: u64) -> Result<Reservation, Report<AdmissionError>> {
+    ///
+    /// A charge that has to wait tells `waits`, when the caller has one, for as long as it waits.
+    pub(crate) async fn reserve(
+        &self,
+        bytes: u64,
+        waits: Option<&CapacityWaits>,
+    ) -> Result<Reservation, Report<AdmissionError>> {
         let requested = self.checked_request(bytes)?;
         match StdArc::clone(&self.permits).try_acquire_many_owned(requested) {
             Ok(permit) => return Ok(self.reservation(requested, permit)),
@@ -136,14 +142,16 @@ impl MemoryBudget {
             }
             Err(TryAcquireError::NoPermits) => {}
         }
-        let permit = StdArc::clone(&self.permits)
-            .acquire_many_owned(requested)
-            .await
-            .map_err(|_| {
-                self.refusal(AdmissionError::BudgetClosed {
-                    class: self.class.as_str(),
-                })
-            })?;
+        let room = StdArc::clone(&self.permits).acquire_many_owned(requested);
+        let acquired = match waits {
+            Some(waits) => waits.report(room).await,
+            None => room.await,
+        };
+        let permit = acquired.map_err(|_| {
+            self.refusal(AdmissionError::BudgetClosed {
+                class: self.class.as_str(),
+            })
+        })?;
         Ok(self.reservation(requested, permit))
     }
 

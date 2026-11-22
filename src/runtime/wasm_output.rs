@@ -780,7 +780,8 @@ pub(super) async fn dispatch_wasm_output_envelopes(
                 processor,
                 error_policies,
             };
-            reporting.fail_held_inputs(ack_map, holds, &failure);
+            // Output the guest is not allowed to produce is the guest breaking its contract.
+            reporting.fail_held_inputs(ack_map, holds, MessageErrorClass::INTERNAL, &failure);
             return Ok(());
         }
     };
@@ -1371,8 +1372,10 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
                         record,
                         acks: context.acks,
                     },
+                    // The guest declared this message an error: it said no to this data.
                     MessageErrorFailure::new(
                         Some(message_error_relay),
+                        MessageErrorClass::REFUSED,
                         message_error.reason.clone(),
                         MessageErrorOperation::Wasm,
                     ),
@@ -1526,7 +1529,13 @@ mod tests {
         install_unpaced_test_domain(&runtime, &domain);
         let processor = named("node");
         let mut branch = junction_branch_template("node", "incoming")
-            .instantiate(&runtime, &domain, None, 1)
+            .instantiate(
+                &runtime,
+                &domain,
+                None,
+                1,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .assured("the branch instantiates")
             .into_inner();

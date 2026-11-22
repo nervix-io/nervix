@@ -652,7 +652,7 @@ An ingest group resolves its event timestamp column once. Admission compares sig
 values against the first and last reached centers in lanes, then tests the exact period remainder
 for values between them. The period reduction is prepared once for that window. A bitmap selects
 accepted Arrow rows and their timestamp and ACK sidecars together. Rejected rows retain their own
-ACKs and follow each output route's message-error policy with code `validation` and operation
+ACKs and follow each output route's message-error policy with class `validation` and operation
 `admit`; a rejected timestamp cannot discard another row of the group. A missing declared timestamp
 is also rejected for that row. The single-timestamp admission check has the same inclusive bounds.
 

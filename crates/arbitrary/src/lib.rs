@@ -332,11 +332,12 @@ mod tests {
             nervix_models::ParseAsType::Bool => 8,
             nervix_models::ParseAsType::String => 9,
             nervix_models::ParseAsType::Datetime => 10,
-            nervix_models::ParseAsType::F32 => 11,
-            nervix_models::ParseAsType::F64 => 12,
-            nervix_models::ParseAsType::Bytes => 13,
-            nervix_models::ParseAsType::Vec { .. } => 14,
-            nervix_models::ParseAsType::Array { .. } => 15,
+            nervix_models::ParseAsType::Duration => 11,
+            nervix_models::ParseAsType::F32 => 12,
+            nervix_models::ParseAsType::F64 => 13,
+            nervix_models::ParseAsType::Bytes => 14,
+            nervix_models::ParseAsType::Vec { .. } => 15,
+            nervix_models::ParseAsType::Array { .. } => 16,
         }
     }
 
@@ -369,11 +370,11 @@ mod tests {
         }
         assert_eq!(
             top_level.into_iter().collect::<Vec<_>>(),
-            (0..16).collect::<Vec<_>>()
+            (0..17).collect::<Vec<_>>()
         );
         assert_eq!(
             listed.into_iter().collect::<Vec<_>>(),
-            (0..14).collect::<Vec<_>>()
+            (0..15).collect::<Vec<_>>()
         );
         assert_eq!(
             flags.len(),

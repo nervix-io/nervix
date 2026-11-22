@@ -32,6 +32,17 @@ relay is branched by high-cardinality values such as tenant, user, account, or d
 lifecycle metrics identify the parametrizer, not the concrete key. A partitioned relay or processor's series
 carry its partition, whose cardinality is bounded by the partition count its parametrizer declares.
 
+## The Node's Own Traces
+
+A node provisioned with a collector exports the spans its `tracing` instrumentation records to that
+collector over OTLP gRPC. Each span's resource names the configured service and the
+OpenTelemetry SDK's own identity, and nothing else. [Trace Export](node-settings.md#trace-export)
+lists the endpoint, the service name and the sampling, timeout, interval, queue and batch
+capabilities, all shown on each node's `DESCRIBE CLUSTER` capability line. No `OTEL_*`
+environment variable applies: none of them adds a resource attribute or a request header, sets a
+span limit, sampler or batch, or names another collector. A span that finds the export queue full
+is dropped, and export failures never reach connector retries or acknowledgements.
+
 ## Metric Labels
 
 Graph metric series use these labels:
@@ -108,6 +119,17 @@ families for ingestors and emitters. Nervix also records these raw metric famili
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
+- `nervix_message_errors_total{domain,node_kind,node,class,operation}`: total message errors each
+  graph node handled, every record a route's `ON MESSAGE ERROR` received and every payload an
+  ingestor's codec or `RATE LIMIT` rejected, whatever the policy did with them. A failure that ends a
+  node's work without a record, which only `ON GENERAL ERROR` reports, is not counted here. `class` is one of the ten
+  [error classes](./errors-and-diagnostics.md#the-message-error-record) (`codec`, `validation`,
+  `evaluation`, `limit`, `refused`, `unavailable`, `throttled`, `timeout`, `interrupted`,
+  `internal`), `node_kind` the node's kind in its snake_case name (`junction`, `emitter`,
+  `window_processor`) and `operation` the work that failed (`set`, `publish`, `decode`,
+  `rate_limit`, `window`, ...). A node exposes a series only for a class and operation it has
+  produced, and its series leave with the node. Decode and `RATE LIMIT` rejections count here under
+  their ingestor beside their own families. No label carries a branch key or a payload value.
 - `nervix_placement_violating_units{domain}`: units of the domain whose live owner a winning
   `REQUIRE NODES` rule does not admit, as the physical node observes the committed schedule and
   node records
@@ -421,11 +443,8 @@ Relay admission:
 - `nervix_interconnect_unresolved_outcome_age_seconds`: how long the oldest unacknowledged relay
   outcome has been waiting. A rising value means acknowledgements are not coming back
 - `nervix_interconnect_relay_channel_watermarks`: the relay channel watermarks this node retains for
-  the channels its peers opened, across every peer. Each peer has a fixed budget of 8,192
-- `nervix_interconnect_relay_channel_watermarks_evicted_total`: watermarks forgotten before their
-  ten-minute retention ended because their peer's budget needed the position for another channel.
-  A count that keeps rising means a peer opens more relay channels within ten minutes than the
-  budget holds; see
+  the channels its peers opened, across every peer. Each is charged to the relay memory class while
+  it is retained and is forgotten only once its own retention has passed; see
   [Bounded Correlation And Peer Owners](./interconnect.md#bounded-correlation-and-peer-owners)
 
 Execution admission:
@@ -634,7 +653,7 @@ The two wait counters preserve fractional seconds.
 
 | Family | Additional label | Meaning |
 | --- | --- | --- |
-| `nervix_emitter_records_rejected_total` | `code="external\|oversize\|invalid\|encode"` | Source rows definitively refused by the destination, size limit, value validation or encoding. The host carries the class from the typed refusal site and counts a row when its message-error handling settles its rejection. A container encoding failure remains `encode` even when its public message error is `validation/encode`. |
+| `nervix_emitter_records_rejected_total` | `code="refused\|limit\|validation\|evaluation\|codec"` | Source rows definitively rejected: refused by the destination, over a size limit, holding a value that does not fit, whose expression could not be computed, or that the codec could not encode. `code` is the [error class](./errors-and-diagnostics.md#the-message-error-record) of the row's own message error, the one its error route reads as `error.class`, so the two never disagree; a rejection is always of the `REJECTED` group. The host counts a row when its message-error handling settles its rejection. |
 | `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure. Delivered, rejected and connector-staged rows are excluded. |
 | `nervix_emitter_records_retried_total` | None | Unresolved source rows selected by each retried host publish attempt, after transport acquisition. Drain retries count too. A staged commit alone presents no source rows again. |
 | `nervix_emitter_retries_total` | `cause="publish\|connect\|commit"` | Successfully scheduled retry deferrals and inline retry waits, classified by the typed operation being retried. |

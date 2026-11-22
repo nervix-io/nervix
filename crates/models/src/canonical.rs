@@ -353,6 +353,7 @@ pub fn expression_to_plexus(
         Expression::Literal(Literal::F64(value)) => float_literal(*value),
         Expression::Literal(Literal::Bool(value)) => Ok(value.to_string().to_ascii_uppercase()),
         Expression::Literal(Literal::String(value)) => Ok(string_literal(value)),
+        Expression::Literal(Literal::Duration(value)) => Ok(value.to_string()),
         Expression::Literal(Literal::Null) => Ok("NULL".to_string()),
         Expression::Field(reference) => {
             if let FieldScope::Node = reference.scope
@@ -1295,6 +1296,7 @@ fn subscription_literal_to_plexus(literal: &SubscriptionLiteral) -> String {
         SubscriptionLiteral::String(value) => string_literal(value),
         SubscriptionLiteral::Number(value) => value.clone(),
         SubscriptionLiteral::Bool(value) => value.to_string().to_ascii_uppercase(),
+        SubscriptionLiteral::Duration(value) => value.to_string(),
     }
 }
 
@@ -2701,6 +2703,10 @@ impl<Version: Display> CreateInferencer<Version> {
             self.resource_version
         )));
         clauses.push(Clause::line(format!("FILE {}", string_literal(&self.file))));
+        clauses.push(Clause::line(format!(
+            "WORKING MEMORY {}",
+            self.working_memory.as_ref()
+        )));
         clauses.push(Clause::braced(
             "INPUTS",
             inference_mapping_items(&self.inputs)?,
@@ -3753,6 +3759,7 @@ fn parse_as_to_keyword(parse_as: &ParseAsType) -> String {
         ParseAsType::String => "STRING".to_string(),
         ParseAsType::Bytes => "BYTES".to_string(),
         ParseAsType::Datetime => "DATETIME".to_string(),
+        ParseAsType::Duration => "DURATION".to_string(),
         ParseAsType::F32 => "F32".to_string(),
         ParseAsType::F64 => "F64".to_string(),
         ParseAsType::Array { .. } => {

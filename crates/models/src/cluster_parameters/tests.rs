@@ -381,6 +381,67 @@ fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
 }
 
 #[test]
+fn resource_quotas_fit_each_node_database_volume_independently() {
+    const GIB: u64 = 1 << 30;
+    let node = crate::ClusterNodeName::parse("node-2").assured("fixture name");
+    let values = ClusterParameterValues::default();
+    let extracted = values.resource_max_extracted_bytes();
+    assert_eq!(values.resource_max_archive_bytes(), 4 * GIB);
+    assert_eq!(extracted, 16 * GIB);
+
+    values
+        .validate_resource_volume(&node, extracted)
+        .assured("a volume exactly as large as each quota holds it");
+    assert_eq!(values.resource_quota_beyond_volume(extracted), None);
+    assert_eq!(
+        values.resource_quota_beyond_volume(8 * GIB),
+        Some(ResourceQuotaBeyondVolume {
+            parameter: ClusterParameterKey::ResourceMaxExtractedBytes,
+            quota: extracted,
+        }),
+        "the archive quota fits, so the extracted quota is the one beyond the volume"
+    );
+    assert_eq!(
+        values.resource_quota_beyond_volume(GIB),
+        Some(ResourceQuotaBeyondVolume {
+            parameter: ClusterParameterKey::ResourceMaxArchiveBytes,
+            quota: 4 * GIB,
+        }),
+        "the archive quota is judged first"
+    );
+
+    let refused = values
+        .validate_resource_volume(&node, 8 * GIB)
+        .err()
+        .assured("an extracted quota above the volume is refused");
+    assert_eq!(
+        refused.current_context(),
+        &ClusterParameterError::NodeVolume {
+            parameter: ClusterParameterKey::ResourceMaxExtractedBytes,
+            node: node.clone(),
+            requested: extracted,
+            available: 8 * GIB,
+        }
+    );
+    assert_eq!(
+        refused.current_context().to_string(),
+        "resource-max-extracted-bytes (16GiB) exceeds node 'node-2' database volume (8GiB)"
+    );
+
+    let updates = ClusterParameterUpdates::try_from(vec![
+        ClusterParameterChange::ResourceMaxArchiveBytes(GIB),
+        ClusterParameterChange::ResourceMaxExtractedBytes(2 * GIB),
+    ])
+    .assured("two assignments");
+    let lowered = values
+        .changed(&updates)
+        .assured("smaller quotas are valid parameters");
+    lowered
+        .validate_resource_volume(&node, 2 * GIB)
+        .assured("both lowered quotas fit a 2 GiB volume");
+}
+
+#[test]
 fn bounded_durations_preserve_nanoseconds_at_both_ends_of_their_domain() {
     let definitions: [fn(Duration) -> ClusterParameterChange; 16] = [
         ClusterParameterChange::LicensingRequestTimeout,
@@ -530,5 +591,25 @@ fn bounded_counts_preserve_their_complete_public_and_stored_value_domains() {
             refusal.current_context(),
             ClusterParameterError::OutOfRange { .. }
         ));
+    }
+}
+
+/// A delivery's relay channel rotates at its total admission budget and its receiver keeps the
+/// channel for twice that budget, so a sender always resumes a channel its receiver still holds.
+#[test]
+fn a_relay_channel_rotates_before_its_retention_ends() {
+    let default_budget = RemoteAckTiming::default().remote_relay_total_timeout;
+    for budget in [
+        Duration::from_millis(50),
+        default_budget,
+        Duration::from_secs(u64::from(u32::MAX)),
+    ] {
+        let timing = RemoteAckTiming {
+            remote_relay_total_timeout: budget,
+            ..RemoteAckTiming::default()
+        };
+        assert_eq!(timing.relay_channel_idle_rotation(), budget);
+        assert_eq!(timing.relay_channel_retention(), budget * 2);
+        assert!(timing.relay_channel_idle_rotation() < timing.relay_channel_retention());
     }
 }

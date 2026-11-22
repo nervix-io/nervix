@@ -103,8 +103,9 @@ fn emitter_outcomes_register_every_child_at_zero_with_only_bounded_dimensions() 
         }
     }
     assert_eq!(families, 12);
-    assert_eq!(samples, 21);
-    assert_eq!(handle.describe_lines().len(), 36);
+    // The rejection family holds one child for each of the five classes of the REJECTED group.
+    assert_eq!(samples, 22);
+    assert_eq!(handle.describe_lines().len(), 37);
 }
 
 #[test]
@@ -112,21 +113,22 @@ fn emitter_outcomes_keep_source_record_units_and_fractional_wait_seconds() {
     let (metrics, handle) = fixture();
     {
         let mut outcomes = handle.record_outcomes();
-        outcomes.reject(EmitterRejectionCode::External);
-        outcomes.reject(EmitterRejectionCode::External);
-        outcomes.reject(EmitterRejectionCode::Oversize);
-        outcomes.reject(EmitterRejectionCode::Invalid);
-        outcomes.reject(EmitterRejectionCode::Encode);
+        outcomes.reject(RejectedErrorClass::Refused);
+        outcomes.reject(RejectedErrorClass::Refused);
+        outcomes.reject(RejectedErrorClass::Limit);
+        outcomes.reject(RejectedErrorClass::Validation);
+        outcomes.reject(RejectedErrorClass::Codec);
         outcomes.fail();
         outcomes.fail();
         outcomes.fail();
         assert_eq!(sample(&metrics, FAILED, &[]), 0.0);
     }
     for (code, expected) in [
-        ("external", 2.0),
-        ("oversize", 1.0),
-        ("invalid", 1.0),
-        ("encode", 1.0),
+        ("refused", 2.0),
+        ("limit", 1.0),
+        ("validation", 1.0),
+        ("codec", 1.0),
+        ("evaluation", 0.0),
     ] {
         assert_eq!(sample(&metrics, REJECTED, &[("code", code)]), expected);
     }

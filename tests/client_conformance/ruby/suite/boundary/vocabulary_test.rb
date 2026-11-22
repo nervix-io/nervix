@@ -102,6 +102,7 @@ module RubySuite
           NX::FieldType::DATETIME => 14,
           NX::FieldType::FIXED_LIST => 15,
           NX::FieldType::LIST => 16,
+          NX::FieldType::DURATION => 17,
         },
         NX::Part => {
           NX::Part::ROWS => 1,
@@ -122,6 +123,19 @@ module RubySuite
         },
         NX::ClockEndReason => {
           NX::ClockEndReason::DOMAIN_REMOVED => 1,
+        },
+        NX::NoticeLevel => {
+          NX::NoticeLevel::INFO => 1,
+          NX::NoticeLevel::WARNING => 2,
+          NX::NoticeLevel::ERROR => 3,
+        },
+        NX::NoticeKind => {
+          NX::NoticeKind::MEMBERSHIP => 1,
+          NX::NoticeKind::LEADERSHIP => 2,
+          NX::NoticeKind::CLUSTER_PARAMETERS => 3,
+          NX::NoticeKind::RUNTIME => 4,
+          NX::NoticeKind::CONTROL_PLANE => 5,
+          NX::NoticeKind::LICENSING => 6,
         },
         NX::EndpointState => {
           NX::EndpointState::ACTIVE => 1,

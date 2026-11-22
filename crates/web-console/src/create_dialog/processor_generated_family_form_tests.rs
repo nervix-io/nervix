@@ -18,8 +18,8 @@ use leptos::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{ChoiceSelection, ChoiceTarget, ChoiceValue};
 use nervix_models::{
-    DomainName, FieldName, GeneralErrorPolicy, ModelKind, ModelName, NodeRef,
-    RequestedResourceVersion, ResourceName, WasmRejectedStatePolicy,
+    DomainName, FieldName, GeneralErrorPolicy, InferencerWorkingMemory, ModelKind, ModelName,
+    NodeRef, RequestedResourceVersion, ResourceName, WasmRejectedStatePolicy,
 };
 use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
@@ -57,6 +57,8 @@ fn render(signals: CreateSignals) -> String {
             .session_generation(RwSignal::new(1))
             .request_tx(RwSignal::new(None))
             .submit(super::ignore_test_submission)
+            .read_labels(super::ignore_test_label_read())
+            .known_label_targets(leptos::prelude::Signal::derive(Vec::new))
             .build(),
     );
     any_spawner::Executor::poll_local();
@@ -161,6 +163,11 @@ fn generated_family_forms_render_their_own_sections_and_omit_what_they_do_not_de
                 "create-processor-resource",
                 "create-processor-resource-version",
                 "create-processor-file",
+                "create-inferencer-memory",
+                "create-inferencer-working-memory",
+                "data-memory=\"released\"",
+                "data-memory=\"retained\"",
+                "WORKING MEMORY has no default",
                 "create-inferencer-tensors",
                 "create-inferencer-execution-mode",
                 "create-inferencer-input-name",
@@ -221,6 +228,7 @@ fn generated_family_forms_render_their_own_sections_and_omit_what_they_do_not_de
                 "create-processor-inherit",
                 "create-processor-invocations",
                 "create-inferencer-tensors",
+                "create-inferencer-working-memory",
                 "create-generator-relay",
             ],
         );
@@ -616,6 +624,7 @@ fn generated_family_submissions_render_their_canonical_statements() {
                     .pin
                     .select_version(RequestedResourceVersion::Latest);
                 inferencer.binding.file = "models/running_sum.onnx".into();
+                inferencer.working_memory = Some(InferencerWorkingMemory::Retained);
                 if let Some(mapping) = inferencer.inputs.active_mut() {
                     mapping.tensor = "features".into();
                     mapping.shape.dimensions = vec![DimensionDraft::Size("2".into())];
@@ -645,12 +654,18 @@ fn generated_family_submissions_render_their_canonical_statements() {
         for clause in [
             "USING RESOURCE scoring VERSION LATEST",
             "FILE 'models/running_sum.onnx'",
+            "WORKING MEMORY RETAINED",
             "'features' DENSE TENSOR<F32>[2] = input.vector",
             "'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] INITIAL ZEROS",
             "'score' DENSE TENSOR<F32>[1]",
         ] {
             assert!(inferencer.contains(clause), "{clause}: {inferencer}");
         }
+        // The working memory is stated right after the FILE, before the model's tensors.
+        assert!(
+            inferencer.contains("FILE 'models/running_sum.onnx'\n  WORKING MEMORY RETAINED\n  INPUTS"),
+            "{inferencer}"
+        );
 
         signals.open(
             CreateKind::Model(ModelKind::WasmProcessor),

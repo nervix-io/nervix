@@ -88,7 +88,7 @@ pub(super) struct InferencerAdmission<'a> {
 /// routes' message-error policies receive.
 struct RejectedRow {
     row: usize,
-    error: StructuredMessageError,
+    error: RaisedMessageError,
 }
 
 /// Inference reports a route failure with the admitted message its generated row came from:
@@ -126,29 +126,30 @@ impl processor_output::ProcessorOutputErrorSource for AdmittedInputRows<'_> {
 impl inferencer::MessageRefusal {
     /// The value-free error a message the model run refused alone carries to its routes'
     /// message-error policies. No native diagnostic and no tensor value is copied into it.
-    fn message_error(self, execution_now: Timestamp) -> StructuredMessageError {
-        let (code, message) = match self {
+    fn message_error(self, execution_now: Timestamp) -> RaisedMessageError {
+        let (class, message) = match self {
             Self::Input => (
-                MessageErrorCode::Validation,
+                MessageErrorClass::VALIDATION,
                 "the mapped INPUTS of this row do not form the declared input tensors".to_owned(),
             ),
             Self::Model { status } => (
-                MessageErrorCode::External,
+                MessageErrorClass::REFUSED,
                 format!("the ONNX model refused this row with status {status:?}"),
             ),
+            // An output of the wrong shape is the model breaking its declared contract.
             Self::Output => (
-                MessageErrorCode::External,
+                MessageErrorClass::INTERNAL,
                 "the ONNX model returned an invalid output tensor for this row".to_owned(),
             ),
             Self::WorkingSet => (
-                MessageErrorCode::Validation,
+                MessageErrorClass::LIMIT,
                 "the model outputs of this row exceed the configured relay operation limit"
                     .to_owned(),
             ),
         };
-        structured_message_error(
+        raised_message_error(
             execution_now,
-            code,
+            class,
             message,
             MessageErrorOperation::Inferencer,
             None,
@@ -452,7 +453,7 @@ impl<'a> InferencerAdmission<'a> {
         batch: &RelayRecordBatch,
         row: usize,
         acks: AckSet,
-        error: StructuredMessageError,
+        error: RaisedMessageError,
     ) {
         let record = match batch.runtime_row(row) {
             Ok(record) => record,

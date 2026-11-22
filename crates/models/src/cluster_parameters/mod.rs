@@ -117,6 +117,17 @@ pub enum ClusterParameterError {
         requested: Duration,
         available: Duration,
     },
+    #[error(
+        "{parameter} ({}) exceeds node '{node}' database volume ({})",
+        ubyte::ByteUnit::Byte(*.requested),
+        ubyte::ByteUnit::Byte(*.available)
+    )]
+    NodeVolume {
+        parameter: ClusterParameterKey,
+        node: crate::ClusterNodeName,
+        requested: u64,
+        available: u64,
+    },
     #[error("{parameter} must be greater than zero")]
     NonPositiveDuration { parameter: ClusterParameterKey },
     #[error("{parameter} must not exceed {maximum:?}")]
@@ -156,6 +167,13 @@ pub enum ClusterParameterError {
 pub struct DescribedClusterParameter {
     pub parameter: ClusterParameterKey,
     pub value: String,
+}
+
+/// A resource byte quota larger than the database volume it was compared with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceQuotaBeyondVolume {
+    pub parameter: ClusterParameterKey,
+    pub quota: u64,
 }
 
 macro_rules! parameter_text {
@@ -528,15 +546,59 @@ impl ClusterParameterValues {
         RemoteAckTiming::from_parameters(self).validate()
     }
 
-    /// Validate the local lifecycle budgets captured in the same commit fence as the policy.
+    /// Validate the local lifecycle budgets and database volumes captured in the same commit fence
+    /// as the policy.
     pub fn validate_runtime_capabilities<'a>(
         &self,
         records: impl IntoIterator<Item = &'a crate::NodeCapabilityRecord>,
     ) -> Result<(), Report<ClusterParameterError>> {
         for record in records {
-            self.validate_runtime_budget(record.identity.node_id(), record.capabilities.shutdown)?;
+            let node = record.identity.node_id();
+            self.validate_runtime_budget(node, record.capabilities.shutdown)?;
+            self.validate_resource_volume(node, record.capabilities.database_volume_bytes)?;
         }
         Ok(())
+    }
+
+    /// The first resource byte quota a database volume of `volume_bytes` cannot hold. Every node
+    /// stages and extracts resource versions on the volume that holds its database directory, and
+    /// each quota is compared with the volume's total size on its own.
+    pub fn resource_quota_beyond_volume(
+        &self,
+        volume_bytes: u64,
+    ) -> Option<ResourceQuotaBeyondVolume> {
+        for (parameter, quota) in [
+            (
+                ClusterParameterKey::ResourceMaxArchiveBytes,
+                self.resource_max_archive_bytes(),
+            ),
+            (
+                ClusterParameterKey::ResourceMaxExtractedBytes,
+                self.resource_max_extracted_bytes(),
+            ),
+        ] {
+            if quota > volume_bytes {
+                return Some(ResourceQuotaBeyondVolume { parameter, quota });
+            }
+        }
+        None
+    }
+
+    /// Refuse resource byte quotas one node's committed database volume cannot hold.
+    pub fn validate_resource_volume(
+        &self,
+        node: &crate::ClusterNodeName,
+        volume_bytes: u64,
+    ) -> Result<(), Report<ClusterParameterError>> {
+        let Some(beyond) = self.resource_quota_beyond_volume(volume_bytes) else {
+            return Ok(());
+        };
+        Err(Report::new(ClusterParameterError::NodeVolume {
+            parameter: beyond.parameter,
+            node: node.clone(),
+            requested: beyond.quota,
+            available: volume_bytes,
+        }))
     }
 
     /// Apply the same admission contract before a node publishes its incarnation-bound claim.

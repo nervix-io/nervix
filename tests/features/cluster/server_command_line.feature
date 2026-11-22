@@ -27,12 +27,19 @@ Feature: Server command-line values
     And the server process log does not contain "panicked"
 
     Examples:
-      | option                    | value | refusal                                                                                      |
-      | --drain-timeout           | 1m    | drain-timeout (60s) must not exceed shutdown-timeout (50s)                                   |
-      | --raft-heartbeat-interval | 0s    | raft-heartbeat-interval (0ns) must be at least 1ms, the resolution consensus runs timings at |
-      | --gossip-interval         | 0s    | gossip-interval (0ns) must be at least 1ms                                                   |
-      | --clock-skew-tolerance    | 0s    | clock-skew-tolerance (0ns) must be at least 1ms                                              |
-      | --memory-limit            | 0B    | memory-limit must be greater than zero                                                       |
+      | option                          | value | refusal                                                                                      |
+      | --drain-timeout                 | 1m    | drain-timeout (60s) must not exceed shutdown-timeout (50s)                                   |
+      | --raft-heartbeat-interval       | 0s    | raft-heartbeat-interval (0ns) must be at least 1ms, the resolution consensus runs timings at |
+      | --gossip-interval               | 0s    | gossip-interval (0ns) must be at least 1ms                                                   |
+      | --clock-skew-tolerance          | 0s    | clock-skew-tolerance (0ns) must be at least 1ms                                              |
+      | --memory-limit                  | 0B    | memory-limit must be greater than zero                                                       |
+      | --otel-trace-export-batch-spans | 4096  | otel-trace-export-batch-spans (4096) must not exceed otel-trace-queue-capacity (2048)        |
+
+  Scenario: A node refuses an empty trace collector endpoint and names the option
+    When a nervix-server process is started with command-line option "--otel-otlp-endpoint" set to ""
+    Then the server process exits with status 1
+    And the server process log contains "otel-otlp-endpoint"
+    And the server process log does not contain "panicked"
 
   Scenario Outline: A node refuses a gossip or MQTT read-ahead capability <option> outside its bounds and names it
     When a nervix-server process is started with command-line option "<option>" set to "<value>"

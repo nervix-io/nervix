@@ -281,6 +281,33 @@ pub struct DescribeInferencer {
     pub name: InferencerName,
 }
 
+/// What a concrete branch's model keeps, from one run to the next, of the memory a run computes
+/// in: the intermediate tensors between the model's operators and the tensors it answers with.
+///
+/// Every inferencer states it with `WORKING MEMORY`; the language gives it no default. Each
+/// concrete branch runs its own copy of the model, so the policy applies once per branch.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::AsRefStr,
+)]
+#[strum(serialize_all = "UPPERCASE")]
+pub enum InferencerWorkingMemory {
+    /// A run frees its working memory when it ends, so between runs a branch holds only its model.
+    Released,
+    /// A branch keeps its runs' working memory for the next run, in a memory pool and a memory
+    /// plan per set of input shapes of its own, up to the largest run's, until the branch ends.
+    Retained,
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -293,6 +320,7 @@ pub struct CreateInferencer<Version = u64> {
     pub resource: ResourceName,
     pub resource_version: Version,
     pub file: String,
+    pub working_memory: InferencerWorkingMemory,
     pub inputs: Vec<InferencerTensorMapping>,
     pub state: Vec<InferencerStateBinding>,
     pub output_schema: Vec<InferencerTensorDeclaration>,

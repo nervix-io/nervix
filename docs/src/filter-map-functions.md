@@ -223,16 +223,20 @@ the failed operation, and the message then takes its context's error handling:
   them with a conditional, `TRY_CAST`, or `TRY_JSON_VALUE`.
 
 In an `ON MESSAGE ERROR SEND TO ... SET`, a function failure has the `error` scope below. Every
-failure an expression reports has the code `evaluation`; the kind appears in the message, which
+failure an expression reports has the class `evaluation`; the kind appears in the message, which
 names the node, the program, the kind, and the reason, such as `junction 'enrich' FILTER-MAP side
 error division_by_zero: integer division by zero at 12..18`. The range at the end locates the
 failed operation within the route's program. When several operations fail for one message, the
-record reports the first.
+record reports the first. The scope is the one error record every error of a node has; [Runtime
+Message Errors](errors-and-diagnostics.md#runtime-message-errors) lists its ten classes.
 
 | Field | Type | Holds |
 | --- | --- | --- |
 | `error.reference` | `STRING` | A stable UUIDv7 that identifies this failure |
-| `error.code` | `STRING` | `evaluation` for every expression failure |
+| `error.class` | `STRING` | `evaluation` for every expression failure |
+| `error.node` | `STRING` | The name of the node whose route failed, such as `enrich` |
+| `error.node_kind` | `STRING` | The kind of that node, such as `junction`, `emitter` or `window_processor` |
+| `error.external_code` | optional `STRING` | The outside system's own code for a refusal, such as a PostgreSQL SQLSTATE; null for every expression failure |
 | `error.message` | `STRING` | The message above. It never contains a value of the message, except as the [regular expressions](#regular-expressions) section describes |
 | `error.operation` | `STRING` | The clause that failed, such as `set`, `inherit`, `route_where`, `filter_where`, `source_where`, `values`, or `invoke` |
 | `error.operation_index` | optional `U32` | The zero-based position of the failed assignment, counting `INHERIT` fields first, or null for a `WHERE` |
@@ -257,6 +261,7 @@ names:
 | `STRING` | `Utf8` |
 | `BYTES` | `Binary` |
 | `DATETIME` | `Datetime`, or `Timestamp(Nanosecond, Some("+00:00"))` |
+| `DURATION` | `Duration`, or `Duration(Nanosecond)` |
 | `ARRAY`, `VEC` | `FixedSizeList(...)`, `List(...)`, or `Generic` |
 
 ## Literals
@@ -267,6 +272,7 @@ names:
 | Float | `F64` | Decimal digits with a fraction, written as one word, such as `2.5`. An exponent, a leading `.`, a trailing `.`, and a space beside the `.`, as in `2 .5`, are not float literals; write `'1e5' AS F64` |
 | String | `STRING` | `'text'`, `"text"`, or dollar-quoted `$$text$$` and `$tag$text$tag$`, where the tag is letters, digits, and underscores. A quoted string cannot hold its own quote or a line break; a dollar-quoted string can hold anything but its closing delimiter, line breaks included. No escape sequence is interpreted, so `'a\nb'` is four characters |
 | Boolean | `BOOL` | `TRUE`, `FALSE`, in any letter case |
+| Duration | `DURATION` | One or more parts, each a number and its unit written right after it, such as `30s`, `250ms`, `1.5s` or `1h 30m`. See [Duration Literals](#duration-literals) |
 | Null | the type its destination supplies | `NULL`, only as the whole value of an assignment to an optional field or as a result of a conditional whose other results give it a type |
 
 A literal reads the same wherever its expression is written: in a statement, in a web console form,
@@ -282,6 +288,25 @@ literal combined with a value of another width is written with a cast:
 `input.priority > 5 AS I32`, `bitwise_and(input.flags, 255 AS U16)`, or `input.ratio * 0.5 AS F32`.
 Arguments that take a count of any integer type, such as the digits of `round` and the counts of
 the string and shift functions, accept an `I64` literal as it is.
+
+### Duration Literals
+
+A duration literal is one or more parts separated by spaces, each a number with its unit written
+right after it: `30s`, `250ms`, `1h 30m`. The units are `ns`, `us`, `ms`, `s`, `m`, `h`, and `d`,
+for nanoseconds through days, written exactly so; a day is always 24 hours. A unit whose length
+varies is refused with its name, `duration unit 'M' has no fixed length` for months and the same for
+years (`y`), and so is every other spelling a clause duration accepts, such as `min`, `sec` or the
+weeks unit `w`, with `duration unit 'w' is not written in a literal; a DURATION literal takes the
+units ns, us, ms, s, m, h and d`. Each part holds its own unit, so `1h30m` is not a literal; write
+`1h 30m`. A part may have a fraction, `1.5s`, when it names a whole number of nanoseconds, and a
+fraction finer than that, `1.5ns`, is refused rather than rounded. The parts add up to one value,
+which must fit a `DURATION`: `106752d` is refused with `it does not fit a DURATION, which holds at
+most 106751d 23h 47m 16s 854ms 775us 807ns`. A literal is never negative, and `-30s` applies unary
+minus, which a `DURATION` does not take.
+
+Text, the CLI and the web console show a duration in the same literal form, its non-zero parts
+from days down to nanoseconds: `1h 30m`, `1s 500ms`, `1d 12h`. Zero shows as `0s`, and a duration
+below zero shows with a leading `-`, as `-250ms`.
 
 ### Operator Precedence
 
@@ -432,7 +457,8 @@ The words `IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, and `END` are [reserved](#reserv
 
 `=`, `!=`, `<`, `<=`, `>`, and `>=` require both operands to have the same exact type. `=` and `!=`
 compare any scalar type, `BYTES` included, which compares octet by octet. The ordering comparisons
-`<`, `<=`, `>`, and `>=` accept numeric, `STRING`, and `DATETIME` operands. A null operand makes the
+`<`, `<=`, `>`, and `>=` accept numeric, `STRING`, `DATETIME`, and `DURATION` operands; a shorter
+duration orders before a longer one. A null operand makes the
 comparison null. No comparison is defined for `ARRAY` and `VEC` values: compare their elements with
 the [array and vector functions](#array-and-vector-functions) instead.
 
@@ -482,8 +508,8 @@ cannot convert its literal, whose typed null is no valid element. So does an ele
 field or calls a function; to test a value against other fields, compare it with `=` and combine
 the comparisons with `OR`.
 
-The operand may have any numeric type, `BOOL`, `STRING`, or `DATETIME`, and every element must have
-exactly the operand's type. Integer literals are `I64` and float literals `F64`, so a set tested
+The operand may have any numeric type, `BOOL`, `STRING`, `DATETIME`, or `DURATION`, and every
+element must have exactly the operand's type. Integer literals are `I64` and float literals `F64`, so a set tested
 against an `I32` or `F32` value casts each element: `input.priority IN (1 AS I32, 2 AS I32)`.
 
 A value is an element of a set when it equals one of its elements under `=`:
@@ -499,7 +525,7 @@ A value is an element of a set when it equals one of its elements under `=`:
   while `0.0` and `-0.0` are the same element.
 
 A set is prepared once for its program rather than for every batch or message. A small set of
-numbers, `BOOL`, or `DATETIME` values is tested by comparing the value with each of its elements,
+numbers, `BOOL`, `DATETIME`, or `DURATION` values is tested by comparing the value with each of its elements,
 while a larger set, and every set of `STRING` values, is looked up by key, so a set of thousands of
 elements still costs each message one lookup.
 
@@ -507,7 +533,7 @@ elements still costs each message one lookup.
 
 `x BETWEEN low AND high` is `x >= low AND x <= high` with `x` computed once, so an operand that fails
 reports its error once. The operand and both bounds must have one exact type: any numeric type,
-`STRING`, or `DATETIME`, the types `<` orders. Both bounds are inclusive, and a range whose low bound
+`STRING`, `DATETIME`, or `DURATION`, the types `<` orders. Both bounds are inclusive, and a range whose low bound
 is above its high bound holds no value; the bounds are never swapped.
 
 Nulls follow `AND`: a null operand makes the result null, and a null bound makes it null unless the
@@ -573,13 +599,16 @@ does not convert does:
 `<type>` is written with the same spellings in both forms, in any letter case. It is a scalar
 type, `U8` or `UINT8`, `I8` or `INT8`, `U16` or `UINT16`, `I16` or `INT16`, `U32` or `UINT32`,
 `I32` or `INT32`, `U64` or `UINT64`, `I64` or `INT64`, `F32` or `FLOAT32`, `F64` or `FLOAT64`,
-`BOOL` or `BOOLEAN`, `STRING` or `UTF8`, `BYTES`, and `DATETIME`, or a list type, `VEC<...>` or
+`BOOL` or `BOOLEAN`, `STRING` or `UTF8`, `BYTES`, `DATETIME`, and `DURATION`, or a list type, `VEC<...>` or
 `ARRAY<..., n>`, written as a schema field declares it and nested to any depth, as
 [Lists](#lists) describes. Any other name is rejected with `unsupported type '<name>'`. A scalar
 converts only to a scalar type and a list only to a list type. A `BYTES` value converts only to
 `BYTES`, which returns it unchanged, and no other type converts to `BYTES`; a statement that asks
 for either is rejected with `BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or
-hex functions`, which name the functions that convert explicitly. A null operand is not a failure:
+hex functions`, which name the functions that convert explicitly. A `DURATION` converts to no other
+type and no other type converts to a `DURATION`, in either form and as a list element alike; a
+statement that asks for either is rejected with `a DURATION converts to no other type, and no other
+type converts to a DURATION`. Converting a `DURATION` to `DURATION` returns it unchanged. A null operand is not a failure:
 it converts to a typed null in both forms, so `input.amount AS I64` over a message without an
 `amount` yields null and reports nothing. Test the operand to tell a missing value from one that did
 not convert:
@@ -766,7 +795,9 @@ three and every fixed length is from 1 to 2,147,483,647. JSON has no date or byt
 `DATETIME` and `BYTES`, including as elements, reject the statement with an error such as
 `JSON_VALUE cannot read DATETIME, which no JSON value is; read the text as STRING and convert it
 explicitly`; read the text as a `STRING` and convert it with [`parse_datetime`](#reading-text) or
-[`base64_decode`](#bytes-encodings-and-hashes). A value is never converted between kinds: a number is
+[`base64_decode`](#bytes-encodings-and-hashes). JSON has no duration either, and no function reads
+one from text, so `DURATION`, including as an element, rejects the statement with `JSON_VALUE cannot
+read DURATION, which no JSON value is`. A value is never converted between kinds: a number is
 not read as text, and text is not read as a number.
 
 | Declared type | Reads | Fails for |
@@ -889,14 +920,15 @@ conditional. There is no `IS NULL` operator and no `is_not_null` function: write
 | `clamp(value, low, high)` | same type as inputs | `low` where `value < low`, `high` where `value > high`, and `value` otherwise |
 
 `greatest` and `least` take one or more arguments of one exact scalar type: any numeric type,
-`BOOL`, `STRING`, `DATETIME`, or `BYTES`. They skip null arguments, so their result is required when
+`BOOL`, `STRING`, `DATETIME`, `DURATION`, or `BYTES`. They skip null arguments, so their result is required when
 any argument is. They order values the way the window `MIN` and `MAX` aggregates do: `BOOL` orders
 `false` before `true`, `STRING` orders by Unicode code point, `BYTES` orders octet by octet, and
 floating-point values order NaN above every other value and treat both zeros as equal. Among equal
 values the earliest argument is returned, so `greatest(-0.0, 0.0)` is `-0.0` and
 `greatest(0.0, -0.0)` is `0.0`. Every argument is evaluated, whichever one is returned.
 
-`clamp` takes three arguments of one exact type: any numeric type, `STRING`, or `DATETIME`. It
+`clamp` takes three arguments of one exact type: any numeric type, `STRING`, `DATETIME`, or
+`DURATION`. It
 compares exactly as `<` and `>` do, so it returns a NaN value unchanged and keeps `-0.0` inside a
 range that starts at `0.0`. A null argument produces a null result. A message whose low bound is
 above its high bound, or whose floating-point bound is NaN, reports an `invalid_argument` error,
@@ -1880,9 +1912,9 @@ including for binary functions when either container is null.
 | --- | --- | --- | --- |
 | `count(list)` | any | `I64` | Number of elements |
 | `sum(list)` | numeric | optional element type | Sum of the elements. An empty list returns null |
-| `first(list)` | numeric, `BOOL`, `STRING`, `DATETIME`, `ARRAY`, `VEC` | optional element type | The first element, or null for an empty list |
-| `last(list)` | numeric, `BOOL`, `STRING`, `DATETIME`, `ARRAY`, `VEC` | optional element type | The last element, or null for an empty list |
-| `nth(list, index)` | numeric, `BOOL`, `STRING`, `DATETIME`, `ARRAY`, `VEC` | optional element type | The element at `index`, counting from `0`, or null when `index` is negative or past the end. `index` may be any integer type |
+| `first(list)` | numeric, `BOOL`, `STRING`, `DATETIME`, `DURATION`, `ARRAY`, `VEC` | optional element type | The first element, or null for an empty list |
+| `last(list)` | numeric, `BOOL`, `STRING`, `DATETIME`, `DURATION`, `ARRAY`, `VEC` | optional element type | The last element, or null for an empty list |
+| `nth(list, index)` | numeric, `BOOL`, `STRING`, `DATETIME`, `DURATION`, `ARRAY`, `VEC` | optional element type | The element at `index`, counting from `0`, or null when `index` is negative or past the end. `index` may be any integer type |
 | `list_reshape(list, d1, ..., dk)` | any innermost type, fixed arrays only | `ARRAY<element, d1, ..., dk>` | Changes the fixed dimensions without changing innermost element order |
 | `list_flatten(list)` | `ARRAY`, `VEC` | `ARRAY` or `VEC` | Removes exactly one level of nesting; two fixed levels multiply their widths, and either variable level gives a vector |
 | `list_transpose(list)` | any innermost type, fixed arrays of rank two or more | `ARRAY` | Exchanges the two outermost dimensions and preserves every deeper dimension |
@@ -1890,7 +1922,7 @@ including for binary functions when either container is null.
 | `overlap(left, right)` | any scalar | `BOOL` | Whether two lists of the same exact element type share an element. An empty list returns `false` |
 | `slice(list, start, length)` | any | `VEC<element>` | Selects up to `length` elements from the zero-based `start`; negative bounds act as zero and bounds past the end are clipped. Null bounds return null |
 | `concat(list, ...)` | any | `ARRAY` or `VEC` | Concatenates lists with one exact element type. All fixed arrays produce a fixed array whose width is their sum; any vector input produces a vector |
-| `min(list)`, `max(list)` | numeric, `BOOL`, `STRING`, `DATETIME` | optional element type | Least or greatest element. Empty lists return null |
+| `min(list)`, `max(list)` | numeric, `BOOL`, `STRING`, `DATETIME`, `DURATION` | optional element type | Least or greatest element. Empty lists return null |
 | `mean(list)` | numeric | optional `F64` | Arithmetic mean. An empty list returns null; integer inputs round to `F64` for the calculation |
 | `dot(left, right)` | numeric | element type | Dot product of two lists of one element type. Empty lists return zero. Integer multiplication and accumulation are checked at the element type |
 | `distance(left, right)` | numeric | `F64` | Euclidean distance of two lists of one element type. Empty lists return zero; integer inputs round to `F64` for the calculation |
@@ -2048,20 +2080,20 @@ with `... cannot retain BYTES in aggregate demand <n> argument <m>`.
 | `BOOL_OR(condition)` | `BOOL` | `BOOL` | no row has a condition |
 | `SUM(value)` | numeric | the argument's type | no row has a value |
 | `AVG(value)` | numeric | `F64` | no row has a value |
-| `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, or `DATETIME` | the argument's type | no row has a value |
+| `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, `DATETIME`, or `DURATION` | the argument's type | no row has a value |
 | `FIRST(value)`, `LAST(value)` | any | the argument's type | no row has a value |
 | `COLLECT_VEC(value)` | any required value | required `VEC<value type>` | never; a window emits only while it retains a row |
 | `COLLECT_ARRAY(value)` | any required value; count-only `WIDTH n MESSAGES` | required `ARRAY<value type, n>` | never; each emission retains exactly `n` rows |
-| `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, or `DATETIME` key | the value's type | no row has both a value and a key |
+| `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, `DATETIME`, or `DURATION` key | the value's type | no row has both a value and a key |
 | `VAR_POP(value)`, `STDDEV_POP(value)` | numeric | `F64` | no row has a value |
 | `VAR_SAMP(value)`, `STDDEV_SAMP(value)` | numeric | `F64` | fewer than two rows have a value |
 | `COVAR_POP(first, second)` | numeric, numeric | `F64` | no row has both values |
 | `COVAR_SAMP(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values |
 | `CORR(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values, or either variable is constant across them |
 | `PERCENTILE_LINEAR_HISTOGRAM(value, percentile, buckets, min, max, delay)` | numeric value, then constants | `F64` | the histogram counts no value |
-| `APPROX_COUNT_DISTINCT(value, precision)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constant precision 4–16 | `I64` | never; zero when no row contributes |
+| `APPROX_COUNT_DISTINCT(value, precision)` | numeric, `BOOL`, `STRING`, `DATETIME`, or `DURATION`; constant precision 4–16 | `I64` | never; zero when no row contributes |
 | `APPROX_QUANTILE(value, percentile, capacity)` | numeric; constant percentile 0–100 and capacity 32–4096 | `F64` | no row has a value |
-| `APPROX_TOP_K(value, k, capacity)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constants `1 <= k <= capacity <= 4096` | `VEC<value type>` | never; empty when no row contributes |
+| `APPROX_TOP_K(value, k, capacity)` | numeric, `BOOL`, `STRING`, `DATETIME`, or `DURATION`; constants `1 <= k <= capacity <= 4096` | `VEC<value type>` | never; empty when no row contributes |
 
 `COLLECT_VEC` returns every retained argument value, ordered by ingestion low watermark and then
 admission, as `FIRST` and `LAST` are. It preserves the argument's exact type: collecting an

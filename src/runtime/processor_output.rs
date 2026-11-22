@@ -176,7 +176,7 @@ pub(super) struct PendingProcessorOutputMessageError {
     pub(super) row: usize,
     pub(super) key: Option<BranchKey>,
     pub(super) record: RuntimeRow,
-    pub(super) error: StructuredMessageError,
+    pub(super) error: RaisedMessageError,
     pub(super) partial_output: Option<RuntimeRecordBatch>,
     pub(super) materialized_state: HashMap<String, RuntimeValue>,
 }

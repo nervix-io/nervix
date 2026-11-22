@@ -262,6 +262,7 @@ impl PartialEq for BorrowedKey<'_> {
                 (Part::Int64(a), Part::Int64(b)) => a == b,
                 (Part::UInt64(a), Part::UInt64(b)) => a == b,
                 (Part::Datetime(a), Part::Datetime(b)) => a == b,
+                (Part::Duration(a), Part::Duration(b)) => a == b,
                 (Part::Float64(a), Part::Float64(b)) => {
                     OrderedFloat(f64::from_bits(a.to_native()))
                         == OrderedFloat(f64::from_bits(b.to_native()))
@@ -286,7 +287,9 @@ impl std::hash::Hash for BorrowedKey<'_> {
             match part {
                 Part::Null => {}
                 Part::Boolean(value) => value.hash(state),
-                Part::Int64(value) | Part::Datetime(value) => value.to_native().hash(state),
+                Part::Int64(value) | Part::Datetime(value) | Part::Duration(value) => {
+                    value.to_native().hash(state)
+                }
                 Part::UInt64(value) => value.to_native().hash(state),
                 Part::Float64(value) => OrderedFloat(f64::from_bits(value.to_native())).hash(state),
                 Part::Utf8(value) => value.as_str().hash(state),

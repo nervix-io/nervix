@@ -91,6 +91,7 @@ pub(crate) fn nervix_type<'src>()
             kw(Identifier::String).to(ParseAsType::String),
             kw(Identifier::Bytes).to(ParseAsType::Bytes),
             kw(Identifier::Datetime).to(ParseAsType::Datetime),
+            kw(Identifier::Duration).to(ParseAsType::Duration),
             kw(Identifier::F32).to(ParseAsType::F32),
             kw(Identifier::F64).to(ParseAsType::F64),
         );
@@ -640,6 +641,34 @@ mod tests {
     }
 
     #[test]
+    fn duration_schema_parses_and_completes_as_one_type() {
+        let parsed = parse_create_schema(
+            "CREATE SCHEMA waits (wait DURATION, retries VEC<DURATION>, pair ARRAY<duration, 2> \
+             OPTIONAL);",
+        )
+        .assured("the DURATION fields follow the internal schema grammar");
+        assert_eq!(parsed.body.fields[0].ty, ParseAsType::Duration);
+        assert_eq!(
+            parsed.body.fields[1].ty,
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Duration)
+            }
+        );
+        assert!(parsed.body.fields[2].optional);
+
+        let input = "CREATE SCHEMA waits (wait ";
+        let suggestions = crate::statement::suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"DURATION".to_string()));
+
+        assert!(parse_create_schema("CREATE SCHEMA waits (wait DURATION<STRING>);").is_err());
+        // The clause keyword `WIDTH 10s DURATION` stays a type keyword nowhere else: a field may
+        // still be named after it.
+        let named = parse_create_schema("CREATE SCHEMA waits (duration DURATION);")
+            .assured("a field may be named like the type it holds");
+        assert_eq!(named.body.fields[0].name.as_str(), "duration");
+    }
+
+    #[test]
     fn parses_internal_schema_definition_with_if_not_exists() {
         let input = r#"
             CREATE IF NOT EXISTS SCHEMA notification (
@@ -788,6 +817,8 @@ mod tests {
                 string_vec VEC<STRING>,
                 datetime_array ARRAY<DATETIME, 2>,
                 datetime_vec VEC<DATETIME>,
+                duration_array ARRAY<DURATION, 2>,
+                duration_vec VEC<DURATION>,
                 f32_array ARRAY<F32, 2>,
                 f32_vec VEC<F32>,
                 f64_array ARRAY<F64, 2>,
@@ -809,6 +840,7 @@ mod tests {
             ParseAsType::Bool,
             ParseAsType::String,
             ParseAsType::Datetime,
+            ParseAsType::Duration,
             ParseAsType::F32,
             ParseAsType::F64,
         ];

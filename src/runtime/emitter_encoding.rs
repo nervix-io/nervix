@@ -84,24 +84,20 @@ impl UnpublishableRow {
         match self {
             Self::OrderingGroup(error) => RejectedEmitterRecord::message(
                 position,
-                EmitterRejectionCode::Invalid,
+                RejectedErrorClass::Evaluation,
                 error.to_string(),
             ),
             Self::Envelope(error) => {
                 let reason = error.to_string();
-                let structured_error = structured_message_error(
+                let structured_error = raised_message_error(
                     execution_now,
-                    MessageErrorCode::Evaluation,
+                    RejectedErrorClass::Evaluation,
                     reason,
                     MessageErrorOperation::Publish,
                     None,
                     std::iter::empty(),
                 );
-                RejectedEmitterRecord::structured(
-                    position,
-                    EmitterRejectionCode::Invalid,
-                    structured_error,
-                )
+                RejectedEmitterRecord::structured(position, structured_error)
             }
         }
     }
@@ -184,7 +180,7 @@ impl EmitterConnector for EncodedRecordEmitter {
                         );
                         let mut member_error = error.clone();
                         member_error.occurred_at = batch.execution_now();
-                        rejected.push(RejectedEmitterRecord::preparation(position, member_error));
+                        rejected.push(RejectedEmitterRecord::member(position, member_error));
                     }
                 }
             }
@@ -376,7 +372,7 @@ async fn encode_broker_records(
                 Err(error) => {
                     rejected.push(RejectedEmitterRecord::message(
                         position,
-                        EmitterRejectionCode::Encode,
+                        RejectedErrorClass::Codec,
                         format!(
                             "emitter '{}' failed to encode record: {error:#}",
                             context.emitter.as_str()
@@ -524,7 +520,7 @@ async fn pack_batch_records(
             PackedOutcome::MemberFailed { position, error } => {
                 rejected.push(RejectedEmitterRecord::message(
                     position,
-                    EmitterRejectionCode::Encode,
+                    RejectedErrorClass::Codec,
                     format!(
                         "emitter '{}' failed to encode record: {error:#}",
                         context.emitter.as_str()
@@ -538,10 +534,9 @@ async fn pack_batch_records(
                 let message = format!("emitter '{}' {exceeded}", context.emitter.as_str());
                 rejected.push(RejectedEmitterRecord::structured(
                     position,
-                    EmitterRejectionCode::Oversize,
-                    structured_message_error(
+                    raised_message_error(
                         batch.execution_now(),
-                        MessageErrorCode::Validation,
+                        RejectedErrorClass::Limit,
                         message,
                         MessageErrorOperation::Encode,
                         None,
@@ -563,11 +558,7 @@ async fn pack_batch_records(
                         .assured("packing positions refer to the source batches it received");
                     let mut member_error = shared.clone();
                     member_error.occurred_at = batch.execution_now();
-                    rejected.push(RejectedEmitterRecord::structured(
-                        position,
-                        EmitterRejectionCode::Encode,
-                        member_error,
-                    ));
+                    rejected.push(RejectedEmitterRecord::structured(position, member_error));
                 }
             }
         }
@@ -594,22 +585,22 @@ fn container_failure(
     batch: &EmitterPublishBatch,
     member_count: usize,
     error: &Report<BatchContainerError>,
-) -> StructuredMessageError {
+) -> RaisedMessageError<RejectedErrorClass> {
     let error = *error.current_context();
-    let code = match error {
+    let class = match error {
         BatchContainerError::NoOutput
         | BatchContainerError::MultipleOutputs
-        | BatchContainerError::Evaluation => MessageErrorCode::Evaluation,
-        BatchContainerError::Unwritable { .. } => MessageErrorCode::Validation,
+        | BatchContainerError::Evaluation => RejectedErrorClass::Evaluation,
+        BatchContainerError::Unwritable { .. } => RejectedErrorClass::Codec,
     };
     let noun = if member_count == 1 {
         "message"
     } else {
         "messages"
     };
-    structured_message_error(
+    raised_message_error(
         batch.execution_now(),
-        code,
+        class,
         format!(
             "emitter '{}' codec '{}' {error} for a batch of {member_count} {noun}",
             context.emitter.as_str(),

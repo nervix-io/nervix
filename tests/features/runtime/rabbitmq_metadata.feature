@@ -255,7 +255,7 @@ Feature: RabbitMQ delivery metadata
         TO readings INHERIT ALL SET source = 'stamped', published_at = metadata.timestamp UNBRANCHED
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO refusals
-          SET value = input.value, code = error.code, operation = error.operation,
+          SET value = input.value, code = error.class, operation = error.operation,
             message = error.message
         ON GENERAL ERROR LOG;
       CREATE RABBITMQ QUEUE INGESTOR unstamped

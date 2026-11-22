@@ -116,6 +116,7 @@ mod tests {
                         .listener_bounds(),
                         cpu_count: NonZeroU64::new(2),
                         memory_bytes: NonZeroU64::new(8 << 30),
+                        database_volume_bytes: 1 << 40,
                         receive: crate::PeerReceiveSettings::default().bounds(),
                     },
                 };

@@ -37,8 +37,9 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_execution::Executor;
 use nervix_models::{
-    FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget, MessageErrorCode,
-    MessageErrorOperation, PropertyType, StructuredMessageError, Timestamp,
+    ExternalErrorCode, FieldPath, HttpApplicationHeaders, HttpMethod, HttpTarget,
+    MessageErrorClass, MessageErrorOperation, PropertyType, RaisedMessageError, RejectedErrorClass,
+    Timestamp,
 };
 use nervix_primitives::{sync::Arc, time::Instant};
 use thiserror::Error;
@@ -439,41 +440,35 @@ pub struct RowRequestPreparation {
 #[derive(Debug)]
 pub struct RejectedEmitterMember<Id> {
     pub id: Id,
-    pub error: StructuredMessageError,
+    /// The rejection, which the host attributes to its emitter. A rejection is always of the
+    /// `REJECTED` group: the record itself is the problem, so sending it again fails the same way.
+    pub error: RaisedMessageError<RejectedErrorClass>,
 }
 
 impl<Id> RejectedEmitterMember<Id> {
     /// A record the external system itself refused.
     pub fn external(id: Id, occurred_at: Timestamp, message: String) -> Self {
-        Self {
+        Self::rejected(
             id,
-            error: StructuredMessageError {
-                reference: uuid::Uuid::now_v7(),
-                code: MessageErrorCode::External,
-                message,
-                operation: MessageErrorOperation::Publish,
-                operation_index: None,
-                fields: Default::default(),
-                occurred_at,
-            },
-        }
+            RejectedErrorClass::Refused,
+            occurred_at,
+            message,
+            MessageErrorOperation::Publish,
+            std::iter::empty(),
+        )
     }
 
     /// A record whose own request measures more than the emitter's `MAX SIZE`, which the connector
     /// found by measuring the record alone. It never reaches the destination.
     pub fn oversize(id: Id, occurred_at: Timestamp, message: String) -> Self {
-        Self {
+        Self::rejected(
             id,
-            error: StructuredMessageError {
-                reference: uuid::Uuid::now_v7(),
-                code: MessageErrorCode::Validation,
-                message,
-                operation: MessageErrorOperation::Encode,
-                operation_index: None,
-                fields: Default::default(),
-                occurred_at,
-            },
-        }
+            RejectedErrorClass::Limit,
+            occurred_at,
+            message,
+            MessageErrorOperation::Encode,
+            std::iter::empty(),
+        )
     }
 
     /// A record whose mapped values the connector's own validation refused, naming the fields that
@@ -484,16 +479,42 @@ impl<Id> RejectedEmitterMember<Id> {
         message: String,
         fields: impl IntoIterator<Item = FieldPath>,
     ) -> Self {
+        Self::rejected(
+            id,
+            RejectedErrorClass::Validation,
+            occurred_at,
+            message,
+            MessageErrorOperation::Values,
+            fields,
+        )
+    }
+
+    /// This rejection with the code its external system gave the refusal, in that system's own
+    /// spelling, which the error route reads as `error.external_code`.
+    pub fn with_external_code(mut self, code: ExternalErrorCode) -> Self {
+        self.error.external_code = Some(code);
+        self
+    }
+
+    fn rejected(
+        id: Id,
+        class: RejectedErrorClass,
+        occurred_at: Timestamp,
+        message: String,
+        operation: MessageErrorOperation,
+        fields: impl IntoIterator<Item = FieldPath>,
+    ) -> Self {
         Self {
             id,
-            error: StructuredMessageError {
+            error: RaisedMessageError {
                 reference: uuid::Uuid::now_v7(),
-                code: MessageErrorCode::Validation,
+                class,
                 message,
-                operation: MessageErrorOperation::Values,
+                operation,
                 operation_index: None,
                 fields: fields.into_iter().collect(),
                 occurred_at,
+                external_code: None,
             },
         }
     }
@@ -927,7 +948,8 @@ pub trait RecordEmitter: EmitterLifecycle {
     /// until delivery or rejection, and never prepares a retained payload again on a retry or
     /// through a reopened connector. Most connectors send the codec's bytes unchanged.
     ///
-    /// A refusal is the payload's definitive message error, shared by all its source members.
+    /// A refusal is the payload's definitive message error, shared by all its source members; like
+    /// every record rejection it belongs to the `REJECTED` group.
     #[cfg_attr(
         nervix_lint,
         nervix::error_boundary(
@@ -939,7 +961,7 @@ pub trait RecordEmitter: EmitterLifecycle {
         &mut self,
         payload: Vec<u8>,
         _occurred_at: Timestamp,
-    ) -> Result<Vec<u8>, StructuredMessageError> {
+    ) -> Result<Vec<u8>, RaisedMessageError<RejectedErrorClass>> {
         Ok(payload)
     }
 
@@ -1120,7 +1142,15 @@ pub trait EmitterStagingDirectory: Send + Sync + 'static {
     )
 )]
 pub trait EmitterGeneralErrorHandler: Send + Sync + 'static {
-    fn handle_general_error(&self, acks: &EmitterRecordAcknowledgements, reason: String);
+    /// Applies the node's general error policy to `acks` for a failure of `class` that the
+    /// connector describes in `reason`; the connector names the class because only it knows what
+    /// failed.
+    fn handle_general_error(
+        &self,
+        acks: &EmitterRecordAcknowledgements,
+        class: MessageErrorClass,
+        reason: String,
+    );
 }
 
 /// The node's bounded executor, through which a connector admits the synchronous work it does
@@ -1277,8 +1307,15 @@ impl EmitterHost {
         self.inner.services.executor()
     }
 
-    pub fn handle_general_error(&self, acks: &EmitterRecordAcknowledgements, reason: String) {
-        self.inner.services.handle_general_error(acks, reason);
+    pub fn handle_general_error(
+        &self,
+        acks: &EmitterRecordAcknowledgements,
+        class: MessageErrorClass,
+        reason: String,
+    ) {
+        self.inner
+            .services
+            .handle_general_error(acks, class, reason);
     }
 }
 

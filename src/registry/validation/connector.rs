@@ -654,6 +654,13 @@ pub(in crate::registry) fn validate_direct_value_mappings(
                     key: mapping.mapping.column.clone(),
                 })
             })?;
+        if expected.declares_rejected(&field.data_type) {
+            return Err(invalid(ConnectorDeclarationIssue::RejectedDuration {
+                section: mapping.section,
+                key: mapping.mapping.column.clone(),
+                entity: emitter.connector.kind(),
+            }));
+        }
         if !expected.admits(&field.data_type) {
             return Err(invalid(ConnectorDeclarationIssue::MappedType {
                 section: mapping.section,

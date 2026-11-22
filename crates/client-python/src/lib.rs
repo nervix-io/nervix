@@ -5,9 +5,10 @@
 //! - **Owns.** The Python classes, enumerations and exceptions a CPython host reads and calls:
 //!   sessions with their connection options, prepared commands and their outcomes, completion
 //!   pages, subscription events with their frames and columns, domain clock events and followed
-//!   clocks, producers, consumers and deliveries of client endpoints, typed batches and batch
-//!   builders, the Arrow PyCapsule exchange of batches, and cancellation tokens with deadlines;
-//!   releasing the GIL for every wait, and tying each object's lifetime to Python's.
+//!   clocks, server notices with the class and node of the error a runtime notice reports,
+//!   producers, consumers and deliveries of client endpoints, typed batches and batch builders,
+//!   the Arrow PyCapsule exchange of batches, and cancellation tokens with deadlines; releasing
+//!   the GIL for every wait, and tying each object's lifetime to Python's.
 //! - **Depends on.** The host session runtime every binding shares, the Rust client vocabulary it
 //!   names, Arrow's C data interface, and pyo3.
 //! - **Must not know.** How a session reaches its server, recovers or decides an outcome, which
@@ -42,6 +43,7 @@ mod errors;
 mod event;
 mod inspection;
 mod node_inspection;
+mod notice;
 mod schema;
 mod session;
 mod values;
@@ -61,6 +63,7 @@ fn nervix_client(module: &Bound<'_, PyModule>) -> PyResult<()> {
     entity_labels::register(module)?;
     node_inspection::register(module)?;
     clock::register(module)?;
+    notice::register(module)?;
     endpoint::register(module)?;
     batch::register(module)?;
     values::register(module)?;

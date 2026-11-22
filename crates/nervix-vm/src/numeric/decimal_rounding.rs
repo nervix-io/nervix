@@ -168,6 +168,7 @@ impl RoundingDigits {
             | TypedArray::Utf8(_)
             | TypedArray::Binary(_)
             | TypedArray::Datetime(_)
+            | TypedArray::Duration(_)
             | TypedArray::Generic(_)
             | TypedArray::Uninitialized { .. } => None,
         }

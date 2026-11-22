@@ -1298,6 +1298,7 @@ mod tests {
         fn handle_general_error(
             &self,
             _acks: &nervix_connector::EmitterRecordAcknowledgements,
+            _class: nervix_models::MessageErrorClass,
             _reason: String,
         ) {
         }
@@ -1352,6 +1353,7 @@ mod tests {
         fn handle_general_error(
             &self,
             _acks: &nervix_connector::EmitterRecordAcknowledgements,
+            _class: nervix_models::MessageErrorClass,
             _reason: String,
         ) {
         }

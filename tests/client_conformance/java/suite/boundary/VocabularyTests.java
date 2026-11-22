@@ -40,7 +40,7 @@ public final class VocabularyTests {
         assertEquals(2, Nervix.TlsRequirement.REQUIRED.code());
 
         assertArrayEquals(new Nervix.FieldType[] {
-            Nervix.FieldType.U8, Nervix.FieldType.I8, Nervix.FieldType.U16, Nervix.FieldType.I16, Nervix.FieldType.U32, Nervix.FieldType.I32, Nervix.FieldType.U64, Nervix.FieldType.I64, Nervix.FieldType.F32, Nervix.FieldType.F64, Nervix.FieldType.BOOL, Nervix.FieldType.STRING, Nervix.FieldType.BYTES, Nervix.FieldType.DATETIME, Nervix.FieldType.FIXED_LIST, Nervix.FieldType.LIST
+            Nervix.FieldType.U8, Nervix.FieldType.I8, Nervix.FieldType.U16, Nervix.FieldType.I16, Nervix.FieldType.U32, Nervix.FieldType.I32, Nervix.FieldType.U64, Nervix.FieldType.I64, Nervix.FieldType.F32, Nervix.FieldType.F64, Nervix.FieldType.BOOL, Nervix.FieldType.STRING, Nervix.FieldType.BYTES, Nervix.FieldType.DATETIME, Nervix.FieldType.FIXED_LIST, Nervix.FieldType.LIST, Nervix.FieldType.DURATION
         }, Nervix.FieldType.values());
         assertEquals(1, Nervix.FieldType.U8.code());
         assertEquals(2, Nervix.FieldType.I8.code());
@@ -58,6 +58,7 @@ public final class VocabularyTests {
         assertEquals(14, Nervix.FieldType.DATETIME.code());
         assertEquals(15, Nervix.FieldType.FIXED_LIST.code());
         assertEquals(16, Nervix.FieldType.LIST.code());
+        assertEquals(17, Nervix.FieldType.DURATION.code());
 
         assertArrayEquals(new Nervix.Part[] {
             Nervix.Part.ROWS, Nervix.Part.BRANCH
@@ -137,6 +138,23 @@ public final class VocabularyTests {
             Nervix.ClockEndReason.DOMAIN_REMOVED
         }, Nervix.ClockEndReason.values());
         assertEquals(1, Nervix.ClockEndReason.DOMAIN_REMOVED.code());
+
+        assertArrayEquals(new Nervix.NoticeLevel[] {
+            Nervix.NoticeLevel.INFO, Nervix.NoticeLevel.WARNING, Nervix.NoticeLevel.ERROR
+        }, Nervix.NoticeLevel.values());
+        assertEquals(1, Nervix.NoticeLevel.INFO.code());
+        assertEquals(2, Nervix.NoticeLevel.WARNING.code());
+        assertEquals(3, Nervix.NoticeLevel.ERROR.code());
+
+        assertArrayEquals(new Nervix.NoticeKind[] {
+            Nervix.NoticeKind.MEMBERSHIP, Nervix.NoticeKind.LEADERSHIP, Nervix.NoticeKind.CLUSTER_PARAMETERS, Nervix.NoticeKind.RUNTIME, Nervix.NoticeKind.CONTROL_PLANE, Nervix.NoticeKind.LICENSING
+        }, Nervix.NoticeKind.values());
+        assertEquals(1, Nervix.NoticeKind.MEMBERSHIP.code());
+        assertEquals(2, Nervix.NoticeKind.LEADERSHIP.code());
+        assertEquals(3, Nervix.NoticeKind.CLUSTER_PARAMETERS.code());
+        assertEquals(4, Nervix.NoticeKind.RUNTIME.code());
+        assertEquals(5, Nervix.NoticeKind.CONTROL_PLANE.code());
+        assertEquals(6, Nervix.NoticeKind.LICENSING.code());
 
         assertArrayEquals(new Nervix.EndpointState[] {
             Nervix.EndpointState.ACTIVE, Nervix.EndpointState.INTERRUPTED, Nervix.EndpointState.RESTORING, Nervix.EndpointState.REOPEN_REQUIRED, Nervix.EndpointState.CLOSED

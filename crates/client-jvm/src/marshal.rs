@@ -93,7 +93,7 @@ codes!(open_refusal(host::OpenRefusal) {
 });
 codes!(field_kind(host::FieldType) {
     U8=1,I8=2,U16=3,I16=4,U32=5,I32=6,U64=7,I64=8,F32=9,F64=10,Bool=11,String=12,
-    Bytes=13,Datetime=14,FixedList=15,List=16,
+    Bytes=13,Datetime=14,FixedList=15,List=16,Duration=17,
 });
 codes!(disposition(host::Disposition) {
     Completed=1,Failed=2,NotLeader=3,TransactionDetached=4,TransactionTakenOver=5,OutcomeUnknown=6,
@@ -115,6 +115,10 @@ codes!(event_kind(host::EventKind) {
 codes!(clock_kind(host::ClockEventKind) {State=1,Tick=2,Ended=3,Interrupted=4,RestorationFailed=5});
 codes!(clock_state(host::ClockState) {Stopped=1,Uninstalled=2,Unpaced=3,Paced=4});
 codes!(clock_end(host::ClockEndReason) {DomainRemoved=1});
+codes!(notice_level(host::NoticeLevel) {Info=1,Warning=2,Error=3});
+codes!(notice_kind(host::NoticeKind) {
+    Membership=1,Leadership=2,ClusterParameters=3,Runtime=4,ControlPlane=5,Licensing=6,
+});
 codes!(end_reason(host::EndReason) {RelayRemoved=1,RelayChanged=2});
 codes!(restoration_cause(host::RestorationCause) {
     InTransaction=1,InvalidStatement=2,NameInUse=3,InvalidFilter=4,Unavailable=5,Rejected=6,Failed=7,

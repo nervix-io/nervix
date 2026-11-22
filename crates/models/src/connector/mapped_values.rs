@@ -57,7 +57,9 @@ pub enum MappedValueType {
     Attribute,
     #[strum(serialize = "a literal string, boolean, I64, F64, null or ARRAY")]
     Literal,
-    #[strum(serialize = "a Plexus scalar, ARRAY or VEC")]
+    /// Every Plexus scalar but `DURATION`, which each native store binding declares rejected
+    /// (see [`MappedValueType::declares_rejected`]), and every `ARRAY` or `VEC` of those.
+    #[strum(serialize = "a Plexus scalar other than DURATION, ARRAY or VEC")]
     Column,
 }
 
@@ -136,6 +138,20 @@ impl MappedValueType {
         }
     }
 
+    /// Whether this declaration rejects `actual` outright rather than merely holding another type:
+    /// a destination column holds no `DURATION` losslessly, at the top level or as the element of
+    /// a list, so every native store binding declares it rejected.
+    pub fn declares_rejected(self, actual: &DataType) -> bool {
+        if self != Self::Column {
+            return false;
+        }
+        let mut innermost = actual;
+        while let Some(element) = Self::sequence_element(innermost) {
+            innermost = element;
+        }
+        *innermost == DataType::Duration(TimeUnit::Nanosecond)
+    }
+
     fn sequence_element(actual: &DataType) -> Option<&DataType> {
         match actual {
             DataType::List(element) | DataType::FixedSizeList(element, _) => {
@@ -156,7 +172,8 @@ pub struct MappedValueField {
 /// The direct value contract of an entity; a codec or native emitter declares none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MappedValueTypes {
-    /// Destination columns take every current Plexus scalar and recursively typed ARRAY or VEC.
+    /// Destination columns take every current Plexus scalar but `DURATION`, which they declare
+    /// rejected, and recursively typed ARRAY or VEC of those.
     Columns,
     /// Named protocol fields have exact types; metadata uses the declared attribute family.
     Fields {

@@ -36,6 +36,8 @@ pub enum FieldType {
     Datetime = 14,
     FixedList = 15,
     List = 16,
+    /// A signed count of nanoseconds, the value of a `DURATION` field.
+    Duration = 17,
 }
 
 impl From<&ParseAsType> for FieldType {
@@ -55,6 +57,7 @@ impl From<&ParseAsType> for FieldType {
             ParseAsType::String => Self::String,
             ParseAsType::Bytes => Self::Bytes,
             ParseAsType::Datetime => Self::Datetime,
+            ParseAsType::Duration => Self::Duration,
             ParseAsType::Array { .. } => Self::FixedList,
             ParseAsType::Vec { .. } => Self::List,
         }
@@ -86,6 +89,7 @@ impl FieldType {
             Self::String => TypeKind::Scalar(ParseAsType::String),
             Self::Bytes => TypeKind::Scalar(ParseAsType::Bytes),
             Self::Datetime => TypeKind::Scalar(ParseAsType::Datetime),
+            Self::Duration => TypeKind::Scalar(ParseAsType::Duration),
             Self::List => TypeKind::List,
             Self::FixedList => TypeKind::FixedList,
         }
@@ -97,7 +101,7 @@ impl FieldType {
             Self::U8 | Self::I8 | Self::Bool => Some(1),
             Self::U16 | Self::I16 => Some(2),
             Self::U32 | Self::I32 | Self::F32 => Some(4),
-            Self::U64 | Self::I64 | Self::F64 | Self::Datetime => Some(8),
+            Self::U64 | Self::I64 | Self::F64 | Self::Datetime | Self::Duration => Some(8),
             Self::String | Self::Bytes | Self::FixedList | Self::List => None,
         }
     }

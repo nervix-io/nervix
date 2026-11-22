@@ -330,6 +330,10 @@ independently of the prompt and are printed above it:
 [events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120Z
 ```
 
+A subscription delivery prints each row as one compact JSON object of its present fields, the
+form every client renders a row in: a `DATETIME` as RFC 3339 text, a `DURATION` as text in its
+literal form, such as `"wait":"1h 30m"`, bytes as base64, and a sensitive field as `"<masked>"`.
+
 A server notice prints as `[events] <kind> <level>: <message>`, labelled by the kind the server
 sent with it: `membership` when the connected node sees a node join, leave or restart as a new
 incarnation, `leadership` for that node's Raft transitions and the membership operations it

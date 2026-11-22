@@ -4,11 +4,11 @@
 
 `nervix_client` is the Python package of the Nervix client. It runs the
 [Rust Client Library](client-library.md) inside your CPython process, so a Python program connects
-to a cluster, runs Plexus, reads relay rows, follows a domain clock, and publishes to and consumes
-from client endpoints with the same recovery as every other Nervix client. This chapter tells you how
-to write that program. Every example below is a test of the package's own suite,
-`tests/client_conformance/python/suite`, which runs against a real cluster, so an example that stops
-working fails a test.
+to a cluster, runs Plexus, reads relay rows and server notices, follows a domain clock, and
+publishes to and consumes from client endpoints with the same recovery as every other Nervix
+client. This chapter tells you how to write that program. Every example below is a test of the
+package's own suite, `tests/client_conformance/python/suite`, which runs against a real cluster, so
+an example that stops working fails a test.
 
 The rules a host must follow are stated normatively in the
 [Client Implementation Manual](client-implementation-manual.md#using-the-python-package) as N-1 to
@@ -207,7 +207,8 @@ and the branch key's fields.
 
 `Session.next_event` waits for the next event of any subscription the session holds. A `ROWS` event
 reads each column as Python values: an `int`, `float`, `bool`, `str` or `bytes`, the nanoseconds
-since the Unix epoch for a `DATETIME`, a `list` for a list, `None` for a null, and `REDACTED` for a
+since the Unix epoch for a `DATETIME`, the signed nanoseconds of a `DURATION` as an `int`, a `list`
+for a list, `None` for a null, and `REDACTED` for a
 value the server withheld because its field is sensitive. `states` tells the three apart, and the
 branch key is read from its own `Part`.
 
@@ -336,6 +337,54 @@ A clock whose domain was removed ends with `ENDED`, and its `end_reason` is `DOM
 To pace a driver by the clock, read `domain_clock` before you publish, wait `wall_duration_until`
 the next boundary, and stamp each event with a time `admits` accepts; the
 [paced simulation driver](paced-simulation-drivers.md) does exactly this.
+
+## Read Server Notices
+
+The server tells a session about conditions worth an operator's attention that belong to no
+request: a node that joined, left or restarted, a consensus transition of the serving node, a
+committed cluster-parameter revision, a runtime or control-plane failure the cluster recovered
+from, and licensing observations and warnings. Each arrives as a `Notice`. Its `kind`, a
+`NoticeKind`, says what it reports: `MEMBERSHIP`, `LEADERSHIP`, `CLUSTER_PARAMETERS`, `RUNTIME`,
+`CONTROL_PLANE` or `LICENSING`. Its `level`, a `NoticeLevel`, says how urgently it asks for
+attention: `INFO`, `WARNING` or `ERROR`. Its `message` is text for display. Route a notice by its
+`kind`, never by its text, as the
+[Client Implementation Manual](client-implementation-manual.md#messages-at-a-glance) requires:
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_notices.py:route_notices}}
+```
+
+A `RUNTIME` notice that reports an error of a graph node carries that error as typed fields:
+`error_class` is the lower-case name of its class, one of the ten [error
+classes](errors-and-diagnostics.md#the-message-error-record) such as `evaluation`, `limit` or
+`refused`; `error_node_kind` is the snake_case kind of the node that produced it, such as
+`junction` or `emitter`; and `error_node` is that node's name. They are the values an error route
+reads as `error.class`, `error.node_kind` and `error.node`. The server publishes such a notice when
+a route's `ON MESSAGE ERROR LOG`, a node's `ON GENERAL ERROR LOG` or a WASM processor's
+`ON GLOBAL ERROR LOG` logs a failure, on whichever node it happened. The three fields are all set
+on such a notice and all `None` on every other notice, a runtime notice about a connector failure
+the node recovered from included. Select errors by these fields, never by parsing the text.
+
+`Session.next_notice` blocks until the next notice arrives and takes a `cancel` token, so bound
+it with a deadline or trigger the token from another thread; see
+[Threads, Cancellation And Deadlines](#threads-cancellation-and-deadlines). A session receives the
+notices published after it opened, so open it before the work whose notices you want to read. The
+suite fails a row in a junction whose route logs the failure, then reads notices until the
+junction's arrives:
+
+```python
+{{#include ../../tests/client_conformance/python/suite/cluster/test_notices.py:read_notice}}
+```
+
+Notices end with the session that delivered them, the ones you have not read included, and
+`next_notice` never opens a session itself: after a lost session it continues with the notices of
+the next session the library opens, for example for your next command. Read notices promptly, on a
+thread of their own if the rest of the program blocks. The session holds at most 128 notices and
+1 MiB you have not read; when more arrive, it drops the ones it holds and the next read raises
+`EventOverflowError`. The stream stays open, and the reads after it return the notices that arrived
+after the gap. The server itself skips the notices a session falls too far behind to receive, and
+logs how many. A notice acknowledges no command: what became of a command is the `Outcome` that
+`execute` returns.
 
 ## Publish Through A Client Ingestor
 
@@ -576,7 +625,7 @@ a copy.
 `Producer.submit` also takes Arrow data that exports itself through the interface, such as a pyarrow
 record batch or table, and `Batch.from_arrow` imports it for a schema. Arrow data must
 have the producer's field names in order, exactly its types, `timestamp[ns, tz=+00:00]` for a
-`DATETIME`, and no null in a required field or a list element; anything else raises
+`DATETIME`, `duration[ns]` for a `DURATION`, and no null in a required field or a list element; anything else raises
 `InvalidArgumentError` before a batch is sent (N-5).
 
 ```python
@@ -601,12 +650,12 @@ reads a withheld value as a null, so read `states` to tell a withheld value from
 ## What The Library Does Not Expose
 
 The package exposes sessions, Plexus execution with resource uploads, completion, subscriptions,
-domain clocks, client endpoints, typed state inspection, backup and restore. It does not expose these parts of the Rust
-client:
+domain clocks, server notices, client endpoints, typed state inspection, backup and restore. It
+does not expose these parts of the Rust client:
 
 - the typed transaction status, transaction attach and transaction inspection; `BEGIN`, `COMMIT` and
   `REVERT` still run through `execute`, and the session keeps its transaction across a reconnect;
-- the typed domain list, structured choice lookups, server notices and the leadership view;
+- the typed domain list, structured choice lookups and the leadership view;
 - uploads that report their progress or run under an upload identity you choose; `UPLOAD RESOURCE`
   runs through `execute` under the identity its `Execution` fixed;
 - `DESCRIBE BACKUP`, which reads an archive without a server.

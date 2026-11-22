@@ -846,6 +846,7 @@ pub(in crate::application) async fn build_test_service_inner(
                         .bounds(),
                     cpu_count: Some(std::num::NonZeroU64::MIN),
                     memory_bytes: Some(std::num::NonZeroU64::MIN),
+                    database_volume_bytes: 1 << 40,
                     receive: interconnect.local_receive_bounds(),
                 },
             },

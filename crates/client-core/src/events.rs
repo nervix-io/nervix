@@ -14,7 +14,7 @@ use nervix_client_wire::{
     SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle, SubscriptionRows,
     SubscriptionRowsSkipped, Suggestion, SuggestionKind, SuggestionStatus,
 };
-use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
+use nervix_models::{RelayName, ReportedError, SubscriptionDeliveryBehavior};
 use nervix_primitives::sync::Arc;
 
 use crate::subscriptions::{SubscriptionInterruption, SubscriptionRestorationFailure};
@@ -101,13 +101,17 @@ impl SubscriptionRowsEvent {
 }
 
 /// A server condition worth an operator's attention that belongs to no request: display text, with
-/// the level it is shown at and the kind of event it reports. A reader routes it by `kind`, never by
-/// its text.
+/// the level it is shown at and the kind of event it reports, and, on a `Runtime` notice about an
+/// error of a graph node, that error's class and producing node. A reader routes it by `kind` and
+/// selects errors by `error`, never by its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerEvent {
     pub level: NoticeLevel,
     pub kind: NoticeKind,
     pub message: String,
+    /// The class and producing node of the error a `Runtime` notice reports; absent on every other
+    /// notice, and on a runtime failure that is no classified error of a graph node.
+    pub error: Option<ReportedError>,
 }
 
 impl From<ServerNotice> for ServerEvent {
@@ -116,15 +120,23 @@ impl From<ServerNotice> for ServerEvent {
             level: notice.level,
             kind: notice.kind,
             message: notice.message,
+            error: notice.error,
         }
     }
 }
 
 impl ServerEvent {
     pub(crate) fn queued_bytes(&self) -> usize {
-        self.message
+        let node_name = match &self.error {
+            Some(error) => error.node.identifier.as_str().len(),
+            None => 0,
+        };
+        let text = self
+            .message
             .len()
-            .checked_add(std::mem::size_of::<Self>())
+            .checked_add(node_name)
+            .assured("a decoded notice's text and node name fit the process address space");
+        text.checked_add(std::mem::size_of::<Self>())
             .assured("a decoded notice and its in-memory header fit the process address space")
     }
 }

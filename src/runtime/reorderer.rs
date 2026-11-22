@@ -1,7 +1,7 @@
 use arrow_array::builder::{
-    BinaryBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder, Int16Builder,
-    Int32Builder, Int64Builder, StringBuilder, TimestampNanosecondBuilder, UInt8Builder,
-    UInt16Builder, UInt32Builder, UInt64Builder,
+    BinaryBuilder, BooleanBuilder, DurationNanosecondBuilder, Float32Builder, Float64Builder,
+    Int8Builder, Int16Builder, Int32Builder, Int64Builder, StringBuilder,
+    TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
 };
 use arrow_schema::{DataType, TimeUnit};
 
@@ -103,6 +103,13 @@ pub(super) fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPa
         VmTypedArray::Datetime(array) => {
             if array.is_valid(row) {
                 ReorderKeyPart::Datetime(array.value(row))
+            } else {
+                ReorderKeyPart::Null
+            }
+        }
+        VmTypedArray::Duration(array) => {
+            if array.is_valid(row) {
+                ReorderKeyPart::Duration(array.value(row))
             } else {
                 ReorderKeyPart::Null
             }
@@ -249,6 +256,18 @@ impl ReorderKeyPart {
                     }
                 }
                 let array: ArrayRef = StdArc::new(builder.finish().with_timezone(zone.clone()));
+                Ok(array)
+            }
+            DataType::Duration(TimeUnit::Nanosecond) => {
+                let mut builder = DurationNanosecondBuilder::with_capacity(rows);
+                for part in parts {
+                    match part {
+                        ReorderKeyPart::Null => builder.append_null(),
+                        ReorderKeyPart::Duration(value) => builder.append_value(*value),
+                        _ => return Err(mismatch()),
+                    }
+                }
+                let array: ArrayRef = StdArc::new(builder.finish());
                 Ok(array)
             }
             // Every other type reaches a key as a null part, so only nulls fit its column.

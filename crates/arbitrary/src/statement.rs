@@ -797,19 +797,7 @@ impl Arbitrary<'_> {
             }),
             StatementVariant::MutateEntityLabels => {
                 let entity = self.entity_label_target();
-                let labels = self.entity_labels();
-                let mutation = if self.entropy.flag() {
-                    nervix_models::EntityLabelMutation::Set(labels)
-                } else {
-                    let keys = labels
-                        .iter()
-                        .map(|(key, _)| key.clone())
-                        .collect::<Vec<_>>();
-                    nervix_models::EntityLabelMutation::Drop(
-                        nervix_models::EntityLabelKeys::try_from(keys)
-                            .assured("generated map keys are unique"),
-                    )
-                };
+                let mutation = self.entity_label_mutation();
                 Statement::MutateEntityLabels(nervix_models::MutateEntityLabels {
                     entity,
                     mutation,
@@ -1185,9 +1173,10 @@ impl Arbitrary<'_> {
 
     /// A literal a subscription binding or a lookup key compares against.
     fn subscription_literal(&mut self) -> SubscriptionLiteral {
-        match self.entropy.byte() % 3 {
+        match self.entropy.byte() % 4 {
             0 => SubscriptionLiteral::String(self.string()),
             1 => SubscriptionLiteral::Number(self.entropy.any_u64().to_string()),
+            2 => SubscriptionLiteral::Duration(self.duration_literal()),
             _ => SubscriptionLiteral::Bool(self.entropy.flag()),
         }
     }

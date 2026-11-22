@@ -522,10 +522,10 @@ pub(super) async fn flush_branch_wasm_processor(
     if let Err(error) = ensured {
         branch.runtime.handle_general_error_for_acks(
             &branch.domain,
-            node_kind,
-            processor,
+            &NodeRef::new(node_kind, processor),
             error_policies,
             forwarded.acks.iter(),
+            MessageErrorClass::INTERNAL,
             &error,
         );
         return;
@@ -554,10 +554,10 @@ pub(super) async fn flush_branch_wasm_processor(
         Err(error) => {
             branch.runtime.handle_general_error_for_acks(
                 &branch.domain,
-                node_kind,
-                processor,
+                &NodeRef::new(node_kind, processor),
                 error_policies,
                 forwarded.acks.iter(),
+                MessageErrorClass::INTERNAL,
                 &error,
             );
             return;

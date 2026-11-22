@@ -9,6 +9,52 @@ use error_stack::{Report, ResultExt as _};
 
 use super::{branch_runtime::BranchInstanceRuntime, *};
 
+/// How building a concrete branch opens the state its processors retain: on which executor, and
+/// what a full bulk wait queue does with a window's sealed sections.
+///
+/// An inferencer's carried state waits for its storage place and its bulk room whichever opening
+/// builds it; the opening only chooses the executor handle those waits go through.
+#[derive(Clone, Debug)]
+pub(super) enum RetainedStateOpening {
+    /// On the node's executor, a window's sealed sections refused when the bulk wait queue is
+    /// full. A branch the record path, a partition move or a guest-state reset builds is built
+    /// this way, and its builder reports or retries the refusal.
+    RefusedWhenFull,
+    /// On `Executor`, a window's sealed sections waiting for a place rather than being refused: a
+    /// processor task's restore, whose executor handle tells the task while any opening waits, so
+    /// that the task answers its commands meanwhile.
+    WaitingForPlace(Executor),
+}
+
+impl RetainedStateOpening {
+    /// The executor every opening runs on.
+    fn executor<'a>(&'a self, runtime: &'a Runtime) -> &'a Executor {
+        match self {
+            Self::RefusedWhenFull => runtime.executor(),
+            Self::WaitingForPlace(executor) => executor,
+        }
+    }
+
+    /// What a full bulk wait queue does with a window's sealed sections.
+    fn queue_admission(&self) -> nervix_execution::QueueAdmission {
+        match self {
+            Self::RefusedWhenFull => nervix_execution::QueueAdmission::RefuseWhenFull,
+            Self::WaitingForPlace(_) => nervix_execution::QueueAdmission::WaitForPlace,
+        }
+    }
+}
+
+/// The concrete branch a processor node is built for.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ProcessorNodeBranch<'a> {
+    /// The scheduled unit that runs the branch.
+    pub(super) unit: Unit,
+    /// The branch's key, absent for unbranched execution.
+    pub(super) key: &'a Option<BranchKey>,
+    /// The incarnation of the branch lifetime, which its retained state belongs to.
+    pub(super) incarnation: u64,
+}
+
 /// Every way applying a refreshed template to a running processor, or instantiating a processor
 /// for a branch, fails.
 #[derive(Debug, thiserror::Error)]
@@ -455,11 +501,15 @@ impl RelayProcessorTemplate {
         &self,
         runtime: &Runtime,
         domain: &DomainName,
-        unit: Unit,
-        key: &Option<BranchKey>,
-        incarnation: u64,
+        branch: ProcessorNodeBranch<'_>,
         revision: &ProcessorPlanRevision,
+        opening: &RetainedStateOpening,
     ) -> error_stack::Result<RelayProcessorNode, ProcessorTemplateError> {
+        let ProcessorNodeBranch {
+            unit,
+            key,
+            incarnation,
+        } = branch;
         Ok(RelayProcessorNode {
             unit,
             kind: self.kind,
@@ -546,7 +596,13 @@ impl RelayProcessorTemplate {
                             branch: BranchScope::from(key),
                         })?;
                     let state = replicated_state
-                        .restore_state(plan, input_schema, incarnation, &runtime.inner.executor)
+                        .restore_state(
+                            plan,
+                            input_schema,
+                            incarnation,
+                            opening.executor(runtime),
+                            opening.queue_admission(),
+                        )
                         .await
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),
@@ -648,7 +704,11 @@ impl RelayProcessorTemplate {
                                 )
                                 .change_context_lazy(context)?;
                             let publication = runtime
-                                .replicated_inferencer_state(placement, &state.plan)
+                                .replicated_inferencer_state(
+                                    placement,
+                                    &state.plan,
+                                    opening.executor(runtime),
+                                )
                                 .await
                                 .change_context_lazy(context)?;
                             let metrics =
@@ -743,6 +803,7 @@ impl BranchInstanceTemplate {
                 inputs,
                 output_schema,
                 mode,
+                working_memory,
                 state,
                 prepared,
                 ..
@@ -751,12 +812,15 @@ impl BranchInstanceTemplate {
                 *prepared = Some(Arc::new(
                     inferencer::PreparedInference::prepare(
                         executor,
-                        inputs,
-                        output_schema,
-                        *mode,
-                        state.as_ref(),
-                        udfs,
-                        vm_settings,
+                        inferencer::PreparedInferenceInit {
+                            inputs,
+                            outputs: output_schema,
+                            mode: *mode,
+                            working_memory: *working_memory,
+                            state: state.as_ref(),
+                            udfs,
+                            vm_settings,
+                        },
                     )
                     .await
                     .change_context_lazy(|| {
@@ -815,6 +879,7 @@ impl BranchInstanceTemplate {
         domain: &DomainName,
         key: Option<BranchKey>,
         incarnation: u64,
+        opening: &RetainedStateOpening,
     ) -> error_stack::Result<BranchInstanceRuntime, ProcessorTemplateError> {
         let delivery_lifetime = CancellationToken::new();
         let relays = self
@@ -845,10 +910,13 @@ impl BranchInstanceTemplate {
                 .instantiate(
                     runtime,
                     domain,
-                    self.owner.unit,
-                    &key,
-                    incarnation,
+                    ProcessorNodeBranch {
+                        unit: self.owner.unit,
+                        key: &key,
+                        incarnation,
+                    },
                     &self.revision,
+                    opening,
                 )
                 .await?;
             processors.insert(processor.clone(), node);
@@ -1046,7 +1114,17 @@ mod tests {
         };
         let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, Unit::SINGLE, &None, 1, &revision)
+            .instantiate(
+                &runtime,
+                &domain,
+                ProcessorNodeBranch {
+                    unit: Unit::SINGLE,
+                    key: &None,
+                    incarnation: 1,
+                },
+                &revision,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .expect("deduplicator template must instantiate");
 
@@ -1146,7 +1224,17 @@ mod tests {
         };
         let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, Unit::SINGLE, &None, 1, &revision)
+            .instantiate(
+                &runtime,
+                &domain,
+                ProcessorNodeBranch {
+                    unit: Unit::SINGLE,
+                    key: &None,
+                    incarnation: 1,
+                },
+                &revision,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .assured("the test publishes the WASM processor state identity before instantiation");
 
@@ -1250,7 +1338,17 @@ mod tests {
         };
         let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, Unit::SINGLE, &None, 1, &revision)
+            .instantiate(
+                &runtime,
+                &domain,
+                ProcessorNodeBranch {
+                    unit: Unit::SINGLE,
+                    key: &None,
+                    incarnation: 1,
+                },
+                &revision,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .expect("deduplicator template must instantiate");
         let refusal = |node: &mut RelayProcessorNode, desired: RelayProcessorTemplate| {

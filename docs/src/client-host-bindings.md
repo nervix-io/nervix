@@ -101,8 +101,8 @@ caller is owned; an accessor's pointer/length pair is borrowed. Strings are byte
 lengths, can contain NUL and are not terminated. A draft `nx_fields` or `nx_batch_builder` is used
 from one thread at a time; other concurrent-use permissions come from the header.
 
-Events, clock events, domain clocks, deliveries and batches expose matching `retain`/`release`
-pairs. Each retained reference has one release, on any thread the header permits. Other owned
+Events, clock events, notices, domain clocks, deliveries and batches expose matching
+`retain`/`release` pairs. Each retained reference has one release, on any thread the header permits. Other owned
 handles use their matching `free`, including sessions, executions, errors, options, outcomes,
 inspections and drafts. An independently obtained schema or inspection outlives the outcome it
 was read from. A borrowed error message ends with its error; a borrowed frame, IPC stream or
@@ -111,7 +111,7 @@ value ends with its owning reference. Freeing a session leaves its endpoint-held
 An `nx_connect_options` draft carries copied credentials, TLS requirement, CA PEM, seeds and
 connection/request/retry/backup waits. Connect reads its snapshot; keep the draft unmodified
 during that call and free it afterwards. An HTTPS start requires HTTPS on every seed and
-redirect. [Manual B-1 through B-16](client-implementation-manual.md#using-the-c-abi) specify the
+redirect. [Manual B-1 through B-17](client-implementation-manual.md#using-the-c-abi) specify the
 application's recovery, cancellation, ownership and settlement duties.
 
 ## Failure Projection
@@ -144,8 +144,11 @@ endpoint-open refusal. C calls that return `nx_error *` return NULL on success; 
 is read and freed by the caller. A successfully received command can still have a failed
 `Outcome` disposition, which remains distinct from a failed host operation.
 
-Subscription and clock events keep their semantic kinds. A restoration failure carries a typed
-cause, message and retry wait. A removed or redefined subscription generation ends; a retryable
+Subscription and clock events keep their semantic kinds, and so do server notices: the shared
+host runtime's `Notice` keeps the notice's level and kind, and a runtime notice about a classified
+error carries the error's class and the producing node's kind and name, all three present or all
+absent, which every binding projects without re-deriving them from the text. A restoration failure
+carries a typed cause, message and retry wait. A removed or redefined subscription generation ends; a retryable
 refusal remains interrupted until restoration succeeds or the application deletes it. The
 bounded session event queue's overflow is a failure of the wait, distinct from a subscription's
 consumer-overflow event. Endpoint interruption, reopening and uncertain settlement retain the
@@ -185,7 +188,8 @@ and acknowledgement boundaries.
 
 PyCapsules share Arrow array buffers across the language boundary; this does not remove IPC
 encoding or transport copies. Ruby and Java bulk arrays copy, while their retained native buffer
-views borrow. Widths, float bits, signed DATETIME nanoseconds, embedded NULs and non-UTF-8 bytes
+views borrow. Widths, float bits, signed DATETIME and DURATION nanoseconds, embedded NULs and
+non-UTF-8 bytes
 survive their declared mappings; Java uses a `long`'s bits for unsigned 64-bit values. No binding
 introduces row-map payloads, implicit numeric conversions or per-cell callbacks from Rust.
 
@@ -380,8 +384,8 @@ behaviour.
 A guide is written for an application developer who has not read the protocol chapter: it
 explains how to write the code, not how the binding is built. Every guide has the same sections in
 the same order, which `validate-client-suites` checks: Install, Connect, Execute Plexus, Complete A
-Statement, Subscribe And Read Rows, Follow A Domain Clock, Publish Through A Client Ingestor,
-Consume A Client Emitter, Back Up And Restore, Errors, Threads, Cancellation And Deadlines,
+Statement, Subscribe And Read Rows, Follow A Domain Clock, Read Server Notices, Publish Through A
+Client Ingestor, Consume A Client Emitter, Back Up And Restore, Errors, Threads, Cancellation And Deadlines,
 Lifetimes And Memory, Arrow Interop, What The Library Does Not Expose, and A Complete Application.
 A developer who knows one guide finds the same answer at the same place in the next. The C and
 C++ guide shows a C++ example beside the C one wherever ownership differs.
@@ -450,8 +454,8 @@ durable replay, and retaining delivery bytes does not preserve settlement rights
 Session limits and exact endpoint grants still bound frames, queued events, rows and credit;
 the host adds no alternate admission or recovery policy.
 
-Transaction status/inspection, structured choice lookup, server notices and leadership
-observation are outside their shared host surface. Read the
+Transaction status/inspection, structured choice lookup and leadership observation are outside
+their shared host surface. Read the
 Rust library and ledger for the exact supported operations rather than assuming binding parity
 with every Rust method. The independent Go and TypeScript probes qualify their recorded subset;
 they are not separately maintained application SDKs.

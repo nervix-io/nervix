@@ -2,11 +2,16 @@
 //! the end of the session.
 
 use error_stack::Report;
-use nervix_models::ClusterNodeName;
+use nervix_models::{
+    ClusterNodeName, FailedErrorClass, MessageErrorClass, RejectedErrorClass, ReportedError,
+};
 
 use crate::{
-    codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
-    common::{LeaderRedirect, NodeEndpoints},
+    codec::{
+        Decoder, EncodedUnion, Encoder, UndeclaredEnumValue, WireDecodeError, WireEncodeError,
+        wire_enum,
+    },
+    common::{LeaderRedirect, NodeEndpoints, decode_node_ref, encode_node_ref},
     frame::{EncodedFrame, ServerFrame},
     limits::SessionLimits,
     server::finish_server_message,
@@ -48,13 +53,59 @@ wire_enum!(ALL_NOTICE_KINDS: NoticeKind => wire::NoticeKind {
     Licensing,
 });
 
+/// Every error class, in the wire enum's order, which the session's own tests enumerate.
+#[cfg(test)]
+pub(crate) const ALL_ERROR_CLASSES: &[MessageErrorClass] = &MessageErrorClass::ALL;
+
+impl From<MessageErrorClass> for wire::ErrorClass {
+    fn from(class: MessageErrorClass) -> Self {
+        match class {
+            MessageErrorClass::Rejected(RejectedErrorClass::Codec) => Self::Codec,
+            MessageErrorClass::Rejected(RejectedErrorClass::Validation) => Self::Validation,
+            MessageErrorClass::Rejected(RejectedErrorClass::Evaluation) => Self::Evaluation,
+            MessageErrorClass::Rejected(RejectedErrorClass::Limit) => Self::Limit,
+            MessageErrorClass::Rejected(RejectedErrorClass::Refused) => Self::Refused,
+            MessageErrorClass::Failed(FailedErrorClass::Unavailable) => Self::Unavailable,
+            MessageErrorClass::Failed(FailedErrorClass::Throttled) => Self::Throttled,
+            MessageErrorClass::Failed(FailedErrorClass::Timeout) => Self::Timeout,
+            MessageErrorClass::Failed(FailedErrorClass::Interrupted) => Self::Interrupted,
+            MessageErrorClass::Failed(FailedErrorClass::Internal) => Self::Internal,
+        }
+    }
+}
+
+impl TryFrom<wire::ErrorClass> for MessageErrorClass {
+    type Error = Report<UndeclaredEnumValue>;
+
+    fn try_from(wire: wire::ErrorClass) -> Result<Self, Report<UndeclaredEnumValue>> {
+        match wire {
+            wire::ErrorClass::Codec => Ok(Self::CODEC),
+            wire::ErrorClass::Validation => Ok(Self::VALIDATION),
+            wire::ErrorClass::Evaluation => Ok(Self::EVALUATION),
+            wire::ErrorClass::Limit => Ok(Self::LIMIT),
+            wire::ErrorClass::Refused => Ok(Self::REFUSED),
+            wire::ErrorClass::Unavailable => Ok(Self::UNAVAILABLE),
+            wire::ErrorClass::Throttled => Ok(Self::THROTTLED),
+            wire::ErrorClass::Timeout => Ok(Self::TIMEOUT),
+            wire::ErrorClass::Interrupted => Ok(Self::INTERRUPTED),
+            wire::ErrorClass::Internal => Ok(Self::INTERNAL),
+            undeclared => Err(Report::new(UndeclaredEnumValue {
+                value: undeclared.0,
+            })),
+        }
+    }
+}
+
 /// A server condition worth an operator's attention that belongs to no request: display text, with
-/// the level it is shown at and the kind of event it reports.
+/// the level it is shown at and the kind of event it reports, and, on a `Runtime` notice about an
+/// error of a graph node, that error's class and node as typed fields a reader routes by instead of
+/// the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerNotice {
     pub level: NoticeLevel,
     pub kind: NoticeKind,
     pub message: String,
+    pub error: Option<ReportedError>,
 }
 
 impl ServerNotice {
@@ -64,12 +115,26 @@ impl ServerNotice {
     ) -> Result<EncodedFrame<ServerFrame>, Report<WireEncodeError>> {
         let mut encoder = Encoder::new(limits.frame_bytes(), limits);
         let message = encoder.text("ServerNotice.message", &self.message)?;
+        let error = match &self.error {
+            Some(error) => {
+                let node = encode_node_ref(&mut encoder, &error.node)?;
+                Some(wire::NoticeError::create(
+                    encoder.fbb(),
+                    &wire::NoticeErrorArgs {
+                        class: Some(error.class.into()),
+                        node: Some(node),
+                    },
+                ))
+            }
+            None => None,
+        };
         let notice = wire::ServerNotice::create(
             encoder.fbb(),
             &wire::ServerNoticeArgs {
                 level: Some(self.level.into()),
                 kind: Some(self.kind.into()),
                 message: Some(message),
+                error,
             },
         );
         finish_server_message(
@@ -85,10 +150,18 @@ impl ServerNotice {
         let level = decoder.required_enumeration("ServerNotice.level", notice.level())?;
         let kind = decoder.required_enumeration("ServerNotice.kind", notice.kind())?;
         let message = decoder.text("ServerNotice.message", notice.message())?;
+        let error = match notice.error() {
+            Some(error) => Some(ReportedError {
+                class: decoder.required_enumeration("NoticeError.class", error.class())?,
+                node: decode_node_ref(decoder, error.node())?,
+            }),
+            None => None,
+        };
         Ok(Self {
             level,
             kind,
             message,
+            error,
         })
     }
 }

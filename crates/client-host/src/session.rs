@@ -3,9 +3,9 @@
 //! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, sharing it
 //!   with the producers, consumers and deliveries opened on it, running a blocking call on the
 //!   host's thread, preparing and executing commands, waiting for subscription and domain clock
-//!   events, and reading the clock of a domain the session follows.
-//! - **Depends on.** The Rust session client, cancellation, and the outcomes, events, clock events
-//!   and domain clocks it returns.
+//!   events and for server notices, and reading the clock of a domain the session follows.
+//! - **Depends on.** The Rust session client, cancellation, and the outcomes, events, clock
+//!   events, notices and domain clocks it returns.
 //! - **Must not know.** Which host is calling, or how it schedules its threads.
 //!
 //! A host thread blocks in [`SessionRuntime::block_on`] while the runtime's own threads drive the
@@ -28,6 +28,7 @@ use crate::{
     domain_clock::DomainClock,
     event::Event,
     failure::{Failure, FailureKind},
+    notice::Notice,
     outcome::Outcome,
 };
 
@@ -179,6 +180,19 @@ impl Session {
         let waiting = async {
             match self.client().next_domain_clock_event().await {
                 Ok(event) => Ok(ClockEvent::new(event)),
+                Err(report) => Err(Failure::from(report)),
+            }
+        };
+        self.block_on(cancel, waiting)
+    }
+
+    /// Waits for the next server notice, continuing across a lost session as
+    /// [`nervix_client_core::Client::next_server_event`] does: the notices of a session end with
+    /// it, and an overflow reports the notices the client dropped before the ones after the gap.
+    pub fn next_notice(&self, cancel: Option<&Cancel>) -> Result<Notice, Failure> {
+        let waiting = async {
+            match self.client().next_server_event().await {
+                Ok(event) => Ok(Notice::new(event)),
                 Err(report) => Err(Failure::from(report)),
             }
         };

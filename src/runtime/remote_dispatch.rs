@@ -728,9 +728,11 @@ impl RemoteDispatcher {
             }));
         }
         let delivery = payload.delivery;
-        let mut cancellation_guard = self
-            .interconnect
-            .relay_cancellation_guard(node_id.clone(), delivery);
+        let mut cancellation_guard = self.interconnect.relay_cancellation_guard(
+            node_id.clone(),
+            delivery,
+            payload.ack_timing,
+        );
         let (registration, admission) = self.register_pending_relay_admission()?;
         payload.admission = Some(registration.clone());
         let progress = RelaySendProgress::default();
@@ -861,7 +863,7 @@ impl RemoteDispatcher {
             nervix_primitives::task::consume_budget().await;
             let cancellation = nervix_primitives::time::timeout_at(
                 deadline,
-                self.interconnect.cancel_relay(node_id, delivery),
+                self.interconnect.cancel_relay(node_id, delivery, timing),
             )
             .await;
             match cancellation {

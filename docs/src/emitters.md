@@ -545,8 +545,8 @@ invocation as it is written. A record that route `WHERE` filters evaluates no re
 sends nothing, even when one of its request fields would fail.
 
 The first request field that fails rejects its record through `ON MESSAGE ERROR` before any part of
-its request is sent. A failed expression keeps its `evaluation` code; a value that is not a valid
-request field has the code `validation`. A method or path failure has the operation `publish` and
+its request is sent. A failed expression keeps its `evaluation` class; a value that is not a valid
+request field has the class `validation`. A method or path failure has the operation `publish` and
 names the request field, `method` or `path`, beside the fields its expression reads. A header write
 failure has the operation `invoke` and the zero-based position of its invocation. A record whose
 body the codec cannot encode when a flush releases it is rejected the same way with the operation
@@ -772,7 +772,7 @@ refusal follows `ON MESSAGE ERROR`, even with `ON GENERAL ERROR IGNORE`.
 A record's message error names the operation that rejected it and where applicable the request
 field or invocation: `publish` with the field `method` or `path`, `invoke` with the zero-based
 position of the header write, `encode` for a body the codec cannot produce, and, for a refused
-request, the code `external` with the operation `publish` and a message carrying the numeric status,
+request, the class `refused` with the operation `publish` and a message carrying the numeric status,
 such as `HTTP endpoint answered with status 404`. Message errors, emitter status, runtime events,
 logs and metric labels never carry an evaluated target, a header value, a credential, a request body
 or a response body.
@@ -913,7 +913,7 @@ byte measurement, halving, or the per-record error policy.
 A record is rejected alone, through `ON MESSAGE ERROR` with operation `encode`, when its member value
 cannot be produced — its `ON EMITTING` transformation fails, or, without a batch transformation, its
 value is not one the format can write — and when a payload of it alone still exceeds `MAX SIZE`.
-The second case has code `validation` and a message naming the codec, its encoding and the limit,
+The second case has class `limit` and a message naming the codec, its encoding and the limit,
 such as `emitter 'bounded_events' codec 'event_codec' JSON payload exceeds MAX SIZE 32B`. The records
 around it are packed as usual.
 
@@ -987,7 +987,7 @@ counting what it writes around the payload:
 | Syslog COLLECTOR | UDP: at most 65,507 payload bytes; octet-counted TCP/TLS: at most 9,999,999,999 payload bytes; non-transparent TCP: no LF in the payload | UDP adds no transport framing; octet counting adds the decimal payload length and one space (at most 11 bytes); non-transparent framing appends one LF |
 
 A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
-code `external`, operation `publish` and one shared reference, and the message names the size and
+class `refused`, operation `publish` and one shared reference, and the message names the size and
 the limit, such as `mqtt rejected record: MQTT PUBLISH packet of 1200090 bytes exceeds the broker's
 maximum packet size of 1048576 bytes`. The messages around it are still written. Declare a
 `MAX SIZE` that leaves room for the metadata to keep batches from reaching the limit.
@@ -1010,7 +1010,7 @@ The remaining limits are not visible to the client. RabbitMQ's `max_message_size
 setting that AMQP never tells a client, and the broker compares it with the message body alone. A
 batch message whose body is larger reaches the broker, which refuses it by closing the channel it
 arrived on and names the limit, and Nervix rejects the message on that answer, in every publishing
-mode: every member follows `ON MESSAGE ERROR` with code `external`, operation `publish` and one
+mode: every member follows `ON MESSAGE ERROR` with class `refused`, operation `publish` and one
 shared reference, and the message names the size and the limit, such as `rabbitmq rejected record:
 message body of 1200090 bytes exceeds the broker's max_message_size of 1048576 bytes`. The broker
 discards the messages written after the refused one with the channel, and Nervix writes them again
@@ -1048,7 +1048,7 @@ and the command and operation fields around MongoDB documents, the fields the dr
 command, and the wire-protocol header. The measured size is exact, and a write of exactly
 `MAX SIZE` bytes is sent. A candidate that measures more is halved, and its first half is measured
 again while the rest returns to the front of the next candidate. A row whose own write still
-measures more follows `ON MESSAGE ERROR` with code `validation`, operation `encode`, and a message
+measures more follows `ON MESSAGE ERROR` with class `limit`, operation `encode`, and a message
 naming the limit, such as `Postgres insert of one row measures 1219 bytes, above MAX SIZE 600B`.
 The rows around it are written.
 
@@ -1058,7 +1058,7 @@ columns, whatever `MAX MESSAGES` allows. Postgres reads no protocol message abov
 bytes, so a Postgres emitter accepts `MAX SIZE` up to `1073741822B` and is refused above it at
 `CREATE`; a write's measured size is never smaller than the message that carries its arrays, so
 every Postgres insert stays within the message the server reads. A MongoDB document holds at most
-16 MiB, so a row whose document exceeds it follows `ON MESSAGE ERROR` as an `external` `publish`
+16 MiB, so a row whose document exceeds it follows `ON MESSAGE ERROR` as a `refused` `publish`
 error naming 16777216 bytes before any write, and the rows around it are written. MongoDB takes
 100,000 writes in one command, more than `MAX MESSAGES` allows, and its driver divides a write
 larger than the `maxMessageSizeBytes` the server reports into several commands whose documents it
@@ -1255,8 +1255,10 @@ Bare fields, `message.field`, and `input.field` read the source row. Direct emit
 `INHERIT` and all current direct emitters reject `INVOKE`.
 
 Nervix checks these mappings against the source schema during `CREATE` and `ALTER`, before opening
-the destination. Database and Iceberg columns accept Plexus scalar, array and vector types; OTEL
-fields require their documented exact types. For example, an I32 source field can supply
+the destination. Database and Iceberg columns accept Plexus scalar, array and vector types, except a
+`DURATION`, alone or as a list element, which each of them declares rejected: `VALUES key 'wait' is
+a DURATION, which POSTGRES TABLE declares rejected`. OTEL fields require their documented exact
+types. For example, an I32 source field can supply
 `severity_number`, while the integer literal `9` is inferred as I64 and is refused for that field.
 OTEL attributes accept supported scalar values and arrays or vectors of those values; `RESOURCE`
 entries must be literal expressions. Mapping types are never implicitly coerced. A refused
@@ -1314,7 +1316,7 @@ That expression surface applies to the full Nervix internal schema type set:
 
 - `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - `F32`, `F64`
-- `BOOL`, `STRING`, `DATETIME`
+- `BOOL`, `STRING`, `DATETIME`, `DURATION`, `BYTES`
 
 Nested conditions and chained calls such as `contains(lower(trim(input.raw)), 'warn')` are supported
 before encoding.
@@ -1574,7 +1576,7 @@ Nervix writes the millisecond that contains the value: `2001-02-03T04:05:06.7899
 or unanswered publish writes the time the first attempt wrote. librdkafka reads a zero timestamp as
 the time it takes the record, and a Kafka record carries no time before the Unix epoch, so a record
 whose millisecond is not after the epoch, any time before `1970-01-01T00:00:00.001Z`, is rejected
-through `ON MESSAGE ERROR` before the producer takes it, as an `external` error of the `publish`
+through `ON MESSAGE ERROR` before the producer takes it, as a `refused` error of the `publish`
 operation whose message names its timestamp, and the emitter's other records are still sent.
 Without `TIMESTAMP`, librdkafka gives each record the time the producer takes it. A topic whose
 `message.timestamp.type` is `LogAppendTime` replaces either time with the time the broker appends
@@ -1722,7 +1724,7 @@ counts nanoseconds and a Pulsar message counts whole milliseconds, so Nervix wri
 that contains the value: `2001-02-03T04:05:06.789999999Z` becomes `2001-02-03T04:05:06.789Z`. Pulsar
 reads a zero event time as none, and a message carries no time before the Unix epoch, so a record
 whose millisecond is not after the epoch, any time before `1970-01-01T00:00:00.001Z`, is rejected
-through `ON MESSAGE ERROR` before the producer takes it, as an `external` error of the `publish`
+through `ON MESSAGE ERROR` before the producer takes it, as a `refused` error of the `publish`
 operation whose message names its timestamp, and the emitter's other records are still sent. Without
 `TIMESTAMP`, a message carries no event time and its `publish_time` is the only time it has.
 
@@ -1897,7 +1899,7 @@ sensitive key. Nervix evaluates it once for every batch it admits, together with
 after the route kept and finalized its rows. A record whose routing key fails or produces no value
 is not sent: it follows `ON MESSAGE ERROR` as an `evaluation` error of the `publish` operation whose
 message begins `ROUTING KEY`, such as `ROUTING KEY expression produced NULL`. A key longer than the
-255 bytes an AMQP short string carries is not sent either: its record is rejected as an `external`
+255 bytes an AMQP short string carries is not sent either: its record is rejected as a `refused`
 error of the `publish` operation that names the key's length. The exchange's type decides where the
 key leads: a direct exchange routes to the queues bound under exactly that key, a topic exchange to
 the queues whose binding pattern matches it, and a fanout exchange to every bound queue, whatever
@@ -1973,7 +1975,7 @@ A message no binding routes, such as one whose key no binding of a direct exchan
 a queue deleted under a `RABBITMQ QUEUE` emitter, is the broker's to drop unless the emitter writes
 `MANDATORY`. Without it the broker drops the message and answers it as taken, so the emitter reports
 its record delivered and the record is lost. With `MANDATORY`, on either entity, the broker returns
-the message, and the emitter rejects its record through `ON MESSAGE ERROR` as an `external` error of
+the message, and the emitter rejects its record through `ON MESSAGE ERROR` as a `refused` error of
 the `publish` operation naming the broker's reply, such as `rabbitmq returned the message unrouted
 with reply code 312: NO_ROUTE`, in every mode, and keeps publishing the write's other records.
 Under `ACK` the broker returns the message ahead of its confirmation, but the driver can attach
@@ -2722,7 +2724,7 @@ reconfigures the queue.
 row after any `FROM ... WHERE` filter, and every record the emitter sends carries the group its own
 input row produced, whatever the emitter's `WHERE` and construction keep or build. A record whose
 group expression fails for its row is not sent.
-It follows `ON MESSAGE ERROR` as an `external` error of the `publish` operation whose message begins
+It follows `ON MESSAGE ERROR` as an `evaluation` error of the `publish` operation whose message begins
 `ordering group`, and the emitter's other records are still sent under their own groups. A record
 the emitter's `WHERE` drops is never sent, so a failure of its group is never reported.
 
@@ -2869,7 +2871,7 @@ Preparation refuses an event before anything is sent when the payload is not a J
 a field is one the Sentry event protocol cannot read, such as a numeric `level`, an `event_id`
 that is not a UUID or a `timestamp` that is neither Unix seconds nor an RFC 3339 string, and when
 the event exceeds the 1,000,000-byte limit. Every record the payload carries then follows
-`ON MESSAGE ERROR` with one `external` message error of the `publish` operation, which names the
+`ON MESSAGE ERROR` with one `refused` message error of the `publish` operation, which names the
 cause; the envelope is neither sent nor retained for a retry.
 
 A write sends its envelopes one at a time, in order, and the answer to each decides its event:
@@ -2877,7 +2879,7 @@ A write sends its envelopes one at a time, in order, and the answer to each deci
 | Answer | Outcome |
 | --- | --- |
 | A `2xx` status | The event is delivered and its records are acknowledged. |
-| `400`, `413` or `422` | Sentry rejected the event. Its records follow `ON MESSAGE ERROR` with an `external` message error of the `publish` operation naming the status, and the write continues with the next envelope. |
+| `400`, `413` or `422` | Sentry rejected the event. Its records follow `ON MESSAGE ERROR` with a `refused` message error of the `publish` operation naming the status, and the write continues with the next envelope. |
 | Any other status, such as `401`, `403`, `404`, `408`, `429` or a `5xx` | The write stops. This event and every later one stay retained and are sent again on the mode's `RETRY POLICY`, while the events delivered before it stay delivered. |
 | No answer within `timeout_ms`, or a failed lookup, connection or TLS handshake | As for a retried status. |
 
@@ -3777,7 +3779,7 @@ Every write is unordered, and MongoDB's answer to a write says what became of it
 when the write fails, so no separate isolation pass is needed. A document the server applied is
 delivered. A document the server refuses for good — one the collection's validator refuses
 (code 121), one too large to store (code 10334) or one that repeats a unique key (code 11000) —
-follows `ON MESSAGE ERROR` as an `external` `publish` error naming the code, such as
+follows `ON MESSAGE ERROR` as a `refused` `publish` error naming the code, such as
 `MongoDB rejected document with code 11000`. Every other document stays unresolved and is written
 again on the emitter's `RETRY POLICY` backoff, so a retry never carries a document the server
 applied or refused for good. A write the server never answered, such as one whose connection
@@ -4239,7 +4241,7 @@ With `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, the emitter measures the complet
 of each candidate file, including its footer, against the table schema it has loaded. It stages
 accepted rows in segments of at most `n` rows and the declared encoded file bytes, then writes
 each segment as one data file. A single row whose own Parquet file exceeds `MAX SIZE` is rejected
-with a `validation` error of the `encode` operation through `ON MESSAGE ERROR`; rows around it
+with a `limit` error of the `encode` operation through `ON MESSAGE ERROR`; rows around it
 continue to staging. The file's actual size and row count are checked before the catalog append.
 If the table schema changes between staging and commit so that a staged segment no longer fits,
 the commit fails and retains its staged rows for retry rather than appending an over-limit file.

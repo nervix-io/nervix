@@ -54,7 +54,7 @@ pub use cli::DiagnosticArgs;
 pub use cli::{
     Args, CapacityArgs, Command, ConsensusArgs, ExecutionArgs, MembershipArgs, MemoryPressureArgs,
     NODE_TAGS_OPTION, NodeArgs, ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride,
-    SettingsArgs, ShutdownArgs, TracingArgs, TransactionArgs,
+    SettingsArgs, ShutdownArgs, TransactionArgs,
 };
 pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
 #[cfg(test)]
@@ -451,7 +451,6 @@ impl Application {
             client_endpoints,
             memory_pressure,
             restore_staging_max_bytes,
-            database_volume,
         } = match preflight {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -696,15 +695,18 @@ impl Application {
         };
         if allow_bootstrap
             && consensus.observer().cluster_parameters().is_none()
-            && let Err(error) =
-                preflight::validate_resource_volume(&parameter_seeds, database_volume, &db_path)
-                    .and_then(|()| {
-                        preflight::validate_runtime_budget(
-                            &parameter_seeds,
-                            &node_id,
-                            capabilities.shutdown,
-                        )
-                    })
+            && let Err(error) = preflight::validate_resource_volume(
+                &parameter_seeds,
+                capabilities.database_volume_bytes,
+                &db_path,
+            )
+            .and_then(|()| {
+                preflight::validate_runtime_budget(
+                    &parameter_seeds,
+                    &node_id,
+                    capabilities.shutdown,
+                )
+            })
         {
             startup.consensus = Some(consensus);
             startup.terminate().await;
@@ -1243,8 +1245,12 @@ impl Application {
                 consensus.observer().cluster_parameters()
             };
             if let Some(record) = record {
-                preflight::validate_resource_volume(&record.values, database_volume, &db_path)
-                    .change_context(AppError::Preflight)?;
+                preflight::validate_resource_volume(
+                    &record.values,
+                    capabilities.database_volume_bytes,
+                    &db_path,
+                )
+                .change_context(AppError::Preflight)?;
                 preflight::validate_runtime_budget(&record.values, &node_id, capabilities.shutdown)
                     .change_context(AppError::Preflight)?;
                 break record;
@@ -2540,7 +2546,7 @@ impl Application {
                 nervix_primitives::select! {
                     _ = runtime_event_shutdown.cancelled() => break,
                     received = runtime_event_rx.recv() => match received {
-                        Ok(RuntimeEvent::Error(message)) => {
+                        Ok(RuntimeEvent::Error(event)) => {
                             let mut node_ids =
                                 runtime_event_service.inner.cluster.live_node_ids().await;
                             node_ids.sort();
@@ -2555,7 +2561,8 @@ impl Application {
                                         &node_id,
                                         ControlEnvelope::RuntimeErrorEvent(
                                             RemoteRuntimeErrorEvent {
-                                                message: message.clone(),
+                                                message: event.message.clone(),
+                                                error: event.error.clone(),
                                             },
                                         ),
                                     )
@@ -2744,7 +2751,7 @@ impl Application {
                                 service_for_interconnect
                                     .inner
                                     .events
-                                    .report_error(NoticeKind::Runtime, event.message);
+                                    .report_runtime_error(event.message, event.error);
                             }
                         }
                     }
@@ -2928,7 +2935,7 @@ impl Application {
 pub use error::AppError;
 pub use termination_signals::TerminationSignals;
 pub use tracing_setup::{
-    TraceSampleRatio, TraceSampleRatioError, TracingGuard, init_tracing, init_tracing_to_file,
+    NodeTraceExport, TraceCollector, TracingGuard, init_tracing, init_tracing_to_file,
 };
 pub use transaction::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
 

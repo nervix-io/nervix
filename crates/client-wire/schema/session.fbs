@@ -1051,7 +1051,8 @@ enum ScalarType : ubyte {
   Bool,
   String,
   Datetime,
-  Bytes
+  Bytes,
+  Duration
 }
 
 table ScalarFieldType {
@@ -1170,6 +1171,11 @@ table DatetimeCell {
   unix_nanos: long;
 }
 
+/// A DURATION value as a signed count of nanoseconds.
+table DurationCell {
+  nanoseconds: long;
+}
+
 /// A fixed-length or variable-length list value.
 table ListCell {
   elements: [Cell] (required);
@@ -1192,7 +1198,8 @@ union CellValue {
   StringCell,
   DatetimeCell,
   ListCell,
-  BytesCell
+  BytesCell,
+  DurationCell
 }
 
 table Cell {
@@ -2558,12 +2565,38 @@ enum NoticeKind : ubyte {
   Licensing
 }
 
+/// One of the ten classes every error has, under the root `ANY` of the class tree: `Codec`
+/// through `Refused` form the `REJECTED` group, where the data itself is the problem, and
+/// `Unavailable` through `Internal` the `FAILED` group, where sending the data again may work.
+enum ErrorClass : ubyte {
+  Codec,
+  Validation,
+  Evaluation,
+  Limit,
+  Refused,
+  Unavailable,
+  Throttled,
+  Timeout,
+  Interrupted,
+  Internal
+}
+
+/// The error a `Runtime` notice reports: its class and the graph node that produced it.
+table NoticeError {
+  /// Required.
+  class: ErrorClass = null;
+  node: NodeRef (required);
+}
+
 table ServerNotice {
   /// Required.
   level: NoticeLevel = null;
   /// Required.
   kind: NoticeKind = null;
   message: string (required);
+  /// The error the notice reports, on a `Runtime` notice about an error of a graph node; absent on
+  /// every other notice.
+  error: NoticeError;
 }
 
 table LeaderIsServingNode {

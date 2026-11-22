@@ -472,7 +472,7 @@ pub(super) async fn plan_filter_map_messages(
                     return Err(PlannedGeneralFailure::new(error, acks));
                 }
             };
-            message_errors.push(planned_structured_message_error(
+            message_errors.push(planned_message_error(
                 RelayMessage {
                     key: keys[input_row].clone(),
                     record,
@@ -497,15 +497,15 @@ pub(super) async fn plan_filter_map_messages(
                     return Err(PlannedGeneralFailure::new(error, acks));
                 }
             };
-            message_errors.push(planned_structured_message_error(
+            message_errors.push(planned_message_error(
                 RelayMessage {
                     key: keys[input_row].clone(),
                     record,
                     acks: std::mem::take(&mut acks[input_row]),
                 },
-                structured_message_error(
+                raised_message_error(
                     run.now,
-                    MessageErrorCode::Evaluation,
+                    MessageErrorClass::EVALUATION,
                     format!(
                         "{} '{}' failed to materialize {} output row: {}",
                         processor_kind,
@@ -664,7 +664,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
                 side_error.reason,
                 side_error.span
             );
-            message_errors.push(planned_structured_message_error(
+            message_errors.push(planned_message_error(
                 RelayMessage {
                     key: input.keys[input_row].clone(),
                     record: source_record,
@@ -698,15 +698,15 @@ pub(super) async fn plan_emitter_filter_map_batch(
                     .codec_route
                     .then(|| captured_partial_output(&body_result.batch, output_row))
                     .flatten();
-                message_errors.push(planned_structured_message_error(
+                message_errors.push(planned_message_error(
                     RelayMessage {
                         key: input.keys[input_row].clone(),
                         record: source_record,
                         acks: std::mem::take(&mut acks[input_row]),
                     },
-                    structured_message_error(
+                    raised_message_error(
                         execution_now,
-                        MessageErrorCode::Evaluation,
+                        MessageErrorClass::EVALUATION,
                         format!(
                             "emitter '{}' failed to materialize FILTER-MAP headers: {error:#}",
                             emitter.as_str(),
@@ -729,15 +729,15 @@ pub(super) async fn plan_emitter_filter_map_batch(
                 .codec_route
                 .then(|| captured_partial_output(&body_result.batch, output_row))
                 .flatten();
-            message_errors.push(planned_structured_message_error(
+            message_errors.push(planned_message_error(
                 RelayMessage {
                     key: input.keys[input_row].clone(),
                     record: source_record,
                     acks: std::mem::take(&mut acks[input_row]),
                 },
-                structured_message_error(
+                raised_message_error(
                     execution_now,
-                    MessageErrorCode::Validation,
+                    MessageErrorClass::VALIDATION,
                     format!(
                         "emitter '{}' FILTER-MAP output row has uninitialized required fields",
                         emitter.as_str()
@@ -1276,6 +1276,7 @@ fn typed_emitter_headers(
             }
             VmTypedArray::Float32(_)
             | VmTypedArray::Float64(_)
+            | VmTypedArray::Duration(_)
             | VmTypedArray::Generic(_)
             | VmTypedArray::Uninitialized { .. } => {
                 return Err(Report::new(EmitterHeaderError::ArgumentTypes));
@@ -1454,6 +1455,27 @@ pub(super) fn append_filter_map_datetime(
     }
 }
 
+pub(super) fn append_filter_map_duration(
+    builder: &mut DurationNanosecondBuilder,
+    value: &RuntimeValue,
+    field: &arrow_schema::Field,
+) -> error_stack::Result<(), RuntimeSchemaError> {
+    match value {
+        RuntimeValue::Duration(value) => {
+            builder.append_value(value.nanoseconds());
+            Ok(())
+        }
+        value => Err(Report::new(RuntimeSchemaError::RuntimeValueTypeMismatch {
+            location: RuntimeValueLocation::VmInputField {
+                field: field.name().clone(),
+                elements: Vec::new(),
+            },
+            expected: ParseAsType::Duration,
+            found: value.kind(),
+        })),
+    }
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::dispatch(
@@ -1504,6 +1526,9 @@ pub(super) fn append_filter_map_nested_value(
             if tz.as_ref() == "+00:00" || tz.as_ref() == "UTC" =>
         {
             append_primitive!(TimestampNanosecondBuilder, append_filter_map_datetime)
+        }
+        ArrowDataType::Duration(arrow_schema::TimeUnit::Nanosecond) => {
+            append_primitive!(DurationNanosecondBuilder, append_filter_map_duration)
         }
         ArrowDataType::List(element) => {
             let builder = builder
@@ -1612,8 +1637,8 @@ mod tests {
     use ahash::HashMap;
     use nervix_models::{
         AckMode, CreateEmitter, CreateSchema, EmitterEntity, ErrorPolicies, FieldPath,
-        KafkaEmitter, KafkaTopicEmitter, MessageErrorCode, MessageErrorOperation, ModelName,
-        ParseAsType, ProcessorInputs, RetryPolicy, Timestamp, ZeroMqEmitter, ZeroMqPushEmitter,
+        KafkaEmitter, KafkaTopicEmitter, MessageErrorOperation, ModelName, ParseAsType,
+        ProcessorInputs, RetryPolicy, Timestamp, ZeroMqEmitter, ZeroMqPushEmitter,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -2402,7 +2427,7 @@ mod tests {
         let [error] = plan.message_errors.as_slice() else {
             panic!("expected exactly one planned message error");
         };
-        assert_eq!(error.error.code, MessageErrorCode::Evaluation);
+        assert_eq!(error.error.class, MessageErrorClass::EVALUATION);
         assert_eq!(error.error.operation, MessageErrorOperation::Set);
         assert_eq!(error.error.operation_index, Some(1));
         assert_eq!(

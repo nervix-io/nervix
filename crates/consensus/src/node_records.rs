@@ -288,6 +288,7 @@ mod tests {
                     .listener_bounds(),
                     cpu_count: NonZeroU64::new(4),
                     memory_bytes: NonZeroU64::new(8 << 30),
+                    database_volume_bytes: 1 << 40,
                     receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
                 },
             },
@@ -344,6 +345,45 @@ mod tests {
 
         candidate.claim.capabilities.shutdown =
             nervix_models::ShutdownSettings::default().capabilities();
+        assert_eq!(
+            announce(&mut state, &candidate).response,
+            ConsensusResponse::Applied
+        );
+        assert_eq!(
+            committed(&state, &candidate).map(|record| &record.record),
+            Some(&candidate)
+        );
+    }
+
+    #[test]
+    fn announcement_refuses_a_run_whose_database_volume_cannot_hold_committed_resource_quotas() {
+        let mut candidate = record(7);
+        let mut state = admitted_state(&candidate);
+        let values = ClusterParameterValues::default();
+        state.parameters = Some(ClusterParameterRecord {
+            revision: std::num::NonZeroU64::MIN,
+            values,
+        });
+        let quota = values.resource_max_extracted_bytes();
+        candidate.claim.capabilities.database_volume_bytes = quota - 1;
+        let unchanged = state.clone();
+        let ConsensusResponse::Conflict(ConsensusConflict::InvalidClusterParameter { issue }) =
+            announce(&mut state, &candidate).response
+        else {
+            panic!("a volume below the committed extracted quota refuses the announcement");
+        };
+        assert_eq!(
+            issue,
+            nervix_models::ClusterParameterError::NodeVolume {
+                parameter: nervix_models::ClusterParameterKey::ResourceMaxExtractedBytes,
+                node: candidate.identity().node_id().clone(),
+                requested: quota,
+                available: quota - 1,
+            }
+        );
+        assert_eq!(state, unchanged, "a refused announcement publishes nothing");
+
+        candidate.claim.capabilities.database_volume_bytes = quota;
         assert_eq!(
             announce(&mut state, &candidate).response,
             ConsensusResponse::Applied

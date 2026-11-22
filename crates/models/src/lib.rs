@@ -39,6 +39,7 @@ pub use data_plane_settings::*;
 mod domain_clock;
 mod domain_stop;
 mod duration_text;
+mod duration_value;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
@@ -281,7 +282,11 @@ pub use domain_stop::{
     LICENSING_STOP_ENFORCE_AFTER, NodeStopReport, OperatorStopRequest, StopCut, StopCutKind,
     StopCutReason, StopEnding, StopRequest, StopRequestAdmission, StopRequestId, StopWithdrawal,
 };
-pub use duration_text::{DurationTextError, parse_duration_text};
+pub use duration_text::{DurationTextError, DurationTextUnit, parse_duration_text};
+pub use duration_value::{
+    DurationLiteralError, DurationLiteralPart, DurationLiteralUnit, DurationLiteralWord,
+    DurationValue,
+};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
     EmitterBatchContractError, EmitterBody, EmitterPublishing, EmitterPublishingModeKind,
@@ -315,7 +320,9 @@ pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use listener_bounds::ListenerBounds;
 pub use message_error::{
-    FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
+    ExternalErrorCode, FailedErrorClass, FieldPath, MessageErrorClass, MessageErrorClassGroup,
+    MessageErrorOperation, RaisedMessageError, RejectedErrorClass, ReportedError,
+    StructuredMessageError, message_error_scope,
 };
 pub use model_index::ModelIndex;
 pub use name_spelling::NamePosition;
@@ -372,9 +379,9 @@ pub use processor::{
     FlushPolicy, InferencerExecutionMode, InferencerStateBinding, InferencerStateInitial,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    InferencerTensorSchemaError, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
-    WindowStateLimit,
+    InferencerTensorSchemaError, InferencerWorkingMemory, InputCollectPolicy, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, WasmProcessorLimits,
+    WasmRejectedStatePolicy, WindowBound, WindowStateLimit,
 };
 pub use quiesce::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,

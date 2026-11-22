@@ -256,7 +256,8 @@ current connection, retry and deadline limits.
   `integer`, `float`, `boolean`, `text`, `bytes`, or `array`, where `bytes` carries native CBOR byte
   strings; AVRO fields `boolean`, `int`, `long`, `float`, `double`, `string`, `bytes`, or
   `array<item>`. `DATETIME` binds a JSON or AVRO `string` or a CBOR `text` with `ENCODE field AS
-  RFC3339`, and AVRO `int` and `long` bind only `I32` and `I64`.
+  RFC3339`, and AVRO `int` and `long` bind only `I32` and `I64`. No wire type binds a `DURATION`:
+  a codec, of any family, whose schema holds one is refused when it is created.
 - AVRO arrays declare their item type, `array<item>`, nested exactly as deep as the internal
   `ARRAY`/`VEC` layers, and the item binds the innermost element as a scalar field would. JSON and
   CBOR arrays stay bare; a `DATETIME` element in any format and a `BYTES` element carried as text
@@ -336,7 +337,7 @@ current connection, retry and deadline limits.
   whole repeated batch, never a regrouped one. Keep `MAX SIZE` below the destination's own message
   limit with room for the key, headers or attributes written around the payload: a batch message
   over a limit the client can see (Kafka, MQTT, NATS, Pulsar, SQS) is rejected with every member as
-  an `external` `publish` error, as is one a Pulsar topic's own `maxMessageSize` refuses under
+  a `refused` `publish` error, as is one a Pulsar topic's own `maxMessageSize` refuses under
   `MODE ACK` and one whose body RabbitMQ refuses as larger than its `max_message_size`. RabbitMQ
   counts the body alone, so a `MAX SIZE` no larger than `max_message_size` suffices there; see
   [Emitters](../../../../docs/src/emitters.md#broker-and-message-emitters).

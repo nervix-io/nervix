@@ -797,9 +797,12 @@ pub(super) struct WindowSnapshotSchemas<'a> {
     pub(super) arguments: &'a StdArc<ArrowSchema>,
 }
 
+/// Decode a sealed window checkpoint for the branch lifetime `lifetime` names, its decoding jobs
+/// taking places on the bulk workers as `admission` says.
 pub(super) async fn decode_window_processor_snapshot(
     payload: &[u8],
     executor: &Executor,
+    admission: nervix_execution::QueueAdmission,
     schemas: WindowSnapshotSchemas<'_>,
     lifetime: WindowSnapshotLifetime,
 ) -> Result<Option<WindowProcessorStateSnapshot>, Report<WindowSnapshotError>> {
@@ -807,7 +810,8 @@ pub(super) async fn decode_window_processor_snapshot(
     else {
         return Ok(None);
     };
-    let decoded = decode_window_processor_layout(payload, executor, schemas, layout).await?;
+    let decoded =
+        decode_window_processor_layout(payload, executor, admission, schemas, layout).await?;
     Ok(Some(decoded.snapshot))
 }
 
@@ -819,9 +823,16 @@ pub(in crate::runtime) struct AdmittedWindowSnapshot {
     pub(in crate::runtime) metadata: Option<nervix_execution::Reservation>,
 }
 
+/// Open the two Arrow sections of a parsed window checkpoint, their decoding jobs taking places on
+/// the bulk workers as `admission` says.
+///
+/// A processor task's restore waits for a place: its executor handle tells the task while it
+/// waits, and the task answers its commands meanwhile. An inspection answers a request, so a full
+/// bulk queue refuses it, and its requester asks again.
 pub(in crate::runtime) async fn decode_window_processor_layout(
     payload: &[u8],
     executor: &Executor,
+    admission: nervix_execution::QueueAdmission,
     schemas: WindowSnapshotSchemas<'_>,
     layout: layout::WindowCheckpointLayout,
 ) -> Result<AdmittedWindowSnapshot, Report<WindowSnapshotError>> {
@@ -829,13 +840,9 @@ pub(in crate::runtime) async fn decode_window_processor_layout(
     let header = &layout.header;
     let input = &payload[layout.input.clone()];
     let arguments = &payload[layout.arguments.clone()];
-    // Every caller of this decode answers someone at once: a processor task restores its branches
-    // inline before it answers its commands, and archives and inspection are requests. A full bulk
-    // queue therefore fails the decode rather than holding the caller: a processor keeps answering
-    // as unrestored and retries on its backoff, and the checkpoint it reads stays where it is.
     let mut input = RestoredMaterializedSnapshot::open(
         executor,
-        nervix_execution::QueueAdmission::RefuseWhenFull,
+        admission,
         schemas.input,
         SealedSource::borrowed(executor, input),
         RestoredRows::Window,
@@ -846,7 +853,7 @@ pub(in crate::runtime) async fn decode_window_processor_layout(
     })?;
     let mut arguments = RestoredMaterializedSnapshot::open(
         executor,
-        nervix_execution::QueueAdmission::RefuseWhenFull,
+        admission,
         schemas.arguments,
         SealedSource::borrowed(executor, arguments),
         RestoredRows::Window,
@@ -924,13 +931,15 @@ impl ReplicatedWindowProcessorState {
         Self::from_generations(placement, generations)
     }
 
-    /// Build the live window a branch task owns from the window published last.
+    /// Build the live window a branch task owns from the window published last, opening a sealed
+    /// window on `executor` with its decoding jobs taking places as `admission` says.
     pub(super) async fn restore_state(
         &self,
         plan: &WindowAccumulatorPlan,
         input_schema: &crate::runtime_schema::CompiledSchema,
         incarnation: u64,
         executor: &Executor,
+        admission: nervix_execution::QueueAdmission,
     ) -> error_stack::Result<WindowProcessorState, WindowProcessorError> {
         let published = self.generations.load();
         let Some(snapshot) = &published.value else {
@@ -943,6 +952,7 @@ impl ReplicatedWindowProcessorState {
                 let decoded = decode_window_processor_snapshot(
                     payload,
                     executor,
+                    admission,
                     WindowSnapshotSchemas {
                         input: &input_schema.arrow_schema(),
                         arguments: &arguments,
@@ -1139,6 +1149,7 @@ mod tests {
         decode_window_processor_snapshot(
             payload,
             executor,
+            nervix_execution::QueueAdmission::RefuseWhenFull,
             WindowSnapshotSchemas {
                 input: &input_schema.arrow_schema(),
                 arguments: &arguments,

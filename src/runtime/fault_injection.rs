@@ -48,6 +48,13 @@ impl ConfiguredFaultInjection {
     ) {
     }
 
+    pub(in crate::runtime) async fn pause_processor_branch_restore_if_armed(
+        &self,
+        _domain: &DomainName,
+        _processor: &NodeRef,
+    ) {
+    }
+
     pub(in crate::runtime) async fn pause_materialized_row_release_if_armed(
         &self,
         _domain: &DomainName,

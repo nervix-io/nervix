@@ -1,8 +1,8 @@
 //! The resolved capacity claim of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** CPU and memory capacity, transport, membership, DNS, database, consensus, engine,
-//!   connector host, operational and listener limits, peer receive bounds and the
+//! - **Owns.** CPU, memory and database volume capacity, transport, membership, DNS, database,
+//!   consensus, engine, connector host, operational and listener limits, peer receive bounds and the
 //!   incarnation-bound claim the node record holds.
 //! - **Depends on.** Node identities and serialization primitives.
 //! - **Must not know.** Detection, consensus, transport or placement policy.
@@ -140,7 +140,6 @@ pub struct InterconnectCapabilities {
     pub request_quota: NonZeroU64,
     pub completion_quota: NonZeroU64,
     pub health_probes: NonZeroU64,
-    pub relay_watermarks: NonZeroU64,
     pub stream_window_bytes: u32,
     pub connection_window_bytes: u32,
     pub connection_setup_timeout: Duration,
@@ -253,6 +252,9 @@ pub struct NodeCapabilities {
     pub membership: MembershipCapabilities,
     pub cpu_count: Option<NonZeroU64>,
     pub memory_bytes: Option<NonZeroU64>,
+    /// The total size of the volume that holds the node's database directory, measured when this
+    /// run started. Every committed resource byte quota must fit it.
+    pub database_volume_bytes: u64,
     pub receive: PeerReceiveBounds,
     pub interconnect: InterconnectCapabilities,
     pub dns: DnsCapabilities,

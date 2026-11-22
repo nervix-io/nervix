@@ -211,7 +211,9 @@ not change the applicability of the lifecycle Deloxide lanes.
 Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
 form, codec and header support, and batching legality in the vocabulary. Direct-value entities
 also declare their mapped-value types there: destination columns accept the current Plexus scalar,
-array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
+array and vector types except `DURATION`, which every native store binding declares rejected
+because no column type holds it losslessly, while OTEL protocol fields require their declared exact
+types and refuse a `DURATION` as well. The OTEL
 connector verifies its prepared input schema against that same type table as an internal plan
 guarantee. An impossible mapped type is not a retryable connector initialization failure.
 
@@ -1701,7 +1703,7 @@ group of the ingestor builds Arrow columns for those fields and no others. A gro
 that reads none visits no metadata value at all. A message whose value for a read field is
 unrepresentable or invalid is refused once its ingestor's `FILTER WHERE` has kept it and before
 its event time is selected: each output route's `ON MESSAGE ERROR` policy receives a message error
-with code `validation` and operation `admit` that names `metadata.<field>` and describes the value
+with class `validation` and operation `admit` that names `metadata.<field>` and describes the value
 or typed failure. The message's ACK resolves through that policy as any other refused message's
 does. An unrepresentable or invalid value in a field no program reads refuses nothing, so the lazy
 projection still decides what a message costs and whether it can fail. Transport headers keep their
@@ -3051,9 +3053,9 @@ typed plan passes the emitter's `BATCH` limits to the connector, which narrows t
 destination takes in one request and divides the run by one rule the contract crate owns:
 candidates in packing order of at most the row limit, a candidate whose exact measured size exceeds
 the byte limit halved and measured again with the rest returned to the front, and a single row that
-still exceeds it rejected alone. A row over `MAX SIZE` is a `validation` error of the `encode`
-operation; a row within it that the destination could never take is the destination's `external`
-rejection of the row. Every request answers for the rows it carried, and a failed request leaves its
+still exceeds it rejected alone. A row over `MAX SIZE` is a `limit` error of the `encode`
+operation; a row within it that the destination could never take is the destination's refusal of
+the row, a `refused` error of the `publish` operation. Every request answers for the rows it carried, and a failed request leaves its
 rows and every later request's unresolved for the host to retry. The host retains per-row outcomes,
 while the connector divides the unresolved rows on the next attempt.
 
@@ -3167,7 +3169,7 @@ prepares the successfully mapped rows of the carrier as one Export request. With
 plan passes the emitter's limits to the connector, which divides the successful positions by the
 same rule, measuring the exact uncompressed protobuf Export request, including resource and scope,
 before optional gzip or transport framing; a record whose request alone exceeds `MAX SIZE` is
-refused while preparing, as a `validation` error of the `encode` operation. The connector converts
+refused while preparing, as a `limit` error of the `encode` operation. The connector converts
 each row once and samples the log records' `observed_time_unix_nano` from actual UTC once per
 preparation, then encodes each request once.
 
@@ -3886,8 +3888,10 @@ status and events, retries infrastructure failures, and preserves the configured
 general error policies. The general error policy receives the host's typed report of a failure
 that ended a batch's work and renders its whole chain once: the event and every negative
 acknowledgement carry it after the emitter's name and domain, and the log records it beside them.
-A general error the connector reports itself reaches the same policy with the connector's
-description. An emitter that does not start on a node reports an `EmitterStartError` naming the
+A general error the connector reports itself, through `EmitterHost::handle_general_error`, reaches
+the same policy with the connector's description and the error class the connector names, because
+only the connector knows what failed; the policy's event carries that class and the emitter as the
+producing node. An emitter that does not start on a node reports an `EmitterStartError` naming the
 emitter, its domain and the step that failed, such as a client configuration that does not
 resolve, a codec that cannot hold a batch, or a program that does not compile. A swap whose old
 task does not stop keeps that task installed and running, and fails with the task's own

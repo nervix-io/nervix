@@ -717,7 +717,13 @@ async fn detached_branch_publishes_buffered_route_output_before_it_stops() {
         .bind_domain_clock(&domain)
         .expect("the fixture installs a running unpaced clock");
     let mut branch = template
-        .instantiate(&runtime, &domain, None, 1)
+        .instantiate(
+            &runtime,
+            &domain,
+            None,
+            1,
+            &RetainedStateOpening::RefusedWhenFull,
+        )
         .await
         .expect("the junction fixture instantiates")
         .into_inner();
@@ -842,7 +848,13 @@ async fn junction_branch_holding(
         .bind_domain_clock(domain)
         .expect("the fixture installs a running unpaced clock");
     let mut branch = template
-        .instantiate(runtime, domain, None, 1)
+        .instantiate(
+            runtime,
+            domain,
+            None,
+            1,
+            &RetainedStateOpening::RefusedWhenFull,
+        )
         .await
         .expect("the junction fixture instantiates")
         .into_inner();
@@ -952,6 +964,7 @@ async fn a_branch_holding_output_reports_what_it_cannot_publish_without_its_cloc
         .await
         .expect("a branch reports the output it loses as it ends")
         .expect("the runtime keeps its event bus open");
+    let message = message.message;
     assert!(
         message.contains("stopped without its clock and cannot publish its accepted output"),
         "unexpected report: {message}"

@@ -185,6 +185,7 @@ host_enum! {
         Datetime = 14 as "DATETIME",
         FixedList = 15 as "FIXED_LIST",
         List = 16 as "LIST",
+        Duration = 17 as "DURATION",
     }
 }
 
@@ -221,6 +222,27 @@ host_enum! {
     /// Why the server ended an attachment to a domain clock.
     ClockEndReason from ClockEndReason {
         DomainRemoved = 1 as "DOMAIN_REMOVED",
+    }
+}
+
+host_enum! {
+    /// How urgently a server notice asks for an operator's attention.
+    NoticeLevel from NoticeLevel {
+        Info = 1 as "INFO",
+        Warning = 2 as "WARNING",
+        Error = 3 as "ERROR",
+    }
+}
+
+host_enum! {
+    /// What a server notice reports, which a host routes the notice by instead of its text.
+    NoticeKind from NoticeKind {
+        Membership = 1 as "MEMBERSHIP",
+        Leadership = 2 as "LEADERSHIP",
+        ClusterParameters = 3 as "CLUSTER_PARAMETERS",
+        Runtime = 4 as "RUNTIME",
+        ControlPlane = 5 as "CONTROL_PLANE",
+        Licensing = 6 as "LICENSING",
     }
 }
 
@@ -408,6 +430,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ClockEventKind>()?;
     module.add_class::<ClockState>()?;
     module.add_class::<ClockEndReason>()?;
+    module.add_class::<NoticeLevel>()?;
+    module.add_class::<NoticeKind>()?;
     module.add_class::<EndpointState>()?;
     module.add_class::<OpenRefusal>()?;
     module.add_class::<ReopenReason>()?;

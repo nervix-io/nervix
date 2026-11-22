@@ -476,8 +476,8 @@ mod tests {
 
         assert_eq!(declared.id, 3);
         assert_eq!(
-            declared.error.code,
-            nervix_models::MessageErrorCode::Validation
+            declared.error.class,
+            nervix_models::RejectedErrorClass::Limit
         );
         assert_eq!(
             declared.error.operation,
@@ -487,7 +487,10 @@ mod tests {
             declared.error.message,
             "Postgres insert of one row measures 40 bytes, above MAX SIZE 32B"
         );
-        assert_eq!(native.error.code, nervix_models::MessageErrorCode::External);
+        assert_eq!(
+            native.error.class,
+            nervix_models::RejectedErrorClass::Refused
+        );
         assert_eq!(
             native.error.operation,
             nervix_models::MessageErrorOperation::Publish

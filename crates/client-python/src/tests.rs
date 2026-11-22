@@ -538,6 +538,7 @@ fn a_pycapsule_round_trip_keeps_every_column_kind_at_its_bounds() {
         field("tags", list(ParseAsType::String)),
         field("pair", pair),
         field("nested", list(list(ParseAsType::U8))),
+        field("wait", ParseAsType::Duration),
     ];
     let mut retyped = fields.clone();
     retyped[0].ty = ParseAsType::U16;
@@ -574,6 +575,7 @@ builder.fixed(15, 1, struct.pack('=4q', -2**63, 2**63 - 1, 0, -1))
 builder.offsets(16, 0, [0, 2, 3])
 builder.offsets(16, 1, [0, 1, 1, 3])
 builder.fixed(16, 2, bytes([255, 0, 7]))
+builder.fixed(17, 0, struct.pack('=2q', -2**63, 2**63 - 1))
 batch = builder.finish()
 columns = len(schema.fields)
 expected = [batch.column(index) for index in range(columns)]
@@ -581,6 +583,7 @@ assert expected[12] == ['h\\u00e9\\u0000', None], expected[12]
 assert expected[14] == [['a', 'bc'], []], expected[14]
 assert expected[15] == [[-2**63, 2**63 - 1], [0, -1]], expected[15]
 assert expected[16] == [[[255], []], [[0, 7]]], expected[16]
+assert expected[17] == [-2**63, 2**63 - 1], expected[17]
 
 # Every capsule carries the name the interface gives what it holds.
 is_valid = ctypes.pythonapi.PyCapsule_IsValid
@@ -898,4 +901,117 @@ assert clock_refused.restoration_failure.cause == nx.RestorationCause.REJECTED
             )
         },
     );
+}
+
+/// A notice as the host holds it once its session decoded it.
+fn notice(
+    level: nervix_client_core::NoticeLevel,
+    kind: nervix_client_core::NoticeKind,
+    message: &str,
+    error: Option<nervix_models::ReportedError>,
+) -> crate::notice::Notice {
+    let notice = nervix_client_core::wire::ServerNotice {
+        level,
+        kind,
+        message: message.to_string(),
+        error,
+    };
+    let event = nervix_client_core::ServerEvent::from(notice);
+    crate::notice::Notice::new(host::Notice::new(event))
+}
+
+#[test]
+fn a_notice_reads_its_kind_level_and_text_and_the_error_it_reports() {
+    use nervix_client_core::{NoticeKind, NoticeLevel};
+    use nervix_models::{MessageErrorClass, ModelKind, ModelName, NodeRef, ReportedError};
+
+    let text = "junction 'scorer' message error in domain 'shop': integer division by zero";
+    let reported = notice(
+        NoticeLevel::Error,
+        NoticeKind::Runtime,
+        text,
+        Some(ReportedError {
+            class: MessageErrorClass::EVALUATION,
+            node: NodeRef::new(ModelKind::Junction, name::<ModelName>("scorer")),
+        }),
+    );
+    let joined = notice(
+        NoticeLevel::Info,
+        NoticeKind::Membership,
+        "node-2 joined",
+        None,
+    );
+    run_with(
+        c"
+assert reported.kind == nx.NoticeKind.RUNTIME
+assert reported.level == nx.NoticeLevel.ERROR
+assert reported.message == text
+assert reported.error_class == 'evaluation'
+assert reported.error_node_kind == 'junction'
+assert reported.error_node == 'scorer'
+
+# A notice that reports no classified error of a graph node carries none of its fields.
+assert joined.kind == nx.NoticeKind.MEMBERSHIP
+assert joined.level == nx.NoticeLevel.INFO
+assert joined.message == 'node-2 joined'
+assert joined.error_class is None
+assert joined.error_node_kind is None
+assert joined.error_node is None
+",
+        |py, globals| {
+            globals.set_item("reported", Bound::new(py, reported)?)?;
+            globals.set_item("joined", Bound::new(py, joined)?)?;
+            globals.set_item("text", text)
+        },
+    );
+}
+
+#[test]
+fn every_notice_level_and_kind_reads_as_the_member_of_its_stable_value() {
+    use nervix_client_core::{NoticeKind, NoticeLevel};
+
+    let levels = [
+        (NoticeLevel::Info, "INFO", 1),
+        (NoticeLevel::Warning, "WARNING", 2),
+        (NoticeLevel::Error, "ERROR", 3),
+    ];
+    let kinds = [
+        (NoticeKind::Membership, "MEMBERSHIP", 1),
+        (NoticeKind::Leadership, "LEADERSHIP", 2),
+        (NoticeKind::ClusterParameters, "CLUSTER_PARAMETERS", 3),
+        (NoticeKind::Runtime, "RUNTIME", 4),
+        (NoticeKind::ControlPlane, "CONTROL_PLANE", 5),
+        (NoticeKind::Licensing, "LICENSING", 6),
+    ];
+    for (level, level_member, level_value) in levels {
+        for (kind, kind_member, kind_value) in kinds {
+            let read = notice(level, kind, "observed", None);
+            run_with(
+                c"
+assert read.level == getattr(nx.NoticeLevel, level_member), read.level
+assert int(read.level) == level_value
+assert read.kind == getattr(nx.NoticeKind, kind_member), read.kind
+assert int(read.kind) == kind_value
+",
+                |py, globals| {
+                    globals.set_item("read", Bound::new(py, read)?)?;
+                    globals.set_item("level_member", level_member)?;
+                    globals.set_item("level_value", level_value)?;
+                    globals.set_item("kind_member", kind_member)?;
+                    globals.set_item("kind_value", kind_value)
+                },
+            );
+        }
+    }
+    // The members a host compares with convert back to the runtime's own values.
+    for (level, _, _) in levels {
+        let host_level = host::NoticeLevel::from(level);
+        let member = crate::enums::NoticeLevel::from(host_level);
+        assert_eq!(host::NoticeLevel::from(member), host_level);
+    }
+    for (kind, _, _) in kinds {
+        let host_kind = host::NoticeKind::from(kind);
+        let member = crate::enums::NoticeKind::from(host_kind);
+        assert_eq!(host::NoticeKind::from(member), host_kind);
+    }
 }

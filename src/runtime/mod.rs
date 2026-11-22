@@ -32,10 +32,10 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
     UInt64Array,
     builder::{
-        ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
-        Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
-        TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
-        make_builder,
+        ArrayBuilder, BooleanBuilder, DurationNanosecondBuilder, FixedSizeListBuilder,
+        Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder,
+        ListBuilder, StringBuilder, TimestampNanosecondBuilder, UInt8Builder, UInt16Builder,
+        UInt32Builder, UInt64Builder, make_builder,
     },
     new_empty_array, new_null_array,
 };
@@ -71,15 +71,16 @@ use nervix_models::{
     DomainNodeUnitRef, DomainState, EmitterName, EndpointName, EndpointType, EntityGateTargets,
     ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
     InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestTimestampSource,
-    IngestorName, Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
+    IngestorName, Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorClass,
     MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, NodeRef, NodeUnitRef,
     OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, ParametrizerName, ParseAsType, PartitionSeed, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    ResolvedBranching, ResolvedParametrizerPartitions, ResourceId, ResourceName, RetryPolicy,
-    RouteConstruction, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    StructuredMessageError, SubscriptionName, Timestamp, Unit, WasmCheckpointInspection,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    OwnershipStateResetCause, ParametrizerName, ParseAsType, PartitionSeed, RaisedMessageError,
+    RejectedErrorClass, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ReportedError, ResolvedBranching, ResolvedParametrizerPartitions,
+    ResourceId, ResourceName, RetryPolicy, RouteConstruction, SchemaFingerprint,
+    SignalingProtocolName, SignalingWireFormat, StructuredMessageError, SubscriptionName,
+    Timestamp, Unit, WasmCheckpointInspection, WasmRejectedStatePolicy, WasmSavedStateRejection,
+    WasmStateGeneration, WasmStateResetScope, message_error_scope,
 };
 #[cfg(test)]
 #[cfg_attr(
@@ -165,8 +166,8 @@ use crate::{
     metrics::{
         BatchMetricsHandle, BranchEvictionReason, ClientIngestorSeries, EmitterAttemptOperation,
         EmitterAttemptOutcome, EmitterFinishOutcome, EmitterInteractionMetrics, EmitterOpenOutcome,
-        EmitterRejectionCode, EmitterRetryCause, IngestorQuiesceMetrics, MessageMetricsHandle,
-        NodeBatchMetricsSpec, NodeInputMetricsHandle, RelayMetricRecorders, RelayMetricsHandle,
+        EmitterRetryCause, IngestorQuiesceMetrics, MessageMetricsHandle, NodeBatchMetricsSpec,
+        NodeInputMetricsHandle, NodeMessageErrors, RelayMetricRecorders, RelayMetricsHandle,
         RuntimeMetrics, RuntimeMetricsSnapshot,
     },
     registry::{
@@ -453,8 +454,8 @@ pub(crate) use domain_execution::{
     CommittedClockInstallation, DomainRoutingCache, SharedDomainRouting,
 };
 use domain_execution::{
-    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick, RelayUnitRef,
-    RuntimeDomainState,
+    DomainExecution, DomainRoutingError, DomainRoutingSnapshot, MessageErrorCounters,
+    ObservedDomainTick, RelayUnitRef, RuntimeDomainState,
 };
 #[cfg(test)]
 use domain_rebuild::branch_relays_from_plans;
@@ -573,8 +574,7 @@ use materialized_state::{
 use message_error::{
     InvalidOutputRows, MessageErrorFailure, MessageErrorHandling, MessageErrorSourceContext,
     SingleRecordFilterMapOutcome, captured_partial_output, finalized_partial_output,
-    planned_structured_message_error, structured_message_error,
-    vm_partial_output_row_to_runtime_batch,
+    planned_message_error, raised_message_error, vm_partial_output_row_to_runtime_batch,
 };
 use message_error_delivery::{
     MessageErrorDelivery, MessageErrorRouteRuntime, MessageErrorRouteTarget,
@@ -590,7 +590,9 @@ use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,
     materialize_ingestor_route_template, parse_branch_flush_policy, parse_input_collect_policy,
 };
-use processor_branch_restore::PendingProcessorBranchRestore;
+use processor_branch_restore::{
+    PendingProcessorBranchRestore, ProcessorBranchRestoreAttempt, RestoreProgress,
+};
 use processor_branch_task::{
     PreparedProcessorBranch, ProcessorBranchCommand, ProcessorBranchHandoff,
     ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
@@ -618,7 +620,7 @@ pub(crate) use processor_state_inspection::{
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
-    wasm_guest_call_schemas, wasm_instance_next_deadline,
+    RetainedStateOpening, wasm_guest_call_schemas, wasm_instance_next_deadline,
 };
 use processors::{
     BranchInstanceTemplate, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
@@ -1042,7 +1044,7 @@ pub(crate) use entity_gate::{
 pub(crate) use error::{ApplicationWait, RuntimeError};
 pub(crate) use events::RuntimeEvent;
 use execution_build_error::{ExecutionBuildError, ExecutionStep};
-pub(crate) use inferencer::onnx_environment;
+pub(crate) use inferencer::{OnnxSessionOptions, onnx_environment};
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;

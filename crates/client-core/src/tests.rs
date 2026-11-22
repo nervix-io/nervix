@@ -258,6 +258,7 @@ fn notice_frame(message: &str) -> VerifiedFrame<ServerFrame> {
             level: NoticeLevel::Info,
             kind: NoticeKind::Membership,
             message: message.to_string(),
+            error: None,
         }
         .encode(&SESSION_LIMITS)
         .assured("a test notice fits a frame"),
@@ -1005,6 +1006,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
             level: NoticeLevel::Info,
             kind: NoticeKind::Leadership,
             message: "oversized".to_string(),
+            error: None,
         },
         129,
     );
@@ -1580,6 +1582,7 @@ fn wire_outcomes_convert_into_public_outcomes() {
         level: NoticeLevel::Warning,
         kind: NoticeKind::ControlPlane,
         message: "watch out".to_string(),
+        error: None,
     });
     assert_eq!(
         server,
@@ -1587,8 +1590,24 @@ fn wire_outcomes_convert_into_public_outcomes() {
             level: NoticeLevel::Warning,
             kind: NoticeKind::ControlPlane,
             message: "watch out".to_string(),
+            error: None,
         }
     );
+
+    let reported = nervix_models::ReportedError {
+        class: nervix_models::MessageErrorClass::REFUSED,
+        node: nervix_models::NodeRef::new(
+            nervix_models::ModelKind::Emitter,
+            nervix_models::ModelName::parse("orders_db").assured("a valid emitter name"),
+        ),
+    };
+    let runtime = ServerEvent::from(ServerNotice {
+        level: NoticeLevel::Error,
+        kind: NoticeKind::Runtime,
+        message: "emitter 'orders_db' message error in domain 'shop': refused".to_string(),
+        error: Some(reported.clone()),
+    });
+    assert_eq!(runtime.error, Some(reported));
 }
 
 #[test]
@@ -2832,6 +2851,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
         level: NoticeLevel::Warning,
         kind: NoticeKind::Runtime,
         message: message.to_string(),
+        error: None,
     };
     let notices = &client.inner.events.emitters.notices;
     notices.push(&generation, notice("dropped"), 1);

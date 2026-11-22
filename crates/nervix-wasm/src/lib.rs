@@ -883,28 +883,54 @@ impl TryFrom<&WasmProcessorType> for ParseAsType {
     }
 }
 
-impl From<&nervix_models::CreateSchema> for WasmProcessorSchema {
-    fn from(schema: &nervix_models::CreateSchema) -> Self {
-        Self {
+impl TryFrom<&nervix_models::CreateSchema> for WasmProcessorSchema {
+    type Error = WasmTypeRefusal;
+
+    fn try_from(schema: &nervix_models::CreateSchema) -> Result<Self, Self::Error> {
+        let mut fields = Vec::with_capacity(schema.fields.len());
+        for field in &schema.fields {
+            fields.push(WasmProcessorField::try_from(field)?);
+        }
+        Ok(Self {
             name: schema.name.as_str().to_string(),
-            fields: schema.fields.iter().map(WasmProcessorField::from).collect(),
-        }
+            fields,
+        })
     }
 }
 
-impl From<&nervix_models::SchemaField> for WasmProcessorField {
-    fn from(field: &nervix_models::SchemaField) -> Self {
-        Self {
+/// Why a schema type has no type in the guest protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a schema type the guest protocol cannot carry is a pure conversion refusal"
+    )
+)]
+pub enum WasmTypeRefusal {
+    /// A `DURATION`, which the guest protocol carries no type for; the registry refuses a WASM
+    /// processor whose schemas hold one before any of its plans exists.
+    #[error("a WASM guest does not read or write a DURATION")]
+    Duration,
+}
+
+impl TryFrom<&nervix_models::SchemaField> for WasmProcessorField {
+    type Error = WasmTypeRefusal;
+
+    fn try_from(field: &nervix_models::SchemaField) -> Result<Self, Self::Error> {
+        Ok(Self {
             name: field.name.as_str().to_string(),
-            ty: WasmProcessorType::from(&field.ty),
+            ty: WasmProcessorType::try_from(&field.ty)?,
             optional: field.optional,
-        }
+        })
     }
 }
 
-impl From<&ParseAsType> for WasmProcessorType {
-    fn from(ty: &ParseAsType) -> Self {
-        match ty {
+impl TryFrom<&ParseAsType> for WasmProcessorType {
+    type Error = WasmTypeRefusal;
+
+    fn try_from(ty: &ParseAsType) -> Result<Self, Self::Error> {
+        let ty = match ty {
             ParseAsType::U8 => Self::U8,
             ParseAsType::I8 => Self::I8,
             ParseAsType::U16 => Self::U16,
@@ -917,16 +943,18 @@ impl From<&ParseAsType> for WasmProcessorType {
             ParseAsType::String => Self::String,
             ParseAsType::Bytes => Self::Bytes,
             ParseAsType::Datetime => Self::Datetime,
+            ParseAsType::Duration => return Err(WasmTypeRefusal::Duration),
             ParseAsType::F32 => Self::F32,
             ParseAsType::F64 => Self::F64,
             ParseAsType::Array { element, len } => Self::Array {
-                element: Box::new(Self::from(element.as_ref())),
+                element: Box::new(Self::try_from(element.as_ref())?),
                 len: len.get(),
             },
             ParseAsType::Vec { element } => Self::Vec {
-                element: Box::new(Self::from(element.as_ref())),
+                element: Box::new(Self::try_from(element.as_ref())?),
             },
-        }
+        };
+        Ok(ty)
     }
 }
 
@@ -2748,11 +2776,32 @@ mod tests {
 
     use super::*;
 
+    /// The guest protocol schema of a test schema, which holds no `DURATION`.
+    fn guest_schema(schema: &nervix_models::CreateSchema) -> WasmProcessorSchema {
+        WasmProcessorSchema::try_from(schema).assured("a test schema holds no DURATION")
+    }
+
+    #[test]
+    fn a_duration_has_no_guest_protocol_type() {
+        for ty in [
+            ParseAsType::Duration,
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Duration),
+            },
+        ] {
+            assert_eq!(
+                WasmProcessorType::try_from(&ty),
+                Err(WasmTypeRefusal::Duration)
+            );
+        }
+    }
+
     #[test]
     fn bytes_schema_type_reaches_wasm_protocol_without_text_conversion() {
-        let ty = WasmProcessorType::from(&ParseAsType::Vec {
+        let ty = WasmProcessorType::try_from(&ParseAsType::Vec {
             element: Box::new(ParseAsType::Bytes),
-        });
+        })
+        .assured("the guest protocol carries BYTES");
         assert_eq!(
             ty.to_protocol(),
             protocol::ProcessorType::Vec {
@@ -2947,10 +2996,8 @@ mod tests {
             domain_name: "events".to_string(),
             domain_type: "PACED".to_string(),
             branch_key: Some(b"user=42".to_vec()),
-            input_schema: WasmProcessorSchema::from(&processor_schema("input_events")),
-            output_schemas: vec![WasmProcessorSchema::from(&processor_schema(
-                "output_events",
-            ))],
+            input_schema: guest_schema(&processor_schema("input_events")),
+            output_schemas: vec![guest_schema(&processor_schema("output_events"))],
         }
     }
 
@@ -3027,13 +3074,13 @@ mod tests {
                 },
             ],
         };
-        let mut output_schema = WasmProcessorSchema::from(&schema);
+        let mut output_schema = guest_schema(&schema);
         output_schema.name = "output_events".to_string();
         WasmBranchInit {
             domain_name: "events".to_string(),
             domain_type: "PACED".to_string(),
             branch_key: Some(b"user=42".to_vec()),
-            input_schema: WasmProcessorSchema::from(&schema),
+            input_schema: guest_schema(&schema),
             output_schemas: vec![output_schema],
         }
     }
@@ -3079,11 +3126,8 @@ mod tests {
             domain_name: "events".to_string(),
             domain_type: "PACED".to_string(),
             branch_key: Some(b"tenant=alpha".to_vec()),
-            input_schema: WasmProcessorSchema::from(&input_schema),
-            output_schemas: vec![
-                WasmProcessorSchema::from(&enriched_schema),
-                WasmProcessorSchema::from(&audit_schema),
-            ],
+            input_schema: guest_schema(&input_schema),
+            output_schemas: vec![guest_schema(&enriched_schema), guest_schema(&audit_schema)],
         }
     }
 
@@ -3319,7 +3363,7 @@ mod tests {
             ],
         };
 
-        let converted = WasmProcessorSchema::from(&source);
+        let converted = guest_schema(&source);
 
         assert_eq!(
             converted,

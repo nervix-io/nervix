@@ -25,7 +25,12 @@ One live branch instance can hold the following at each graph node that belongs 
 - deduplication entries retained within `MAX TIME`;
 - open window state retained by `WIDTH` and advanced by `STEP`;
 - reorderer and correlator buffers retained within `MAX TIME`;
-- for WASM processors, an isolated store and the guest linear-memory pages dirtied by that branch.
+- for WASM processors, an isolated store and the guest linear-memory pages dirtied by that branch;
+- for inferencers, the branch's own ONNX session: the model's weights and the graph ONNX Runtime
+  optimized from them, loaded on the branch's first admitted batch and held until the branch ends.
+  An inferencer declared `WORKING MEMORY RETAINED` also keeps, per branch, up to the largest
+  working memory any of its model runs needed; `WORKING MEMORY RELEASED` keeps none between runs.
+  See [Working memory](processors.md#working-memory).
 
 `FLUSH EACH` has a configured byte boundary. `FLUSH IMMEDIATE` has no size boundary; its pending
 depth depends on arrivals during the system-owned 100 µs window. See the
@@ -73,10 +78,20 @@ An ONNX binding inspection reserves one bulk chunk (`--execution-bulk-chunk-byte
 read and released on the admitted worker, with cancellation checked between reads. Its
 thirty-second deadline includes waiting for that memory, the worker
 queue, image preparation and the native session's build, metadata extraction and release. ONNX
-Runtime's own heap remains outside this buffer charge. Only an absolute `ORT_DYLIB_PATH` naming a
+Runtime's own heap remains outside this buffer charge; the inspection's session keeps no working
+memory, since it never runs the model. Only an absolute `ORT_DYLIB_PATH` naming a
 regular file receives the read hint; other library discovery and load failures remain the external
 loader's responsibility. Kernel I/O and native calls cannot be preempted by dropping their awaiter;
 a running job retains its charge until it returns and checks cancellation between bounded reads.
+
+What an inferencer's charges cover: loading a branch's session is charged only an admission token
+on the bulk workers, and each model run is charged its working set from the relay pool, the mapped
+input, the native copy the model reads, its public outputs and any carried state. The model each
+session holds stays outside every executor budget for as long as its branch lives, once for each
+concrete branch, and so do the intermediate tensors a run computes. `WORKING MEMORY RELEASED` frees
+those when the run ends; `WORKING MEMORY RETAINED` keeps up to the largest run's for the branch's
+next run. Size node memory for the models and retained working memory of the branches a node runs,
+beyond the executor ceilings below.
 
 These counts bound admission, not threads. Jobs run on the process-wide blocking pool, so a
 class's count is the number of its jobs that may be on that pool at once. A class is guaranteed its
@@ -183,7 +198,10 @@ cannot hold it:
   `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB` as seeds on the new cluster's bootstrapping node.
   Later node starts omit those seed variables and use the committed values. Change an existing
   cluster's quotas through `ALTER CLUSTER SET` before joining a node with a smaller volume;
-  [Node Settings](node-settings.md#committed-parameter-changes) defines that contract. Each quota is compared with the volume's total size on its own, and what the volume
+  [Node Settings](node-settings.md#committed-parameter-changes) defines that contract. Each node's
+  committed claim carries the volume size it measured at start, and `ALTER CLUSTER SET` refuses a
+  quota larger than any admitted node's volume, naming that node, so grow a volume and restart its
+  node before raising a quota above it. Each quota is compared with the volume's total size on its own, and what the volume
   already holds is not subtracted, so size the volume for the log, snapshots and state the node
   keeps beside them.
 
@@ -231,14 +249,18 @@ The claim does not itself resize executor pools or memory budgets.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's
   ordering slot. A receiving node also keeps, for every peer, a watermark for each channel that
-  peer opened in the last ten minutes, up to a fixed 8,192 per peer at about 180 bytes each.
-  Branches that end and return open new channels, so size branch turnover between two nodes
-  against that budget: beyond it the least recently used watermarks are forgotten first rather
-  than new channels refused. A branch whose channel was forgotten while it was still in use fails
-  its next delivery as indeterminate and opens a new channel; an ingestor that waits for
-  acknowledgements redelivers the batch, and one in `NO ACK` mode loses it as it loses any failed
-  delivery. Keep the branches that are active at once between two nodes below the budget, and read
-  `nervix_interconnect_relay_channel_watermarks_evicted_total` to see when turnover exceeds it. Management subquotas independently reserve streams for discovery, liveness,
+  peer used within the channel's retention: twice the longest `REMOTE_RELAY_TOTAL_TIMEOUT` its
+  deliveries captured, ten minutes at the defaults. Each watermark is charged to the relay memory
+  class while it is retained, about 180 bytes plus the text of a rejection reason it keeps, and no
+  count limits them; the retired-channel floors that forgotten channels leave take 32 bytes for each
+  budget they were kept for. Branches that end and return open new channels, so size the relay
+  memory class for the channels two nodes use within that retention as well as for their batches: a
+  thousand channels take about 180 KiB. When the class has no room for a new channel's watermark,
+  that delivery waits as a held delivery until watermarks expire or other relay work returns room;
+  nothing forgets a watermark to make room, and the wait ends the delivery only once its own total
+  admission budget has passed. Lowering `REMOTE_RELAY_TOTAL_TIMEOUT` shortens the retention of the
+  channels opened afterwards, and `nervix_interconnect_relay_channel_watermarks`
+  shows how many watermarks a node keeps. Management subquotas independently reserve streams for discovery, liveness,
   replaceable domain-clock progress, relay admission, cancellation, and terminal outcomes even when
   ordinary management requests are full.
   Bulk subquotas independently reserve streams for resource transfer and for runtime and Raft
@@ -266,7 +288,10 @@ defaults.
 ## What To Watch
 
 - `nervix_jemalloc_allocated_bytes`, `nervix_jemalloc_active_bytes`, and
-  `nervix_jemalloc_resident_bytes` show process-memory pressure from all workloads on the node.
+  `nervix_jemalloc_resident_bytes` show process-memory pressure from every workload on the node
+  except ONNX Runtime, which allocates its sessions' models and working memory through the C
+  library's allocator, outside jemalloc. On a node that runs inferencers, also watch the process's
+  resident memory as the operating system reports it.
 - `nervix_branch_instances` shows the current concrete branch-key population per domain, branch
   declaration, and physical node.
 - `nervix_branch_evictions_total` shows LRU pressure and TTL churn through its `reason` label.

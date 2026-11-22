@@ -808,8 +808,12 @@ exhausts a limit or runs past the deadline fails only that entry's description: 
 no checkpoint fails and `ON GLOBAL ERROR` does not run. A page carries at most the node's
 `inspection-max-sections` guest sections, and an entry whose description alone exceeds that bound
 reports it as a failed render; the page stops before an entry whose description no longer fits the
-reply, so a reply that stops early carries a continuation. Half of the read's remaining time bounds
-the renders of one unit's page.
+reply, so a reply that stops early carries a continuation. Before it answers, the owner checks the
+complete reply against the payload limit of the page operation once more, because entries can take
+a few more bytes together than one by one: it drops trailing entries until the reply fits and
+reports that more remain, and a page reduced to one entry whose reply still does not fit carries
+that entry's description as a failed render instead. A reply that does not fit even then is refused
+as `reply_too_large`. Half of the read's remaining time bounds the renders of one unit's page.
 
 | Signal | What it shows |
 | --- | --- |

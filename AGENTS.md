@@ -776,6 +776,16 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   alteration waits for the work in motion, a payload an ingestor holds while it waits for a place on
   the bounded executor included, rather than cutting it, and a full queue holds back what feeds it
   rather than dropping what it was handed.
+- Backpressure is the one control of data-plane resources, and the data plane has no magic limits.
+  What a data-plane path holds, the bookkeeping that keeps its processing correct included (channel
+  watermarks, acknowledgement and admission state, outcomes kept for reconciliation), is charged to
+  an executor memory class or to a bound declared with its capacity and overflow. A full bound holds
+  back the work that would fill it, as a capacity refusal its sender retries, a held delivery or a
+  wait for a place, until room returns. No count, cap, budget, quota or eviction of its own drops,
+  forgets, refuses or invalidates work or that bookkeeping when it fills, and work fails only when
+  its own captured deadline passes or the cluster is disrupted. An existing limit that loses,
+  forgets or refuses work in place of backpressure is a defect recorded on ClickUp, never extended
+  or copied.
 - In async code, a loop whose body performs async work calls
   `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one

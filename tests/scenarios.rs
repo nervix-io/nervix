@@ -171,7 +171,7 @@ use crate::common::{
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
     node_execution::{NodeExecutionEndpoint, ProbeExecution},
     node_startup::StartupPorts,
-    node_trace_export::NodeTraceExport,
+    node_trace_export::{CollectorProvisioning, NodeTraceExport, TraceExportLaunch},
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     process_program::{
@@ -474,6 +474,34 @@ struct BlockedConsensusConnectivity {
     restored: AbortOnDropHandle<std::io::Result<()>>,
 }
 
+/// The last server error a step captured: its text and, when it reports a classified error of a
+/// graph node, that error's class and producing node, kept together so a step never reads the class
+/// of one error beside the text of another.
+#[derive(Debug, Clone)]
+pub(crate) struct CapturedServerError {
+    message: String,
+    error: Option<nervix_models::ReportedError>,
+}
+
+impl CapturedServerError {
+    /// A failure a step observed itself, which carries no typed error.
+    fn text(message: String) -> Self {
+        Self {
+            message,
+            error: None,
+        }
+    }
+}
+
+impl From<crate::common::raw_session::TestServerEvent> for CapturedServerError {
+    fn from(event: crate::common::raw_session::TestServerEvent) -> Self {
+        Self {
+            message: event.message,
+            error: event.error,
+        }
+    }
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     outward_tls_retained: Vec<outward_tls_policy::RetainedConnection>,
@@ -612,7 +640,7 @@ struct ScenarioWorld {
     /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
     /// against it verbatim.
     saved_relocation_plan: Option<String>,
-    last_server_error: Option<String>,
+    last_server_error: Option<CapturedServerError>,
     last_auth_attempts_elapsed: Option<Duration>,
     /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
     saturated_credentials_node: Option<String>,
@@ -3681,14 +3709,71 @@ async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
             {string} through fixture DNS"
 )]
 async fn when_node_trace_export(world: &mut ScenarioWorld, node_count: usize, receiver: String) {
-    let cluster = NodeTraceExport::start(
-        node_count,
-        grpc_receiver(world, &receiver),
-        world.test_id.clone(),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    let launch = TraceExportLaunch::option(grpc_receiver(world, &receiver));
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
     world.node_trace_export = Some(cluster);
+}
+
+/// The option names one collector, its environment twin a second and every OpenTelemetry
+/// environment variable a third, with every other OpenTelemetry variable set beside them.
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string}, the option's environment twin naming OTLP receiver {string} and every \
+            OpenTelemetry environment variable naming OTLP receiver {string}"
+)]
+async fn when_node_trace_export_beside_environment(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    receiver: String,
+    twin: String,
+    opentelemetry: String,
+) {
+    let launch = TraceExportLaunch {
+        collector: grpc_receiver(world, &receiver),
+        provisioning: CollectorProvisioning::Option {
+            twin: Some(grpc_receiver(world, &twin)),
+        },
+        opentelemetry: Some(grpc_receiver(world, &opentelemetry)),
+    };
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string} named only by the option's environment twin"
+)]
+async fn when_node_trace_export_from_environment_twin(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    receiver: String,
+) {
+    let launch = TraceExportLaunch {
+        collector: grpc_receiver(world, &receiver),
+        provisioning: CollectorProvisioning::EnvironmentTwin,
+        opentelemetry: None,
+    };
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[then(expr = "OTLP receiver {string} received nothing the OpenTelemetry environment asked for")]
+async fn then_node_trace_export_follows_declared_options(
+    world: &mut ScenarioWorld,
+    receiver: String,
+) {
+    world
+        .node_trace_export
+        .as_ref()
+        .verified("the preceding step started trace-exporting processes")
+        .assert_declared_export_only(grpc_receiver(world, &receiver))
+        .unwrap_or_else(|error| panic!("node trace export followed its environment: {error}"));
 }
 
 #[then(expr = "OTLP receiver {string} eventually receives the server's own spans from every node")]
@@ -22050,6 +22135,24 @@ async fn when_selector_is_clicked(world: &mut ScenarioWorld, selector: String) {
         .expect("selector must be clickable");
 }
 
+#[when(expr = "selector {string} is set to option {string}")]
+async fn when_selector_is_set_to_option(
+    world: &mut ScenarioWorld,
+    selector: String,
+    value: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector actions");
+    let selector = expand_placeholders(world, &selector);
+    let value = expand_placeholders(world, &value);
+    page.locator(&selector)
+        .select_option(value.as_str(), None)
+        .await
+        .expect("selector must be a select element offering the option");
+}
+
 #[when(expr = "selector {string} is clicked by script")]
 async fn when_selector_is_clicked_by_script(world: &mut ScenarioWorld, selector: String) {
     let page = world
@@ -22230,6 +22333,64 @@ async fn when_bulk_execution_is_occupied_on_every_node_for(
             fault_injection.release_execution(node_name);
         }
     });
+}
+
+/// The window processor of the scenario's domain named `processor`.
+fn window_processor_ref(world: &ScenarioWorld, processor: &str) -> nervix_models::DomainNodeRef {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let processor =
+        nervix_models::ModelName::try_from(expand_placeholders(world, processor).as_str())
+            .assured("the scenario window processor is an identifier-shaped name");
+    nervix_models::DomainNodeRef::node_in(
+        domain,
+        nervix_models::ModelKind::WindowProcessor,
+        processor,
+    )
+}
+
+/// The window processor's next restore of its branches stops after reading their lifecycle and
+/// before it opens any of their windows, wherever its task starts.
+#[when(expr = "the next branch restore of window processor {string} is held")]
+async fn when_window_processor_branch_restore_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .pause_processor_branch_restore(processor);
+}
+
+#[then(expr = "within {string} the branch restore of window processor {string} reaches its hold")]
+async fn then_window_processor_branch_restore_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let processor = window_processor_ref(world, &processor);
+    nervix_primitives::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_processor_branch_restore(&processor),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the branch restore of {processor:?} did not reach its hold within {duration:?}")
+    });
+}
+
+#[when(expr = "the held branch restore of window processor {string} is released")]
+async fn when_held_window_processor_branch_restore_is_released(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .release_processor_branch_restore(&processor);
 }
 
 /// Leave room for transport on the selected node while refusing larger decoding reservations.
@@ -28647,6 +28808,63 @@ async fn then_cluster_observability_metric_eventually_totals(
     );
 }
 
+/// Like the step above, for a family whose series a node exposes only once it has counted one,
+/// such as `nervix_message_errors_total`: a node that declares no such family has counted nothing
+/// and contributes zero, while the total still has to come from the nodes that do.
+#[then(
+    expr = "cluster observability metric {string} with labels eventually totals {int} across the \
+            nodes that count it"
+)]
+async fn then_cluster_observability_metric_eventually_totals_across_counting_nodes(
+    world: &mut ScenarioWorld,
+    metric_name: String,
+    expected: i64,
+    #[step] step: &Step,
+) {
+    let expanded = expand_placeholders(world, docstring(step));
+    let labels = expanded
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let expected: f64 = expected.approx_into();
+    let mut observed = BTreeMap::new();
+    let outcome =
+        nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                observed.clear();
+                let mut total = 0.0;
+                for node in world.cluster().node_ids() {
+                    nervix_primitives::task::consume_budget().await;
+                    let declared = match world
+                        .cluster()
+                        .sum_declared_observability_metric(&node, &metric_name, &labels)
+                        .await
+                    {
+                        Ok(declared) => declared,
+                        Err(error) => panic!("node '{node}' metrics could not be read: {error}"),
+                    };
+                    if let Some(value) = declared {
+                        total += value;
+                    }
+                    observed.insert(node, declared);
+                }
+                if total == expected {
+                    break;
+                }
+                nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "metric '{metric_name}' with labels {labels:?} did not total {expected} across the nodes \
+         that count it (a node without the family shows None): {observed:?}"
+    );
+}
+
 #[then(expr = "node {string} observability metric {string} is saved as placeholder {string}")]
 async fn then_node_observability_metric_is_saved(
     world: &mut ScenarioWorld,
@@ -31986,12 +32204,14 @@ async fn send_websocket_client_test_server_payload(world: &mut ScenarioWorld, pa
                 return;
             }
             Ok(response) => {
-                world.last_server_error = Some(format!(
+                world.last_server_error = Some(CapturedServerError::text(format!(
                     "websocket client test server returned {}",
                     response.status()
-                ))
+                )))
             }
-            Err(error) => world.last_server_error = Some(error.to_string()),
+            Err(error) => {
+                world.last_server_error = Some(CapturedServerError::text(error.to_string()))
+            }
         }
         assert!(
             Instant::now() < deadline,
@@ -35268,7 +35488,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error(
         "observed runtime server error level={:?} message={}",
         event.level, event.message
     ));
-    world.last_server_error = Some(event.message);
+    world.last_server_error = Some(CapturedServerError::from(event));
 }
 
 /// Waits for the server error that carries the docstring, passing over the errors reported before
@@ -35306,7 +35526,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
             event.level, event.message
         ));
         if event.message.contains(&expected) {
-            world.last_server_error = Some(event.message);
+            world.last_server_error = Some(CapturedServerError::from(event));
             return;
         }
         passed_over.push(event.message);
@@ -35353,10 +35573,10 @@ async fn then_the_active_session_observes_no_server_error_containing(
 #[then("the last server error contains")]
 async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step: &Step) {
     let expected = expand_placeholders(world, docstring(step).trim());
-    let error = world
-        .last_server_error
-        .as_deref()
-        .expect("server error must be captured before assertion");
+    let Some(captured) = world.last_server_error.as_ref() else {
+        panic!("server error must be captured before assertion");
+    };
+    let error = captured.message.as_str();
     assert!(
         error.contains(&expected),
         "expected server error to contain {expected:?}, got: {error}"
@@ -35366,13 +35586,55 @@ async fn then_last_server_error_contains(world: &mut ScenarioWorld, #[step] step
 #[then("the last server error does not contain")]
 async fn then_last_server_error_does_not_contain(world: &mut ScenarioWorld, #[step] step: &Step) {
     let unexpected = expand_placeholders(world, docstring(step).trim());
-    let error = world
-        .last_server_error
-        .as_deref()
-        .expect("server error must be captured before assertion");
+    let Some(captured) = world.last_server_error.as_ref() else {
+        panic!("server error must be captured before assertion");
+    };
+    let error = captured.message.as_str();
     assert!(
         !error.contains(&unexpected),
         "expected server error not to contain {unexpected:?}, got: {error}"
+    );
+}
+
+/// The typed error the last captured server error carries beside its text: the error's class and
+/// the graph node that produced it. A client reads these fields, never the text, so the step
+/// compares them exactly. `kind` is the node kind's snake_case name, as `DESCRIBE` writes it.
+#[then(expr = "the last server error reports the class {string} of the {word} {string}")]
+async fn then_last_server_error_reports_the_class_of_the_node(
+    world: &mut ScenarioWorld,
+    class: String,
+    kind: String,
+    node: String,
+) {
+    let Some(captured) = world.last_server_error.as_ref() else {
+        panic!("server error must be captured before assertion");
+    };
+    let Some(reported) = captured.error.as_ref() else {
+        panic!(
+            "the last server error carries no typed error class or node: {}",
+            captured.message
+        );
+    };
+    let expected_kind: nervix_models::ModelKind = match kind.parse() {
+        Ok(expected_kind) => expected_kind,
+        Err(_) => panic!("'{kind}' names no node kind"),
+    };
+    assert_eq!(
+        reported.class.as_str(),
+        class,
+        "the last server error reports another class: {}",
+        captured.message
+    );
+    assert_eq!(
+        reported.node.kind, expected_kind,
+        "the last server error reports another node kind: {}",
+        captured.message
+    );
+    assert_eq!(
+        reported.node.identifier.as_str(),
+        node,
+        "the last server error reports another node: {}",
+        captured.message
     );
 }
 

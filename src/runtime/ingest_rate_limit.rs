@@ -115,6 +115,8 @@ pub(super) struct RateLimitReporting {
     pub(super) ingestor: IngestorName,
     pub(super) policy: GeneralErrorPolicy,
     pub(super) counters: IngestorRateLimitCounters,
+    /// The ingestor's error counters, which count every rejection by its class.
+    pub(super) errors: NodeMessageErrors,
 }
 
 /// One execution unit's allowance, owned by the one task that admits the unit's payloads.
@@ -467,6 +469,9 @@ impl UnitAllowance {
                 self.reporting.counters.program_rejections.inc();
             }
         }
+        self.reporting
+            .errors
+            .count(rejection.class(), RateLimitRejection::OPERATION);
         let RateLimitReporting {
             runtime,
             domain,
@@ -484,17 +489,24 @@ impl UnitAllowance {
                 );
             }
             GeneralErrorPolicy::Log => {
-                runtime.inner.events.report_error(format!(
-                    "ingestor '{}' general error in domain '{}': rate limit rejection {rejection}",
-                    ingestor.as_str(),
-                    domain.as_str(),
-                ));
+                runtime.inner.events.report_node_error(
+                    format!(
+                        "ingestor '{}' general error in domain '{}': rate limit rejection \
+                         {rejection}",
+                        ingestor.as_str(),
+                        domain.as_str(),
+                    ),
+                    ReportedError {
+                        class: rejection.class(),
+                        node: NodeRef::new(ModelKind::Ingestor, ingestor.clone()),
+                    },
+                );
                 warn!(
                     domain = domain.as_str(),
                     node_kind = ModelKind::Ingestor.as_str(),
                     node = ingestor.as_str(),
                     error_reference = %rejection.reference,
-                    error_code = RateLimitRejection::CODE.as_ref(),
+                    error_class = rejection.class().as_str(),
                     error_operation = RateLimitRejection::OPERATION.as_ref(),
                     rejection = %rejection,
                     "runtime node consumed a payload its RATE LIMIT rejected"
@@ -539,9 +551,17 @@ pub(crate) struct RateLimitRejection {
 }
 
 impl RateLimitRejection {
-    /// The payload does not satisfy its ingestor's allowance.
-    pub(crate) const CODE: MessageErrorCode = MessageErrorCode::Validation;
     pub(crate) const OPERATION: MessageErrorOperation = MessageErrorOperation::RateLimit;
+
+    /// The class of the rejection: a payload costing more than a clause's `BURST` is larger than
+    /// a declared limit, and a measure that failed on it is an expression that could not be
+    /// computed.
+    pub(crate) fn class(&self) -> MessageErrorClass {
+        match self.cause {
+            RateLimitRejectionCause::AboveBurst { .. } => MessageErrorClass::LIMIT,
+            RateLimitRejectionCause::MeasureFailed { .. } => MessageErrorClass::EVALUATION,
+        }
+    }
 
     /// The rejection of the payload `metadata` names, by the clause at `clause`, from 1, which the
     /// host rejected at `occurred_at`.

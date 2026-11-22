@@ -463,7 +463,9 @@ belong to the client rather than to one session, so a reader keeps calling them 
   them, including the ones not read yet, and the stream continues with the notices of the next
   session. Each `ServerEvent` carries the notice's `level`, its `kind` (`NoticeKind::Membership`,
   `Leadership`, `ClusterParameters`, `Runtime`, `ControlPlane` or `Licensing`) and its display text; a reader
-  routes notices by `kind` and never by their text.
+  routes notices by `kind` and never by their text. A `Runtime` notice about an error of a graph node
+  also carries `error: Some(ReportedError)`, the error's `MessageErrorClass` and the producing node's
+  `NodeRef`, which a reader selects runtime errors by; every other notice carries `None`.
 
 A failed read leaves its stream open. `ClientError::EventOverflow` from `next_server_event()` means
 notices arrived faster than they were read: the client dropped the ones it held, and the next read
@@ -751,7 +753,7 @@ Execute `SHOW RELAY events MATERIALIZED STATE FOR ALL BRANCHES LIMIT 10 FORMAT J
 Read `outcome.state`, match `StateInspectionResult::Page` or `Rejected`, then visit units, sections
 and `frame.batch()` using each section's schema. `counts` describe the complete selected cut;
 `continuation` resumes bounded pages. Typed cells preserve sensitivity, integer widths, float bits,
-datetime nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
+datetime and duration nanoseconds and bytes. `state.to_json()` and `state.display_text()` render the same value.
 
 `SHOW WASM PROCESSOR guest STATE FOR ALL BRANCHES LIMIT 10;` fills the same envelope with typed WASM
 guest-state facts instead of row sections: the page's `wasm_binding` holds the pinned module, and

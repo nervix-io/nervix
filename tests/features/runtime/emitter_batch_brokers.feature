@@ -59,7 +59,7 @@ Feature: Batching across broker and message emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -92,7 +92,7 @@ Feature: Batching across broker and message emitters
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      "seq":7 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 80B
+      "seq":7 | "error_code":"limit" | "operation":"encode" | exceeds MAX SIZE 80B
       """
 
     Examples:
@@ -245,7 +245,7 @@ Feature: Batching across broker and message emitters
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -270,8 +270,8 @@ Feature: Batching across broker and message emitters
       | [{"seq":5,"tenant":"beta"},{"seq":6,"tenant":"beta"}] |     | tenant=beta |       |
     And within "10s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":3 | "error_code":"external" | "operation":"publish" | attribute 'tenant' has an empty value
-      "seq":4 | "error_code":"external" | "operation":"publish" | attribute 'tenant' has an empty value
+      "seq":3 | "error_code":"refused" | "operation":"publish" | attribute 'tenant' has an empty value
+      "seq":4 | "error_code":"refused" | "operation":"publish" | attribute 'tenant' has an empty value
       """
     And the relay subscription does not receive a payload within "1s"
 
@@ -328,7 +328,7 @@ Feature: Batching across broker and message emitters
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -348,9 +348,9 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | <limit_message>
-      "seq":2 | "error_code":"external" | "operation":"publish" | <limit_message>
-      "seq":3 | "error_code":"external" | "operation":"publish" | <limit_message>
+      "seq":1 | "error_code":"refused" | "operation":"publish" | <limit_message>
+      "seq":2 | "error_code":"refused" | "operation":"publish" | <limit_message>
+      "seq":3 | "error_code":"refused" | "operation":"publish" | <limit_message>
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -422,7 +422,7 @@ Feature: Batching across broker and message emitters
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
               error_reference = error.reference,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -440,9 +440,9 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments that share one "error_reference"
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
-      "seq":2 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
-      "seq":3 | "error_code":"external" | "operation":"publish" | Exceed maximum message size
+      "seq":1 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
+      "seq":2 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
+      "seq":3 | "error_code":"refused" | "operation":"publish" | Exceed maximum message size
       """
     And within "30s" the observed broker receives exactly these payloads
       """
@@ -509,7 +509,7 @@ Feature: Batching across broker and message emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
-              error_code = error.code,
+              error_code = error.class,
               operation = error.operation,
               error_message = error.message
         ON GENERAL ERROR LOG;
@@ -525,7 +525,7 @@ Feature: Batching across broker and message emitters
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "seq":1 | "error_code":"external" | "operation":"publish" | SQS message is 1048591 bytes
+      "seq":1 | "error_code":"refused" | "operation":"publish" | SQS message is 1048591 bytes
       """
     And within "30s" the observed broker receives exactly these messages
       | payload               | key | headers    | group |

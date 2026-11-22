@@ -882,8 +882,11 @@ mod tests {
                     .recv()
                     .await
                     .assured("the runtime retains its event bus while the route is observed");
-                if message.starts_with("message-error route for 'notifications'") {
-                    break message;
+                if message
+                    .message
+                    .starts_with("message-error route for 'notifications'")
+                {
+                    break message.message;
                 }
             }
         })

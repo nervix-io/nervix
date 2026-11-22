@@ -686,10 +686,11 @@ impl BranchRuntime {
             if self.owner.node.kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
-                    self.owner.node.kind,
-                    &self.owner.node.identifier,
+                    &self.owner.node,
                     &self.error_policies,
                     batch.acks.iter(),
+                    // The entrypoint's own route machinery failed, as a processor's internal error.
+                    MessageErrorClass::INTERNAL,
                     &error,
                 );
             } else {
@@ -893,10 +894,11 @@ impl IngestorRouteTask {
         if self.template.branch.owner.node.kind == ModelKind::Ingestor {
             self.runtime_handle.handle_general_error_for_acks(
                 &self.domain,
-                self.template.branch.owner.node.kind,
-                &self.ingestor,
+                &NodeRef::new(self.template.branch.owner.node.kind, &self.ingestor),
                 &self.template.branch.error_policies,
                 acks.iter(),
+                // The entrypoint's own route machinery failed, as a processor's internal error.
+                MessageErrorClass::INTERNAL,
                 error,
             );
         } else {
@@ -1386,7 +1388,13 @@ impl BranchExecutionRuntime {
                     nervix::lifecycle_call,
                     "the missing concrete branch is installed once under its branch key and \
                      incarnation before batch dispatch",
-                    template.instantiate(runtime_handle, domain, key.clone(), incarnation)
+                    template.instantiate(
+                        runtime_handle,
+                        domain,
+                        key.clone(),
+                        incarnation,
+                        &RetainedStateOpening::RefusedWhenFull,
+                    )
                 )
                 .await
                 {
@@ -1532,10 +1540,11 @@ impl BranchExecutionRuntime {
         if template.owner.node.kind == ModelKind::Ingestor {
             runtime_handle.handle_general_error_for_acks(
                 domain,
-                template.owner.node.kind,
-                ingestor,
+                &NodeRef::new(template.owner.node.kind, ingestor),
                 &template.error_policies,
                 acks,
+                // The entrypoint's own route machinery failed, as a processor's internal error.
+                MessageErrorClass::INTERNAL,
                 error,
             );
         } else {
@@ -2310,7 +2319,13 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     for (entry, lifetime) in lifetimes.into_iter().enumerate() {
         nervix_primitives::task::consume_budget().await;
         let state = template
-            .instantiate(runtime, domain, lifetime.key.clone(), lifetime.incarnation)
+            .instantiate(
+                runtime,
+                domain,
+                lifetime.key.clone(),
+                lifetime.incarnation,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .change_context(BranchLruSnapshotError::Restore { entry })?;
         restored.push(RestoredBranch { lifetime, state });

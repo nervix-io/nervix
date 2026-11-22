@@ -91,6 +91,7 @@ static const char *type_name(nx_type type) {
     case NX_TYPE_DATETIME: return "DATETIME";
     case NX_TYPE_FIXED_LIST: return "FIXED_LIST";
     case NX_TYPE_LIST: return "LIST";
+    case NX_TYPE_DURATION: return "DURATION";
     }
     fail("unknown type");
     return NULL;
@@ -101,7 +102,8 @@ static size_t fixed_width(nx_type type) {
     case NX_TYPE_U8: case NX_TYPE_I8: case NX_TYPE_BOOL: return 1;
     case NX_TYPE_U16: case NX_TYPE_I16: return 2;
     case NX_TYPE_U32: case NX_TYPE_I32: case NX_TYPE_F32: return 4;
-    case NX_TYPE_U64: case NX_TYPE_I64: case NX_TYPE_F64: case NX_TYPE_DATETIME: return 8;
+    case NX_TYPE_U64: case NX_TYPE_I64: case NX_TYPE_F64: case NX_TYPE_DATETIME:
+    case NX_TYPE_DURATION: return 8;
     default: return 0;
     }
 }
@@ -338,6 +340,7 @@ static void render(const nx_event *event, nx_part part, const fields *columns, s
             case NX_TYPE_F64: { uint64_t v; memcpy(&v, cell, 8); append(target, "f64:%016" PRIx64, v); break; }
             case NX_TYPE_BOOL: append(target, "bool:%s", *cell != 0 ? "true" : "false"); break;
             case NX_TYPE_DATETIME: { int64_t v; memcpy(&v, cell, 8); append(target, "datetime:%" PRId64, v); break; }
+            case NX_TYPE_DURATION: { int64_t v; memcpy(&v, cell, 8); append(target, "duration:%" PRId64, v); break; }
             case NX_TYPE_STRING:
             case NX_TYPE_BYTES: {
                 const uint8_t *copied = data + offsets[row];
@@ -966,6 +969,7 @@ static const level_spec LEVELS_F64[] = {{NX_TYPE_F64, 0}};
 static const level_spec LEVELS_BOOL[] = {{NX_TYPE_BOOL, 0}};
 static const level_spec LEVELS_BYTES[] = {{NX_TYPE_BYTES, 0}};
 static const level_spec LEVELS_DATETIME[] = {{NX_TYPE_DATETIME, 0}};
+static const level_spec LEVELS_DURATION[] = {{NX_TYPE_DURATION, 0}};
 static const level_spec LEVELS_TAGS[] = {{NX_TYPE_LIST, 0}, {NX_TYPE_STRING, 0}};
 static const level_spec LEVELS_GRID[] = {{NX_TYPE_FIXED_LIST, 2}, {NX_TYPE_FIXED_LIST, 2},
                                          {NX_TYPE_I16, 0}};
@@ -998,6 +1002,7 @@ static const field_spec INPUT_FIELDS[] = {
     FIELD("grid", LEVELS_GRID, false, false),
     FIELD("spans", LEVELS_SPANS, true, false),
     FIELD("secret", LEVELS_STRING, false, true),
+    FIELD("wait", LEVELS_DURATION, false, false),
 };
 #define INPUT_FIELD_COUNT (sizeof INPUT_FIELDS / sizeof INPUT_FIELDS[0])
 
@@ -1044,6 +1049,7 @@ typedef struct row {
     const int64_t (*spans)[2];
     size_t span_count;
     const char *secret;
+    int64_t wait;
 } row;
 
 static const char *const FIRST_TAGS[] = {"a", "", "h\xc3\xa9llo"};
@@ -1056,13 +1062,13 @@ static row typed_rows[3] = {
      INT64_MAX, 0x7f7fffffu, 0x7fefffffffffffffull, true,
      PRESENT("h\xc3\xa9llo \xe4\xb8\x96\xe7\x95\x8c \xf0\x9f\x9a\x80"),
      PRESENT("\x00\xff\xfe\x80\x00"), INT64_MAX, false, 0, FIRST_TAGS, 3,
-     {{1, -2}, {INT16_MAX, INT16_MIN}}, true, FIRST_SPANS, 1, "s1"},
+     {{1, -2}, {INT16_MAX, INT16_MIN}}, true, FIRST_SPANS, 1, "s1", INT64_MAX},
     {2, "acme", 0, INT8_MIN, 0, INT16_MIN, 0, INT32_MIN, 0, INT64_MIN, 0x80000000u,
      0x0000000000000001ull, false, PRESENT("a\x00" "b"), PRESENT(""), INT64_MIN, true, 0, NULL, 0,
-     {{0, 0}, {0, 0}}, false, NULL, 0, "s2"},
+     {{0, 0}, {0, 0}}, false, NULL, 0, "s2", INT64_MIN},
     {3, "acme", 1, -1, 1, -1, 1, -1, 9007199254740993ull, -9007199254740993ll, 0x3fc00000u,
      0x3fb999999999999aull, true, ABSENT, ABSENT, 1, true, 9007199254740992ll, THIRD_TAGS, 1,
-     {{-1, 1}, {2, -2}}, true, NULL, 0, "s3"},
+     {{-1, 1}, {2, -2}}, true, NULL, 0, "s3", 1},
 };
 
 /* A row of `tenant` whose every other value is the zero of its type. */
@@ -1161,6 +1167,8 @@ static host_column column_of(const char *name, const row *rows, size_t count) {
             push(&column.values, &flag, 1);
         } else if (strcmp(name, "at") == 0) {
             push(&column.values, &item->at, 8);
+        } else if (strcmp(name, "wait") == 0) {
+            push(&column.values, &item->wait, 8);
         } else if (strcmp(name, "text") == 0 || strcmp(name, "raw") == 0) {
             const blob *value = strcmp(name, "text") == 0 ? &item->text : &item->raw;
             column.varlen = true;
@@ -1445,6 +1453,7 @@ static void render_leaf(line *target, const column_view *view, size_t index) {
     case NX_TYPE_I64: { int64_t value; memcpy(&value, cell, 8); append(target, "i64:%" PRId64, value); break; }
     case NX_TYPE_F64: { uint64_t value; memcpy(&value, cell, 8); append(target, "f64:%016" PRIx64, value); break; }
     case NX_TYPE_DATETIME: { int64_t value; memcpy(&value, cell, 8); append(target, "datetime:%" PRId64, value); break; }
+    case NX_TYPE_DURATION: { int64_t value; memcpy(&value, cell, 8); append(target, "duration:%" PRId64, value); break; }
     default: fail("a leaf is not a scalar");
     }
 }
