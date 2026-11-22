@@ -1831,7 +1831,11 @@ a refused open leaves nothing attached and reserves nothing. `ProducerOpened` ca
 the ingestor, and a `ClientProducerDescription`: the attachment identity, the input schema, the
 domain's `START` generation, the endpoint contract digest, the ingestor's window, ACK timeout and
 retry backoff, the granted credit with the largest batch one submission may carry, and whether
-admission is open.
+admission is open. The largest batch is at most what one frame of the session carries beside its
+submission envelope, and never more than the credit. When the producer is attached through
+another node, it is also at most what one frame between the two nodes carries, which can be less
+([Client Producer Links](./interconnect.md#client-producer-links)); the serving node answers a
+batch above it at once as not admitted with `InvalidBatch(TooLarge)`, and the producer stays open.
 
 The ordered open captures the session's authenticated user name and carries it to the ingestor
 owner. Every row of that producer's batches reads the same identity as `metadata.user`, including
