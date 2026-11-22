@@ -132,8 +132,8 @@ passing the turn; cancellation while waiting retains neither a turn nor a memory
 Vote and committed-marker reads and writes, the log state read, the retention boundary scan and the
 store's idle barrier are management work. Each reserves four management events from the
 Management class, 256 KiB with the fixed 64 KiB event, and takes no turn. A node refuses to start
-with a Management budget smaller than this working set, so none of these operations can need more
-than its whole class ([Node Settings](node-settings.md#execution-capabilities)).
+with a Management budget smaller than this working set, so no reservation of these operations can
+exceed its whole class ([Node Settings](node-settings.md#execution-capabilities)).
 
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
