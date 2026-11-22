@@ -832,11 +832,11 @@ branch builds, restores, encodes and decodes wait for a place on a worker class 
 memory class whenever the node is busy, as [Execution Primitives](./execution-primitives.md)
 requires.
 
-So no control command is answered from behind work that waits for executor capacity. A loop that
-answers commands never waits for a place or for room itself. Heavy work a command needs runs on the
-owner's data side, and the command is answered when that work completes, while the owner keeps
-answering its other commands. The loop never refuses heavy work to stay responsive either: the work
-still waits, and only the commands stop waiting behind it.
+So a command never triggers heavy work by blocking the answers to its owner's other commands. Heavy
+work a command needs runs on the owner's data side, and the command is answered when that work
+completes, while the owner keeps answering its other commands. The owner never refuses that work to
+stay responsive either: the work still waits for capacity, and only the other commands stop waiting
+behind it.
 
 New owners serve the two planes from separate tasks. A processor unit still serves both from one
 supervisor loop, which dispatches the unit's input to its branches and handles every
@@ -851,7 +851,9 @@ Until the planes are separate there, each heavy step that loop starts runs as an
 - building the branch of a key the unit has not seen.
 
 An attempt runs alone while it makes progress, so commands keep their order behind work that moves.
-While it waits for capacity, the loop keeps answering its commands beside it. What each command
+While it waits for capacity, the loop keeps answering its commands beside it. Data work in a loop
+that still serves both planes, such as a batch a branch task processes, waits for capacity as
+backpressure, and commands queued behind it wait with it until the planes are separate tasks. What each command
 answers meanwhile is stated with its owner: [Restoring Processor
 Branches](./shutdown.md#restoring-processor-branches) for the restore and [Partition transitions and
 key claims](#partition-transitions-and-key-claims) for a claim.

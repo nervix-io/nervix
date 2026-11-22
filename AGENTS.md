@@ -773,14 +773,14 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   class holds back what feeds it rather than dropping or refusing what it was handed.
 - Control commands are answered apart from data-plane work. Commands (lifecycle steps, checkpoints,
   handoffs, resets, partition-move steps, inspections, stops) are light, rare and time-sensitive;
-  data work is heavy and backpressured. A loop that answers commands never waits for a worker place
-  or memory room itself, and never refuses heavy work to stay responsive: the heavy work a command
-  needs runs on the owner's data side, and the command is answered when that work completes while
-  the owner keeps answering its other commands. New owners serve the two planes from separate
-  tasks. A loop that still serves both runs each heavy step as an attempt that runs alone while it
-  makes progress and answers commands beside it while it waits for capacity. [Data-Plane
-  Concurrency](docs/src/data-plane-concurrency.md#control-commands-beside-data-work) owns the rule
-  and names the loops that still serve both planes.
+  data work is heavy and backpressured. A command never triggers heavy work by blocking the answers
+  to its owner's other commands, and never refuses that work to stay responsive: the heavy work a
+  command needs runs on the owner's data side, and the command is answered when that work completes
+  while the owner keeps answering its other commands. New owners serve the two planes from separate
+  tasks. A loop that still serves both runs the heavy work a command needs as an attempt that runs
+  alone while it makes progress and answers commands beside it while it waits for capacity.
+  [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#control-commands-beside-data-work)
+  owns the rule and names the loops that still serve both planes.
 - In async code, a loop whose body performs async work calls
   `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one

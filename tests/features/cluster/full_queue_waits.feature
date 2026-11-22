@@ -528,6 +528,72 @@ Feature: Work no caller waits on waits for a place in a full worker class
       | 1            | claimant |
       | 3            | claimant |
 
+  # A junction on node-3 reads the profile row of a materialized relay whose state node-2 owns, so it
+  # asks node-2 to describe and send the row, which node-2 serves on its bulk workers. With every
+  # bulk place taken, the fetch waits for one instead of being refused, so the event is held back
+  # rather than dropped as an internal error. The class frees within the fetch's request deadline,
+  # and the event is enriched and delivered once.
+  @full_queue_remote_materialized_fetch
+  Scenario: A junction's remote materialized fetch waits for a bulk place on the state's owner and delivers its event once
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA profile ( tenant STRING, tier STRING );
+      CREATE WIRE JSON SCHEMA profile_wire MODE STRICT ( tenant string, tier string );
+      CREATE WIRE JSON CODEC profile_codec FROM WIRE SCHEMA profile_wire TO SCHEMA profile;
+      CREATE SCHEMA event ( tenant STRING, seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA enriched_event ( tenant STRING, seq I64, tier STRING );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m PARTITIONS 4;
+      CREATE RELAY profiles SCHEMA profile BRANCHED BY by_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE RELAY enriched_events SCHEMA enriched_event BRANCHED BY by_tenant;
+      CREATE VHOST edge remote-fetch-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT profile_ingress ON edge PATH '/profiles';
+      CREATE HTTP ENDPOINT event_ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR profile_ingestor FROM profile_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING profile_codec TIMESTAMP NOW
+        TO profiles INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE JUNCTION enrich FROM events BRANCHED BY by_tenant
+        USING MATERIALIZED STATE profiles REQUIRED SKIP
+        TO enriched_events INHERIT ALL SET tier = relay_state.profiles.tier
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE PLACEMENT profiles_on_node_2 FOR profiles REQUIRE NODES WHERE node.name = 'node-2';
+      CREATE PLACEMENT enrich_on_node_3 FOR enrich REQUIRE NODES WHERE node.name = 'node-3';
+      CREATE SUBSCRIPTION enriched_subscription TO enriched_events;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "remote-fetch-{{test_id}}.example.com" path "/profiles"
+      """
+      {"tenant":"beta","tier":"bronze"}
+      """
+    Then within "30s" node "node-2" eventually reports materialized state for relay "profiles" containing
+      """
+      {"branch":{"tenant":"beta"},"fields":{"tenant":"beta","tier":"bronze"}}
+      """
+    When bulk execution is saturated on every node
+    And http payload is posted to node "node-1" with host "remote-fetch-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","seq":1}
+      """
+    Then within "20s" a bulk job waits for a place on node "node-2"
+    When bulk execution is released on every node
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      "tenant":"beta" | "seq":1 | "tier":"bronze"
+      """
+
   # A committed change compiles each user-defined function it adds on the bulk workers. The change
   # is already decided, and a full bulk class holds the compilation back until a place frees.
   @full_queue_committed_compilation
