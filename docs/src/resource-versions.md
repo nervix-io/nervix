@@ -144,7 +144,10 @@ node fetches the version. The quotas and their defaults are listed in
 The archive-byte, extracted-byte and file-count quotas are committed cluster parameters. Live
 installation updates the same resource store; newly constructed staging owners capture its typed
 limits. A parameter transition validates completed catalog versions against its candidate quotas,
-and a concurrent catalog change invalidates that validation before the record can commit.
+and a concurrent catalog change invalidates that validation before the record can commit. It also
+refuses an archive-byte or extracted-byte quota larger than the database volume any admitted
+node's committed claim carries, naming that node, because every node stages and extracts versions
+on that volume.
 [Node Settings](node-settings.md#committed-parameter-changes) owns bootstrap seeds, the administrative
 statement and the parameter publication contract.
 

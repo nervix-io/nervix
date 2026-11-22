@@ -198,7 +198,10 @@ cannot hold it:
   `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB` as seeds on the new cluster's bootstrapping node.
   Later node starts omit those seed variables and use the committed values. Change an existing
   cluster's quotas through `ALTER CLUSTER SET` before joining a node with a smaller volume;
-  [Node Settings](node-settings.md#committed-parameter-changes) defines that contract. Each quota is compared with the volume's total size on its own, and what the volume
+  [Node Settings](node-settings.md#committed-parameter-changes) defines that contract. Each node's
+  committed claim carries the volume size it measured at start, and `ALTER CLUSTER SET` refuses a
+  quota larger than any admitted node's volume, naming that node, so grow a volume and restart its
+  node before raising a quota above it. Each quota is compared with the volume's total size on its own, and what the volume
   already holds is not subtracted, so size the volume for the log, snapshots and state the node
   keeps beside them.
 

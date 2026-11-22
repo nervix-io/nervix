@@ -22,7 +22,7 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 18] = [
+const SETTINGS_HEADINGS: [&str; 19] = [
     "Databases",
     "Consensus capacities",
     "DNS",
@@ -41,10 +41,11 @@ const SETTINGS_HEADINGS: [&str; 18] = [
     "Capacity",
     "Execution",
     "Listeners",
+    "Trace export",
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 176] = [
+const SETTING_NAMES: [&str; 181] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -221,6 +222,11 @@ const SETTING_NAMES: [&str; 176] = [
     "listener-tcp-keepalive-time",
     "listener-tcp-keepalive-interval",
     "listener-tcp-keepalive-retries",
+    "otel-trace-sample-ratio",
+    "otel-trace-export-timeout",
+    "otel-trace-export-interval",
+    "otel-trace-queue-capacity",
+    "otel-trace-export-batch-spans",
 ];
 
 #[test]
@@ -664,6 +670,50 @@ fn a_named_setting_that_breaks_a_relationship_is_refused_like_an_option() {
         refused.current_context(),
         AppError::InvalidShutdownTimeouts
     ));
+}
+
+#[test]
+fn trace_export_capabilities_render_and_read_back_and_refuse_a_batch_beyond_the_queue() {
+    let settings = NodeSettings::default()
+        .with_overrides(&[
+            override_of("otel-trace-sample-ratio", "0.125"),
+            override_of("otel-trace-export-timeout", "7s"),
+            override_of("otel-trace-export-interval", "250ms"),
+            override_of("otel-trace-queue-capacity", "4096"),
+            override_of("otel-trace-export-batch-spans", "4096"),
+        ])
+        .assured("the overrides are valid trace export capabilities");
+    let traces = settings.operational.traces;
+    assert_eq!(
+        traces.sample_ratio(),
+        nervix_models::SampleRatio::new(0.125)
+    );
+    assert_eq!(traces.export_timeout(), Duration::from_secs(7));
+    assert_eq!(traces.export_interval(), Duration::from_millis(250));
+    assert_eq!(traces.queued_spans(), 4096);
+    assert_eq!(traces.batched_spans(), 4096);
+    let read = settings
+        .with_overrides(&[])
+        .assured("rendered settings read back");
+    assert_eq!(read, settings);
+
+    let refused = settings
+        .with_overrides(&[override_of("otel-trace-queue-capacity", "2048")])
+        .err()
+        .assured("a 4096-span batch does not fit a 2048-span queue");
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidTraceExportSettings
+    ));
+    assert_eq!(
+        refused.downcast_ref::<nervix_models::NodeOperationalError>(),
+        Some(&nervix_models::NodeOperationalError::TraceExportBatch {
+            batch_setting: "otel-trace-export-batch-spans",
+            batch: 4096,
+            queue_setting: "otel-trace-queue-capacity",
+            queue: 2048,
+        })
+    );
 }
 
 fn override_of(name: &str, value: &str) -> SettingOverride {

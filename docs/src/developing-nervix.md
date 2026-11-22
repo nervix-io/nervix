@@ -246,10 +246,12 @@ Whatever it selects, the node never logs a dependency event that carries a recor
 
 OpenTelemetry trace export is optional and uses the existing `tracing` instrumentation:
 
-- `--otel-enabled` or `NERVIX_OTEL_ENABLED=true` enables OTLP trace export
-- `--otel-otlp-endpoint` or `NERVIX_OTEL_OTLP_ENDPOINT` sets the OTLP gRPC collector endpoint, defaulting to `http://127.0.0.1:4317`
+- `--otel-otlp-endpoint` or `NERVIX_OTEL_OTLP_ENDPOINT` names the OTLP gRPC collector; without it the node exports no traces
 - `--otel-service-name` or `NERVIX_OTEL_SERVICE_NAME` sets the OpenTelemetry service name, defaulting to `nervix`
-- `--otel-trace-sample-ratio` or `NERVIX_OTEL_TRACE_SAMPLE_RATIO` sets parent-based trace sampling from `0.0` through `1.0`
+- `--otel-trace-sample-ratio` or `NERVIX_OTEL_TRACE_SAMPLE_RATIO` sets parent-based trace sampling from `0` through `1`
+- `--otel-trace-export-timeout`, `--otel-trace-export-interval`, `--otel-trace-queue-capacity` and `--otel-trace-export-batch-spans` bound the export, as [Trace Export](./node-settings.md#trace-export) describes
+
+No `OTEL_*` environment variable changes the node's trace export.
 
 The node's trace exporter shares its configured name resolver. Startup, timeout and transport
 behavior are described in [Node Trace Export](./name-resolution.md#node-trace-export).
@@ -347,7 +349,7 @@ curl --get 'http://127.0.0.1:9090/api/v1/query' \
 
 ## OpenTelemetry Local Check
 
-Start Nervix with `--otel-enabled` and keep the default OTLP endpoint when `just deps` is running. Open `http://127.0.0.1:16686`, select the `nervix` service, and search for traces. Quickwit is also available at `http://127.0.0.1:7280`.
+Start Nervix with `--otel-otlp-endpoint http://127.0.0.1:4317` when `just deps` is running. Open `http://127.0.0.1:16686`, select the `nervix` service, and search for traces. Quickwit is also available at `http://127.0.0.1:7280`.
 
 ## Connector Crates
 
@@ -1249,8 +1251,8 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_working_memory_*` consensus namespace
-and `ClusterState` encoding 47. A stored state with a different namespace or encoding fails with
+This revision requires the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_*` consensus namespace
+and `ClusterState` encoding 49. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.
 User backup records require version 3 and contain the complete typed credential and the user's
