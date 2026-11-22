@@ -365,6 +365,8 @@ impl Arbitrary<'_> {
                 memory_bytes: memory,
                 receive,
                 listeners: self.listener_bounds(),
+                // Drawn last, so every value drawn before it keeps its place in the input.
+                database_volume_bytes: self.entropy.boundary_biased(0..=u64::MAX),
             },
         }
     }

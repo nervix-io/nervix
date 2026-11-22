@@ -225,6 +225,31 @@ Feature: Committed cluster parameters
       | 1            |
       | 3            |
 
+  @resource_quota_volume
+  Scenario Outline: A resource quota above a node's database volume is refused, naming the node, on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus statements fail with "resource-max-extracted-bytes (8EiB) exceeds node 'node-1' database volume"
+      """
+      ALTER CLUSTER SET RESOURCE_MAX_EXTRACTED_BYTES = 8EiB;
+      """
+    Then node "node-1" eventually reports status containing "resource-max-extracted-bytes committed=17179869184B revision=1"
+    When these Plexus commands are executed through the client on node "node-<cluster_size>"
+      """
+      DESCRIBE CLUSTER;
+      """
+    Then the last command output contains
+      """
+      database-volume-bytes=
+      """
+    When node "node-<cluster_size>" is stopped
+    And node "node-<cluster_size>" is started
+    Then node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> resource-max-extracted-bytes running=17179869184B"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A parameter change refuses a nonpositive snapshot interval on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     When these Plexus statements fail with "state-snapshot-interval must be greater than zero"

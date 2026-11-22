@@ -163,6 +163,12 @@ Both overrides must be positive. A failed host query remains `unknown`; memory p
 committed claim use the same resolved measurement. The startup log includes these resolved values
 and the receive bounds. Worker pools, budgets and watermarks retain their own setting owners.
 
+The claim also carries the total size of the volume that holds the node's database directory, as
+the [startup preflight](#the-startup-preflight) measured it when the run started. It has no
+override. The committed resource quotas must fit it on every admitted node, as
+[Committed Parameter Changes](#committed-parameter-changes) describes. A volume that grows or
+shrinks while the node runs counts from the node's next start, which measures it again.
+
 After membership admission, each node submits one incarnation-bound capacity claim, a
 `NodeCapabilityRecord`, to the current leader inside its [node record](#the-node-record). Raft
 commits the record under the node name. Repeating an identical announcement is a no-op; a newer
@@ -185,8 +191,9 @@ The bulk window must fit HTTP/2's connection limit for every stream and have its
 budget behind it before listening. These options govern inter-node delivery independently of
 public client admission. Change a claim by restarting the node with new overrides.
 
-`DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes, four receive
-bounds and its engine/connector host capabilities, pending claims, and retained departed records. Its `cluster-effective receive bounds` are
+`DESCRIBE CLUSTER` shows each live incarnation's committed CPU count, memory bytes, database volume
+bytes, four receive bounds and its engine/connector host capabilities, pending claims, and retained
+departed records. Its `cluster-effective receive bounds` are
 the componentwise minimum of matching live committed claims. Individual sends use their receiver's
 claim, so one smaller peer does not shrink traffic between larger peers. The interconnect chapter
 owns refusal, re-slicing, bootstrap transfer and flow-control behavior; the placement chapter owns
@@ -925,7 +932,9 @@ Each refusal names the setting or directory it judged, with the values involved:
 Only the restore-staging quota, a node capability, follows the volume. The resource quotas are
 cluster parameters with fixed defaults, 4 GiB and 16 GiB. A node whose database volume is smaller
 refuses to start. Provision a larger volume, seed smaller quotas on a new cluster, or change an
-existing cluster's committed quotas through `ALTER CLUSTER SET` before joining it. A node that passes logs
+existing cluster's committed quotas through `ALTER CLUSTER SET` before joining it. The measured
+size of the database volume also enters the node's committed claim, so `ALTER CLUSTER SET` cannot
+raise a quota above it while the node stays admitted. A node that passes logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
 volumes, the restore-staging quota it resolved and the properties it detected.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
@@ -1344,6 +1353,16 @@ within that range. Counts used by a wire or native count fit its current represe
 application headers default to 128 distinct fields; `HTTP_HEADER_FIELDS` changes that count up to
 16,384. This limit leaves 8,192 distinct-field slots in the native request map for client and
 transport headers. A prerequisite cannot be assigned through this statement.
+
+`RESOURCE_MAX_ARCHIVE_BYTES` and `RESOURCE_MAX_EXTRACTED_BYTES` must each fit the database volume
+that every admitted node's committed claim carries. A transition that raises either above one of
+those volumes is refused before anything commits, naming the parameter, the node and both sizes:
+`resource-max-extracted-bytes (8EiB) exceeds node 'node-1' database volume (1.82TiB)`. A departed
+node's retained claim does not count. The check shares the commit fence with node announcements:
+a node whose new claim carries a volume the committed quotas do not fit has its announcement
+refused, and its startup preflight already refuses it, naming the volume's directory. Each claim
+records the size its run measured at start, so grow a node's volume and restart that node before
+raising a quota above its old size.
 
 Validation and publication share a commit fence. A concurrent model change or parameter change
 invalidates a captured transition before it applies, and validation runs again against the
