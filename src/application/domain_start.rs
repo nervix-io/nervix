@@ -374,3 +374,38 @@ impl SessionServiceImpl {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+
+    use super::*;
+
+    /// A `START` whose domain is committed running but did not become usable everywhere answers
+    /// failed, naming the started domain and, beneath it, why activation did not complete.
+    #[test]
+    fn an_activation_failure_names_the_started_domain_and_its_cause() {
+        let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+        let answer = DomainStartError::activation_failure(
+            &domain,
+            Report::new(RuntimeError::ApplyRevision { revision: 3 }),
+        );
+        assert!(!answer.succeeded());
+        assert_eq!(
+            answer.message,
+            "started domain 'tenant', but runtime activation did not complete: failed to apply \
+             runtime revision 3"
+        );
+    }
+
+    /// A refused `START` answers failed with its reason alone.
+    #[test]
+    fn a_refused_start_answers_failed_with_its_reason() {
+        let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+        let Err(answer) = DomainStartError::AlreadyRunning { domain }.refusal::<()>() else {
+            panic!("a refusal never answers success");
+        };
+        assert!(!answer.succeeded());
+        assert_eq!(answer.message, "domain 'tenant' is already running");
+    }
+}
