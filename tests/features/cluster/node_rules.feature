@@ -334,12 +334,9 @@ Feature: Node rules
       """
       {"tenant":"beta","transaction_id":"txn-2"}
       """
-    Then within "10s" the relay subscription receives a payload
+    Then within "10s" the relay subscription receives payloads
       """
       {"tenant":"acme","transaction_id":"txn-1"}
-      """
-    And within "10s" the relay subscription receives a payload
-      """
       {"tenant":"beta","transaction_id":"txn-2"}
       """
     When node "node-3" is stopped
@@ -380,12 +377,9 @@ Feature: Node rules
       """
       {"tenant":"acme","transaction_id":"txn-4"}
       """
-    Then within "30s" the relay subscription receives a payload
+    Then within "30s" the relay subscription receives payloads
       """
       {"tenant":"beta","transaction_id":"txn-3"}
-      """
-    And within "10s" the relay subscription receives a payload
-      """
       {"tenant":"acme","transaction_id":"txn-4"}
       """
     And within "10s" node "node-1" eventually reports scheduled "junction" "scorer" owner "node-3"
@@ -462,12 +456,9 @@ Feature: Node rules
       """
       {"tenant":"beta","transaction_id":"txn-1"}
       """
-    Then within "10s" the relay subscription receives a payload
+    Then within "10s" the relay subscription receives payloads
       """
       {"tenant":"acme","transaction_id":"txn-1"}
-      """
-    And within "10s" the relay subscription receives a payload
-      """
       {"tenant":"beta","transaction_id":"txn-1"}
       """
     When these Plexus commands are executed on the active session

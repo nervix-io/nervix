@@ -681,14 +681,16 @@ impl Drop for QueueSlot {
     }
 }
 
-// Owner checks can retain an active worker without parking a thread, including under Turmoil.
-// Releasing it uses the same advance/dispatch transition as the last callback of a real worker.
+// Owner checks can retain an active worker without parking a thread, including under Turmoil, where
+// a CPU job is one step of the only scheduler thread. Releasing it uses the same advance/dispatch
+// transition as the last callback of a real worker. The crate's checks that fill a class hold its
+// worker this way, never with a job that blocks until the check releases it.
 #[cfg(all(test, not(feature = "loom")))]
-struct HeldWorker(Worker);
+pub(crate) struct HeldWorker(Worker);
 
 #[cfg(all(test, not(feature = "loom")))]
 impl HeldWorker {
-    fn new(pool: &WorkerPool) -> Self {
+    pub(crate) fn new(pool: &WorkerPool) -> Self {
         let mut queue = pool.inner.queue.lock();
         assert_eq!(queue.running, 0);
         assert_eq!(pool.inner.workers, 1);

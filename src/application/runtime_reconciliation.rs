@@ -114,7 +114,11 @@ mod tests {
     use super::*;
 
     fn refused() -> error_stack::Result<(), RuntimeError> {
-        Err(Report::new(RuntimeError::ApplyRevision { revision: 1 }))
+        Err(Report::new(RuntimeError::ApplyRevision {
+            node: nervix_models::ClusterNodeName::parse("node-1")
+                .assured("the test node name is valid"),
+            revision: 1,
+        }))
     }
 
     #[nervix_primitives::test(start_paused = true)]

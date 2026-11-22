@@ -90,3 +90,17 @@ burst_load_accepted() {
     jq -c 'if type == "array" then .[] else . end' "${payloads}" >"${output}" \
         || { printf '%s holds a payload that is not JSON\n' "${topic}" >&2; return 1; }
 }
+
+# The offset consumer GROUP committed on partition 0 of TOPIC, or -1 while it has none. A source has
+# confirmed everything it read from TOPIC once this reaches the topic's end offset.
+burst_load_committed() {
+    local group="$1"
+    local topic="$2"
+    local output
+    output="$(broker_offset_query /opt/kafka/bin/kafka-consumer-groups.sh \
+        --bootstrap-server broker:9092 --group "${group}" --describe 2>/dev/null)" || return 1
+    awk -v topic="${topic}" '
+        $2 == topic && $3 == "0" { found = 1; offset = ($4 == "-") ? -1 : $4 }
+        END { if (!found) { exit 1 } print offset }
+    ' <<<"${output}"
+}
