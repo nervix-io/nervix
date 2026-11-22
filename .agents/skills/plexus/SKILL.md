@@ -149,6 +149,11 @@ For cluster continuity and public identity inspection, read
 For node tags and detected properties, read [Selecting Nodes](../../../docs/src/placement.md#selecting-nodes)
 and [Node Selectors](../../../docs/src/filter-map-functions.md#node-selectors). Use `SHOW NODES WHERE ...`
 to preview the selector against the committed node records and `FORMAT JSON` for scripts.
+To keep work on chosen cluster nodes, read [Node Rules](../../../docs/src/placement.md#node-rules):
+`CREATE PLACEMENT <name> FOR <runtime_node> [, ...] | DOMAIN WIDE` with `REQUIRE NODES WHERE`,
+`PREFER NODES WHERE` or `ANY NODE`. Preview the selector with `SHOW NODES WHERE` first. A running
+domain refuses a rule an executing unit would break, and a stopped domain's `START` waits while a
+unit has no admitted node, so tell the user which node must carry the tag.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
 effective policy, capabilities, credential handling and quota usage, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
@@ -185,7 +190,7 @@ The web console's visual Create forms also cover internal schemas, declared JSON
 schemas, branches, relays, codecs, signaling protocols, clients, VHOSTs, endpoints, hash maps,
 Roto UDFs, ingestors and emitters for every connector and entity pair, junctions, deduplicators,
 reorderers, window processors, correlators, reingestors, generators, inferencers, WASM processors,
-domain-wide and corridor placement rules, and session subscriptions; use the same web-console
+domain-wide, corridor and node placement rules, and session subscriptions; use the same web-console
 chapter for their typed fields, resource versions, tensor shapes, guest limits, program editors,
 reference lookup, placement members, contextual create actions, and transaction behavior, and its
 Creation Coverage section for which form creates each statement.
@@ -246,8 +251,9 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   Use `DESCRIBE INFERENCER <name>;` to check the pinned model, tensor declarations, static bytes
   per branch and per-unit state progress. Read `Metrics And Observability` → `Inferencer state`
   before interpreting state bytes, initialization counters or branch-local revision summaries.
-- Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence, and
-  whether ordinary scheduler heuristics should remain neutral.
+- Placement: latency-critical or heavy corridors, colocation enforcement, rule precedence,
+  whether ordinary scheduler heuristics should remain neutral, and the cluster nodes, by tag or
+  detected property, that runtime nodes must or should run on.
 - Operations: batching/flush, error routes, credentials/TLS resources, observability, session
   subscriptions, each ingestor's declared quiesce behavior, and whether an existing schema
   must be evolved atomically with its dependents.
@@ -1024,7 +1030,9 @@ reports no replicas. Use `DESCRIBE JUNCTION <junction>;` when the verification s
 routing contract, scheduled placement, and local edge metrics.
 
 Use `SHOW PLACEMENTS;`, `DESCRIBE PLACEMENT <placement>;`, and `DESCRIBE DOMAIN;` to verify rule
-coverage, hop classes, effective policies, exact unit groups, and domain-wide scope. Use
+coverage, hop classes, effective policies, exact unit groups, and domain-wide scope. For a node
+rule they also show the matching nodes, each unit's satisfaction and the units violating or waiting,
+and `SHOW CLUSTER STATUS;` marks them `violates=` or `waiting_for=`. Use
 `DESCRIBE RELOCATION ...;` with the clauses of a planned `RELOCATE` to inspect the unit it would
 move, its quiesce level, the relays its hold would gate, and the preferences it would leave
 unsatisfied.

@@ -36,6 +36,12 @@ impl<'a> ExpressionCompletion<'a> {
         }
     }
 
+    /// Whether the expression being written selects cluster nodes: a `SHOW NODES` filter or a
+    /// node rule's selector, which read the `node` scope and the node selector builtins only.
+    fn selects_nodes(&self) -> bool {
+        crate::show_nodes::has_head(self.tokens) || crate::placement::selects_nodes(self.tokens)
+    }
+
     pub(super) fn ingestor_reference(&self) -> Option<IngestorReferenceKind> {
         self.ingestor.map(|kind| kind.capabilities().reference)
     }
@@ -49,7 +55,7 @@ impl<'a> ExpressionCompletion<'a> {
             "ref:expression_field" => self.fields(),
             "ref:expression_target" | "set_assignments" => self.targets(),
             "ref:expression_udf" => {
-                if crate::show_nodes::has_head(self.tokens) {
+                if self.selects_nodes() {
                     Vec::new()
                 } else {
                     vec![CompletionExpectation::Semantic(SemanticReference::Model(
@@ -67,7 +73,7 @@ impl<'a> ExpressionCompletion<'a> {
     }
 
     fn functions(&self) -> Vec<CompletionExpectation> {
-        if crate::show_nodes::has_head(self.tokens) {
+        if self.selects_nodes() {
             return vec![
                 CompletionExpectation::Literal(format!("{NODE_SCOPE}.")),
                 CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
@@ -103,7 +109,7 @@ impl<'a> ExpressionCompletion<'a> {
     }
 
     fn fields(&self) -> Vec<CompletionExpectation> {
-        if crate::show_nodes::has_head(self.tokens) {
+        if self.selects_nodes() {
             return self.node_fields();
         }
         match self.tokens.last_chunk::<2>() {

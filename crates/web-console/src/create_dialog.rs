@@ -176,7 +176,7 @@ use labels_draft::{CreationLabelsDraft, LabelEditDraft, LabelsDraftError};
 pub(crate) use labels_draft::{LabelTarget, LabelTargetKind};
 use labels_editor::{CreationLabelsEditor, LabelEditEditor};
 pub(crate) use labels_editor::{KnownLabelTarget, LabelReadResponse};
-use placement_draft::{PlacementCoverage, PlacementDraft, PlacementDraftError};
+use placement_draft::{PlacementCoverage, PlacementDraft, PlacementDraftError, PlacementForm};
 use placement_editor::PlacementEditor;
 use processor_draft::{ProcessorDraft, ProcessorDraftError, ProcessorFamily};
 use processor_editor::ProcessorEditor;
@@ -201,6 +201,8 @@ pub(crate) enum ChoiceControl {
     PlacementFromMember,
     /// Adds a runtime node to the end of a corridor placement's `TO` members.
     PlacementToMember,
+    /// Adds a runtime node to the end of a node rule's `FOR` members.
+    PlacementForMember,
     BranchSchema,
     RelaySchema,
     RelayParametrizer,
@@ -290,9 +292,10 @@ impl ChoiceControl {
     fn form(self) -> CreateKind {
         match self {
             Self::DomainPace => CreateKind::Domain,
-            Self::PlacementPolicy | Self::PlacementFromMember | Self::PlacementToMember => {
-                CreateKind::Model(ModelKind::Placement)
-            }
+            Self::PlacementPolicy
+            | Self::PlacementFromMember
+            | Self::PlacementToMember
+            | Self::PlacementForMember => CreateKind::Model(ModelKind::Placement),
             Self::BranchSchema => CreateKind::Model(ModelKind::Parametrizer),
             Self::RelaySchema | Self::RelayParametrizer => CreateKind::Model(ModelKind::Relay),
             Self::SubscriptionRelay | Self::SubscriptionField => CreateKind::Subscription,
@@ -413,6 +416,7 @@ struct ChoiceControls {
     placement_policy: ChoiceControlSignals,
     placement_from_member: ChoiceControlSignals,
     placement_to_member: ChoiceControlSignals,
+    placement_for_member: ChoiceControlSignals,
     branch_schema: ChoiceControlSignals,
     relay_schema: ChoiceControlSignals,
     relay_branch: ChoiceControlSignals,
@@ -490,6 +494,7 @@ impl ChoiceControls {
             placement_policy: ChoiceControlSignals::new(),
             placement_from_member: ChoiceControlSignals::new(),
             placement_to_member: ChoiceControlSignals::new(),
+            placement_for_member: ChoiceControlSignals::new(),
             branch_schema: ChoiceControlSignals::new(),
             relay_schema: ChoiceControlSignals::new(),
             relay_branch: ChoiceControlSignals::new(),
@@ -567,6 +572,7 @@ impl ChoiceControls {
             ChoiceControl::PlacementPolicy => self.placement_policy,
             ChoiceControl::PlacementFromMember => self.placement_from_member,
             ChoiceControl::PlacementToMember => self.placement_to_member,
+            ChoiceControl::PlacementForMember => self.placement_for_member,
             ChoiceControl::BranchSchema => self.branch_schema,
             ChoiceControl::RelaySchema => self.relay_schema,
             ChoiceControl::RelayParametrizer => self.relay_branch,
@@ -1642,11 +1648,12 @@ impl CreateSignals {
                 // Every policy fits one page, so the form offers all of them without paging.
                 page_size: 100,
             }),
-            ChoiceControl::PlacementFromMember | ChoiceControl::PlacementToMember => self
-                .domain_question(
-                    ChoiceTarget::PlacementMember,
-                    "Select a domain before choosing placement members",
-                ),
+            ChoiceControl::PlacementFromMember
+            | ChoiceControl::PlacementToMember
+            | ChoiceControl::PlacementForMember => self.domain_question(
+                ChoiceTarget::PlacementMember,
+                "Select a domain before choosing placement members",
+            ),
             ChoiceControl::BranchSchema | ChoiceControl::RelaySchema => self.domain_question(
                 ChoiceTarget::Schema,
                 "Select a domain before choosing a schema",
@@ -2378,13 +2385,26 @@ fn open_form_controls(signals: CreateSignals, kind: CreateKind) -> Vec<ChoiceCon
         CreateKind::Domain => vec![ChoiceControl::DomainPace],
         CreateKind::EndpointPause | CreateKind::EntityLabels => Vec::new(),
         CreateKind::Model(ModelKind::Placement) => {
-            match signals.placement.get_untracked().coverage {
-                PlacementCoverage::DomainWide => vec![ChoiceControl::PlacementPolicy],
-                PlacementCoverage::Corridor => vec![
+            let draft = signals.placement.get_untracked();
+            match (draft.form, draft.coverage) {
+                (PlacementForm::Colocation, PlacementCoverage::DomainWide) => {
+                    vec![ChoiceControl::PlacementPolicy]
+                }
+                (
+                    PlacementForm::Colocation,
+                    PlacementCoverage::Corridor | PlacementCoverage::Members,
+                ) => vec![
                     ChoiceControl::PlacementPolicy,
                     ChoiceControl::PlacementFromMember,
                     ChoiceControl::PlacementToMember,
                 ],
+                (PlacementForm::Nodes, PlacementCoverage::DomainWide) => Vec::new(),
+                (
+                    PlacementForm::Nodes,
+                    PlacementCoverage::Corridor | PlacementCoverage::Members,
+                ) => {
+                    vec![ChoiceControl::PlacementForMember]
+                }
             }
         }
         CreateKind::Model(ModelKind::Parametrizer) => vec![ChoiceControl::BranchSchema],

@@ -113,7 +113,10 @@ preserves every key and exact value.
 
 Labels are control-plane metadata. A label-only commit leaves execution and state fingerprints,
 tasks, branch state, allowances, resource bindings, connections, buffered work and acknowledgement
-outcomes intact. It requires no pause, force flush, rebuild, reconnection or relocation. A mixed
+outcomes intact. It requires no pause, force flush, rebuild, reconnection or relocation. It keeps
+every unit on the node the current schedule placed it on, even while that node is down or
+cordoned, so it needs no ownership handoff and commits while a unit's owner is unavailable.
+Placement changes only through configuration changes, relocation, drain and failover. A mixed
 transaction still applies the normal safety contract for its actual configuration changes.
 Client endpoint contracts and resolved branch-key schemas use configuration only. Later
 configuration edits retain attachments and state whenever their actual execution contracts allow it,

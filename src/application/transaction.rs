@@ -259,6 +259,11 @@ fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> S
 pub(in crate::application) enum TransactionCommitError {
     #[error("transaction consensus proposal failed")]
     Proposal,
+    #[error(
+        "START of domain '{domain}' in transaction '{id}' cannot place its units under the node \
+         rules this transaction changes; commit the change first, then START"
+    )]
+    StartNodeRules { id: String, domain: DomainName },
     #[error("transaction '{id}' is unknown")]
     UnknownTransaction { id: String },
     #[error("transaction '{id}' is still open")]
@@ -1413,11 +1418,31 @@ impl SessionServiceImpl {
                     id: transaction.id.clone(),
                 })?;
         let mut resolved_starts = BTreeMap::new();
+        // The graph and schedule the latest model step of this transaction leaves, which a START
+        // after it starts. A START no model step precedes was placed against the committed state.
+        let mut changed = None;
         for step in captured.plan.steps() {
             nervix_primitives::task::consume_budget().await;
+            if let PlannedTransactionStepKind::Models { plan } = &step.kind {
+                changed = Some((
+                    plan.planned
+                        .as_ref()
+                        .and_then(crate::registry::PlannedMutations::candidate_graph),
+                    plan.schedule.clone(),
+                ));
+                continue;
+            }
             let PlannedTransactionStepKind::StartDomain { previous } = &step.kind else {
                 continue;
             };
+            if let Some((Some(graph), Some(schedule))) = &changed {
+                self.refuse_start_breaking_node_rules(&transaction.domain, graph, schedule)
+                    .await
+                    .change_context(TransactionCommitError::StartNodeRules {
+                        id: transaction.id.clone(),
+                        domain: transaction.domain.clone(),
+                    })?;
+            }
             let operation = step.impact.operations().first();
             let statement_index = step.impact.operations().first_index();
             let queued = transaction.statements.get(statement_index).ok_or_else(|| {
@@ -1672,6 +1697,13 @@ impl SessionServiceImpl {
         let Some(current) = self.inner.consensus.current_transaction(&id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
+        // A START of a stopped domain first places every unit its node rules constrain, and waits,
+        // holding the transaction's mutation lease, while some unit has no node they admit.
+        if let TransactionState::Open(_) = &current.state
+            && let Err(error) = self.place_units_for_start(&current).await
+        {
+            return self.start_placement_refusal(error).await;
+        }
         let started = match &current.state {
             TransactionState::Open(_) => match self.prepare_transaction_commit(&current).await {
                 Ok(prepared) => {
