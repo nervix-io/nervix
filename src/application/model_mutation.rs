@@ -1650,11 +1650,7 @@ impl SessionServiceImpl {
                         Ok(transaction) => {
                             self.pause_transaction_commit_if_armed(&transaction).await;
                             let activation_error =
-                                Box::pin(self.apply_current_cluster_state_recording_recovery(
-                                    transaction_step.actual,
-                                    &transaction,
-                                ))
-                                .await;
+                                Box::pin(self.apply_current_cluster_state()).await.err();
                             recorded_transaction = Some(transaction);
                             if let Some(handoff) = ownership_handoff.take() {
                                 if let Some(error) = &activation_error {
@@ -1664,7 +1660,7 @@ impl SessionServiceImpl {
                                          {error:#}",
                                         domain.as_str()
                                     ));
-                                    self.defer_planned_ownership_handoff_release(
+                                    self.hold_planned_ownership_handoff_until_applied(
                                         &domain,
                                         handoff,
                                         error,
@@ -1838,7 +1834,7 @@ impl SessionServiceImpl {
                         Some(Box::pin(self.inner.consensus.current_runtime_revision()).await);
                     if let Err(error) = Box::pin(self.apply_current_cluster_state()).await {
                         if let Some(handoff) = ownership_handoff.take() {
-                            self.defer_planned_ownership_handoff_release(
+                            self.hold_planned_ownership_handoff_until_applied(
                                 &domain,
                                 handoff,
                                 &error,

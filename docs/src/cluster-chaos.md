@@ -963,6 +963,7 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `domain-time` | 1 or 3; one node only with no fault or a cluster restart | None, or each voter in turn crashed, paused, isolated or stopped, or a cluster restart | 1 s, and `paced-load` at 250 ms | 1,000, 2,700 s |
 | `graceful-stop` | 3 | A domain `STOP` while records rest in every buffer and a slow destination holds a publish on the wire, then a `START` | 1 s, and two [burst loads](#burst-loads) of an acknowledged and an unacknowledged source | 1,000, 1,800 s |
 | `mixed-instability` | 3 | A seeded or explicit plan of the families above, alone and combined | 1 s | Twice the planned timeline plus 15 minutes of records, at most 20,000; the duration plus the larger of the duration and 20 minutes, at most 6 hours |
+| `alteration-handover` | 1 or 3 | None; an alteration replaces a deduplicator holding 6,000 branches while a burst is in motion, after `DOMAIN_DRAIN_TIMEOUT` is lowered to 1.5 s | 1 s, and two burst loads per source | 1,000, 1,800 s |
 
 A fixture runs out when the load has produced its last record, so its size bounds how long faults
 can be observed:
@@ -2964,6 +2965,78 @@ So several things can differ between a run and its replay:
 
 Each run's trace records what it actually met.
 
+### Alteration Handover
+
+```bash
+just chaos run alteration-handover --image nervix:debian --nodes 3
+just chaos run alteration-handover --image <image of the base revision> --nodes 3 \
+    --expect-failure domain-rebuilt,negative-acknowledgements
+```
+
+This scenario is the chaos reproduction of [Graceful Lifecycle
+18](https://app.clickup.com/t/86bd1knfh): a change that fails while it is applied never cuts the work
+of a running domain. An alteration replaces a deduplicator through an entity swap, in which the
+replaced deduplicator hands its branches over to its replacement one at a time, while records of two
+sources are in motion, and a [strict verdict](#the-strict-verdict) judges what became of every record.
+The baseline path keeps its own traffic in its own domain, and its ledger stays strict.
+
+**The graph.** `fixtures/alteration-handover.plexus` runs in its own domain, `chaos_alter`. A Kafka
+ingestor that acknowledges, in `MODE ACK SEQUENTIAL`, and one in `MODE NO ACK` each read their own
+topic into one branched relay. A deduplicator keyed on the event ID, branched by the record's branch
+name, feeds a Kafka emitter with an idempotent producer. Its branch has no instance limit, and its
+relays have room to spare.
+
+**The trigger.** Before the graph runs, `ALTER CLUSTER SET DOMAIN_DRAIN_TIMEOUT = 1500ms` makes the
+task stop grace, one fifteenth of the drain timeout, 100 ms. An image whose swap gives the whole
+handover only that grace cannot hand 6,000 branches over in time. Its swap fails, and the node
+rebuilds the domain without a drain: it logs `entity-level schedule apply failed; rebuilding domain`
+and aborts its ingestors' tasks, so the records in motion are cut. The acknowledged source reads one
+payload at a time and is still reading its burst, so the payload it holds ends with a negative
+outcome: a `shutdown` acknowledgement and an unconfirmed stop position. The change's hold suspends
+both sources' intake before the swap, so the source without acknowledgements usually holds nothing
+when its task is aborted; a record it reads during the swap itself is lost and shows as missing.
+The red run therefore expects `domain-rebuilt` and `negative-acknowledgements`. An image whose swap
+waits for every branch cuts nothing.
+
+**The sequence.**
+
+1. One [error-event observer](#error-events) attaches per node, the drain timeout is lowered, the
+   graph is installed and the [negative-outcome counters](#negative-acknowledgements) are read.
+2. Each source's backlog of 3,000 records, each with a branch of its own, is produced as a
+   [burst](#burst-loads) and waits in its topic. `START` follows. Within 300 seconds, the output
+   must hold all 6,000 records and both consumer groups must have committed their backlog through its
+   end: the deduplicator now holds 6,000 branches.
+3. A second burst of 4,000 records per source, alternating between two branches, is produced, the
+   source without acknowledgements last, and `ALTER DEDUPLICATOR chaos_alter_dedup SET DEDUPLICATE
+   ON input.content;` follows at once through the packaged CLI. Every record's content is unique, so
+   neither key drops a record. The output's end offset is read as the alteration is requested; if it
+   already holds every record, nothing was in motion and the run fails as an injection failure. The
+   answer, its exit status and its timing are recorded in `alter-answer.txt`, `alter.exit` and
+   `alter-timing.json`, with the records still in motion at the request.
+4. Within 300 seconds, both sources must have confirmed every position they read and the output must
+   stand still for three observations five seconds apart.
+5. The counters are read again, the observers' transcripts are collected, and every node's log since
+   the scenario began is kept in `node-<host>.log`.
+
+**The verdict.** `verify-alteration-handover.sh` keeps every symptom of the strict verdict over both
+sources and adds two:
+
+| Symptom | When |
+| --- | --- |
+| `alteration-refused` | The CLI did not exit 0 with an answer naming the altered deduplicator |
+| `domain-rebuilt` | A node logged `entity-level schedule apply failed; rebuilding domain`: a rebuild without a drain stood in for the failed swap |
+
+How many processor branch tasks the nodes aborted at their stop grace is recorded beside the verdict
+and judges nothing: an idle branch whose state the alteration purges loses nothing when it is
+aborted, and a branch that held records shows its loss in the strict verdict.
+
+**Evidence.** `alteration-handover/` holds the backlog observation, the alteration's answer and
+timing, the settle observations, both counter snapshots, the observers' transcripts, the node logs,
+`delivery.json` and `verdict.json`. `results/alteration-handover-progress.json` summarizes them, and
+`results/symptoms.json` names the symptoms an expected failure matches. `just
+test-chaos-alteration-handover` runs the scenario's option checks, its fixture generator and its
+verdict without Docker.
+
 ## Correctness Reproductions
 
 A correctness fix removes a way for Nervix to lose, repeat, reorder or change data it accepted. Its
@@ -2986,6 +3059,9 @@ appends its record to `traffic/<load>-bursts.ndjson`: the payloads and records i
 offsets before and after it, the producer's exit status and its times. The load's first burst
 declares it in `manifest.json` under `loads` with `shape: "burst"`, beside the paced loads, which
 declare `shape: "paced"`. A burst has no interval, so it has no pacing verdict.
+
+`burst_load_committed GROUP TOPIC` reads the offset a consumer group committed on the topic: a
+source has confirmed everything it read once that reaches the topic's end offset.
 
 A burst source's accepted-input ledger is rebuilt from its topic, never from the producer's report:
 every payload the topic holds through its end offset, kept in `traffic/<load>-payloads.ndjson`, and

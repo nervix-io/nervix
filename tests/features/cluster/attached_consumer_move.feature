@@ -111,6 +111,9 @@ Feature: Attached acknowledgements across consumer moves
       """
     And within "30s" Kafka consumer group "moved_sink_group_{{test_id}}" next offset for topic "moved_sink_in_{{test_id}}" partition 0 is "at least 3"
 
+  # The owner holds a buffered batch while a move changes the routes it fans out on. The batch waits
+  # for the move and then reaches every attached emitter where it runs then: it is never refused,
+  # so its source never hears a negative acknowledgement and sends nothing again.
   Scenario: A relay owner fans out to every attached emitter when one moves away from its sibling
     Given Kafka is running
     And the production sticky scheduler is configured
@@ -204,9 +207,9 @@ Feature: Attached acknowledgements across consumer moves
       """
     Then the swap of emitter "owner_move_target" in domain "{{domain}}" has detached it
     When the relay owner fan-out pause for domain "{{domain}}" is released
+    And the swap of emitter "owner_move_target" in domain "{{domain}}" is released
     Then relay owner fan-out for domain "{{domain}}" has finished
-    When the swap of emitter "owner_move_target" in domain "{{domain}}" is released
-    Then the background Plexus execution succeeds
+    And the background Plexus execution succeeds
     Then within "60s" node "node-1" eventually reports scheduled "emitter" "owner_move_target" owner different from placeholder "former_target_owner"
     Then within "60s" Kafka consumer group "owner_move_group_{{test_id}}" next offset for topic "owner_move_in_{{test_id}}" partition 0 is "at least 2"
     And within "30s" the observed broker receives payloads
@@ -228,3 +231,9 @@ Feature: Attached acknowledgements across consumer moves
       "event_id":"after"
       """
     And within "30s" Kafka consumer group "owner_move_group_{{test_id}}" next offset for topic "owner_move_in_{{test_id}}" partition 0 is "at least 3"
+    And cluster observability metric "nervix_ingestor_ack_outcomes_total" with labels eventually totals 0
+      """
+      domain="{{domain}}"
+      ingestor="owner_move_ingestor"
+      outcome="failed"
+      """

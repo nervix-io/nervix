@@ -384,10 +384,11 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   answer the caller maps to its own outcome, never a decode, encode or authentication failure; the
   executor's refusing `run_cpu` and `run_storage` serve only such requests. A wait ends in a refusal
   only once the executor admits no more work, which its owner treats as its own stop. Loss is reserved
-  for cluster disruption. `task::spawn_cpu` belongs to the executor's worker pools,
-  `spawn_blocking` to its storage workers, and `block_in_place` to no file by default. An embedded
-  engine's own parallelism (ONNX Runtime's threads, WASM parallel compilation) is pinned or disabled
-  where the executor already owns that admission.
+  for cluster disruption ([Planned operations cost backpressure, never
+  data](#planned-operations-cost-backpressure-never-data)). `task::spawn_cpu` belongs to the
+  executor's worker pools, `spawn_blocking` to its storage workers, and `block_in_place` to no file
+  by default. An embedded engine's own parallelism (ONNX Runtime's threads, WASM parallel
+  compilation) is pinned or disabled where the executor already owns that admission.
 - **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
   thread through `thread::{spawn, Builder, scope, spawn_detached}` or `unmodeled::thread::Builder`,
   lists exactly those items in `crates/primitives/blocking-permissions.toml` with its owner, why it
@@ -839,6 +840,30 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   processing. External entities are provisioned explicitly by test setup, deployment policy or
   operator action, and a missing one surfaces as an initialization or publish error.
 
+### Planned operations cost backpressure, never data
+
+- Only a cluster disruption may lose, refuse or repeat a record: a node crash, a network partition,
+  a failover or forced recovery of a node that stopped answering, or a deadline the operator set
+  expiring. Even then the loss is the narrowest the disruption forces, and it is reported.
+- Everything else keeps every record it was given. That covers every planned or routine operation
+  (an alteration, a move, a drain, a rebalance, a handoff, a pause or quiesce, a repartition, a
+  reconciliation retry, a restart in order) and every temporary condition of a healthy cluster (a
+  closed gate, a full queue or buffer, a busy worker pool, an owner or channel being replaced, a
+  slow consumer or peer). It waits, holds the record or applies backpressure; it never negatively
+  acknowledges, drops, fails, returns for re-sending or diverts to an error route the work it
+  accepted, as a way to make progress.
+- The cost of a planned operation is higher latency and backpressure, never loss, a duplicate or a
+  negative acknowledgement. Planned operations are as gentle as possible: they hold no more and no
+  longer than their change needs.
+- When waiting appears to deadlock, the repair is the order of the operation (what it closes, drains
+  or hands over, and when), never failing the work. "The source will retry" is not a delivery
+  guarantee: a re-send is a duplicate to consumers that already took the record, and a
+  `MODE NO ACK` source loses it.
+- A path that refuses or drops accepted work because of a transient condition is a defect, whatever
+  a comment, chapter, test or Shuttle check says about its intent. No change adds one, and none
+  widens or relies on one; an existing one is recorded on ClickUp against its repair task and is
+  never cited as precedent. A test asserts that the work is kept, never that it is refused.
+
 ### Observability
 
 - `info` is reserved for lifecycle, topology, startup, shutdown, administration and unusual state
@@ -883,12 +908,13 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   a session limit at session open, a heartbeat at link open), and the peer uses the announced value,
   never its own default or an assumption that nodes agree.
 - A value computed from other settings or the machine is a named derivation on its owner, never a
-  flag of its own. Whatever mirrors a setting (the charge for a buffer it sizes, a chunk, a deadline,
-  a restated default or bound) takes it from the resolved setting or its definition, and a charge
-  covers what is allocated at every valid value. Defaults and bounds are written once, in the owning
-  definition, and dependent defaults stay `Option` at the edge until resolved against typed context.
-  An explicit value is kept exactly and refused when it does not fit, never rounded, clamped or
-  reduced. Operator-supplied relationships are validated before I/O, and transitions at commit.
+  flag of its own. Whatever mirrors a setting (the charge for a buffer it sizes, a chunk, a
+  deadline, a restated default or bound) takes it from the resolved setting or its definition, and a
+  charge covers what is allocated at every valid value. Defaults and bounds are written once, in the
+  owning definition, and dependent defaults stay `Option` at the edge until resolved against typed
+  context. An explicit value is kept exactly and refused when it does not fit, never rounded,
+  clamped or reduced. Operator-supplied relationships are validated before I/O, and transitions at
+  commit.
 - Before any listener binds or store opens, the
   [startup preflight](docs/src/node-settings.md#the-startup-preflight) checks what the node needs
   from its environment, such as memory against its budgets, its directories and its resolver, and a
@@ -921,10 +947,11 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 - The `nervix::hidden_tunable` compiler diagnostic refuses numeric policy outside a setting's
   definition, a group's defaults, a derivation from typed input and a fixed contract: a constant of
   a governed numeric type, and a numeric literal that chooses a duration, a capacity, a channel
-  capacity or a permit count. [Hidden Tunables](docs/src/architecture-enforcement.md#hidden-tunables)
-  owns what it recognizes. A value that resists the class test is not a setting: it is fixed with
-  the reason that fixes it, never kept as a literal, and a retained exception is a reason-bearing
-  expectation on that one declaration or operation, naming its repair task.
+  capacity or a permit count. [Hidden
+  Tunables](docs/src/architecture-enforcement.md#hidden-tunables) owns what it recognizes. A value
+  that resists the class test is not a setting: it is fixed with the reason that fixes it, never
+  kept as a literal, and a retained exception is a reason-bearing expectation on that one
+  declaration or operation, naming its repair task.
 
 ## Cryptography
 

@@ -934,15 +934,16 @@ fn an_interrupted_producer_leaves_a_fresh_sequence_for_the_next_producer() {
     assert_eq!(successor.sequence, 0);
 }
 
+/// A swap that moves the relay's attached consumer holds an owner's buffered batch back. The
+/// batch waits for the swap, then reaches the consumer the swap installed and is acknowledged;
+/// it is never refused because the relay was being changed.
 #[nervix_primitives::test]
-async fn relay_gate_fails_buffered_owner_batch_when_its_attached_consumer_moves() {
-    let domain = domain("default");
-    let relay = named("orders");
+async fn an_owner_batch_waits_for_a_swap_and_reaches_the_consumer_it_installed() {
     let services = test_relay_boundary_services();
-    let consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    let previous = services.add_local_runtime_consumer(AckMode::Attached);
     let (acks, completion) = AckSet::root();
     let mut batch = quiesce_test_batch();
-    batch.acks = vec![acks.clone()];
+    batch.acks = vec![acks];
     let gate = services.fanout.dispatch_gate();
     let mut lease = RelayDispatchGateLease::engage(
         gate,
@@ -950,25 +951,122 @@ async fn relay_gate_fails_buffered_owner_batch_when_its_attached_consumer_moves(
         "attached consumer is moving",
     );
     assert!(lease.wait_quiescent().await);
-    drop(consumer);
+    let (_owner_runs, owner_stop) = watch::channel(false);
+    let owner_services = services.clone();
+    let owner = nervix_primitives::task::spawn(async move {
+        owner_services
+            .fanout_owner_batch(
+                &domain("default"),
+                &named("orders"),
+                Unit::SINGLE,
+                &batch,
+                &ConfiguredFaultInjection::default(),
+                &owner_stop,
+            )
+            .await
+    });
+    nervix_primitives::task::yield_now().await;
+    assert!(
+        !owner.is_finished(),
+        "a buffered owner batch waits while the swap holds hand-on back"
+    );
+    drop(previous);
     services.remove_local_runtime_consumer(AckMode::Attached);
-    let result = services
-        .fanout_owner_batch(
-            &domain,
-            &relay,
+    let mut installed = services.add_local_runtime_consumer(AckMode::Attached);
+    drop(lease);
+
+    timeout(Duration::from_secs(1), owner)
+        .await
+        .expect("releasing the swap's hold wakes the owner")
+        .expect("the owner task joins")
+        .expect("the batch reaches the consumer the swap installed");
+    installed
+        .recv()
+        .await
+        .expect("the installed consumer receives the batch")
+        .ack_success();
+    assert_eq!(
+        timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("the delivered batch resolves its root ACK"),
+        AckOutcome::Ack
+    );
+}
+
+/// A hold that waits for the relay to empty holds producers only: an owner's buffered batch goes
+/// on to its consumer at once.
+#[nervix_primitives::test]
+async fn a_producers_hold_lets_an_owner_batch_reach_its_consumer() {
+    let services = test_relay_boundary_services();
+    let mut consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    let (acks, completion) = AckSet::root();
+    let mut batch = quiesce_test_batch();
+    batch.acks = vec![acks];
+    let mut lease = RelayDispatchGateLease::engage_producers(
+        services.fanout.dispatch_gate(),
+        Instant::now() + Duration::from_secs(1),
+        "coordinated alteration drains the relay",
+    );
+    assert!(lease.wait_quiescent().await);
+    timeout(
+        Duration::from_secs(1),
+        services.fanout_owner_batch(
+            &domain("default"),
+            &named("orders"),
             Unit::SINGLE,
             &batch,
             &ConfiguredFaultInjection::default(),
-        )
-        .await;
-    assert!(
-        result.is_err(),
-        "a closed routing gate must fail the attached batch before fan-out"
-    );
-    let outcome = timeout(Duration::from_secs(1), completion.wait())
+            &watch::channel(false).1,
+        ),
+    )
+    .await
+    .expect("a producers hold never makes the owner wait")
+    .expect("the batch reaches its consumer");
+    consumer
+        .recv()
         .await
-        .expect("the failed owner fan-out must resolve its root ACK");
-    assert!(matches!(outcome, AckOutcome::NoAck(_)));
+        .expect("the consumer receives the batch")
+        .ack_success();
+    assert_eq!(completion.wait().await, AckOutcome::Ack);
+    drop(lease);
+}
+
+/// An owner told to stop cannot wait for a swap that waits for it to stop: the batch a swap holds
+/// back fails its acknowledgement so its source delivers it again.
+#[nervix_primitives::test]
+async fn a_stopping_owner_fails_a_batch_a_swap_holds_back() {
+    let services = test_relay_boundary_services();
+    let _consumer = services.add_local_runtime_consumer(AckMode::Attached);
+    let (acks, completion) = AckSet::root();
+    let mut batch = quiesce_test_batch();
+    batch.acks = vec![acks];
+    let mut lease = RelayDispatchGateLease::engage(
+        services.fanout.dispatch_gate(),
+        Instant::now() + Duration::from_secs(1),
+        "the relay owner is replaced",
+    );
+    assert!(lease.wait_quiescent().await);
+    let (stop, owner_stop) = watch::channel(false);
+    stop.send_replace(true);
+    let result = timeout(
+        Duration::from_secs(1),
+        services.fanout_owner_batch(
+            &domain("default"),
+            &named("orders"),
+            Unit::SINGLE,
+            &batch,
+            &ConfiguredFaultInjection::default(),
+            &owner_stop,
+        ),
+    )
+    .await
+    .expect("a stopping owner does not wait for the swap");
+    assert!(result.is_err());
+    let AckOutcome::NoAck(reason) = completion.wait().await else {
+        panic!("a stopping owner fails the batch it could not hand on");
+    };
+    assert_eq!(reason, "relay routing changed before owner fan-out");
+    drop(lease);
 }
 
 /// One acknowledgement forwarded to `receiving_node()`, held by a registry of its own.

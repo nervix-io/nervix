@@ -96,7 +96,7 @@ non-model step, including schedule changes. The **transaction summary** combines
 requirements of all steps: no pause contributes nothing, entity subgraphs combine their nodes and
 gates, and any domain pause makes the summary domain-wide. This is the *planned* maximum. A commit
 result reports the highest level actually engaged by executed steps, which can be lower after a
-pre-engagement failure or higher after recorded recovery expansion.
+pre-engagement failure.
 
 | Required level | Typed scope | What it requires before the step's effect |
 | --- | --- | --- |
@@ -381,11 +381,12 @@ local alteration guard. A backup's distinct mutation lease and alteration guard 
 protected. Only a confirmed status change emits `resumed orphaned ALTER pause`.
 
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
-than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
-entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery
-rebuild effects beside the original entity plan. The runtime retries the same complete typed
-schedule revision during that rebuild, and reports its wider node scope to the transaction. The
-actual aggregate rises accordingly. Node
+than falsely declaring that no gate engaged. An entity swap that cannot complete on a node never
+widens into a rebuild of the domain: the node puts back the entities it had begun to replace,
+before their gate opens, and keeps running its previous revision. The change answers with that
+node's failure and its reason, the actual history keeps the entity attempt and its release, and the
+runtime retries the same complete typed schedule revision on its reconciliation cadence, as
+[Execution Plans](./execution-plans.md#incremental-changes-and-rebuilds) describes. Node
 shutdown and restart use their own intake, drain, and former-owner fences, described in
 [Shutdown And Recovery](./shutdown.md); the transaction report does not redefine them.
 

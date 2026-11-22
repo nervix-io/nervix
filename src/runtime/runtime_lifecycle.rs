@@ -166,7 +166,6 @@ impl Runtime {
                 schedule_application: Mutex::new(ScheduleApplication::default()),
                 #[cfg(test)]
                 test_applied_schedule: ArcSwapOption::empty(),
-                applied_recovery_expansions: ArcSwapOption::empty(),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
                 domain_status_changed,

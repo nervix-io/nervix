@@ -18,7 +18,7 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     ActualExecutionStepImpact, ActualQuiescence, ExecutionStepImpactReport, ImpactDiagnostic,
     ImpactDiagnosticKind, ImpactEffects, PauseRequirement, QuiesceLevel, QuiescenceOutcome,
-    RebuildImpact, TransactionOperationNumber,
+    TransactionOperationNumber,
 };
 use nervix_primitives::sync::blocking::Mutex;
 
@@ -113,17 +113,6 @@ impl TransactionStepImpactRecorder {
         let mut actual = self.actual.lock();
         actual.outcome = nervix_models::ExecutionStepOutcome::Applying;
         actual.effects = effects;
-    }
-
-    pub(in crate::application) fn record_recovery_expansion(
-        &self,
-        requirement: PauseRequirement,
-        rebuilds: impl IntoIterator<Item = RebuildImpact>,
-    ) {
-        let attempt = self.request(requirement);
-        self.confirm(attempt);
-        self.actual.lock().effects.rebuilds.extend(rebuilds);
-        self.release(attempt);
     }
 
     pub(in crate::application) fn pending_domain_attempt(&self) -> Option<QuiescenceAttempt> {

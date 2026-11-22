@@ -390,8 +390,11 @@ Each engagement request keeps the two-second reply bound; a typed timeout retrie
 and complete scope within the original preparation deadline. A transport failure, such as a stream
 that broke, leaves delivery as uncertain as a lost reply, so it retries the same identity and scope
 too, after a 100-millisecond pause that gives the connection time to be replaced. A retry observes
-the existing receiver-owned operation and lease. Other request failures keep their existing
-classification.
+the existing receiver-owned operation and lease. An engagement of the same identity and scope whose
+deadline is later than the lease's end renews the lease to it: a coordinator keeps a committed
+handoff's hold that way while a participant has not applied the move. A lease that already ended
+is never renewed, so such an engagement fails, and a renewal racing the lease's end either keeps
+the hold or is refused. Other request failures keep their existing classification.
 
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
@@ -1537,11 +1540,13 @@ swap. It acquires a dispatch permit before reading the local and remote consumer
 that permit through fan-out, attachment of the consumer ACK shares, and resolution of the owner's
 share. A swap closes the gate
 and waits for existing permits before changing those sets. If the gate is already closed when a
-buffered batch starts fan-out, the owner fails its record acknowledgements and the ingestor retries
-after the schedule changes. It cannot wait for the gate while holding that buffered batch: the
-swap's drain counts the batch, so such a wait would prevent the swap from finishing. In particular,
-an attached sibling on the old destination cannot acknowledge a batch while another attached
-consumer moves to a new destination before the owner selected routes for that batch.
+buffered batch starts fan-out, the batch waits for the swap and then fans out along the routes the
+swap published. A coordinated hold that waits for relays to empty holds producers only, so the
+drain completes by delivering what the owner buffered rather than refusing it. In particular, an
+attached sibling on the old destination cannot acknowledge a batch while another attached consumer
+moves to a new destination before the owner selected routes for that batch. A routed delivery that
+reaches a node while that node's swap holds its partition still fails its record acknowledgements:
+it holds the sending owner's permit, and two nodes swapping at once must not wait for each other.
 
 The receiver decides admission before it hands the batch to the runtime consumers of the relay, and
 it hands the batch to the consumers that run on the node at that moment. An owner routes an attached
@@ -2515,20 +2520,24 @@ connected follower may still probe an unreachable peer successfully after the le
 that peer. Revision and HTTPS listener progress requests remain bound to the reported incarnation.
 
 Application progress is one record per process incarnation: the authoritative revision it applied,
-the runtime revisions it prepared and made ready, and the runtime revision through which its
-domain clocks match the committed ones. A phase is absent until the incarnation reaches a revision
-in it and only advances, and a new incarnation starts with every phase absent. The consensus
-applied revision, the runtime applicator and the domain clock installer are the record's only
-writers. The clock installer also uses its local installed phase to open domain clock delivery
+the runtime revisions it prepared and made ready, the runtime revision through which its
+domain clocks match the committed ones, and the newest runtime revision it failed to prepare with
+the reason it rendered. A phase is absent until the incarnation reaches a revision in it and only
+advances, and a new incarnation starts with every phase absent. A failure holds until the
+incarnation prepares that revision or a later one, and a failure of an earlier revision never
+replaces a later one. The consensus applied revision, the runtime applicator and the domain clock
+installer are the record's only writers. The clock installer also uses its local installed phase to open domain clock delivery
 with each remote authority through `domain_clock_attach`, ahead of graph readiness.
 
 Each node reports its record to the Raft leader it observes in an `application_progress`
-management progress request whenever a phase advances or the leadership it observes changes. The
+management progress request whenever its record changes, a phase advancing or a failure being
+recorded, or the leadership it observes changes. The
 report carries the record and the leader and term it addressed. One report is in flight at a time
 and carries the newest record, so a burst of advances costs one report per round trip. The leader
 holds a report only when the connection's authenticated node is the node the report names and the
 leader leads the addressed term, and answers `Accepted`, `NotLeader` or `ForeignReporter`. It keeps
-the latest report of each incarnation, merges a late report without moving a phase back, and keeps
+the latest report of each incarnation, merges a late report without moving a phase back or taking
+an earlier failure, ends a held failure once a report prepared its revision, and keeps
 reports only from the incarnations its availability view holds live, besides the reporter. A
 barrier reads a report only for an incarnation its leader view names, so a late report from an
 earlier incarnation of that node completes nothing. A

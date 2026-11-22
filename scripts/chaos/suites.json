@@ -139,6 +139,13 @@
           "run": ["stateful", "--nodes", "3", "--state-partitions", "4", "--fault", "owner-crash"]
         },
         {
+          "id": "alteration-handover",
+          "shard": 15,
+          "budget_minutes": 12,
+          "note": "the chaos reproduction of Graceful Lifecycle 18",
+          "run": ["alteration-handover", "--nodes", "3"]
+        },
+        {
           "id": "mixed-seed-42",
           "shard": 1,
           "budget_minutes": 60,
