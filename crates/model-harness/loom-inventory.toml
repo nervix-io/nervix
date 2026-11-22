@@ -248,6 +248,34 @@ path = "src/runtime/relay_channel.rs"
 weakened = ".store(!state.engagements.is_empty(), Ordering::Relaxed);"
 
 [[invariant]]
+claim = "A fence of an engagement that holds hand-on back counts every hand-on that finds the gate open: the engagement stores the hand-on flag before its fence reads the dispatch count by read-modify-write, and a hand-on raises the count by read-modify-write before it reads the flag, so one observes the other."
+id = "runtime.relay-dispatch-gate.hand-on-entry-fence"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_fence_holding_hand_on_counts_every_hand_on_that_finds_it_open"
+
+[[qualification]]
+failure = "the fence took its lease while a hand-on it did not count was still running"
+id = "runtime.relay-dispatch-gate.engagement-leaves-hand-on-open"
+invariant = "runtime.relay-dispatch-gate.hand-on-entry-fence"
+original = "            self.fanout_closed.store(true, Ordering::Relaxed);"
+path = "src/runtime/relay_channel.rs"
+weakened = "            // weakened: the engagement leaves hand-on open"
+
+[[invariant]]
+claim = "A hand-on that finds the gate reopened observes what the protected mutation changed while hand-on was held: reopening releases the hand-on flag and the hand-on's read of it acquires."
+id = "runtime.relay-dispatch-gate.hand-on-reopen-publication"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_hand_on_that_finds_the_gate_reopened_observes_the_protected_change"
+
+[[qualification]]
+failure = "a hand-on entered the reopened gate without the change made while it was held"
+id = "runtime.relay-dispatch-gate.relaxed-hand-on-reopen"
+invariant = "runtime.relay-dispatch-gate.hand-on-reopen-publication"
+original = "self.fanout_closed.store(holds_hand_on, Ordering::Release);"
+path = "src/runtime/relay_channel.rs"
+weakened = "self.fanout_closed.store(holds_hand_on, Ordering::Relaxed);"
+
+[[invariant]]
 claim = "A consumer that frees room a waiting publisher needs either admits it or wakes it: the publisher raises the waiting count before it reads the admission count, the consumer lowers the admission count before it reads the waiting count, and both reach the admission count by read-modify-write, so one observes the other."
 id = "runtime.relay-fanout.admission-wakeup"
 package = "nervix-server"

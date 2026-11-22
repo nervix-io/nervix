@@ -29,6 +29,7 @@ Usage:
   just chaos run lifetimes --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run domain-time --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run graceful-stop --image IMAGE [--expect-failure SYMPTOM[,SYMPTOM...]]
+  just chaos run alteration-handover --image IMAGE [--nodes 1|3] [--expect-failure SYMPTOM[,SYMPTOM...]]
   just chaos run mixed-instability --image IMAGE [--seed N] [--duration 30m] [--policy POLICY]
       [--coverage LIST] [--plan FILE] [--max-memory-bytes N] [--max-recovery-backlog N] [--max-pending N]
   just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS]
@@ -48,6 +49,7 @@ Run `just chaos run pause-resume --help` for pause-resume options.
 Run `just chaos run partition-recovery --help` for partition-recovery options.
 Run `just chaos run degraded-links --help` for degradation profiles and thresholds.
 Run `just chaos run stateful --help` for stateful, endpoints, lifetimes and domain-time faults.
+Run `just chaos run alteration-handover --help` for the symptoms an expected failure can name.
 Run `just chaos run mixed-instability --help` for seeded plans, quorum policies and coverage.
 Run `just chaos run graceful-stop --help` for the symptoms an expected failure can name.
 Run `just chaos suite --help` for the smoke and soak suites that CI runs.
@@ -139,6 +141,12 @@ graceful-stop  A domain STOP while burst loads from an acknowledged and an unack
                and an emitter's buffer, and a slow destination holds a publish on the wire, then a
                START, judged strictly: every record exactly once, no negative acknowledgement, no
                error event, and a STOP answer that reports no cut (three-node)
+alteration-handover  An alteration that replaces a deduplicator holding thousands of branches
+                     while bursts from an acknowledged and an unacknowledged Kafka source are
+                     in motion, judged strictly: every record exactly once, no negative
+                     acknowledgement, no error event, an acknowledged alteration and no domain
+                     rebuild standing in for the swap
+                     topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 EOF
 }
 
@@ -187,7 +195,7 @@ case "${command_name}" in
             stale-follower | former-owner-restart | cluster-restart)
                 exec "${script_dir}/run-recovery.sh" --scenario "${scenario}" "$@"
                 ;;
-            stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop)
+            stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop | alteration-handover)
                 exec "${script_dir}/run-baseline.sh" --scenario "${scenario}" "$@"
                 ;;
             *)

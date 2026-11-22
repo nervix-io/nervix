@@ -234,6 +234,7 @@ mod emitter_lifecycle;
 mod emitter_metrics;
 mod endpoint_intake;
 mod engine_settings;
+mod entity_swap_failure;
 mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
@@ -10943,20 +10944,6 @@ async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld
     world
         .fault_injection
         .force_next_domain_drain_timeout(domain);
-}
-
-#[given(expr = "the next entity schedule swap in domain {string} on the leader is forced to fail")]
-async fn given_next_entity_schedule_swap_on_leader_fails(
-    world: &mut ScenarioWorld,
-    domain: String,
-) {
-    let leader = current_leader_node(world).await;
-    let domain = expand_placeholders(world, &domain);
-    let domain = nervix_models::DomainName::try_from(domain.as_str())
-        .assured("the scenario uses an identifier-shaped domain name");
-    world
-        .fault_injection
-        .fail_next_entity_schedule_swap_on(crate::common::cluster::node_name(&leader), domain);
 }
 
 #[given("graceful shutdown drain is enabled")]
@@ -21888,40 +21875,6 @@ async fn then_transaction_report_records_actual_quiescence(
     }
 }
 
-#[then(expr = "transaction {string} report step {int} eventually records recovery rebuild effects")]
-async fn then_transaction_report_records_recovery_rebuilds(
-    world: &mut ScenarioWorld,
-    transaction_id: String,
-    step_number: usize,
-) {
-    let transaction_id = expand_placeholders(world, &transaction_id);
-    let index = step_number
-        .checked_sub(1)
-        .assured("transaction report step numbers are one-based");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        assert!(
-            Instant::now() < deadline,
-            "transaction '{transaction_id}' report step {step_number} did not record recovery \
-             rebuild effects"
-        );
-        if let Ok(report) = read_transaction_impact_report(world, &transaction_id).await
-            && let Some(step) = report.execution_steps().get(index)
-        {
-            let rebuilds = step.actual().effects.rebuilds.as_slice();
-            if rebuilds.len() > step.planned().effects.rebuilds.len()
-                && rebuilds
-                    .iter()
-                    .any(|rebuild| rebuild.reason == nervix_models::RebuildReason::Recovery)
-            {
-                return;
-            }
-        }
-        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 #[then(expr = "transaction {string} is eventually removed")]
 async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, transaction_id: String) {
     let transaction_id = expand_placeholders(world, &transaction_id);
@@ -28767,6 +28720,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let expected: f64 = expected.approx_into();
+    // A node that exposes no such family counts nothing, since it never ran an instance the family
+    // counts; at least one node must expose it, so a misspelled family still fails.
     let mut observed = BTreeMap::new();
     let outcome =
         nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
@@ -28774,22 +28729,26 @@ async fn then_cluster_observability_metric_eventually_totals(
                 nervix_primitives::task::consume_budget().await;
                 observed.clear();
                 let mut total = 0.0;
+                let mut exposed = false;
                 for node in world.cluster().node_ids() {
                     nervix_primitives::task::consume_budget().await;
                     let value = match world
                         .cluster()
-                        .sum_observability_metric(&node, &metric_name, &labels)
+                        .sum_declared_observability_metric(&node, &metric_name, &labels)
                         .await
                     {
                         Ok(value) => value,
                         Err(error) => {
-                            panic!("node '{node}' did not expose '{metric_name}': {error}")
+                            panic!("node '{node}' did not report '{metric_name}': {error}")
                         }
                     };
-                    total += value;
+                    if let Some(value) = value {
+                        exposed = true;
+                        total += value;
+                    }
                     observed.insert(node, value);
                 }
-                if total == expected {
+                if exposed && total == expected {
                     break;
                 }
                 nervix_primitives::time::sleep(Duration::from_millis(100)).await;
@@ -28798,7 +28757,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .await;
     assert!(
         outcome.is_ok(),
-        "metric '{metric_name}' with labels {labels:?} did not total {expected}: {observed:?}"
+        "metric '{metric_name}' with labels {labels:?} did not total {expected} (a node without \
+         the family shows None): {observed:?}"
     );
 }
 
@@ -38895,6 +38855,72 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
             arrived_after >= expected_delay,
             "expected the payload no sooner than {expected_delay:?} after publishing, but it \
              arrived after {arrived_after:?}"
+        );
+        break;
+    }
+}
+
+/// Bounds a payload's delivery from the instant its publishing request began, the anchor of the
+/// "no sooner than" step above. A budget that opened at this step's start would grow by however
+/// long the publishing request took, so a scenario that compares the budget with a route's
+/// cadence could not rely on the two windows staying apart.
+#[then(expr = "the relay subscription receives a payload within {string} after it was published")]
+async fn then_stream_subscription_receives_payload_within_publication_budget(
+    world: &mut ScenarioWorld,
+    budget: String,
+    #[step] step: &Step,
+) {
+    let budget = parse_duration_text(&budget).assured("the receive budget is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("a delivery-budget assertion follows a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step))
+        .trim()
+        .to_string();
+    append_cucumber_log_line(&format!(
+        "awaiting subscription payload containing {} within {budget:?} after publishing",
+        expected_payload.replace('\n', "\\n")
+    ));
+    let deadline = published_at
+        .checked_add(budget)
+        .assured("a scenario's receive budget lies seconds after a recent instant");
+    let mut observed = Vec::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for subscription payload containing {expected_payload} within \
+             {budget:?} after publishing. observed {observed:?}"
+        );
+        let event = world
+            .active_session
+            .as_mut()
+            .assured("the scenario opened its subscription before publishing")
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .unwrap_or_else(|error| panic!("the subscription session failed: {error}"));
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for subscription payload containing {expected_payload} within \
+                 {budget:?} after publishing. observed {observed:?}"
+            );
+        };
+        let read_after = published_at.elapsed();
+        let payload = event.payload;
+        observed.push(payload.clone());
+        world.last_subscription_payload = Some(payload.clone());
+        if !payload.contains(&expected_payload) {
+            continue;
+        }
+        append_cucumber_log_line(&format!(
+            "subscription payload containing {} read {read_after:?} after publishing",
+            expected_payload.replace('\n', "\\n")
+        ));
+        assert!(
+            read_after <= budget,
+            "expected the payload within {budget:?} after publishing, but it was read after \
+             {read_after:?}"
         );
         break;
     }
