@@ -711,6 +711,10 @@ fn write_growing(
 /// A growing job whose class has no room for its growth gives back everything it holds before it
 /// waits for the charge it needs: a charge queued behind its attempt is granted the room the
 /// attempt held, and the job runs again under its larger charge once room frees.
+// The first attempt parks its worker's thread on a blocking channel until a charge is queued
+// behind it. Turmoil's simulated CPU strategy runs every job on the one simulated host thread,
+// which that park would stop, so this check runs in the ordinary build only.
+#[cfg(not(feature = "turmoil"))]
 #[nervix_primitives::test]
 async fn a_growing_job_that_ran_short_gives_back_its_charge_waits_and_runs_again() {
     use nervix_primitives::sync::{
@@ -1105,6 +1109,11 @@ async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
 
 /// The same for a CPU class: a job that finds the class's one worker busy and its one queue place
 /// taken waits for a place and runs once one frees.
+// The occupying job parks its worker's thread on a blocking channel until the test releases it.
+// Turmoil's simulated CPU strategy runs every job on the one simulated host thread, which that park
+// would stop, so this check runs in the ordinary build only; `workers::queue_admission_checks`
+// holds a worker without parking a thread and checks the same admission under Turmoil.
+#[cfg(not(feature = "turmoil"))]
 #[nervix_primitives::test]
 async fn a_full_cpu_queue_holds_every_job_until_a_place_frees() {
     let executor = small_executor();
