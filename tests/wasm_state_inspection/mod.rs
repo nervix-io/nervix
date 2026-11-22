@@ -2,16 +2,19 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //! - **Owns.** Polling the WASM state statement and reading branch entries, reset facts,
-//!   guest-state descriptions, unit owners and continuations from its JSON rendering.
-//! - **Depends on.** The scenario world, leader command execution and placeholder expansion.
+//!   guest-state descriptions, unit owners and continuations from its JSON rendering, and arming
+//!   the owner page reply overflows a scenario reads through.
+//! - **Depends on.** The scenario world, leader command execution, placeholder expansion and the
+//!   server's fault controls.
 //! - **Must not know.** Checkpoint storage, the owner page operation or the envelope's encoding.
 
 use std::{collections::BTreeSet, time::Duration};
 
-use cucumber::{gherkin::Step, then};
+use cucumber::{gherkin::Step, given, then};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::parse_duration_text;
+use nervix_models::{DomainName, DomainNodeRef, ModelKind, ModelName, parse_duration_text};
 use nervix_primitives::time::{Instant, sleep};
+use nervix_server::WasmStatePageOverflow;
 use serde_json::Value;
 
 use crate::{
@@ -100,6 +103,44 @@ async fn within_show_wasm_processor_state_contains(
         );
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Makes the owner page replies of the scenario's WASM processor `processor` that `overflow` names
+/// too large for their request class on every node, as replies whose entries pad beyond the payload
+/// limit inside one reply would be. A later step replaces an earlier one's choice.
+fn overflow_owner_page_replies(
+    world: &ScenarioWorld,
+    processor: &str,
+    overflow: WasmStatePageOverflow,
+) {
+    let domain = DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let processor = ModelName::try_from(expand_placeholders(world, processor).as_str())
+        .assured("the scenario processor is an identifier-shaped name");
+    world.fault_injection.overflow_wasm_state_page_replies(
+        DomainNodeRef::node_in(domain, ModelKind::WasmProcessor, processor),
+        overflow,
+    );
+}
+
+#[given(
+    expr = "every owner page reply of WASM PROCESSOR {string} holding more than one entry \
+            overflows"
+)]
+fn replies_beyond_one_entry_overflow(world: &mut ScenarioWorld, processor: String) {
+    overflow_owner_page_replies(world, &processor, WasmStatePageOverflow::BeyondOneEntry);
+}
+
+#[given(
+    expr = "every owner page reply of WASM PROCESSOR {string} holding a described entry overflows"
+)]
+fn replies_with_a_described_entry_overflow(world: &mut ScenarioWorld, processor: String) {
+    overflow_owner_page_replies(world, &processor, WasmStatePageOverflow::DescribedEntry);
+}
+
+#[given(expr = "every owner page reply of WASM PROCESSOR {string} overflows")]
+fn every_reply_overflows(world: &mut ScenarioWorld, processor: String) {
+    overflow_owner_page_replies(world, &processor, WasmStatePageOverflow::EveryReply);
 }
 
 #[then(expr = "the last command output JSON value at {string} is saved as placeholder {string}")]

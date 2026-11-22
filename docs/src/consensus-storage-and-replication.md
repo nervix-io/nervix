@@ -536,10 +536,10 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_working_memory_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_working_memory_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_working_memory_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_working_memory_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_working_memory_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_working_memory_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_working_memory_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_working_memory_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
@@ -564,7 +564,8 @@ whose signaling data exists only on its WebSockets variant, the branch partition
 resolved branch declaration of the committed schedule carries, and the partition epoch the
 committed schedule records for every branch whose count changed. It identifies
 the current statement shape as well, which the statements a transaction keeps are stored in:
-`ALTER PARAMETRIZER` and `DESCRIBE INFERENCER` among those statements, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
+`ALTER PARAMETRIZER` and `DESCRIBE INFERENCER` among those statements, a `SET LABELS` whose one edit
+sets and removes keys, an `ALTER INGESTOR` or `ALTER EMITTER` operation that
 changes one part of its entity's body (`SET RATE LIMIT` and `DROP RATE LIMIT` among them), an envelope clause or the properties, or one part of a
 construction where it stands, including the typed `payload` expression scope and a
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
@@ -573,8 +574,8 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host, runtime, shutdown, operational and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 46. The state carries the endpoint pause response
-choice, domain, resource and user labels, placement node rules, the cluster identity reference, committed cluster
+requires the current `ClusterState` encoding, 47. The state carries the endpoint pause response
+choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
 The current shape also requires inferencer state bindings and their initial expressions, each inferencer's working memory,

@@ -4066,3 +4066,185 @@ button {
 .sidebar-create-menu button:focus-visible {
   background: color-mix(in srgb, var(--cyan) 11%, transparent);
 }
+
+/* Entity labels: the labels a create form adds, and the editor of an existing entity's labels. */
+
+.labels-menu-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--orange) 42%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--orange) 9%, var(--surface));
+  color: var(--orange);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.create-labels {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.create-labels legend {
+  padding: 0 4px;
+  color: var(--text-c);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.create-labels-note {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 10px;
+}
+
+.create-label-row,
+.labels-new-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  align-items: end;
+}
+
+.create-label-value,
+.labels-entry-value,
+.labels-new-value {
+  resize: vertical;
+}
+
+.labels-target {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.labels-target select {
+  height: 35px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.labels-owner,
+.labels-view,
+.labels-reading,
+.labels-empty {
+  margin: 0;
+  color: var(--text-c);
+  font-size: 11px;
+}
+
+.labels-owner {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.labels-read-error,
+.labels-entry-conflict,
+.labels-new-conflict {
+  margin: 0;
+  color: #fb7185;
+  font-size: 11px;
+}
+
+.labels-list {
+  display: grid;
+  gap: 6px;
+}
+
+.labels-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.labels-entry[data-state="changed"] {
+  border-color: color-mix(in srgb, var(--cyan) 55%, var(--border));
+}
+
+.labels-entry[data-state="removed"] .labels-entry-key {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.labels-entry[data-state="conflict"] {
+  border-color: color-mix(in srgb, #fb7185 60%, var(--border));
+}
+
+.labels-entry-key {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.labels-entry-value {
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.labels-entry-conflict {
+  grid-column: 1 / -1;
+}
+
+.labels-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.nav-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.nav-entry .nav-item {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.nav-labels {
+  grid-column: 2;
+  grid-row: 1;
+  margin-right: 10px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-c);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.nav-labels:hover,
+.nav-labels:focus-visible {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--cyan) 45%, var(--border));
+}

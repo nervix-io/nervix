@@ -83,7 +83,8 @@ pub(crate) mod task_shutdown;
 pub use fault_injection::{
     BackupCutBoundary, DomainResumeBoundary, FaultInjection, ForeignExecutionObservation,
     ModelPublicationRefusalKind, RelayCapabilityRefusal, RestoreStagingKind,
-    StandaloneTransactionBoundary, WasmCheckpointWindow, WasmStateResetRequestError,
+    StandaloneTransactionBoundary, WasmCheckpointWindow, WasmStatePageOverflow,
+    WasmStateResetRequestError,
 };
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;
@@ -128,6 +129,15 @@ impl ConfiguredFaultInjection {
         _destination: &nervix_models::ClusterNodeName,
     ) -> Option<std::time::Duration> {
         None
+    }
+
+    pub(crate) const fn overflows_wasm_state_page_reply(
+        &self,
+        _domain: &nervix_models::DomainName,
+        _processor: &nervix_models::ModelName,
+        _page: &nervix_models::WasmUnitStatePage,
+    ) -> bool {
+        false
     }
 }
 
