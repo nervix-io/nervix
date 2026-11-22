@@ -17,6 +17,7 @@ use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::{
     Span, Symbol,
     def_id::{DefId, LOCAL_CRATE, LocalDefId},
+    hygiene::{ExpnKind, MacroKind},
 };
 
 use crate::contracts::{Flow, contract_attribute, meta_items};
@@ -245,6 +246,22 @@ fn governed_constant(cx: &LateContext<'_>, definition: DefId) -> bool {
     governed(cx, value)
 }
 
+/// Whether a derive or attribute macro generated the item at `span`. Such a macro can name its
+/// item with an authored token, as bytecheck names each enum variant's discriminant constant after
+/// the variant, and the item is still the macro's, not its author's. An authored `macro_rules!`
+/// body is not generated in this sense: it stays checked in every expansion.
+fn macro_generated(span: Span) -> bool {
+    let mut context = span.ctxt();
+    while !context.is_root() {
+        let expansion = context.outer_expn_data();
+        if let ExpnKind::Macro(MacroKind::Derive | MacroKind::Attr, _) = expansion.kind {
+            return true;
+        }
+        context = expansion.call_site.ctxt();
+    }
+    false
+}
+
 /// The authored name of a definition. A derive or attribute macro can give a generated item an
 /// authored span whose tokens are not that item's name; such an item is generated, not written.
 fn authored_name(cx: &LateContext<'_>, definition: DefId) -> Option<Span> {
@@ -313,7 +330,8 @@ impl TunableRules {
             return;
         }
         let definition = definition.to_def_id();
-        if !governed_constant(cx, definition)
+        if macro_generated(cx.tcx.def_span(definition))
+            || !governed_constant(cx, definition)
             || fixed(cx.tcx, definition)
             || declares_setting_default(cx, definition)
             || self.definition_default(cx, definition)

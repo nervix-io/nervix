@@ -49,3 +49,13 @@ macro_rules! cadence {
 pub fn expanded() -> Wait {
     cadence!()
 }
+
+macro_rules! named_limit {
+    ($name:ident) => {
+        pub const $name: usize = 64;
+    };
+}
+
+// An authored `macro_rules!` body stays checked in every expansion, also when its caller names
+// the constant it declares.
+named_limit!(SPLICED);

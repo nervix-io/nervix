@@ -204,6 +204,7 @@ fn hidden_tunables_are_diagnosed_once_at_the_constant_name_or_the_policy_call() 
             "EVERY",
             "LIMIT",
             "MINIMUM",
+            "SPLICED",
             "TIMEOUT",
             "WORKERS",
             "add_permits",

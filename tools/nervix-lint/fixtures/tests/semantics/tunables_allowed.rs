@@ -76,3 +76,13 @@ pub fn current() -> watch::Receiver<u32> {
     let (_sender, receiver) = watch::channel(0);
     receiver
 }
+
+/// A derive's generated items are the derive's, even when it names one with an authored token:
+/// bytecheck declares each variant's discriminant as a `u8` constant named after the variant.
+#[derive(nervix_lint_fixtures::bytecheck::CheckBytes)]
+#[bytecheck(crate = nervix_lint_fixtures::bytecheck)]
+#[repr(u8)]
+pub enum Tag {
+    Alpha,
+    Beta,
+}

@@ -257,9 +257,11 @@ These are outside the rule:
 - The `arbitrary`, `benchmark`, `model-harness` and `test-environment` crates, whose numbers shape
   test inputs and measurements.
 - Code the matrix does not compile: test targets and `cfg(test)` modules, and any configuration
-  that `configurations.toml` does not declare, as for every compiler rule. Derive and attribute
-  macros' generated items, whose tokens are not the item's name, are generated rather than
-  authored. Authored `macro_rules!` bodies are checked in every expansion.
+  that `configurations.toml` does not declare, as for every compiler rule.
+- Items a derive or attribute macro generates, which are the macro's rather than authored, also
+  when the macro names one with an authored token, as bytecheck names each enum variant's
+  discriminant constant after the variant. Authored `macro_rules!` bodies are checked in every
+  expansion, also where the caller supplies the name of the constant one declares.
 
 A reason is reviewed justification, not a proof that the literal is fixed; review owns it, as it
 owns every source contract. An exception for one retained value is a narrow, reason-bearing
@@ -269,8 +271,9 @@ operations, or unfulfilled fails like any other Nervix expectation.
 
 The `tunables_*` compiler fixtures qualify the rule: governed and ungoverned types, the policy
 calls and their same-named lookalikes, the exact sorted span of every site, the resolution-only
-cases a spelling cannot follow, the setting, group and fixed-contract exclusions, and the
-fulfilled, unfulfilled, widened and invalid expectations. [Node Settings](node-settings.md) owns the
+cases a spelling cannot follow, the setting, group and fixed-contract exclusions, a derive's
+discriminant constants beside a `macro_rules!` constant its caller names, and the fulfilled,
+unfulfilled, widened and invalid expectations. [Node Settings](node-settings.md) owns the
 classification a site takes: a setting of its class, a derivation, or a fixed value.
 
 ## Host Memory Admission

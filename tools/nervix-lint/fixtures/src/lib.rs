@@ -24,6 +24,8 @@ use std::{
     ops::Deref,
 };
 
+/// The derive whose generated discriminant constants the hidden-tunable rule leaves to it.
+pub use bytecheck;
 pub use error_stack;
 pub use futures_core;
 use indexmap::IndexMap;
