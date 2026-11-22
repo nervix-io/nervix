@@ -5,6 +5,8 @@
 //! - **Depends on.** Class-typed parameters and duration arithmetic.
 //! - **Must not know.** Runtime tasks, timers, transport or acknowledgement storage.
 
+use meticulous::OptionExt as _;
+
 use super::*;
 use crate::ClusterParameters;
 
@@ -147,6 +149,23 @@ impl RemoteAckTiming {
     }
     pub fn instantiation_poll(self) -> Duration {
         (self.remote_relay_instantiation_wait / 200).max(Duration::from_nanos(1))
+    }
+
+    /// How long a sender leaves a relay channel without a batch before its next batch opens a
+    /// fresh incarnation: the delivery's total admission budget. It is shorter than the channel's
+    /// retention, so a receiver still holds the watermark of a channel its sender resumes.
+    pub fn relay_channel_idle_rotation(self) -> Duration {
+        self.remote_relay_total_timeout
+    }
+
+    /// How long a receiver keeps what reconciling this delivery's channel needs after it last made
+    /// progress or was last recorded or consulted: twice the total admission budget, so it outlasts
+    /// the delivery and its channel's idle rotation.
+    pub fn relay_channel_retention(self) -> Duration {
+        self.remote_relay_total_timeout.checked_mul(2).assured(
+            "a validated total admission budget is at most u32::MAX seconds, so twice it fits a \
+             Duration",
+        )
     }
 
     pub fn from_parameters(values: &ClusterParameterValues) -> Self {

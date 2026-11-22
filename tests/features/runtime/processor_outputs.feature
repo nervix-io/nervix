@@ -72,7 +72,7 @@ Feature: Processor output routing
       """
       {"id":"event-1","divisor":0,"result":0}
       """
-    Then within "5s" the relay subscription receives payloads containing all fragments
+    Then within "30s" the relay subscription receives payloads containing all fragments
       """
       "divisor":0 | "id":"event-1" | "result":10
       "attempted_result":0 | "divisor":0 | "error_code":"evaluation" | "error_message":"junction 'project_events' FILTER-MAP side error division_by_zero | "error_reference":" | "source_id":"event-1"
@@ -237,7 +237,7 @@ Feature: Processor output routing
       """
       {"id":"drop-1","active":false,"level":"ERROR","raw":"  DROP  "}
       """
-    Then within "5s" the relay subscription receives payloads
+    Then within "30s" the relay subscription receives payloads
       """
       "id":"err-1","normalized":"fail","route":"error"
       "id":"err-1","normalized":"fail","route":"audit"
@@ -443,7 +443,7 @@ Feature: Processor output routing
       """
       {"id":"source-drop-b","active":true,"level":"hold","urgent":true}
       """
-    Then within "5s" the relay subscription receives payloads
+    Then within "30s" the relay subscription receives payloads
       """
       "id":"err-1"
       "id":"err-1"

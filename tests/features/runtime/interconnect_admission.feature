@@ -504,6 +504,161 @@ Feature: Interconnect relay admission
     When 600 http payloads with distinct tenants and sequence 2 are acknowledged by node "node-3" with host "turnover-{{test_id}}.example.com" path "/events"
     Then within "120s" the observed broker receives every generated payload exactly once
 
+  # Every node-3 branch opens its own relay channel to the relay's owner on node-1, and node-1 keeps
+  # a watermark for each of those channels: the channel's position and the outcome of its last
+  # batch. Node-1 starts with an incoming queue capacity of 4, so it takes few deliveries at once,
+  # while the warm-up tenant and 48 more keep their channels in use together: every tenant posts
+  # once, and then every tenant posts again on the same branch and channel. A watermark is part of
+  # the memory a channel's deliveries need, so node-1 keeps one for every channel in use and the
+  # second round arrives as completely as the first. A one-node cluster delivers nothing to another
+  # node, so this behavior has no one-node example.
+  @relay_channel_watermarks
+  Scenario: A node keeps delivering to another node's relay owner on many more branch channels than the owner takes deliveries at once
+    Given node-1 starts with interconnect-incoming-queue-capacity = 4
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these Plexus statements are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN watermarks_{{test_id}};
+      """
+    Given the active domain is "watermarks_{{test_id}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA event (
+        tenant STRING,
+        seq I64
+      );
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 10m;
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
+        tenant string,
+        seq integer
+      );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE ZEROMQ CLIENT emitter CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE VHOST edge watermarks-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
+        FROM ingress MODE ACK MAX 1 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ZEROMQ PUSH EMITTER output FROM events
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When these Plexus statements are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    When endpoint request "warmup" is posted on node "node-3" host "watermarks-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"warmup","seq":0}
+      """
+    Then endpoint request "warmup" answers HTTP 200 with "completed" cause "none"
+    And within "15s" the observed broker receives payloads
+      """
+      {"tenant":"warmup","seq":0}
+      """
+    When 48 http payloads with distinct tenants and sequence 1 are acknowledged by node "node-3" with host "watermarks-{{test_id}}.example.com" path "/events"
+    Then within "120s" the observed broker receives every generated payload exactly once
+    When 48 http payloads with distinct tenants and sequence 2 are acknowledged by node "node-3" with host "watermarks-{{test_id}}.example.com" path "/events"
+    Then within "120s" the observed broker receives every generated payload exactly once
+
+  # Node-1 keeps the watermark of every node-3 branch channel that delivered to it for twice the
+  # longest total relay timeout that channel's deliveries captured. The warm-up tenant's channel
+  # delivers under the default five-minute timeout, so node-1 keeps its watermark for ten minutes.
+  # Lowering REMOTE_RELAY_TOTAL_TIMEOUT to 20s governs the deliveries that start afterwards: node-1
+  # keeps the watermarks of the channels the ten tenants then open for 40s, and forgets them while
+  # the warm-up channel's watermark remains. A one-node cluster delivers nothing to another node,
+  # so this behavior has no one-node example.
+  @relay_channel_watermarks @long_running
+  Scenario: A receiver forgets the channels of deliveries that started under a lowered total relay timeout within twice that timeout
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
+    When these Plexus statements are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN retention_{{test_id}};
+      """
+    Given the active domain is "retention_{{test_id}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA event (
+        tenant STRING,
+        seq I64
+      );
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 10m;
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
+        tenant string,
+        seq integer
+      );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
+      CREATE ZEROMQ CLIENT emitter CONFIG {
+        'addr' = '{{zeromq_emit_addr}}',
+        'bind' = 'false'
+      };
+      CREATE VHOST edge retention-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR ingestor
+        FROM ingress MODE ACK MAX 1 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
+        TO events INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE ZEROMQ PUSH EMITTER output FROM events
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When these Plexus statements are executed through the client on node "node-1"
+      """
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    When endpoint request "warmup" is posted on node "node-3" host "retention-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"warmup","seq":0}
+      """
+    Then endpoint request "warmup" answers HTTP 200 with "completed" cause "none"
+    And within "15s" the observed broker receives payloads
+      """
+      {"tenant":"warmup","seq":0}
+      """
+    And node "node-1" observability metric "nervix_interconnect_relay_channel_watermarks" with labels eventually equals 1
+      """
+      nervix_interconnect_relay_channel_watermarks
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER CLUSTER SET REMOTE_RELAY_TOTAL_TIMEOUT = 20s;
+      """
+    Then node "node-3" eventually reports status containing "node=node-3 remote-relay-total-timeout running=20s"
+    When 10 http payloads with distinct tenants and sequence 1 are acknowledged by node "node-3" with host "retention-{{test_id}}.example.com" path "/events"
+    Then within "120s" the observed broker receives every generated payload exactly once
+    And within "240s" node "node-1" observability metric "nervix_interconnect_relay_channel_watermarks" with labels eventually equals 1
+      """
+      nervix_interconnect_relay_channel_watermarks
+      """
+
   # Each node a record waits on reports it alive to its source: the receiving node does once it has
   # admitted a delivery, and the delivering node does until then. The source's ACK TIMEOUT is far
   # shorter than the hold, so a delivery that stopped reporting its record would make the source

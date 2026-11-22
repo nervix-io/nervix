@@ -49,7 +49,7 @@ Core create statements:
 
 The `<json_type>` in a declared JSON wire schema is one of `string`, `number`, `integer`, `boolean`,
 or `array`. `DATETIME` uses `string` with an `RFC3339` codec rule, and `BYTES` uses `string` with a
-`BASE64` codec rule.
+`BASE64` codec rule. No wire type binds a `DURATION`, so a codec whose schema holds one is refused.
 
 The `<avro_type>` in a declared AVRO wire schema is one of `boolean`, `int`, `long`, `float`,
 `double`, `string`, `bytes`, or `array<avro_type>`, which names its item type at every depth. A JSON
@@ -323,8 +323,10 @@ The same form follows `SET QUIESCE` in an alteration. See
 
 Every inferencer runs its model once for each admitted batch, before any route, one message at a
 time or, when its tensors declare `BATCH`, one call per group of equally shaped messages; see
-[Execution](processors.md#execution). `CREATE INFERENCER` may declare model-carried `STATE` between
-`INPUTS` and `OUTPUT SCHEMA`. The [Inferencer](processors.md#state-tensors) section defines its
+[Execution](processors.md#execution). Every `CREATE INFERENCER` states its working memory right
+after `FILE`, `WORKING MEMORY RELEASED` or `WORKING MEMORY RETAINED`, with no default; see
+[Working memory](processors.md#working-memory). `CREATE INFERENCER` may declare model-carried
+`STATE` between `INPUTS` and `OUTPUT SCHEMA`. The [Inferencer](processors.md#state-tensors) section defines its
 port pairs, fixed tensor shapes, initial expressions, per-branch invocation order and reset
 behavior.
 
@@ -618,7 +620,7 @@ Expression types match the full Nervix internal schema type set:
 
 - integers: `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - floating point: `F32`, `F64`
-- other scalars: `BOOL`, `STRING`, `BYTES`, `DATETIME`
+- other scalars: `BOOL`, `STRING`, `BYTES`, `DATETIME`, `DURATION`
 - lists: `ARRAY<...>` and `VEC<...>`
 
 `AS` and `TRY_CAST(expr AS TYPE)` convert between scalar types and accept long and short spellings,
@@ -1001,8 +1003,8 @@ cluster created: 2026-11-08T12:00:00Z
 timing drift: node-2
 node: node-1 (leader)
   incarnation: 3
-  capabilities: committed node-1#3 cpu-count=8 memory-bytes=17179869184 relay-batch-bytes=33554432 relay-decoded-bytes=33554432 bulk-chunk-bytes=65536 bulk-window-bytes=1048576 vm-inline-row-limit=1024 vm-regex-search-cache-bytes=2097152 vm-dynamic-pattern-cache-capacity=64 vm-pattern-sets-per-batch=64 wasm-stack-bytes=524288 wasm-memory-reservation-bytes=4294967296 wasm-parallel-compilation=false connector-retry-multiplier=2 connector-retry-jitter-percent=0 kafka-domain-assignment-retry=100ms syslog-intake-queue-capacity=64 syslog-read-chunk-bytes=8192 listeners=ListenerBounds { max_connections: 1024, buffer_bytes: 417792, header_bytes: 16384, header_timeout: 30s, tls_timeout: 10s, idle_timeout: 60s, accept_retry_delay: 100ms, http_keepalive: true, http_body_bytes: 33554432, http_body_copy_bytes: 65536, http_body_timeout: 30s, http_refusal_drain_timeout: 5s, websocket_message_bytes: 67108864, websocket_frame_bytes: 16777216, grpc_header_bytes: 16384, grpc_concurrency: 128, grpc_request_timeout: 120s, grpc_max_streams: 256, grpc_keepalive_interval: 30s, grpc_keepalive_timeout: 20s, tcp_keepalive_time: 60s, tcp_keepalive_interval: 10s, tcp_keepalive_retries: 3 } <control-plane, session and client-link capabilities as name=value pairs>
-  interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 watermarks=8192 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0
+  capabilities: committed node-1#3 cpu-count=8 memory-bytes=17179869184 database-volume-bytes=536870912000 relay-batch-bytes=33554432 relay-decoded-bytes=33554432 bulk-chunk-bytes=65536 bulk-window-bytes=1048576 vm-inline-row-limit=1024 vm-regex-search-cache-bytes=2097152 vm-dynamic-pattern-cache-capacity=64 vm-pattern-sets-per-batch=64 wasm-stack-bytes=524288 wasm-memory-reservation-bytes=4294967296 wasm-parallel-compilation=false connector-retry-multiplier=2 connector-retry-jitter-percent=0 kafka-domain-assignment-retry=100ms syslog-intake-queue-capacity=64 syslog-read-chunk-bytes=8192 listeners=ListenerBounds { max_connections: 1024, buffer_bytes: 417792, header_bytes: 16384, header_timeout: 30s, tls_timeout: 10s, idle_timeout: 60s, accept_retry_delay: 100ms, http_keepalive: true, http_body_bytes: 33554432, http_body_copy_bytes: 65536, http_body_timeout: 30s, http_refusal_drain_timeout: 5s, websocket_message_bytes: 67108864, websocket_frame_bytes: 16777216, grpc_header_bytes: 16384, grpc_concurrency: 128, grpc_request_timeout: 120s, grpc_max_streams: 256, grpc_keepalive_interval: 30s, grpc_keepalive_timeout: 20s, tcp_keepalive_time: 60s, tcp_keepalive_interval: 10s, tcp_keepalive_retries: 3 } <control-plane, session and client-link capabilities as name=value pairs>
+  interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0
   dns: cache-entries=4096 positive-max-ttl=1h negative-max-ttl=30s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=64
   database: cache-bytes=33554432 journal-bytes=536870912 workers=4
   raft database: cache-bytes=33554432 journal-bytes=536870912 workers=4

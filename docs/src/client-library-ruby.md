@@ -179,8 +179,8 @@ and a schema describing the rows and branch key.
 ```
 
 `next_event` reads the next event of any subscription the session holds. Branch on its `kind`.
-For `ROWS`, columns contain Ruby integers, floats, booleans, strings, binary strings and signed
-nanoseconds for timestamps. Null is `nil`; a withheld sensitive value is `NX::REDACTED`. `states`
+For `ROWS`, columns contain Ruby integers, floats, booleans, strings, binary strings, and signed
+nanoseconds for timestamps and durations. Null is `nil`; a withheld sensitive value is `NX::REDACTED`. `states`
 distinguishes them. The branch key has its own `Part`.
 
 ```ruby

@@ -33,7 +33,7 @@ Feature: List shape functions
         TO retained SET tenant = FIRST(input.tenant), sequence = FIRST(input.sequence)
           ON MESSAGE ERROR LOG;
       CREATE INFERENCER shaped_input FROM retained
-        USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx' WORKING MEMORY RELEASED
         INPUTS { 'matrix' <tensor_type>[2, 3] = list_reshape(input.sequence, 2, 3) }
         OUTPUT SCHEMA { 'transformed' <tensor_type>[2, 3] }
         BRANCHED BY by_tenant TO scored SET transformed = transformed

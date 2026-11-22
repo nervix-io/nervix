@@ -163,7 +163,7 @@ fn lifecycle_values(
 }
 
 fn scalar(arbitrary: &mut Arbitrary<'_>) -> StateValue {
-    match arbitrary.entropy().byte() % 13 {
+    match arbitrary.entropy().byte() % 14 {
         0 => StateValue::U8(arbitrary.entropy().byte()),
         1 => StateValue::I8(i8::from_le_bytes([arbitrary.entropy().byte()])),
         2 => StateValue::U16(
@@ -202,7 +202,7 @@ fn scalar(arbitrary: &mut Arbitrary<'_>) -> StateValue {
                 bits & 0xff7f_ffff
             })
         }
-        _ => {
+        12 => {
             let bits = arbitrary.entropy().any_u64();
             StateValue::F64Bits(if f64::from_bits(bits).is_finite() {
                 bits
@@ -210,6 +210,7 @@ fn scalar(arbitrary: &mut Arbitrary<'_>) -> StateValue {
                 bits & 0xffef_ffff_ffff_ffff
             })
         }
+        _ => StateValue::Duration(arbitrary.entropy().any_i64()),
     }
 }
 

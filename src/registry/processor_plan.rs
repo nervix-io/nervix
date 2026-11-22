@@ -119,6 +119,9 @@ pub(crate) enum BranchedProcessorOperationSpec {
         resource: ResourceName,
         resource_version: u64,
         file: String,
+        /// What every branch's session keeps of a model run's working memory, as the inferencer
+        /// states it.
+        working_memory: nervix_models::InferencerWorkingMemory,
         inputs: Vec<InferencerTensorMapping>,
         state: Option<InferencerStatePlan>,
         output_schema: Vec<InferencerTensorDeclaration>,
@@ -583,6 +586,7 @@ pub(crate) fn branched_node_specs_from_models(
                         resource: inferencer.resource.clone(),
                         resource_version: inferencer.resource_version,
                         file: inferencer.file.clone(),
+                        working_memory: inferencer.working_memory,
                         inputs: inferencer.inputs.clone(),
                         state: InferencerStatePlan::from_validated(&inferencer.state),
                         output_schema: inferencer.output_schema.clone(),

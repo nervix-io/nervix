@@ -131,6 +131,11 @@ Typed Row subscription frames carry a `BYTES` field as raw octets in a `BytesCel
 the value as borrowed bytes, including empty and non-UTF-8 sequences. JSON subscription views
 render that field as padded standard base64 text. Sensitive byte fields are redacted in both views.
 
+A `DURATION` field travels in a `DurationCell` as a signed count of nanoseconds, which every client
+reads as a 64-bit integer. Text views, the CLI and the web console write it in its literal form,
+such as `"1h 30m"`. A subscription binds a `DURATION` branch key field with a duration literal
+written as in an expression, `WHERE (window = 5m)`; a quoted string or a number does not bind one.
+
 Persistent administrative commands carry a stable execution reference. The cluster binds that
 reference to the authenticated owner, selected domain, and semantic command, continues admitted
 work after the session disconnects, and retains one terminal result for the command retry

@@ -11,7 +11,7 @@ use nervix_models::{
     ClientProducerAdmission, ClientProducerDescription, ClientProducerGrant, ClientProducerLimits,
     ClientProducerPolicy, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
     DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
-    DomainClockState, DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate,
+    DomainClockState, DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate, DurationValue,
     ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
     ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
     ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
@@ -927,6 +927,7 @@ pub(crate) fn row_schema() -> RowSchema {
                     element: Box::new(array(ParseAsType::U8, 2)),
                 },
             ),
+            field("wait", ParseAsType::Duration),
         ],
         branch: Some(
             RowBranch::new(
@@ -988,6 +989,7 @@ fn write_minimum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<W
         Ok(())
     })?;
     cells.push_list(|_| Ok(()))?;
+    cells.push_duration(DurationValue::MIN)?;
     Ok(())
 }
 
@@ -1027,6 +1029,7 @@ fn write_maximum_row(cells: &mut CellWriter<'_, 'static>) -> Result<(), Report<W
             Ok(())
         })
     })?;
+    cells.push_duration(DurationValue::MAX)?;
     Ok(())
 }
 

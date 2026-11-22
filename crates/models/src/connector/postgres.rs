@@ -227,8 +227,10 @@ pub const POSTGRES_MESSAGE_SIZE_MAXIMUM: PayloadSizeLimit =
 /// the statement then casts to the column's declared type.
 ///
 /// Every current Plexus scalar and recursively typed `ARRAY` or `VEC` has one; nullability is
-/// separate, and a null binds as a NULL element. The registry refuses at `CREATE` a mapping
-/// whose inferred type is outside [`crate::MappedValueType::Column`].
+/// separate, and a null binds as a NULL element. A `DURATION`, alone or as a list element, is
+/// declared rejected, because no PostgreSQL column holds it losslessly. The registry refuses at
+/// `CREATE` a mapping whose inferred type is outside [`crate::MappedValueType::Column`] or one it
+/// declares rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum PostgresValueEncoding {
     #[strum(serialize = "text true or false")]
@@ -246,6 +248,8 @@ pub enum PostgresValueEncoding {
     ByteaHex,
     #[strum(serialize = "RFC 3339 timestamp text at UTC offset +00:00")]
     TimestampText,
+    #[strum(serialize = "rejected: no PostgreSQL column holds a DURATION losslessly")]
+    Rejected,
     #[strum(
         serialize = "recursive JSON text; bytes use padded base64 and non-finite floats use null"
     )]
@@ -253,7 +257,8 @@ pub enum PostgresValueEncoding {
 }
 
 impl PostgresValueEncoding {
-    /// The binding of a declared type; every current Plexus type has one.
+    /// The binding of a declared type; every current Plexus type has one, a declared rejection
+    /// for a `DURATION` and a list of them at any depth.
     pub fn for_type(ty: &ParseAsType) -> Self {
         match ty {
             ParseAsType::Bool => Self::BooleanText,
@@ -269,7 +274,14 @@ impl PostgresValueEncoding {
             ParseAsType::String => Self::Text,
             ParseAsType::Bytes => Self::ByteaHex,
             ParseAsType::Datetime => Self::TimestampText,
-            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Self::JsonText,
+            ParseAsType::Duration => Self::Rejected,
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
+                if ty.holds_duration() {
+                    Self::Rejected
+                } else {
+                    Self::JsonText
+                }
+            }
         }
     }
 }

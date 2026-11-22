@@ -105,7 +105,13 @@ multi-mebibyte report atomic without making storage memory proportional to retai
 ### Storage Working Sets
 
 Every storage operation charged to the Commands class reserves the same 16 MiB working set: an
-appended batch, an applied range, a log chunk, a full log read, a truncation and a purge. The
+appended batch, an applied range, a log chunk, a full log read, the log state read, the retention
+boundary scan, a truncation and a purge. Every read of stored log entries is Commands work: the
+database hands each stored entry out whole, even to a read that needs only its key, its length or
+its log id, so the read holds the whole entry, up to one 1 MiB command. Decoding an entry adds its
+validated copy and the values it decodes into. The log state read decodes the
+last entry to learn the log id it ends at, and the retention boundary scan reads each covered entry
+it passes to add up their lengths, so neither fits the management working set below. The
 default 24 MiB Commands budget holds one such working set with 8 MiB beside it. The store admits
 these operations through turns of its own, as many as the budget holds working sets while keeping
 room beside them, which is one with the default budgets. An operation takes a turn first and asks
@@ -122,6 +128,13 @@ the next one is admitted without waiting in the class.
 The turns hold no more working sets than the budget already held at once, and they do not change
 the order in which the ordered storage worker runs admitted operations.
 
+The log state read and the retention boundary scan take their turn like any other Commands
+operation, and neither holds a turn, a working set or a log chunk when it asks for one. Raft reads
+the log state only while it starts, between its other storage operations and never while it holds
+a log chunk, and the retention task measures the covered log between its passes. Neither therefore
+waits behind a turn its own caller holds. A Raft append that arrives while one of them holds the turn waits for it, as it waits for an
+applied range, a purge or a log chunk.
+
 Bulk storage uses independent turns under the same rule. Each operation reserves twice the
 snapshot section limit plus one bulk chunk: 16 MiB plus 64 KiB with the default limits. The
 32 MiB Bulk class admits one such working set, leaving room for snapshot transport and local
@@ -129,11 +142,14 @@ staging. A second storage operation waits for the Bulk turn without taking the r
 permits. Commands and Bulk turns do not serialize each other. Both return their memory before
 passing the turn; cancellation while waiting retains neither a turn nor a memory queue place.
 
-Vote and committed-marker reads and writes, the log state read, the retention boundary scan and the
-store's idle barrier are management work. Each reserves four management events from the
-Management class, 256 KiB with the fixed 64 KiB event, and takes no turn. A node refuses to start
-with a Management budget smaller than this working set, so no reservation of these operations can
-exceed its whole class ([Node Settings](node-settings.md#execution-capabilities)).
+Vote and committed-marker reads and writes, the check for stored Raft state and the store's idle
+barrier are management work. Each reserves four management events from the Management class,
+256 KiB with the fixed 64 KiB event, and takes no turn. The check for stored Raft state reads the
+log only on a node without a vote. Raft saves a vote before it appends any entry other than the
+single-node membership entry that initialization appends first, so the log of a node without a
+vote holds at most that one small entry. A node refuses to start with a Management budget smaller
+than this working set, so no reservation of these operations can exceed its whole class
+([Node Settings](node-settings.md#execution-capabilities)).
 
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
@@ -437,8 +453,8 @@ it stops rather than reading through a truncation performed under another leader
 includes entries still in Fjall's memtable and excludes purged entries, tombstones, stale segment
 space, snapshots, and other keyspaces. Append adds encoded entry bytes; purge and truncation subtract
 the removed entries in the same ordered storage operation. Opening the database rebuilds the counter
-by scanning the current log, so a process failure between a durable mutation and its in-memory
-counter update does not skew the recovered value.
+by scanning the current log within the Commands working set the opening holds, so a process failure
+between a durable mutation and its in-memory counter update does not skew the recovered value.
 
 A node starts one snapshot after either of these thresholds is crossed:
 
@@ -448,7 +464,9 @@ A node starts one snapshot after either of these thresholds is crossed:
 Only a completed snapshot permits covered log entries to be purged. By default the node retains the
 newest 1,000 covered entries or 64 MiB of covered suffix, whichever bound is reached first. Entries
 newer than the snapshot remain regardless of those settings. A failed or unfinished build therefore
-does not remove the log needed to recover.
+does not remove the log needed to recover. On every retention pass, the retention boundary scan
+walks back from the snapshot index until it reaches either bound, reading each covered entry it
+passes, as Commands work ([Storage Working Sets](#storage-working-sets)).
 
 When `retained_bytes` is already above the 1 GiB admission cap, a new control-plane mutation waits
 up to 30 seconds for snapshotting and purge to reclaim space. If it remains above the cap, the write
@@ -536,16 +554,17 @@ status, keeping the start version, start mode, clock, schedule and incremental s
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
 group and payload unfold policy. Their durations use validated, lossless seconds and nanoseconds
 projections so ordinary Raft records keep their inline footprint bound. Admitted node capabilities
-carry runtime capacities, local shutdown budgets and listener bounds.
+carry runtime capacities, local shutdown budgets, listener bounds and the size of the volume that
+holds the node's database directory.
 This namespace also includes durable cluster identity rotation and activation release operations.
 It identifies the current Model and stored transaction statement layouts, including
 `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE`,
@@ -558,7 +577,8 @@ count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the session and quali
 MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC emitter
 writes beside its publishing mode, its retained-publication flag and MQTT 5 property mappings, a
 `REDIS PUBSUB` ingestor's `CHANNEL` or `PATTERN` subscription, the ordered `RATE LIMIT` clauses
-an ingestor body writes, an emitter's `INSTANCES` declaration,
+an ingestor body writes, an emitter's `INSTANCES` declaration, the `DURATION` type with the
+duration literals expressions, subscription bindings and branch selections hold,
 whether a polled HTTP request's header holds a literal or names a client secret, the endpoint kind
 whose signaling data exists only on its WebSockets variant, the branch partition count every
 resolved branch declaration of the committed schedule carries, and the partition epoch the
@@ -572,13 +592,14 @@ construction where it stands, including the typed `payload` expression scope and
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 committed node records under record-family tag `C`, each with the revision that committed it, its
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
-host, runtime, shutdown, operational and listener capacities, its detected properties and its tags. The boxed node record
+host, runtime, shutdown, operational (trace export included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 46. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 50. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
-The current shape also requires inferencer state bindings and their initial expressions,
+The current shape also requires inferencer state bindings and their initial expressions, each inferencer's working memory,
+the `DURATION` type with the duration literals its Models hold,
 typed ingestor and emitter instancing, exact-unit placement-group members
 and entity-versus-unit transaction gate targets. Placement Models carry corridor or domain-wide
 coverage; domain records carry pace, and relocation statements retain exact partition or instance

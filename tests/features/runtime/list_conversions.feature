@@ -250,7 +250,7 @@ Feature: List conversions
         ON GENERAL ERROR LOG;
       CREATE INFERENCER transform_grid FROM integer_grids
         USING RESOURCE inference VERSION 1
-        FILE 'models/matrix_identity.onnx'
+        FILE 'models/matrix_identity.onnx' WORKING MEMORY RELEASED
         INPUTS { "matrix" <tensor_type>[2, 3] = input.rows AS <f32_grid> }
         OUTPUT SCHEMA { "transformed" <tensor_type>[2, 3] }
         UNBRANCHED

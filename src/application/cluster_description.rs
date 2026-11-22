@@ -501,8 +501,8 @@ fn interconnect_line(record: &NodeCapabilityRecord) -> String {
     let capacity = record.capabilities.interconnect;
     format!(
         "  interconnect: max-peers={} request-quota={} health-probes={} max-connections={} \
-         handshakes={} queue={} completion={} watermarks={} stream-window={} connection-window={} \
-         setup={} request={} progress={} backoff={} max-backoff={} jitter-permille={}",
+         handshakes={} queue={} completion={} stream-window={} connection-window={} setup={} \
+         request={} progress={} backoff={} max-backoff={} jitter-permille={}",
         capacity.max_peers,
         capacity.request_quota,
         capacity.health_probes,
@@ -510,7 +510,6 @@ fn interconnect_line(record: &NodeCapabilityRecord) -> String {
         capacity.concurrent_handshakes,
         capacity.incoming_queue_capacity,
         capacity.completion_quota,
-        capacity.relay_watermarks,
         capacity.stream_window_bytes,
         capacity.connection_window_bytes,
         timing_text(capacity.connection_setup_timeout),
@@ -540,9 +539,11 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} {} {} {} {} \
-         drain-timeout={} shutdown-timeout={} task-grace-period={} listeners={:?} {operational}",
+        "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} \
+         database-volume-bytes={} {} {} {} {} drain-timeout={} shutdown-timeout={} \
+         task-grace-period={} listeners={:?} {operational}",
         record.identity,
+        capabilities.database_volume_bytes,
         bounds_line(capabilities.receive),
         engine_capability_line(capabilities.engines),
         connector_host_capability_line(capabilities.connector_host),
@@ -787,6 +788,7 @@ mod tests {
                         .bounds(),
                     cpu_count: None,
                     memory_bytes: NonZeroU64::new(8 << 30),
+                    database_volume_bytes: 1 << 40,
                     receive,
                 },
             }
@@ -811,7 +813,9 @@ mod tests {
         };
         let lines = description.lines();
         assert!(lines.contains(&capability_line(&first)));
-        assert!(capability_line(&first).contains("cpu-count=unknown memory-bytes=8589934592"));
+        assert!(capability_line(&first).contains(
+            "cpu-count=unknown memory-bytes=8589934592 database-volume-bytes=1099511627776 "
+        ));
         assert!(lines.contains(&"node: node-4 (departed)".to_string()));
         assert!(lines.contains(&capability_line(&departed)));
         let effective = first
@@ -889,6 +893,7 @@ mod tests {
                     .bounds(),
                 cpu_count: NonZeroU64::new(4),
                 memory_bytes: NonZeroU64::new(8 << 30),
+                database_volume_bytes: 1 << 40,
                 receive: nervix_interconnect::PeerReceiveSettings::default().bounds(),
             },
         };

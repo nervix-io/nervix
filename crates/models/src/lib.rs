@@ -39,6 +39,7 @@ pub use data_plane_settings::*;
 mod domain_clock;
 mod domain_stop;
 mod duration_text;
+mod duration_value;
 mod emitter;
 mod emitter_batch;
 mod emitter_envelope;
@@ -283,7 +284,11 @@ pub use domain_stop::{
     LICENSING_STOP_ENFORCE_AFTER, NodeStopReport, OperatorStopRequest, StopCut, StopCutKind,
     StopCutReason, StopEnding, StopRequest, StopRequestAdmission, StopRequestId, StopWithdrawal,
 };
-pub use duration_text::{DurationTextError, parse_duration_text};
+pub use duration_text::{DurationTextError, DurationTextUnit, parse_duration_text};
+pub use duration_value::{
+    DurationLiteralError, DurationLiteralPart, DurationLiteralUnit, DurationLiteralWord,
+    DurationValue,
+};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
     EmitterBatchContractError, EmitterBody, EmitterPublishing, EmitterPublishingModeKind,
@@ -375,9 +380,9 @@ pub use processor::{
     FlushPolicy, InferencerExecutionMode, InferencerStateBinding, InferencerStateInitial,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    InferencerTensorSchemaError, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
-    WindowStateLimit,
+    InferencerTensorSchemaError, InferencerWorkingMemory, InputCollectPolicy, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutput, ProcessorOutputs, WasmProcessorLimits,
+    WasmRejectedStatePolicy, WindowBound, WindowStateLimit,
 };
 pub use quiesce::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
@@ -502,10 +507,6 @@ pub use licensing::{
     LicensingConnectivityPublication, LicensingStopReason, LicensingTransportFailure,
     RefreshLicense, ReleaseLicense, RotateLicenseClusterKey,
 };
-
-/// The existing host's single relay admission budget. The runtime settings owner adopts this
-/// policy input; transport retention consumes it rather than choosing another timeout.
-pub const HOST_RELAY_ADMISSION_BOUND: std::time::Duration = RemoteRelayTotalTimeout::DEFAULT;
 
 /// The host's existing keep-alive cadence for unresolved relay acknowledgement admission.
 pub const HOST_RELAY_ALIVE_INTERVAL: std::time::Duration = RemoteAckAliveInterval::DEFAULT;

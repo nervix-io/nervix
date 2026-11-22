@@ -26,7 +26,9 @@
 //! exits, because the memory is still allocated until then. A class whose wait queue is full refuses
 //! a job that answers a request, whose sender can present it again, and holds a job the node already
 //! accepted and keeps until a place frees, ahead of any job asking afterwards: the caller states
-//! which with a [`QueueAdmission`].
+//! which with a [`QueueAdmission`]. An owner that must keep serving others while its own work
+//! waits submits through a handle that tells it, with [`CapacityWaits`], while that work waits for
+//! a place or for memory room.
 //!
 //! A class bounds admission, not threads. Jobs run on the process-wide Tokio blocking pool, and a
 //! class's worker count is the number of its jobs that may be on that pool at once — taken before
@@ -58,6 +60,7 @@
 
 mod accepted_work;
 mod cancellation;
+mod capacity_waits;
 mod executor;
 mod limits;
 mod memory;
@@ -84,6 +87,7 @@ pub use settings::{
 pub use crate::{
     accepted_work::{AcceptedCpu, AcceptedWork},
     cancellation::{Cancellation, Cancelled},
+    capacity_waits::CapacityWaits,
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
     limits::{
         ConnectorStorageWorkers, CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets,
