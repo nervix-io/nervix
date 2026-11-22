@@ -1,17 +1,18 @@
 //! `nx_session`: a session a host holds, and the commands it prepares, `nx_execution`.
 //!
 //! - **Owns.** Opening a session through the C ABI with the text a host passes, preparing and
-//!   executing commands, waiting for subscription and domain clock events, reading the clock of a
-//!   domain the session follows, and freeing the session and its executions.
-//! - **Depends on.** The shared session, the cancellation, outcome, event, clock event and domain
-//!   clock handles, and the C ABI boundary.
+//!   executing commands, waiting for subscription and domain clock events and for server notices,
+//!   reading the clock of a domain the session follows, and freeing the session and its
+//!   executions.
+//! - **Depends on.** The shared session, the cancellation, outcome, event, clock event, notice and
+//!   domain clock handles, and the C ABI boundary.
 //! - **Must not know.** The runtime a session runs on; the shared session owns it.
 
 use std::ptr;
 
 use nervix_client_core::DomainName;
 use nervix_client_host::{
-    Cancel, ClockEvent, DomainClock, Event, Execution, Failure, Outcome, Session,
+    Cancel, ClockEvent, DomainClock, Event, Execution, Failure, Notice, Outcome, Session,
 };
 
 use crate::{abi, connect_options::ConnectionOptions};
@@ -238,6 +239,36 @@ unsafe fn write_next_clock_event(
     let event = session.next_clock_event(cancel)?;
     // SAFETY: `out` is non-null, and the caller guarantees it is writable.
     unsafe { abi::write(out, abi::into_shared(event)) };
+    Ok(())
+}
+
+/// # Safety
+///
+/// `session` is live, a non-null `cancel` is a live token, and a non-null `out` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_session_next_notice(
+    session: *const Session,
+    cancel: *const Cancel,
+    out: *mut *mut Notice,
+) -> *mut Failure {
+    // SAFETY: the header's contract is this function's.
+    abi::outcome(unsafe { write_next_notice(session, cancel, out) })
+}
+
+/// # Safety
+///
+/// As [`nx_session_next_notice`].
+unsafe fn write_next_notice(
+    session: *const Session,
+    cancel: *const Cancel,
+    out: *mut *mut Notice,
+) -> Result<(), Failure> {
+    abi::require_out(out, "out")?;
+    // SAFETY: the caller guarantees a live session and a live token or null.
+    let (session, cancel) = unsafe { (abi::handle(session, "session")?, cancel.as_ref()) };
+    let notice = session.next_notice(cancel)?;
+    // SAFETY: `out` is non-null, and the caller guarantees it is writable.
+    unsafe { abi::write(out, abi::into_shared(notice)) };
     Ok(())
 }
 

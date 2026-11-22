@@ -58,7 +58,7 @@ Feature: Processor output routing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO route_errors
             SET error_reference = error.reference,
-                error_code = error.code,
+                error_code = error.class,
                 error_message = error.message,
                 source_id = input.id,
                 divisor = input.divisor,

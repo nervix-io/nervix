@@ -50,8 +50,8 @@ async fn next_error(events: &mut broadcast::Receiver<RuntimeEvent>) -> String {
         .await
         .expect("the host reports its event at once")
         .expect("the bus keeps every event of this check");
-    let RuntimeEvent::Error(message) = event;
-    message
+    let RuntimeEvent::Error(event) = event;
+    event.message
 }
 
 #[nervix_primitives::test]

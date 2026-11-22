@@ -118,7 +118,7 @@ Feature: Runtime node error policies
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR SEND TO error_stream
         SET error_reference = error.reference,
-            error_code = error.code,
+            error_code = error.class,
             error_message = error.message,
             operation = error.operation,
             source_user_id = input.user_id

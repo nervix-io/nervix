@@ -23,7 +23,7 @@ use tempfile::tempdir;
 
 use crate::{JoinTerms, PeerResolver, TransportIdentity};
 
-pub(super) fn localhost_identity(cluster_id: &str, node_id: ClusterNodeName) -> TransportIdentity {
+pub(crate) fn localhost_identity(cluster_id: &str, node_id: ClusterNodeName) -> TransportIdentity {
     TransportIdentity {
         cluster_id: cluster_id.to_string(),
         node_id,
@@ -34,7 +34,7 @@ pub(super) fn localhost_identity(cluster_id: &str, node_id: ClusterNodeName) -> 
 
 /// The join terms every test transport brings unless a test gives it others, so their handshakes
 /// accept each other.
-pub(super) fn test_join_terms() -> JoinTerms {
+pub(crate) fn test_join_terms() -> JoinTerms {
     JoinTerms {
         durability: RaftLogDurability::FsyncEveryAppend,
         timings: PrerequisiteTimings {
@@ -47,7 +47,7 @@ pub(super) fn test_join_terms() -> JoinTerms {
 
 /// A resolver that answers `localhost` from its own hosts file and asks no name server.
 #[cfg(not(feature = "turmoil"))]
-pub(super) async fn test_resolver() -> PeerResolver {
+pub(crate) async fn test_resolver() -> PeerResolver {
     let files = tempdir().assured("a temporary directory can be created");
     let resolver_configuration = files.path().join("resolv.conf");
     let hosts_file = files.path().join("hosts");
@@ -70,6 +70,6 @@ pub(super) async fn test_resolver() -> PeerResolver {
 
 /// The simulated host's resolver.
 #[cfg(feature = "turmoil")]
-pub(super) async fn test_resolver() -> PeerResolver {
+pub(crate) async fn test_resolver() -> PeerResolver {
     PeerResolver::simulated()
 }

@@ -322,7 +322,9 @@ pub use ingestor_input::{IngestorInput, TransportIngestorInput};
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use listener_bounds::ListenerBounds;
 pub use message_error::{
-    FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
+    ExternalErrorCode, FailedErrorClass, FieldPath, MessageErrorClass, MessageErrorClassGroup,
+    MessageErrorOperation, RaisedMessageError, RejectedErrorClass, ReportedError,
+    StructuredMessageError, message_error_scope,
 };
 pub use model_index::ModelIndex;
 pub use name_spelling::NamePosition;
@@ -359,8 +361,8 @@ pub use partition_topology::{
     PartitionTopology, PartitionTopologySnapshot, SourcePartitionObservation,
 };
 pub use placement::{
-    AlterPlacement, AlterPlacementError, AlterPlacementOperation, CreatePlacement, PlacementPolicy,
-    PlacementScope,
+    AlterPlacement, AlterPlacementError, AlterPlacementOperation, CreatePlacement, NodePolicy,
+    NodeRuleScope, PlacementPolicy, PlacementRule, PlacementScope,
 };
 pub use prerequisites::{
     ConsensusFloors, DescribedPrerequisite, FingerprintTextError, NodePrerequisites, Prerequisite,

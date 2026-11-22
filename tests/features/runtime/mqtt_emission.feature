@@ -134,7 +134,7 @@ Feature: MQTT emission
         <batch>
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
-          SET error_code = error.code,
+          SET error_code = error.class,
               source_user_id = input.user_id
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;

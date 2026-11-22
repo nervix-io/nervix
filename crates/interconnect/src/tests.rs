@@ -83,7 +83,7 @@ pub(crate) fn test_tls() -> TlsConfigBundle {
     .expect("test TLS should load")
 }
 
-struct TestCertificateAuthority {
+pub(crate) struct TestCertificateAuthority {
     _directory: TempDir,
     certificate: rcgen::Certificate,
     key: KeyPair,
@@ -91,7 +91,7 @@ struct TestCertificateAuthority {
 }
 
 impl TestCertificateAuthority {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let directory = tempdir().expect("test certificate directory should be created");
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -114,7 +114,7 @@ impl TestCertificateAuthority {
         }
     }
 
-    fn issue(&self, cluster: &str, node: &ClusterNodeName) -> TlsConfigBundle {
+    pub(crate) fn issue(&self, cluster: &str, node: &ClusterNodeName) -> TlsConfigBundle {
         let mut params = CertificateParams::new(vec!["localhost".to_string()])
             .expect("test endpoint SAN should be valid");
         params.subject_alt_names.push(SanType::URI(
@@ -357,7 +357,7 @@ pub(crate) struct ConnectedTransports {
     /// The responder's budgets, so a test can observe what its handlers are holding charged.
     executor_b: Executor,
     _incoming_a: mpsc::Receiver<ReceivedEnvelope>,
-    incoming_b: mpsc::Receiver<ReceivedEnvelope>,
+    pub(crate) incoming_b: mpsc::Receiver<ReceivedEnvelope>,
 }
 
 impl ConnectedTransports {
@@ -721,7 +721,7 @@ mod coordination;
 mod relay_grant_capacity;
 mod relay_owners;
 mod relay_send_progress;
-mod resolver;
+pub(crate) mod resolver;
 mod stream_opening;
 
 use resolver::{localhost_identity, test_resolver};

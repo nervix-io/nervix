@@ -363,6 +363,203 @@ fn restoration_events_keep_the_complete_message_and_physical_wait() {
     .assured("both restoration event kinds retain their cause, message and wait through JNI");
 }
 
+/// The stable code and Java name of the enum constant a notice accessor returned.
+#[derive(Debug, PartialEq, Eq)]
+struct JavaConstant {
+    code: i32,
+    name: String,
+}
+
+impl JavaConstant {
+    fn expected(code: i32, name: &str) -> Self {
+        Self {
+            code,
+            name: name.to_string(),
+        }
+    }
+
+    fn read(env: &mut Env<'_>, constant: &jni::objects::JObject<'_>) -> jni::errors::Result<Self> {
+        let code = env
+            .call_method(constant, jni_str!("code"), jni_sig!("()I"), &[])?
+            .i()?;
+        let name = env
+            .call_method(
+                constant,
+                jni_str!("name"),
+                jni_sig!("()Ljava/lang/String;"),
+                &[],
+            )?
+            .l()?;
+        let name = jni::objects::JString::cast_local(env, name)?;
+        Ok(Self {
+            code,
+            name: name.try_to_string(env)?,
+        })
+    }
+}
+
+/// A Java notice as its public accessors read it.
+#[derive(Debug, PartialEq, Eq)]
+struct JavaNotice {
+    level: JavaConstant,
+    kind: JavaConstant,
+    message: Option<String>,
+    error_class: Option<String>,
+    error_node_kind: Option<String>,
+    error_node: Option<String>,
+}
+
+impl JavaNotice {
+    /// Projects `notice` through the binding and reads the Java value back.
+    fn project(
+        env: &mut Env<'_>,
+        notice: &nervix_client_host::Notice,
+    ) -> jni::errors::Result<Self> {
+        let object = match crate::notices::notice(env, notice) {
+            Ok(object) => object,
+            Err(error) => return Err(error.raise(env)),
+        };
+        let level = env
+            .call_method(
+                &object,
+                jni_str!("level"),
+                jni_sig!("()Lio/nervix/client/Nervix$NoticeLevel;"),
+                &[],
+            )?
+            .l()?;
+        let kind = env
+            .call_method(
+                &object,
+                jni_str!("kind"),
+                jni_sig!("()Lio/nervix/client/Nervix$NoticeKind;"),
+                &[],
+            )?
+            .l()?;
+        Ok(Self {
+            level: JavaConstant::read(env, &level)?,
+            kind: JavaConstant::read(env, &kind)?,
+            message: Self::text(env, &object, jni_str!("message"))?,
+            error_class: Self::text(env, &object, jni_str!("errorClass"))?,
+            error_node_kind: Self::text(env, &object, jni_str!("errorNodeKind"))?,
+            error_node: Self::text(env, &object, jni_str!("errorNode"))?,
+        })
+    }
+
+    fn text(
+        env: &mut Env<'_>,
+        notice: &jni::objects::JObject<'_>,
+        accessor: &jni::strings::JNIStr,
+    ) -> jni::errors::Result<Option<String>> {
+        let value = env
+            .call_method(notice, accessor, jni_sig!("()Ljava/lang/String;"), &[])?
+            .l()?;
+        if value.is_null() {
+            return Ok(None);
+        }
+        let value = jni::objects::JString::cast_local(env, value)?;
+        Ok(Some(value.try_to_string(env)?))
+    }
+}
+
+fn host_notice(
+    level: nervix_client_core::wire::NoticeLevel,
+    kind: nervix_client_core::wire::NoticeKind,
+    message: &str,
+    error: Option<nervix_models::ReportedError>,
+) -> nervix_client_host::Notice {
+    let notice = nervix_client_core::wire::ServerNotice {
+        level,
+        kind,
+        message: message.to_string(),
+        error,
+    };
+    nervix_client_host::Notice::new(nervix_client_core::ServerEvent::from(notice))
+}
+
+#[test]
+fn a_runtime_notice_crosses_jni_with_the_class_and_producing_node_of_its_error() {
+    use nervix_client_core::wire::{NoticeKind, NoticeLevel};
+    use nervix_models::{MessageErrorClass, ModelKind, ModelName, NodeRef, ReportedError};
+    let text = "window_processor 'hourly' message error in domain 'shop': the row is too wide";
+    let error = ReportedError {
+        class: MessageErrorClass::LIMIT,
+        node: NodeRef::new(
+            ModelKind::WindowProcessor,
+            ModelName::parse("hourly").assured("the node name is valid"),
+        ),
+    };
+    let notice = host_notice(NoticeLevel::Error, NoticeKind::Runtime, text, Some(error));
+    vm().attach_current_thread(|env| -> jni::errors::Result<()> {
+        assert_eq!(
+            JavaNotice::project(env, &notice)?,
+            JavaNotice {
+                level: JavaConstant::expected(3, "ERROR"),
+                kind: JavaConstant::expected(4, "RUNTIME"),
+                message: Some(text.to_string()),
+                error_class: Some("limit".to_string()),
+                error_node_kind: Some("window_processor".to_string()),
+                error_node: Some("hourly".to_string()),
+            }
+        );
+        Ok(())
+    })
+    .assured("a runtime notice keeps its level, kind, text and reported error through JNI");
+}
+
+#[test]
+fn every_notice_level_and_kind_crosses_jni_as_its_java_constant_without_an_error() {
+    use nervix_client_core::wire::{NoticeKind, NoticeLevel};
+    let levels = [
+        (NoticeLevel::Info, JavaConstant::expected(1, "INFO")),
+        (NoticeLevel::Warning, JavaConstant::expected(2, "WARNING")),
+        (NoticeLevel::Error, JavaConstant::expected(3, "ERROR")),
+    ];
+    let kinds = [
+        (
+            NoticeKind::Membership,
+            JavaConstant::expected(1, "MEMBERSHIP"),
+        ),
+        (
+            NoticeKind::Leadership,
+            JavaConstant::expected(2, "LEADERSHIP"),
+        ),
+        (
+            NoticeKind::ClusterParameters,
+            JavaConstant::expected(3, "CLUSTER_PARAMETERS"),
+        ),
+        (NoticeKind::Runtime, JavaConstant::expected(4, "RUNTIME")),
+        (
+            NoticeKind::ControlPlane,
+            JavaConstant::expected(5, "CONTROL_PLANE"),
+        ),
+        (
+            NoticeKind::Licensing,
+            JavaConstant::expected(6, "LICENSING"),
+        ),
+    ];
+    let text = "node-2 joined the cluster: Δ incarnation";
+    vm().attach_current_thread(|env| -> jni::errors::Result<()> {
+        for (level, java_level) in &levels {
+            for (kind, java_kind) in &kinds {
+                let notice = host_notice(*level, *kind, text, None);
+                assert_eq!(
+                    JavaNotice::project(env, &notice)?,
+                    JavaNotice {
+                        level: JavaConstant::expected(java_level.code, &java_level.name),
+                        kind: JavaConstant::expected(java_kind.code, &java_kind.name),
+                        message: Some(text.to_string()),
+                        error_class: None,
+                        error_node_kind: None,
+                        error_node: None,
+                    }
+                );
+            }
+        }
+        Ok(())
+    })
+    .assured("every level and kind reads as its Java constant, with no error on the notice");
+}
+
 #[test]
 fn an_ended_subscription_reads_its_end_reason_and_another_kind_refuses_it() {
     use nervix_client_core::{

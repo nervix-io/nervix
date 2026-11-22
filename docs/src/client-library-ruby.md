@@ -3,10 +3,11 @@
 *Plexus, the Nervix graph definition language.*
 
 The `nervix-client` gem runs the [Rust Client Library](client-library.md) inside your CRuby
-process. A Ruby program connects to Nervix, executes Plexus, reads subscriptions and domain
-clocks, publishes through client ingestors, and consumes client emitters with the Rust client's
-recovery. The [Client Implementation Manual](client-implementation-manual.md#using-the-ruby-gem)
-states the host rules R-1 to R-5.
+process. A Ruby program connects to Nervix, executes Plexus, reads subscriptions, domain clocks
+and server notices, publishes through client ingestors, and consumes client emitters with the
+Rust client's recovery. The
+[Client Implementation Manual](client-implementation-manual.md#using-the-ruby-gem) states the host
+rules R-1 to R-5.
 
 Every example is included from `tests/client_conformance/ruby/suite`, a minitest suite over the
 gem. Cluster examples use the real graph in `tests/features/runtime/client_suites.feature`.
@@ -254,6 +255,51 @@ already returned remain usable after the session closes.
 {{#include ../../tests/client_conformance/ruby/suite/cluster/clocks_test.rb:clock_generations}}
 ```
 
+## Read Server Notices
+
+A server notice tells you about something in the cluster that belongs to no request of yours: a
+node joining or leaving, a leadership change, a new cluster-parameter revision, a failure the
+runtime or the control plane recovered from, or a licensing observation. `next_notice` blocks until
+the session's next notice arrives, with the GVL released, and takes the `cancel:` keyword and its
+token's deadline like every other wait.
+
+Each `Notice` has a `level` (`NoticeLevel::INFO`, `WARNING` or `ERROR`), a `kind` and its display
+text in `message`. The kind says what the notice reports: `NoticeKind::MEMBERSHIP`, `LEADERSHIP`,
+`CLUSTER_PARAMETERS`, `RUNTIME`, `CONTROL_PLANE` or `LICENSING`. Route a notice by its `kind`,
+never by its text, which is written for people and can change.
+
+A `RUNTIME` notice that reports an error of a graph node, which a route's `ON MESSAGE ERROR LOG`, a
+node's `ON GENERAL ERROR LOG` or a WASM processor's `ON GLOBAL ERROR LOG` handled on any node,
+names that error in typed fields: `error_class` is the lower-case name of one of the ten [error
+classes](errors-and-diagnostics.md#the-message-error-record), such as `'evaluation'` or
+`'refused'`, `error_node_kind` the kind of the node that produced it, such as `'junction'` or
+`'emitter'`, and `error_node` that node's name. They are the values an error route reads as
+`error.class`, `error.node_kind` and `error.node`. All three are `nil` on every other notice,
+including a runtime notice about a connector failure. Here a junction's route divides by zero: its
+`ON MESSAGE ERROR LOG` fails the row, so the submission settles as `PROCESSING_FAILED` with
+`REJECTED`, and every session of every node receives the error as a notice:
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/notices_test.rb:runtime_notice}}
+```
+
+Notices belong to the session that delivered them. A notice reaches the sessions open when it is
+published, and a session's unread notices are dropped when it ends; the stream continues with the
+notices of the next session the gem opens. Reading notices never opens a session itself, so after
+a lost session `next_notice` waits for the next session the gem opens, for example for your next
+command. Each notice is returned to one call, so let one thread read them. Read them promptly: the
+gem holds at most 128 unread notices and 1 MiB of them. A notice that does not fit
+drops the ones held, the next `next_notice` raises `EventOverflowError`, and the call after it
+returns the notices that arrived after that gap. `ClosedError` means the session ended and the gem
+knows no server to open another on. A notice acknowledges no command: what became of a command is
+the `Outcome` that `execute` returns.
+
+A reader thread ends when its token is triggered:
+
+```ruby
+{{#include ../../tests/client_conformance/ruby/suite/cluster/notices_test.rb:notice_thread}}
+```
+
 ## Publish Through A Client Ingestor
 
 Build a `Fields` draft with complete types, list levels, fixed lengths, nullability and sensitivity.
@@ -378,7 +424,7 @@ message. `execution_reference` identifies a command interrupted before its outco
 | `TransportError`, `UncertainOutcomeError` | Recover an admitted command with its original execution. |
 | `RejectedError` | Inspect the typed refusal when opening an endpoint. |
 | `CancelledError`, `DeadlineError` | The host wait ended; admitted work may still complete. |
-| `EventOverflowError` | Read events promptly; the session's event buffer overflowed. |
+| `EventOverflowError` | Read events and notices promptly; the session's buffer for them overflowed. |
 | `ProtocolError` | The server answered outside the session protocol. |
 | `TypeMismatchError` | Check the object's variant or column type before reading. |
 | `ClosedError` | Open a new session or endpoint. |
@@ -456,9 +502,10 @@ The gem exchanges canonical Arrow IPC streams as binary strings or `IO::Buffer`.
 ## What The Library Does Not Expose
 
 The gem exposes sessions, Plexus execution and resource uploads, completion, subscriptions, clocks,
-client endpoints, typed state inspection, backup and restore. It does not expose typed transaction inspection, structured
-choice lookups, the leadership view, typed server notices, custom upload identities or upload
-progress, or offline `DESCRIBE BACKUP`. Transaction statements still run through `execute`.
+server notices, client endpoints, typed state inspection, backup and restore. It does not expose
+typed transaction inspection, the typed domain list, structured choice lookups, the leadership
+view, custom upload identities or upload progress, or offline `DESCRIBE BACKUP`. Transaction
+statements still run through `execute`.
 
 There is no asynchronous Ruby API: a waiting call blocks its calling thread with the GVL released.
 Use Ruby threads to run calls concurrently. The gem targets CRuby's native extension ABI.

@@ -112,6 +112,17 @@ activation. Soft policies influence future decisions and preserve existing assig
 rule on a hop, ordinary scheduler heuristics apply. See [Placement Policies](placement.md) for
 unit classes, path-gated coverage, rank resolution and inspection.
 
+A node rule selects the cluster nodes a runtime node may run on, or should prefer, by their
+committed records:
+
+```plexus
+CREATE PLACEMENT eu_only DOMAIN WIDE REQUIRE NODES WHERE tag('zone') = 'eu';
+```
+
+A running domain refuses a change that would put an executing unit on a node its rules do not
+admit. A stopped domain accepts the rule, and its next `START` places every unit on an admitted
+node first. See [Node Rules](placement.md#node-rules).
+
 ## Start And Stop
 
 Domain lifecycle commands apply to the active domain:
@@ -190,6 +201,12 @@ Successful lifecycle commands are completion boundaries. `START` returns after e
 node has prepared the same revision and every configured listener and assigned ingestor has completed
 startup. `STOP` returns once its stop ended and every node that ran the domain reported what its
 teardown cut, including when it is the last running domain.
+
+Before it commits, `START` places every unit of a stopped domain on a node its node rules admit,
+moving a unit stored elsewhere with its state. While some unit has no admitted node, `START` waits
+before committing anything, holding the domain's mutation lease so its other changes are refused,
+and continues once a node that satisfies the rules is live; see [When Node Rules Take
+Effect](placement.md#when-node-rules-take-effect).
 
 `START` commits the domain running before the cluster activates it, and nothing undoes that
 commit. Once every live node has prepared the revision, each node starts the domain's ingestors

@@ -1251,7 +1251,7 @@ where
                 item: request,
                 charge: _request_charge,
             } = codec
-                .decode::<M>(payload)
+                .decode_opening::<M>(payload)
                 .await
                 .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
             let items = DuplexItems::new(frames, codec.clone(), M::NAME);
@@ -1259,8 +1259,9 @@ where
                 .await
                 .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))?;
             let frames = responses.into_stream().then(move |response| {
-                // The encoding starts here, so the answer keeps no borrow of the codec.
-                let encoding = response.map(|response| codec.encode(response));
+                // The encoding starts here, so the answer keeps no borrow of the codec. It waits for
+                // a place on a full class, and the stream's reset ends that wait.
+                let encoding = response.map(|response| codec.encode_answer(response));
                 async move {
                     let encoded = encoding?.await.map_err(StreamHandlerError::with_cause)?;
                     Ok(ChargedBytes::from_owned(encoded.bytes, encoded.charge))
@@ -1779,7 +1780,7 @@ impl Transport {
             bytes: payload,
             charge: _payload_charge,
         } = DuplexCodec::of::<M>(self.inner.executor())
-            .encode(message)
+            .encode_opening(message)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let opening = RequestEnvelope {

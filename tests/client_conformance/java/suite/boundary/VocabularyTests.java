@@ -139,6 +139,23 @@ public final class VocabularyTests {
         }, Nervix.ClockEndReason.values());
         assertEquals(1, Nervix.ClockEndReason.DOMAIN_REMOVED.code());
 
+        assertArrayEquals(new Nervix.NoticeLevel[] {
+            Nervix.NoticeLevel.INFO, Nervix.NoticeLevel.WARNING, Nervix.NoticeLevel.ERROR
+        }, Nervix.NoticeLevel.values());
+        assertEquals(1, Nervix.NoticeLevel.INFO.code());
+        assertEquals(2, Nervix.NoticeLevel.WARNING.code());
+        assertEquals(3, Nervix.NoticeLevel.ERROR.code());
+
+        assertArrayEquals(new Nervix.NoticeKind[] {
+            Nervix.NoticeKind.MEMBERSHIP, Nervix.NoticeKind.LEADERSHIP, Nervix.NoticeKind.CLUSTER_PARAMETERS, Nervix.NoticeKind.RUNTIME, Nervix.NoticeKind.CONTROL_PLANE, Nervix.NoticeKind.LICENSING
+        }, Nervix.NoticeKind.values());
+        assertEquals(1, Nervix.NoticeKind.MEMBERSHIP.code());
+        assertEquals(2, Nervix.NoticeKind.LEADERSHIP.code());
+        assertEquals(3, Nervix.NoticeKind.CLUSTER_PARAMETERS.code());
+        assertEquals(4, Nervix.NoticeKind.RUNTIME.code());
+        assertEquals(5, Nervix.NoticeKind.CONTROL_PLANE.code());
+        assertEquals(6, Nervix.NoticeKind.LICENSING.code());
+
         assertArrayEquals(new Nervix.EndpointState[] {
             Nervix.EndpointState.ACTIVE, Nervix.EndpointState.INTERRUPTED, Nervix.EndpointState.RESTORING, Nervix.EndpointState.REOPEN_REQUIRED, Nervix.EndpointState.CLOSED
         }, Nervix.EndpointState.values());

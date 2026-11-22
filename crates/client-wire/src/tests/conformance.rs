@@ -178,11 +178,28 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
             level,
             kind,
             message: message.to_string(),
+            error: None,
         }
         .encode(&limits())
         .assured("a corpus notice fits the default limits")
         .into_bytes()
     };
+    let runtime_error_notice = ServerNotice {
+        level: NoticeLevel::Error,
+        kind: NoticeKind::Runtime,
+        message: "ingestor 'orders_in' general error in domain 'tenant': decode rejection"
+            .to_string(),
+        error: Some(nervix_models::ReportedError {
+            class: nervix_models::MessageErrorClass::CODEC,
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Ingestor,
+                nervix_models::ModelName::parse("orders_in").assured("a valid node name"),
+            ),
+        }),
+    }
+    .encode(&limits())
+    .assured("a corpus notice fits the default limits")
+    .into_bytes();
     let download = |frame: crate::EncodedFrame<BackupDownloadFrame>| frame.into_bytes();
     let backup = CommandOutcome {
         backup: Some(Box::new(backup_archive())),
@@ -905,14 +922,7 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                 "node 'node-2' restarted (incarnation 1793845627114630656)",
             ),
         ),
-        (
-            "server_notice_runtime.nxsm",
-            notice(
-                NoticeLevel::Warning,
-                NoticeKind::Runtime,
-                "ingestor 'orders_in' general error in domain 'tenant': decode rejection",
-            ),
-        ),
+        ("server_notice_runtime.nxsm", runtime_error_notice),
         (
             "server_producer_admission.nxsm",
             producer_admission.into_bytes(),
@@ -1715,8 +1725,17 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
             ));
         }
         ServerMessage::Event(ServerEvent::Notice(notice)) => {
+            let error = match &notice.error {
+                Some(error) => format!(
+                    " error={} node={}/{}",
+                    schema_name(wire::ErrorClass::from(error.class).variant_name()),
+                    schema_name(wire::ModelKind::from(error.node.kind).variant_name()),
+                    error.node.identifier.as_str()
+                ),
+                None => String::new(),
+            };
             lines.push(format!(
-                "EVENT NOTICE level={} kind={} message={}",
+                "EVENT NOTICE level={} kind={} message={}{error}",
                 schema_name(wire::NoticeLevel::from(notice.level).variant_name()),
                 schema_name(wire::NoticeKind::from(notice.kind).variant_name()),
                 text(&notice.message)

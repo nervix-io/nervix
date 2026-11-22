@@ -108,6 +108,22 @@ families for ingestors and emitters. Nervix also records these raw metric famili
   physical node
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
+- `nervix_message_errors_total{domain,node_kind,node,class,operation}`: total message errors each
+  graph node handled, every record a route's `ON MESSAGE ERROR` received and every payload an
+  ingestor's codec or `RATE LIMIT` rejected, whatever the policy did with them. A failure that ends a
+  node's work without a record, which only `ON GENERAL ERROR` reports, is not counted here. `class` is one of the ten
+  [error classes](./errors-and-diagnostics.md#the-message-error-record) (`codec`, `validation`,
+  `evaluation`, `limit`, `refused`, `unavailable`, `throttled`, `timeout`, `interrupted`,
+  `internal`), `node_kind` the node's kind in its snake_case name (`junction`, `emitter`,
+  `window_processor`) and `operation` the work that failed (`set`, `publish`, `decode`,
+  `rate_limit`, `window`, ...). A node exposes a series only for a class and operation it has
+  produced, and its series leave with the node. Decode and `RATE LIMIT` rejections count here under
+  their ingestor beside their own families. No label carries a branch key or a payload value.
+- `nervix_placement_violating_units{domain}`: units of the domain whose live owner a winning
+  `REQUIRE NODES` rule does not admit, as the physical node observes the committed schedule and
+  node records
+- `nervix_placement_waiting_units{domain}`: units of the domain with no live owner their node rules
+  admit and no cluster node that satisfies them, as the physical node observes them
 - `nervix_branch_partition_epoch`: the partition epoch a parametrizer executes in on the physical
   node
 - `nervix_branch_partition_keys_pending`: concrete keys the physical node's units still have to move
@@ -442,6 +458,11 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
   queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
+- `nervix_execution_jobs_waiting`: jobs that found their class's wait queue full and wait for a
+  place in it instead of being refused. They carry work no caller is waiting to be answered about,
+  such as a payload an ingestor handed over, a relay or subscription delivery, a checkpoint or the
+  compilation for a committed change. A nonzero value is backpressure, never loss: the jobs take
+  the places the class frees, in the order they asked
 - `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
   `nervix_execution_job_rejections_total`: jobs admitted, jobs that left a worker, and jobs refused
   because the class already held its whole wait queue
@@ -624,7 +645,7 @@ The two wait counters preserve fractional seconds.
 
 | Family | Additional label | Meaning |
 | --- | --- | --- |
-| `nervix_emitter_records_rejected_total` | `code="external\|oversize\|invalid\|encode"` | Source rows definitively refused by the destination, size limit, value validation or encoding. The host carries the class from the typed refusal site and counts a row when its message-error handling settles its rejection. A container encoding failure remains `encode` even when its public message error is `validation/encode`. |
+| `nervix_emitter_records_rejected_total` | `code="refused\|limit\|validation\|evaluation\|codec"` | Source rows definitively rejected: refused by the destination, over a size limit, holding a value that does not fit, whose expression could not be computed, or that the codec could not encode. `code` is the [error class](./errors-and-diagnostics.md#the-message-error-record) of the row's own message error, the one its error route reads as `error.class`, so the two never disagree; a rejection is always of the `REJECTED` group. The host counts a row when its message-error handling settles its rejection. |
 | `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure. Delivered, rejected and connector-staged rows are excluded. |
 | `nervix_emitter_records_retried_total` | None | Unresolved source rows selected by each retried host publish attempt, after transport acquisition. Drain retries count too. A staged commit alone presents no source rows again. |
 | `nervix_emitter_retries_total` | `cause="publish\|connect\|commit"` | Successfully scheduled retry deferrals and inline retry waits, classified by the typed operation being retried. |
@@ -1030,6 +1051,13 @@ phase log records and by `terminating: true` in its status, as described in
 [Shutdown And Recovery](shutdown.md#observability). A timed-out precommit handoff leaves the schedule and metric authority unchanged.
 Unexpected owner loss continues through failover immediately and starts fresh relay metrics on the
 new owner.
+
+The two placement gauges carry only the domain: no label names a node, a rule or a tag value. A
+domain's series is removed once it has no node rule or no longer exists. Every node exports them
+from its own view of the committed schedule and records, and the leader logs at `info` each unit
+that starts or stops breaking a node rule, naming the domain, the unit and the rules. The schedule
+line of such a unit in `SHOW CLUSTER STATUS` adds `violates=<rule>` or `waiting_for=<rule>`, the
+rules comma-separated; see [Node Rules](placement.md#observing-node-rules).
 
 The schedule line `SHOW CLUSTER STATUS` prints for a unit whose owner changed names that
 transition as `transition_from=<former owner> state_recovery=<outcome>`. A planned handoff reports

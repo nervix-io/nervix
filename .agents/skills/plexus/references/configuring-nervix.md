@@ -337,7 +337,7 @@ current connection, retry and deadline limits.
   whole repeated batch, never a regrouped one. Keep `MAX SIZE` below the destination's own message
   limit with room for the key, headers or attributes written around the payload: a batch message
   over a limit the client can see (Kafka, MQTT, NATS, Pulsar, SQS) is rejected with every member as
-  an `external` `publish` error, as is one a Pulsar topic's own `maxMessageSize` refuses under
+  a `refused` `publish` error, as is one a Pulsar topic's own `maxMessageSize` refuses under
   `MODE ACK` and one whose body RabbitMQ refuses as larger than its `max_message_size`. RabbitMQ
   counts the body alone, so a `MAX SIZE` no larger than `max_message_size` suffices there; see
   [Emitters](../../../../docs/src/emitters.md#broker-and-message-emitters).
@@ -838,7 +838,8 @@ Choose checks relevant to the configured graph:
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and
   `DESCRIBE DOMAIN` inspect placement coverage, hop classes, effective policies, exact unit
-  groups, their hosts, and domain-wide scope.
+  groups, their hosts, and domain-wide scope, and for a node rule its selector, the nodes it
+  matches, each unit's satisfaction and the units violating or waiting for it.
 - `DESCRIBE RELOCATION ...;` shows the unit, quiesce level, gated relays, corridor coverage, and
   unsatisfied preferences a `RELOCATE` with the same clauses would execute, without moving
   anything.

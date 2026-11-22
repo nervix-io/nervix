@@ -342,10 +342,10 @@ defines the wider ingestor/emitter combinations.
 ## Errors and inspection
 
 A request-field error rejects its record at the first failed field. Failed expressions retain
-code `evaluation`; invalid method, target, or header values use `validation`. Method and path
+class `evaluation`; invalid method, target, or header values use `validation`. Method and path
 errors use operation `publish` and name `method` or `path`. A header failure uses `invoke` and its
-zero-based invocation index. Codec failures use `encode`. A terminal response uses code
-`external`, operation `publish`, and its numeric status. These errors identify the emitter and
+zero-based invocation index. Codec failures use `encode`. A terminal response uses class
+`refused`, operation `publish`, and its numeric status. These errors identify the emitter and
 safe operation or field without quoting the evaluated method, target, header value, credential,
 request body, or response body. A message-error route sees the original eligible input and the
 captured materialized-state snapshot; a codec route also offers the attempted record as an
