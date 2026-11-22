@@ -584,12 +584,7 @@ impl RelayProcessorTemplate {
                             branch: BranchScope::from(key),
                         })?;
                     let state = replicated_state
-                        .restore_state(
-                            plan,
-                            input_schema,
-                            incarnation,
-                            opening.executor(runtime),
-                        )
+                        .restore_state(plan, input_schema, incarnation, opening.executor(runtime))
                         .await
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),

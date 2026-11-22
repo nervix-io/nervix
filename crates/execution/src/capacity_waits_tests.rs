@@ -141,11 +141,7 @@ async fn waits_for_a_place_in(class: Class) {
     let full = FullClass::fill(&executor, class).await;
     let waits = CapacityWaits::new();
     let reporting = executor.reporting_waits_to(&waits);
-    let waiting = nervix_primitives::task::spawn(async move {
-        class
-            .run(&reporting, || ())
-            .await
-    });
+    let waiting = nervix_primitives::task::spawn(async move { class.run(&reporting, || ()).await });
 
     timeout(WAIT, waits.began())
         .await

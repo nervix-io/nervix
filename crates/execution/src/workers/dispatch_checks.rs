@@ -101,8 +101,9 @@ async fn a_panicking_job_reports_its_own_failure_and_the_worker_drains_its_succe
     let charge = executor
         .try_reserve(MemoryClass::Management, 1)
         .assured("one byte fits in the management budget");
-    let mut panicking =
-        Box::pin(pool.run(None, charge, |_, _| panic!("the callback's deliberate panic")));
+    let mut panicking = Box::pin(pool.run(None, charge, |_, _| {
+        panic!("the callback's deliberate panic")
+    }));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(panicking.as_mut().poll(cx)))
             .await
