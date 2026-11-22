@@ -193,8 +193,8 @@ fn replaying_a_user_label_edit_preserves_later_labels_and_the_credential() {
         let reference =
             CommandExecutionReference::parse(format!("018bcfe5-6800-7000-8000-{ordinal:012x}"))
                 .assured("the fixture reference is a valid UUIDv7");
-        let labels = serde_json::from_value(serde_json::json!({ "owner": value }))
-            .assured("the fixture label is valid");
+        let mutation = serde_json::from_value(serde_json::json!({ "owner": { "set": value } }))
+            .assured("the fixture edit is valid");
         state.command_executions.insert_admitted(
             CommandExecution::applying(
                 reference.clone(),
@@ -204,7 +204,7 @@ fn replaying_a_user_label_edit_preserves_later_labels_and_the_credential() {
                 admitted_at,
                 CommandExecutionEffect::EditAdministrativeLabels {
                     target: AdministrativeLabelTarget::User(user.clone()),
-                    mutation: EntityLabelMutation::Set(labels),
+                    mutation,
                     outcome: None,
                 },
             ),
@@ -506,6 +506,19 @@ fn user_edit_reference(ordinal: u64) -> CommandExecutionReference {
         .assured("the fixture reference is a valid UUIDv7")
 }
 
+/// The one edit that sets every label of `labels` to its value.
+#[cfg(feature = "shuttle")]
+fn setting(labels: &EntityLabels) -> EntityLabelMutation {
+    let edits = labels
+        .iter()
+        .map(|(key, value)| nervix_models::LabelEdit {
+            key: key.clone(),
+            change: nervix_models::LabelChange::Set(value.to_owned()),
+        })
+        .collect::<Vec<_>>();
+    EntityLabelMutation::try_from(edits).assured("a label map names each key once")
+}
+
 /// Admits a user label edit as the session service does before it applies the edit, at the instant
 /// the fixture references' UUIDv7 time names (2023-11-14T22:13:20Z), which admission accepts.
 #[cfg(feature = "shuttle")]
@@ -519,7 +532,7 @@ fn admit_user_edit(log: &AppliedLog, reference: &CommandExecutionReference, labe
         admitted_at,
         CommandExecutionEffect::EditAdministrativeLabels {
             target: AdministrativeLabelTarget::User(user()),
-            mutation: EntityLabelMutation::Set(labels),
+            mutation: setting(&labels),
             outcome: None,
         },
     );
@@ -648,7 +661,7 @@ fn relabelled(
     let planned_against = node.config.labels().clone();
     let limits = EntityLabelLimits::from(&inputs.parameters()?.values);
     let edited = planned_against
-        .updated(&EntityLabelMutation::Set(labels), &limits)
+        .updated(&setting(&labels), &limits)
         .assured("the fixture edit fits the committed limits");
     *node.config.labels_mut() = edited;
     Some((schedule, planned_against))

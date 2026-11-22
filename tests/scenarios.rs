@@ -171,7 +171,7 @@ use crate::common::{
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
     node_execution::{NodeExecutionEndpoint, ProbeExecution},
     node_startup::StartupPorts,
-    node_trace_export::NodeTraceExport,
+    node_trace_export::{CollectorProvisioning, NodeTraceExport, TraceExportLaunch},
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     process_program::{
@@ -3710,14 +3710,71 @@ async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
             {string} through fixture DNS"
 )]
 async fn when_node_trace_export(world: &mut ScenarioWorld, node_count: usize, receiver: String) {
-    let cluster = NodeTraceExport::start(
-        node_count,
-        grpc_receiver(world, &receiver),
-        world.test_id.clone(),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    let launch = TraceExportLaunch::option(grpc_receiver(world, &receiver));
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
     world.node_trace_export = Some(cluster);
+}
+
+/// The option names one collector, its environment twin a second and every OpenTelemetry
+/// environment variable a third, with every other OpenTelemetry variable set beside them.
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string}, the option's environment twin naming OTLP receiver {string} and every \
+            OpenTelemetry environment variable naming OTLP receiver {string}"
+)]
+async fn when_node_trace_export_beside_environment(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    receiver: String,
+    twin: String,
+    opentelemetry: String,
+) {
+    let launch = TraceExportLaunch {
+        collector: grpc_receiver(world, &receiver),
+        provisioning: CollectorProvisioning::Option {
+            twin: Some(grpc_receiver(world, &twin)),
+        },
+        opentelemetry: Some(grpc_receiver(world, &opentelemetry)),
+    };
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string} named only by the option's environment twin"
+)]
+async fn when_node_trace_export_from_environment_twin(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    receiver: String,
+) {
+    let launch = TraceExportLaunch {
+        collector: grpc_receiver(world, &receiver),
+        provisioning: CollectorProvisioning::EnvironmentTwin,
+        opentelemetry: None,
+    };
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[then(expr = "OTLP receiver {string} received nothing the OpenTelemetry environment asked for")]
+async fn then_node_trace_export_follows_declared_options(
+    world: &mut ScenarioWorld,
+    receiver: String,
+) {
+    world
+        .node_trace_export
+        .as_ref()
+        .verified("the preceding step started trace-exporting processes")
+        .assert_declared_export_only(grpc_receiver(world, &receiver))
+        .unwrap_or_else(|error| panic!("node trace export followed its environment: {error}"));
 }
 
 #[then(expr = "OTLP receiver {string} eventually receives the server's own spans from every node")]
@@ -22023,6 +22080,24 @@ async fn when_selector_is_clicked(world: &mut ScenarioWorld, selector: String) {
         .click(None)
         .await
         .expect("selector must be clickable");
+}
+
+#[when(expr = "selector {string} is set to option {string}")]
+async fn when_selector_is_set_to_option(
+    world: &mut ScenarioWorld,
+    selector: String,
+    value: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector actions");
+    let selector = expand_placeholders(world, &selector);
+    let value = expand_placeholders(world, &value);
+    page.locator(&selector)
+        .select_option(value.as_str(), None)
+        .await
+        .expect("selector must be a select element offering the option");
 }
 
 #[when(expr = "selector {string} is clicked by script")]

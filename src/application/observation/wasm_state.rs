@@ -889,7 +889,15 @@ impl SessionServiceImpl {
                     page: page.clone(),
                 }),
             };
-            if reply.fits(executor) {
+            // A testing build lets a scenario make the reply overflow, as entries that pad beyond
+            // the payload limit inside one reply would; an ordinary build only measures it.
+            if reply.fits(executor)
+                && !self
+                    .inner
+                    .runtime
+                    .fault_injection()
+                    .overflows_wasm_state_page_reply(&request.domain, processor, page)
+            {
                 return Ok(());
             }
             if page.state.branches.len() > 1 {
@@ -977,6 +985,10 @@ impl SessionServiceImpl {
         ReadWasmStatePageResponse { result }
     }
 }
+
+#[cfg(all(test, feature = "testing"))]
+#[path = "wasm_state_reply_tests.rs"]
+mod reply_tests;
 
 #[cfg(test)]
 #[cfg_attr(
