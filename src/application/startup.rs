@@ -501,7 +501,9 @@ mod tests {
                 raft: RaftTimings::resolve(Some(Duration::from_millis(50)))
                     .expect("the test's Raft heartbeat is valid"),
                 membership: MembershipSettings::resolve(MembershipValues {
-                    node_unavailability_timeout: Some(Duration::from_secs(1)),
+                    // The bootstrap timeout must exceed the default one-second health rounds plus
+                    // a tenth of itself, or the startup preflight refuses the node.
+                    node_unavailability_timeout: Some(Duration::from_secs(2)),
                     ..MembershipValues::default()
                 })
                 .expect("the test's membership settings are valid"),

@@ -6105,6 +6105,20 @@ selections = [
   "deloxide-stress-restore",
 ]
 [[workload]]
+coverage = "A lowered node-unavailability timeout is validated against the health-probe interval each admitted node's committed claim carries, in the application pre-check and the replicated apply, and is refused naming the node on one and three nodes; the last node restarted with an interval the committed timeout does not fit refuses before readiness, naming itself, and starts once its interval fits. The check reads immutable claims and adds no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.node-unavailability-health-probes"
+invariant = "A committed node-unavailability timeout always exceeds every admitted node's health-probe interval plus the probe timeout derived from it."
+invocation = "cluster-parameters"
+scenario = "An unavailability timeout a node's health probes cannot observe within is refused, naming the node, on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+[[workload]]
 coverage = "Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
 examples = 2
 feature = "tests/features/runtime/wasm_state_reset.feature"

@@ -6,7 +6,8 @@
 //!   node's memory limit against its memory budgets and its memory-pressure watermark, its database
 //!   and temporary directories, the quotas their volume must hold and the restore staging quota it
 //!   resolves against that volume, loading its resolver, and, once every check passed, detecting
-//!   the node's properties, which never refuses the start.
+//!   the node's properties, which never refuses the start; then the checks of the selected
+//!   bootstrap or committed policy against this run's claim and health-probe interval.
 //! - **Depends on.** The executor's configuration, the settings groups it checks, the capacity
 //!   detection, the node's detection input, and the resolver's loader.
 //! - **Must not know.** What the node runs once it has started.
@@ -19,6 +20,7 @@
 use std::{
     fmt,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use error_stack::{Report, ResultExt as _};
@@ -72,6 +74,8 @@ pub enum PreflightError {
     RuntimeCapacity,
     #[error("the committed runtime deadlines exceed this node’s drain/shutdown budget")]
     RuntimeDeadlines,
+    #[error("the committed node-unavailability timeout does not fit this node’s health probes")]
+    HealthProbeInterval,
     #[error("the derived memory pressure configuration is invalid")]
     MemoryPressure,
     #[error("the preflight's filesystem work could not be admitted")]
@@ -447,9 +451,34 @@ fn prepare_directory_now(
 #[path = "preflight_tests.rs"]
 mod tests;
 
+/// Validate the selected bootstrap or live committed policy against this run of the node before it
+/// runs a domain or publishes readiness, in order: the database volume every resource quota must
+/// fit, the lifecycle budgets this node's shutdown needs, and the health rounds the
+/// node-unavailability timeout must fit. Local defaults and command-line seeds on a returning node
+/// never substitute for its committed policy.
+pub(in crate::application) fn validate_selected_policy(
+    parameters: &nervix_models::ClusterParameterValues,
+    node: &nervix_models::ClusterNodeName,
+    capabilities: &nervix_models::NodeCapabilities,
+    operational: &nervix_models::NodeOperationalCapabilities,
+    database_path: &Path,
+) -> Result<(), Report<PreflightError>> {
+    validate_resource_volume(
+        parameters,
+        capabilities.database_volume_bytes,
+        database_path,
+    )?;
+    validate_runtime_budget(parameters, node, capabilities.shutdown)?;
+    validate_health_probe_interval(
+        parameters,
+        node,
+        operational.control_plane.health_probe_interval(),
+    )
+}
+
 /// Validate resource promises only after choosing the actual bootstrap or live committed policy.
 /// Local defaults on a returning node are never a substitute for that policy.
-pub(in crate::application) fn validate_resource_volume(
+fn validate_resource_volume(
     parameters: &nervix_models::ClusterParameterValues,
     database_volume_bytes: u64,
     path: &Path,
@@ -468,7 +497,7 @@ pub(in crate::application) fn validate_resource_volume(
 
 /// Validate the selected bootstrap or committed policy before running a domain or publishing
 /// readiness. A returning node's command-line seeds never substitute for its committed policy.
-pub(in crate::application) fn validate_runtime_budget(
+fn validate_runtime_budget(
     parameters: &nervix_models::ClusterParameterValues,
     node: &nervix_models::ClusterNodeName,
     shutdown: nervix_models::ShutdownCapabilities,
@@ -476,4 +505,17 @@ pub(in crate::application) fn validate_runtime_budget(
     parameters
         .validate_runtime_budget(node, shutdown)
         .change_context(PreflightError::RuntimeDeadlines)
+}
+
+/// Validate the selected bootstrap or committed node-unavailability timeout against this node's
+/// health-probe interval before it runs a domain or publishes readiness, so the node never runs a
+/// failure detector whose observations go stale before it probes each peer again.
+fn validate_health_probe_interval(
+    parameters: &nervix_models::ClusterParameterValues,
+    node: &nervix_models::ClusterNodeName,
+    health_probe_interval: Duration,
+) -> Result<(), Report<PreflightError>> {
+    parameters
+        .validate_health_probe_interval(node, health_probe_interval)
+        .change_context(PreflightError::HealthProbeInterval)
 }

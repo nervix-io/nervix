@@ -204,6 +204,13 @@ cannot hold it:
   node before raising a quota above it. Each quota is compared with the volume's total size on its own, and what the volume
   already holds is not subtracted, so size the volume for the log, snapshots and state the node
   keeps beside them.
+- **Health probes.** Before it reports ready, a node also checks that the committed
+  `NODE_UNAVAILABILITY_TIMEOUT`, 10 seconds by default, exceeds its
+  `--control-plane-health-probe-interval`, 1 second by default, plus the probe timeout, a tenth of
+  the timeout. Otherwise its observations of its peers go stale before it probes them again, so the
+  node refuses to start, naming itself, and `ALTER CLUSTER SET` likewise refuses a timeout that any
+  admitted node's interval does not fit, naming that node. Raise the timeout before lengthening a
+  node's interval; [Node Settings](node-settings.md#committed-parameter-changes) gives the rule.
 
 A refusal names the setting, the value and the capacity it was compared with, such as
 `resource-max-extracted-bytes (16GiB) exceeds the 5GiB capacity of the volume holding the database
