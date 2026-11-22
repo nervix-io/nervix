@@ -3606,6 +3606,25 @@ changes nothing. The owner's choice between clauses that act together is a pure 
 tests cover; the per-node drain views and reports cross the network in the Turmoil stop case of
 [Deterministic Interconnect Simulation](./interconnect-simulation.md#scenario-matrix).
 
+A node's runtime installations and activations run under the runtime admission's one installation
+turn. `RuntimeAdmission::begin_installation` waits for the turn as an owned guard, and
+`InstallationTurn::run` hands the section to a task that keeps the guard until the section ends.
+The caller only waits for that task, so a caller that goes away cuts nothing short: a request
+handler the interconnect server drops, or a task shutdown ends. Once drain support has ended,
+terminal teardown takes the turn through `finish_installations` and keeps it. Keeping it matters: a
+caller can check the shutdown just before drain support ends and ask for the turn only after
+teardown has taken it, and a turn given back would let that caller begin a section while the runtime
+stops. The check found exactly that schedule while `finish_installations` still released the turn.
+`shuttle_an_installation_whose_caller_goes_away_ends_before_the_next_turn_and_the_runtime_stop` in
+`src/application/runtime_admission_shuttle_tests.rs` explores two callers racing that teardown, one
+of which goes away at any moment while it waits for the turn or for its section. Every section that
+began ends, two sections never overlap, none begins after the runtime stopped, and the runtime stops
+only after the last section ended. This is a control-plane ordering check without a memory-ordering
+claim. The turn is an async mutex, outside Deloxide's tracked-lock detection. The owner test in
+`src/application/session_service/tests/abandoned_installation.rs` and the public
+`@abandoned_installation` scenario cover the stopped domain's teardown that a dropped drain-status
+request handler began.
+
 Consensus storage admits each Commands or Bulk working set through independent class-specific
 turns before asking its memory class, and a working set returns its bytes before its turn passes.
 Each Shuttle check holds one working set while a second admission waits for its turn and a progress
