@@ -102,7 +102,8 @@ pub use request::{
     DomainClockAttachRequest, HandlerRegistrationError, HttpsListenerInstallation,
     HttpsListenerInstallationRequest, HttpsListenerInstallationResponse, InterconnectDuplexRequest,
     InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure, RequestContext,
-    RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
+    RequestError, RequestSubquota, RuntimeApplicationFailure, StreamHandlerError,
+    StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
