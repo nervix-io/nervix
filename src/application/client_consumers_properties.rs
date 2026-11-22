@@ -653,8 +653,8 @@ fn a_chunk_is_at_most_one_mebibyte_and_a_bound_below_its_envelope_carries_none()
     assert_eq!(
         ConsumerEvent::largest_chunk_within(64),
         None,
-        "a 64-byte relay batch bound, which the scenario of a node that refuses forwarded consumers \
-         sets, carries no chunk beside the {envelope}-byte envelope"
+        "a 64-byte relay batch bound, which the scenario of a node that refuses forwarded \
+         consumers sets, carries no chunk beside the {envelope}-byte envelope"
     );
 }
 
