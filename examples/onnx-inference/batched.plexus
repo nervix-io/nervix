@@ -19,7 +19,8 @@ CREATE INFERENCER batch_score_messages
   FROM input
   ATTACHED
   USING RESOURCE inference VERSION 1
-  FILE 'batch-score.onnx' WORKING MEMORY RELEASED
+  FILE 'batch-score.onnx'
+  WORKING MEMORY RELEASED
   INPUTS {
     'features' DENSE TENSOR<F32>[BATCH, 128] = input.features,
     'mask' DENSE TENSOR<F32>[BATCH, 128] = input.mask

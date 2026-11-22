@@ -20,7 +20,8 @@ CREATE INFERENCER chaos_running
   FROM chaos_state_records
   ATTACHED
   USING RESOURCE chaos_running_model VERSION 1
-  FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
+  FILE 'models/running_sum.onnx'
+  WORKING MEMORY RELEASED
   INPUTS {
     'features' DENSE TENSOR<F32>[2] = [1 AS F32, 0 AS F32]
   }
