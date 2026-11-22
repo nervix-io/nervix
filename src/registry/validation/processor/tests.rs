@@ -50,7 +50,7 @@ fn apply_batch_accepts_inferencer_generated_output() {
         CREATE INFERENCER score_model
           FROM features
           USING RESOURCE fraud_model VERSION 1
-          FILE 'models/simple_score.onnx'
+          FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
           INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector }
           OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
           BRANCHED BY by_tenant_branch
@@ -78,7 +78,7 @@ fn apply_batch_rejects_mixed_inferencer_execution_modes() {
         CREATE RELAY scored SCHEMA scored UNBRANCHED;
         CREATE INFERENCER score_model
           FROM features
-          USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx'
+          USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
           INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = input.vector }
           OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] }
           UNBRANCHED
@@ -112,7 +112,7 @@ fn apply_batch_rejects_multiple_batch_axes_in_one_tensor() {
         CREATE RELAY scored SCHEMA scored UNBRANCHED;
         CREATE INFERENCER score_model
           FROM features
-          USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx'
+          USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
           INPUTS { "features" DENSE TENSOR<F32>[BATCH, BATCH, 2] = input.vector }
           OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] }
           UNBRANCHED

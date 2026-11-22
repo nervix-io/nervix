@@ -901,8 +901,9 @@ impl SessionServiceImpl {
             }
         })?;
         // Reading metadata executes no inference. The inspection's session takes the options
-        // every session carries, so its optimization also stays on the admitted bulk worker.
-        let mut builder = crate::runtime::OnnxSessionOptions::builder(environment)
+        // every session carries, so its optimization also stays on the admitted bulk worker, and
+        // it keeps no working memory.
+        let mut builder = crate::runtime::OnnxSessionOptions::inspection(environment)
             .change_context_lazy(|| InferencerBindingValidationError::SessionBuilder {
                 node: processor_name.clone(),
             })?;
@@ -1335,6 +1336,7 @@ mod tests {
         };
         let processor = CreateInferencer {
             file: "matrix_identity.onnx".to_string(),
+            working_memory: nervix_models::InferencerWorkingMemory::Released,
             inputs: vec![nervix_models::InferencerTensorMapping {
                 tensor: "matrix".to_string(),
                 schema: matrix.clone(),
@@ -1533,6 +1535,7 @@ mod tests {
             resource: named("model"),
             resource_version: 1,
             file: "model.onnx".to_string(),
+            working_memory: nervix_models::InferencerWorkingMemory::Released,
             inputs: Vec::new(),
             state: Vec::new(),
             output_schema: Vec::new(),

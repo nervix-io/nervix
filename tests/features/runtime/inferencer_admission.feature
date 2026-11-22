@@ -43,7 +43,7 @@ Feature: Inferencer admission
         ON GENERAL ERROR LOG;
       CREATE INFERENCER one_run_score FROM features
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[BATCH, 2] = input.features, "mask" <tensor_type>[BATCH, 2] = input.features }
         OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         BRANCHED BY by_tenant
@@ -144,7 +144,7 @@ Feature: Inferencer admission
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER checked FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/checked_running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/checked_running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS {
           'features' <tensor_type>[2] = input.vector,
           'state_in' <tensor_type>[2] = [0 AS F32, 0 AS F32]
@@ -216,7 +216,7 @@ Feature: Inferencer admission
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER ratio_score FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/simple_score.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { 'score' <tensor_type>[1] }
         BRANCHED BY by_tenant
@@ -291,7 +291,7 @@ Feature: Inferencer admission
       CREATE INFERENCER collected_score FROM features
         COLLECT FOR 1h MAX BATCH SIZE 72B
         USING RESOURCE inference VERSION 1
-        FILE 'models/batch_score.onnx'
+        FILE 'models/batch_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[BATCH, 2] = input.features, "mask" <tensor_type>[BATCH, 2] = input.mask }
         OUTPUT SCHEMA { "scores" <tensor_type>[BATCH, 2] }
         BRANCHED BY by_tenant

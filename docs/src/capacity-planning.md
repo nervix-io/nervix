@@ -25,7 +25,12 @@ One live branch instance can hold the following at each graph node that belongs 
 - deduplication entries retained within `MAX TIME`;
 - open window state retained by `WIDTH` and advanced by `STEP`;
 - reorderer and correlator buffers retained within `MAX TIME`;
-- for WASM processors, an isolated store and the guest linear-memory pages dirtied by that branch.
+- for WASM processors, an isolated store and the guest linear-memory pages dirtied by that branch;
+- for inferencers, the branch's own ONNX session: the model's weights and the graph ONNX Runtime
+  optimized from them, loaded on the branch's first admitted batch and held until the branch ends.
+  An inferencer declared `WORKING MEMORY RETAINED` also keeps, per branch, up to the largest
+  working memory any of its model runs needed; `WORKING MEMORY RELEASED` keeps none between runs.
+  See [Working memory](processors.md#working-memory).
 
 `FLUSH EACH` has a configured byte boundary. `FLUSH IMMEDIATE` has no size boundary; its pending
 depth depends on arrivals during the system-owned 100 µs window. See the
@@ -73,10 +78,20 @@ An ONNX binding inspection reserves one bulk chunk (`--execution-bulk-chunk-byte
 read and released on the admitted worker, with cancellation checked between reads. Its
 thirty-second deadline includes waiting for that memory, the worker
 queue, image preparation and the native session's build, metadata extraction and release. ONNX
-Runtime's own heap remains outside this buffer charge. Only an absolute `ORT_DYLIB_PATH` naming a
+Runtime's own heap remains outside this buffer charge; the inspection's session keeps no working
+memory, since it never runs the model. Only an absolute `ORT_DYLIB_PATH` naming a
 regular file receives the read hint; other library discovery and load failures remain the external
 loader's responsibility. Kernel I/O and native calls cannot be preempted by dropping their awaiter;
 a running job retains its charge until it returns and checks cancellation between bounded reads.
+
+What an inferencer's charges cover: loading a branch's session is charged only an admission token
+on the bulk workers, and each model run is charged its working set from the relay pool, the mapped
+input, the native copy the model reads, its public outputs and any carried state. The model each
+session holds stays outside every executor budget for as long as its branch lives, once for each
+concrete branch, and so do the intermediate tensors a run computes. `WORKING MEMORY RELEASED` frees
+those when the run ends; `WORKING MEMORY RETAINED` keeps up to the largest run's for the branch's
+next run. Size node memory for the models and retained working memory of the branches a node runs,
+beyond the executor ceilings below.
 
 These counts bound admission, not threads. Jobs run on the process-wide blocking pool, so a
 class's count is the number of its jobs that may be on that pool at once. A class is guaranteed its
@@ -266,7 +281,10 @@ defaults.
 ## What To Watch
 
 - `nervix_jemalloc_allocated_bytes`, `nervix_jemalloc_active_bytes`, and
-  `nervix_jemalloc_resident_bytes` show process-memory pressure from all workloads on the node.
+  `nervix_jemalloc_resident_bytes` show process-memory pressure from every workload on the node
+  except ONNX Runtime, which allocates its sessions' models and working memory through the C
+  library's allocator, outside jemalloc. On a node that runs inferencers, also watch the process's
+  resident memory as the operating system reports it.
 - `nervix_branch_instances` shows the current concrete branch-key population per domain, branch
   declaration, and physical node.
 - `nervix_branch_evictions_total` shows LRU pressure and TTL churn through its `reason` label.

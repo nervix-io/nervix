@@ -742,6 +742,7 @@ impl BranchInstanceTemplate {
                 inputs,
                 output_schema,
                 mode,
+                working_memory,
                 state,
                 prepared,
                 ..
@@ -753,6 +754,7 @@ impl BranchInstanceTemplate {
                         inputs,
                         output_schema,
                         *mode,
+                        *working_memory,
                         state.as_ref(),
                         udfs,
                         vm_settings,

@@ -357,7 +357,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX NODE RULE` archive signature identifies the current Model layout, including
+The registry's `NERVIX INFER MEM` archive signature identifies the current Model layout, including
 the `parametrizer` kind text of the declared entity that defines a parametrization, that union, a
 placement's colocation or node rule with its `FOR` members or domain-wide scope and its
 `REQUIRE NODES`, `PREFER NODES` or `ANY NODE` policy and selector, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
@@ -369,7 +369,7 @@ the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the sessi
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
-that header state, inferencer state bindings with their initial expressions, the typed `payload`
+that header state, inferencer state bindings with their initial expressions, an inferencer's required working memory, the typed `payload`
 expression scope and an emitter's `INSTANCES` declaration.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
@@ -381,9 +381,9 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_` keyspaces and `ClusterState`
-metadata encoding 45 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
-domain, resource and user labels, node selector statements, placement node rules and the partition count of every resolved
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_working_memory_` keyspaces and `ClusterState`
+metadata encoding 46 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+domain, resource and user labels, node selector statements, placement node rules, inferencer working memory and the partition count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes

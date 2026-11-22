@@ -239,6 +239,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   shapes or routes: the model runs once per admitted batch before any route, a `BATCH` model's batch
   is the input batch, so size it with `COLLECT FOR ... MAX BATCH SIZE` rather than a route's
   `FLUSH`, and one message at a time a refused row fails alone through `ON MESSAGE ERROR`.
+- Every `CREATE INFERENCER` needs `WORKING MEMORY RELEASED` or `WORKING MEMORY RETAINED` right after
+  `FILE`; there is no default. Read `Runtime Nodes` → `Inferencer` → `Working memory` before
+  choosing: prefer `RELEASED`, and choose `RETAINED` only for a measured model of many small
+  operations, since it keeps working memory per concrete branch that no budget counts.
 - For inference with model-carried state, read `Runtime Nodes` → `Inferencer` → `State tensors`
   and `Shutdown And Recovery` → `What Survives` before choosing port bindings, initialization,
   branch isolation or recovery guarantees, and `Inferencer State And Recovery` → `Guarantees And

@@ -2,8 +2,9 @@
 //!
 //! Layer: test harness.
 //! Owns: worker classes and waiting admission of model loads and runs, session retention across
-//! abandoned waits, row refusal and state atomicity, batched grouping and arrival order, chunking
-//! by working set, and the projection of native diagnostics.
+//! abandoned waits, the definition changes that make a branch load its model again, row refusal
+//! and state atomicity, batched grouping and arrival order, chunking by working set, and the
+//! projection of native diagnostics.
 //! Depends on: the production session owner and the generated ONNX fixtures.
 //! Must not know: graph scheduling, routes or registry implementation.
 
@@ -135,6 +136,7 @@ async fn prepared(
             &inputs,
             &outputs,
             mode,
+            nervix_models::InferencerWorkingMemory::Released,
             state,
             None,
             nervix_vm::VmSettings::default(),
@@ -273,6 +275,43 @@ async fn a_model_loads_on_the_bulk_workers_and_runs_on_the_extension_workers() {
     assert_eq!(snapshot.data_cpu.admitted, 0);
     assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
+}
+
+/// The identity model's definition, whose sessions keep `working_memory`.
+async fn identity_keeping(
+    executor: &Executor,
+    working_memory: nervix_models::InferencerWorkingMemory,
+) -> PreparedInference {
+    let matrix = vec![fixed(2), fixed(3)];
+    PreparedInference::prepare(
+        executor,
+        &[port("matrix", matrix.clone())],
+        &[output("transformed", matrix)],
+        InferencerExecutionMode::PerMessage,
+        working_memory,
+        None,
+        None,
+        nervix_vm::VmSettings::default(),
+    )
+    .await
+    .expect("the identity definition prepares")
+}
+
+#[nervix_primitives::test]
+async fn a_definition_that_changes_only_its_working_memory_is_another_binding() {
+    let executor = Executor::default();
+    let released =
+        identity_keeping(&executor, nervix_models::InferencerWorkingMemory::Released).await;
+    let released_again =
+        identity_keeping(&executor, nervix_models::InferencerWorkingMemory::Released).await;
+    let retained =
+        identity_keeping(&executor, nervix_models::InferencerWorkingMemory::Retained).await;
+    // The same policy is the same binding, so a branch keeps the session it loaded.
+    assert!(released.same_binding(&released_again));
+    // Another policy is another binding, so every branch loads its model again, into a session
+    // that keeps the new working memory, rather than keeping the session built for the old one.
+    assert!(!released.same_binding(&retained));
+    assert!(!retained.same_binding(&released));
 }
 
 #[nervix_primitives::test]

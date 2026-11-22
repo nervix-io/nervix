@@ -38,6 +38,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorMapping,
+    InferencerWorkingMemory,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -55,12 +56,14 @@ use super::{
 use crate::{registry::InferencerStatePlan, runtime_schema::RuntimeRecordBatch};
 
 /// The definition every concrete branch of one inferencer shares: its tensor ports, its execution
-/// mode, the Arrow schema of its public outputs, and the initial generation of its `STATE`.
+/// mode, the working memory its sessions keep, the Arrow schema of its public outputs, and the
+/// initial generation of its `STATE`.
 #[derive(Clone)]
 pub(in crate::runtime) struct PreparedInference {
     pub(in crate::runtime) inputs: Vec<InferencerTensorMapping>,
     pub(in crate::runtime) outputs: Vec<InferencerTensorDeclaration>,
     pub(in crate::runtime) mode: InferencerExecutionMode,
+    pub(in crate::runtime) working_memory: InferencerWorkingMemory,
     pub(in crate::runtime) state: Option<PreparedState>,
     output_arrow_schema: StdArc<arrow_schema::Schema>,
 }
@@ -78,6 +81,7 @@ impl std::fmt::Debug for PreparedInference {
             .field("inputs", &self.inputs.len())
             .field("outputs", &self.outputs.len())
             .field("mode", &self.mode)
+            .field("working_memory", &self.working_memory)
             .field(
                 "state_bytes_per_branch",
                 &self.state.as_ref().map(|state| state.plan.bytes_per_branch),
@@ -99,6 +103,7 @@ impl PreparedInference {
         inputs: &[InferencerTensorMapping],
         outputs: &[InferencerTensorDeclaration],
         mode: InferencerExecutionMode,
+        working_memory: InferencerWorkingMemory,
         state: Option<&InferencerStatePlan>,
         udfs: Option<&UdfExecutor>,
         vm_settings: nervix_vm::VmSettings,
@@ -126,16 +131,19 @@ impl PreparedInference {
             inputs: inputs.to_vec(),
             outputs: outputs.to_vec(),
             mode,
+            working_memory,
             state,
             output_arrow_schema: StdArc::new(arrow_schema::Schema::new(fields)),
         })
     }
 
-    /// Whether a branch built from `other` runs the same model binding and carries the same state.
+    /// Whether a branch built from `other` runs the same model binding, in a session keeping the
+    /// same working memory, and carries the same state.
     pub(in crate::runtime) fn same_binding(&self, other: &Self) -> bool {
         self.inputs == other.inputs
             && self.outputs == other.outputs
             && self.mode == other.mode
+            && self.working_memory == other.working_memory
             && self.state.as_ref().map(|state| &state.plan)
                 == other.state.as_ref().map(|state| &state.plan)
     }
@@ -579,7 +587,7 @@ impl InferenceSession {
 impl BoundSession {
     /// Load the model and resolve every one of its ports, which validation has already matched to
     /// the declaration. The session carries the options [`OnnxSessionOptions`] sets on every
-    /// session.
+    /// session, keeping the working memory the inferencer states.
     fn load(
         path: &Path,
         definition: &PreparedInference,
@@ -589,7 +597,7 @@ impl BoundSession {
             .check()
             .change_context(InferencerError::Cancelled)?;
         let environment = onnx_environment().change_context(InferencerError::InitializeSession)?;
-        let session = OnnxSessionOptions::builder(environment)
+        let session = OnnxSessionOptions::inference(environment, definition.working_memory)
             .change_context(InferencerError::InitializeSession)?
             .commit_from_file(path)
             .change_context_lazy(|| InferencerError::LoadModel {

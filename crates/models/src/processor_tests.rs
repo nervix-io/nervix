@@ -31,8 +31,9 @@ use crate::{
     CreateReorderer, Expression, FlushPolicy, InferencerExecutionMode, InferencerStateBinding,
     InferencerStateInitial, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, InferencerTensorSchemaError, Literal, MaterializedStateDependency,
-    MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    InferencerTensorSchema, InferencerTensorSchemaError, InferencerWorkingMemory, Literal,
+    MaterializedStateDependency, MaterializedStatePolicy, ParseAsType, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs,
 };
 
 fn named<N>(raw: &str) -> N
@@ -637,6 +638,7 @@ fn inferencer(
         resource: named("models"),
         resource_version: 1,
         file: "score.onnx".to_string(),
+        working_memory: InferencerWorkingMemory::Released,
         inputs: vec![InferencerTensorMapping {
             tensor: "input".to_string(),
             schema: tensor(input),

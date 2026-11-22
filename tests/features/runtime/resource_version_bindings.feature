@@ -34,7 +34,7 @@ Feature: Resource version bindings
       """
       CREATE INFERENCER score_model FROM features
         USING RESOURCE fraud_model
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         UNBRANCHED
@@ -150,7 +150,7 @@ Feature: Resource version bindings
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER score_model FROM features
         USING RESOURCE fraud_model VERSION LATEST
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         UNBRANCHED
@@ -839,7 +839,7 @@ Feature: Resource version bindings
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER score_model FROM features
         USING RESOURCE shared_bundle VERSION 1
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         UNBRANCHED
@@ -932,7 +932,7 @@ Feature: Resource version bindings
         ON GENERAL ERROR LOG;
       CREATE INFERENCER score_model FROM features
         USING RESOURCE fraud_model VERSION LATEST
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS { "features" <tensor_type>[2] = input.vector }
         OUTPUT SCHEMA { "score" <tensor_type>[1] }
         UNBRANCHED

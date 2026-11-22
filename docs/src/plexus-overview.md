@@ -323,8 +323,10 @@ The same form follows `SET QUIESCE` in an alteration. See
 
 Every inferencer runs its model once for each admitted batch, before any route, one message at a
 time or, when its tensors declare `BATCH`, one call per group of equally shaped messages; see
-[Execution](processors.md#execution). `CREATE INFERENCER` may declare model-carried `STATE` between
-`INPUTS` and `OUTPUT SCHEMA`. The [Inferencer](processors.md#state-tensors) section defines its
+[Execution](processors.md#execution). Every `CREATE INFERENCER` states its working memory right
+after `FILE`, `WORKING MEMORY RELEASED` or `WORKING MEMORY RETAINED`, with no default; see
+[Working memory](processors.md#working-memory). `CREATE INFERENCER` may declare model-carried
+`STATE` between `INPUTS` and `OUTPUT SCHEMA`. The [Inferencer](processors.md#state-tensors) section defines its
 port pairs, fixed tensor shapes, initial expressions, per-branch invocation order and reset
 behavior.
 
