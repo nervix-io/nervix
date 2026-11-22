@@ -132,6 +132,7 @@ class InventoryTests(unittest.TestCase):
                 "turmoil": "turmoil",
                 "deloxide": "deloxide",
                 "client-conformance": "client-conformance",
+                "licensing-smoke": "licensing-smoke",
                 "client-suites": None,
                 "chaos-smoke": "chaos",
                 "chaos-soak": "chaos-soak",
@@ -184,6 +185,15 @@ class InventoryTests(unittest.TestCase):
         bolero = re.findall(r"^    name: (.+)$", workflows["bolero.yaml"], re.M)
         self.assertIn("bolero-random", bolero)
         names.update(f"bolero / {name.strip()}" for name in bolero)
+        # Check calls the reusable Licensing Smoke workflow as its `licensing-smoke` job, so its
+        # check carries that prefix.
+        self.assertIn(
+            "uses: ./.github/workflows/licensing-smoke.yaml",
+            workflow_job(workflows["check.yaml"], "licensing-smoke"),
+        )
+        licensing_smoke = re.findall(r"^    name: (.+)$", workflows["licensing-smoke.yaml"], re.M)
+        self.assertIn("licensing-smoke", licensing_smoke)
+        names.update(f"licensing-smoke / {name.strip()}" for name in licensing_smoke)
         for method in methods.values():
             for check in method.checks:
                 with self.subTest(method=method.name, check=check):

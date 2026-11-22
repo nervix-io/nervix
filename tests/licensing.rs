@@ -24,6 +24,46 @@ use super::{
 };
 mod notifications;
 
+/// The environment variable holding the production smoke-test account's license key, which only the
+/// `licensing-smoke` CI job and an operator running `just test-licensing-production-smoke` set.
+const PRODUCTION_SMOKE_KEY: &str = "NERVIX_LICENSING_SMOKE_KEY";
+
+/// Activates the production smoke-test account's license. The key never enters the scenario text,
+/// the scenario's state or a message: a failure reports the server's answer or the client's error.
+#[when("the leader node activates the production smoke-test license as ephemeral")]
+async fn activate_production_smoke_license(world: &mut ScenarioWorld) {
+    let Ok(key) = std::env::var(PRODUCTION_SMOKE_KEY) else {
+        panic!("{PRODUCTION_SMOKE_KEY} must hold the production smoke-test account's license key");
+    };
+    assert!(
+        !key.is_empty() && !key.contains('\''),
+        "{PRODUCTION_SMOKE_KEY} must hold one license key without quotes"
+    );
+    let leader = super::current_leader_node(world).await;
+    let uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .assured("the scenario started its leader node");
+    let client = Client::connect_with_options(
+        &uri,
+        None,
+        super::client_connect_options(&uri).assured("the fixture provides native TLS"),
+    )
+    .await
+    .assured("the public native client connects without selecting a domain");
+    let statement = format!("ACTIVATE LICENSE EPHEMERAL WITH KEY '{key}';");
+    let outcome = match client.execute(statement).await {
+        Ok(outcome) => outcome,
+        Err(error) => panic!("the production smoke-test activation could not be sent: {error:#}"),
+    };
+    assert!(
+        outcome.succeeded(),
+        "the production smoke-test activation failed: {}",
+        outcome.message
+    );
+    world.last_command_output = Some(outcome.message);
+}
+
 #[given(
     expr = "node {string} refuses its next license activation because it cannot confirm its lease"
 )]

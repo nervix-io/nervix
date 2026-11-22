@@ -1778,6 +1778,16 @@ jobs:
           path: tests/logs
           if-no-files-found: ignore
 
+  # The production licensing smoke test, through its own workflow, which also runs it nightly on
+  # main. It runs only for a pull request labeled `licensing-smoke`, from a branch of this
+  # repository: a fork's pull request receives no secrets.
+  licensing-smoke:
+    if: contains(github.event.pull_request.labels.*.name, 'licensing-smoke')
+    uses: ./.github/workflows/licensing-smoke.yaml
+    permissions:
+      contents: read
+    secrets: inherit
+
   # The checks that answer for the workspace rather than for the scenario suite: undefined
   # behaviour, mutation coverage, benchmark bodies, primitive boundary conformance and completion
   # reachability. None of them reads the suite's result, so they run beside it instead of queueing

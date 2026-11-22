@@ -16,6 +16,7 @@ LABELS_BY_JOB = {
     "loom-qualification": "loom",
     "turmoil": "turmoil",
     "client-conformance": "client-conformance",
+    "licensing-smoke": "licensing-smoke",
 }
 # A workflow names a label it acts on in a condition, directly or through the labels Check passes to
 # the Bolero workflow.
