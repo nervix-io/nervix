@@ -289,7 +289,10 @@ fn parse_and_text_encoding_helpers_roundtrip() {
         parse_human_bytes("1.5MiB").expect("valid bytes"),
         ubyte::ByteUnit::Mebibyte(1) + ubyte::ByteUnit::Kibibyte(512)
     );
-    assert_eq!(parse_trace_sample_ratio("0.25").expect("valid ratio"), 0.25);
+    assert_eq!(
+        parse_trace_sample_ratio("0.25").expect("valid ratio"),
+        nervix_models::SampleRatio::new(0.25)
+    );
     assert!(parse_trace_sample_ratio("1.25").is_err());
 
     let bytes = vec![0xde, 0xad, 0xbe, 0xef];
@@ -447,7 +450,6 @@ fn server_args_reject_a_low_watermark_at_or_above_the_high_one() {
 #[test]
 fn server_args_parse_opentelemetry_options() {
     let args = test_args(&[
-        "--otel-enabled",
         "--otel-otlp-endpoint",
         "http://collector:4317",
         "--otel-service-name",
@@ -455,31 +457,64 @@ fn server_args_parse_opentelemetry_options() {
         "--otel-trace-sample-ratio",
         "0.5",
     ]);
+    let app = Application::try_from(args).expect("args should parse");
 
-    assert!(args.tracing.otel_enabled);
-    assert_eq!(args.tracing.otel_otlp_endpoint, "http://collector:4317");
-    assert_eq!(args.tracing.otel_service_name, "nervix-test");
-    assert_eq!(args.tracing.otel_trace_sample_ratio, 0.5);
+    assert_eq!(
+        app.identity.trace_collector,
+        Some(
+            TraceCollector::new("http://collector:4317", "nervix-test".to_owned())
+                .expect("a collector URI")
+        )
+    );
+    assert_eq!(
+        app.settings.operational.traces.sample_ratio(),
+        nervix_models::SampleRatio::new(0.5)
+    );
 }
 
 #[test]
 fn server_args_do_not_require_opentelemetry_options() {
-    let args = test_args(&[]);
+    let app = Application::try_from(test_args(&[])).expect("args should parse");
 
-    assert!(!args.tracing.otel_enabled);
-    assert_eq!(args.tracing.otel_otlp_endpoint, "http://127.0.0.1:4317");
-    assert_eq!(args.tracing.otel_service_name, "nervix");
-    assert_eq!(args.tracing.otel_trace_sample_ratio, 1.0);
+    assert_eq!(app.identity.trace_collector, None);
+    assert_eq!(
+        app.settings.operational.traces,
+        nervix_models::TraceExportCapabilities::default()
+    );
 }
 
 #[test]
-fn server_args_only_require_opentelemetry_enable_flag_to_enable_export() {
-    let args = test_args(&["--otel-enabled"]);
+#[cfg(not(feature = "shuttle"))]
+fn a_collector_endpoint_alone_provisions_trace_export() {
+    let app = Application::try_from(test_args(&[
+        "--otel-otlp-endpoint",
+        "http://collector:4317",
+    ]))
+    .expect("args should parse");
 
-    assert!(args.tracing.otel_enabled);
-    assert_eq!(args.tracing.otel_otlp_endpoint, "http://127.0.0.1:4317");
-    assert_eq!(args.tracing.otel_service_name, "nervix");
-    assert_eq!(args.tracing.otel_trace_sample_ratio, 1.0);
+    let export = app
+        .trace_export()
+        .expect("an endpoint provisions the node's trace export");
+    assert_eq!(
+        export.collector,
+        &TraceCollector::new("http://collector:4317", "nervix".to_owned())
+            .expect("a collector URI")
+    );
+    assert_eq!(
+        export.capabilities,
+        &nervix_models::TraceExportCapabilities::default()
+    );
+}
+
+#[test]
+fn server_args_refuse_an_empty_trace_collector_endpoint() {
+    let refused = Application::try_from(test_args(&["--otel-otlp-endpoint", ""]))
+        .expect_err("an empty endpoint names no collector");
+
+    assert!(matches!(
+        refused.current_context(),
+        AppError::ParseTraceCollectorEndpoint
+    ));
 }
 
 #[test]

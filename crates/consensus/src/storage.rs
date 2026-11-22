@@ -96,19 +96,21 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_volume_logs";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_logs";
 const KEYSPACE_META: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_volume_meta";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_volume_state";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_volume_snapshots";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 
 /// The budget one storage operation is charged against. Storage writes votes and metadata as
 /// management work, log entries and normalized state as commands, and snapshot sections as bulk
-/// transfers; it never holds relay or credential memory.
+/// transfers; it never holds relay or credential memory. A read of stored log entries is commands
+/// work too: the database hands each stored entry out whole, even to a read that needs only the
+/// entry's key, its length or its log id, so the read holds the whole entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageCharge {
     Management,
@@ -231,7 +233,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 47,
+    ClusterState = 48,
 }
 
 #[derive(Debug)]
@@ -1652,6 +1654,12 @@ impl FjallStore {
         self.inner.replace_state_machine(&manifest).await
     }
 
+    /// Whether this node already holds Raft state: a vote or a log entry.
+    ///
+    /// The check reads the log only on a node without a vote. Raft saves a vote before it appends
+    /// any entry but the single-node membership entry that initialization appends first, so such
+    /// a node holds at most that one small entry and the check stays within the management working
+    /// set.
     pub(super) async fn has_raft_state(&self) -> io::Result<bool> {
         self.inner
             .run(StorageCharge::Management, |inner, _| {
@@ -1693,6 +1701,10 @@ impl FjallStore {
     /// The scan walks back from the snapshot index and stops as soon as either bound is reached,
     /// so it reads no more than the retention policy keeps. `None` means the covered log is
     /// already inside both bounds.
+    ///
+    /// Each entry the scan passes is read whole, so the scan is charged as Commands work, like
+    /// every other read of stored log entries. The retention task that asks for it holds no
+    /// Commands turn, so the scan never waits behind a turn its caller holds.
     pub(super) async fn covered_retention_boundary(
         &self,
         snapshot_index: u64,
@@ -1700,7 +1712,7 @@ impl FjallStore {
         bytes_retained: u64,
     ) -> io::Result<Option<u64>> {
         self.inner
-            .run(StorageCharge::Management, move |inner, _| {
+            .run(StorageCharge::Commands, move |inner, _| {
                 let bounds = StoreInner::log_bounds(..=snapshot_index);
                 let mut kept_entries = 0_u64;
                 let mut kept_bytes = 0_u64;
@@ -2005,9 +2017,15 @@ impl RaftLogReader<TypeConfig> for FjallLogReader {
 
 impl RaftLogStorage<TypeConfig> for FjallStore {
     type LogReader = FjallLogReader;
+    /// Where this node's log ends and what it has purged.
+    ///
+    /// The last log id comes from the last stored entry, which the read holds whole and decodes,
+    /// so the read is charged as Commands work, like every other read of stored log entries. Raft
+    /// asks for it only while it starts, between its other storage operations and never while it
+    /// holds a log chunk, so the read never waits behind a turn its caller holds.
     async fn get_log_state(&mut self) -> io::Result<LogState<TypeConfig>> {
         self.inner
-            .run(StorageCharge::Management, |inner, _| {
+            .run(StorageCharge::Commands, |inner, _| {
                 let last_purged_log_id = inner.read_optional_log_id(KEY_LAST_PURGED)?;
                 let last_log_id = match inner.logs.iter().next_back() {
                     Some(item) => {

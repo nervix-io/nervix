@@ -8434,7 +8434,7 @@ dependencies = [
  "num-rational",
  "nvml-wrapper",
  "opentelemetry",
- "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "ordered-float 4.6.0",
  "ort",
@@ -9321,22 +9321,6 @@ dependencies = [
  "pin-project-lite",
  "thiserror 2.0.21",
  "tracing",
-]
-
-[[package]]
-name = "opentelemetry-otlp"
-version = "0.31.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1f69cd6acbb9af919df949cd1ec9e5e7fdc2ef15d234b6b795aaa525cc02f71f"
-dependencies = [
- "http",
- "opentelemetry",
- "opentelemetry-proto",
- "opentelemetry_sdk",
- "prost 0.14.6",
- "thiserror 2.0.21",
- "tokio",
- "tonic 0.14.9",
 ]
 
 [[package]]
