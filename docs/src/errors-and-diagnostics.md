@@ -777,8 +777,9 @@ is committed. The browser keeps the draft editable so the program can be correct
 under the same name.
 
 An endpoint that decodes a payload but cannot dispatch or flush its ingest group uses the same
-rendered report chain in its runtime event and log. A temporary unfolding admission refusal logs
-its report chain while preserving the endpoint's retryable refusal outcome.
+rendered report chain in its runtime event and log. An unfolding admission refusal, which only a
+stopping node or an unfolding larger than its whole memory class leaves, logs its report chain
+while preserving the endpoint's refusal outcome.
 
 In endpoint `MODE ACK`, the public HTTP or WebSocket reply exposes exactly the shared client
 submission outcome's class and cause labels. A codec or local route refusal is HTTP 400 with

@@ -3552,9 +3552,10 @@ A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it al
 WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
 still follow their protocol. Under `RESPOND AFTER RESUME`, an unacknowledged HTTP request waits
 until resume, it disconnects, or the intake ends. A request still waiting when the domain stops
-receives HTTP 503 and its body is discarded. If extension workers cannot unfold a fresh HTTP body,
-HTTP answers 503; a fresh WebSocket frame waits for a place, its connection reading nothing further
-meanwhile, and buffered payloads retain their place until workers can take them. See
+receives HTTP 503 and its body is discarded. A fresh HTTP body the extension workers cannot unfold
+yet waits for a place for as long as its request lasts, a fresh WebSocket frame waits for a place,
+its connection reading nothing further meanwhile, and buffered payloads retain their place until
+workers can take them. See
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full) and
 [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 

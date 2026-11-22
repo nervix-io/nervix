@@ -3831,8 +3831,10 @@ Broker read results and scheduled polls are observed once through the host's typ
 `IngestorReadOutcome`. The host counts returned raw payloads and bytes before decoding and only
 times paced polls; internal buffer replay is not another transport read. Neither observation
 changes delivery, cancellation, acknowledgement, error reporting or retry policy. An
-extension-worker unfolding refusal is counted only for an endpoint request whose sender is answered
-that the node is busy; an ingestor's payload waits for admission instead, which is not a refusal. The request path records each endpoint request or frame
+extension-worker unfolding refusal is counted only for an endpoint request the node could not
+unfold at all, because it is stopping or the unfolding needs a charge larger than its whole memory
+class; every other payload, endpoint bodies included, waits for a place, which is not a refusal.
+The request path records each endpoint request or frame
 once for every ingestor bound to its route, through retained children of that ingestor's unit,
 from the typed outcome that ingestor reached. A route that refuses a request before reading it
 records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.
@@ -3961,8 +3963,9 @@ the address's failure and the parser's error, both at the ingestor's start and i
 emitter's configuration diagnostic.
 
 The endpoint ingestor also reports the full ingest-group dispatch or flush chain in its runtime event
-and log. A refusal to admit unfolding remains retryable and its diagnostic retains the executor
-cause without treating the payload as decoded or rejected.
+and log. A refusal to admit unfolding, which only a stopping node or an unfolding larger than its
+whole memory class leaves, keeps the executor cause in its diagnostic without treating the payload
+as decoded or rejected.
 
 Paced ingestor resume and poll status, ingestor suspend and close events, and cadence failures render
 the full report supplied by their owner. Kafka partition-watch failures similarly name the ingestor
