@@ -34,8 +34,10 @@ use crate::runtime_schema::RuntimeValue;
 
 mod columns;
 mod session;
+mod session_options;
 mod stateful;
 pub(super) use session::{InferenceRun, InferenceSession, MessageRefusal, PreparedInference};
+pub(crate) use session_options::OnnxSessionOptions;
 pub(super) use stateful::{CarriedState, NativeGeneration};
 
 /// Every way ONNX inference fails, from loading a model to reshaping one tensor axis. A model's

@@ -900,27 +900,12 @@ impl SessionServiceImpl {
                 node: processor_name.clone(),
             }
         })?;
-        let builder = Session::builder(environment).change_context_lazy(|| {
-            InferencerBindingValidationError::SessionBuilder {
+        // Reading metadata executes no inference. The inspection's session takes the options
+        // every session carries, so its optimization also stays on the admitted bulk worker.
+        let mut builder = crate::runtime::OnnxSessionOptions::builder(environment)
+            .change_context_lazy(|| InferencerBindingValidationError::SessionBuilder {
                 node: processor_name.clone(),
-            }
-        })?;
-        // Reading metadata executes no inference. Keep optimization on the admitted bulk
-        // worker too: ONNX's defaults create a physical-core-sized pool for every inspection.
-        let builder = builder.with_intra_threads(1).map_err(|source| {
-            Report::<ort::Error>::new(source.into()).change_context(
-                InferencerBindingValidationError::SessionBuilder {
-                    node: processor_name.clone(),
-                },
-            )
-        })?;
-        let mut builder = builder.with_inter_threads(1).map_err(|source| {
-            Report::<ort::Error>::new(source.into()).change_context(
-                InferencerBindingValidationError::SessionBuilder {
-                    node: processor_name.clone(),
-                },
-            )
-        })?;
+            })?;
         tracing::debug!(
             node = %processor_name,
             model_file = %processor_file,
