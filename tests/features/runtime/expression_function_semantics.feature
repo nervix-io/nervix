@@ -221,7 +221,7 @@ Feature: Expression function semantics
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO note_errors
             SET source_id = input.id,
-                error_code = error.code,
+                error_code = error.class,
                 error_message = error.message;
       CREATE SUBSCRIPTION matched_notes_subscription TO matched_notes;
       CREATE SUBSCRIPTION note_errors_subscription TO note_errors;

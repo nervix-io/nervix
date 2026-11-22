@@ -45,7 +45,7 @@ Feature: Practical string search and normalization
           FLUSH IMMEDIATE
           ON MESSAGE ERROR SEND TO search_errors
             SET source_id = input.id,
-                error_code = error.code,
+                error_code = error.class,
                 error_message = error.message;
       CREATE SUBSCRIPTION searched_texts_subscription TO searched_texts;
       CREATE SUBSCRIPTION search_errors_subscription TO search_errors;

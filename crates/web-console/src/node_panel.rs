@@ -211,6 +211,7 @@ mod tests {
             level: NoticeLevel::Info,
             kind,
             message: message.to_string(),
+            error: None,
         }
     }
 

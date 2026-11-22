@@ -68,6 +68,7 @@ async fn serve_one(listener: TcpListener, limits: SessionLimits) {
         level: NoticeLevel::Info,
         kind: NoticeKind::Leadership,
         message: "connected to leader 'node-1'".to_string(),
+        error: None,
     }
     .encode(&limits)
     .assured("a notice fits");

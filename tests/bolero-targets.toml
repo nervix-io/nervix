@@ -1242,6 +1242,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/runtime_error_event_properties__bolero_runtime_error_events_round_trip/corpus"
+domain_version = 1
+features = []
+id = "runtime-error-event-wire"
+invariant = "A runtime error event keeps its complete value through the control envelope's production wire codec: its text, and the class and producing node of the error it reports for every class and every node kind, and the absence of an error on an event that reports none."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-interconnect"
+random_iterations = 128
+source = "crates/interconnect/src/runtime_error_event_properties.rs"
+test = "runtime_error_event_properties::bolero_runtime_error_events_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/backup__wire_properties__bolero_restore_installation_requests_round_trip/corpus"
 domain_version = 6
 features = []
@@ -1903,10 +1918,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
-domain_version = 23
+domain_version = 24
 features = ["grpc"]
 id = "client-events"
-invariant = "Every unsolicited event preserves complete values, including all five checked opening bounds through fixed frames, gRPC metadata and pre-admission offer refusals; borrowed graph views retain exact bytes after their original frame is dropped."
+invariant = "Every unsolicited event preserves complete values, including every notice's typed error class and node, all five checked opening bounds through fixed frames, gRPC metadata and pre-admission offer refusals; borrowed graph views retain exact bytes after their original frame is dropped."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-client-wire"

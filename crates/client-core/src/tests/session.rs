@@ -910,6 +910,7 @@ async fn a_closed_session_recovers_through_a_configured_seed() {
                 level: NoticeLevel::Warning,
                 kind: NoticeKind::Runtime,
                 message: "relay 'orders' is behind".to_string(),
+                error: None,
             }
             .encode(&limits())
             .assured("a notice fits a frame"),
@@ -2099,6 +2100,7 @@ async fn a_reply_larger_than_a_frame_arrives_in_parts() {
                         level: NoticeLevel::Info,
                         kind: NoticeKind::Leadership,
                         message: "raft transition: state=Leader".to_string(),
+                        error: None,
                     }
                     .encode(&limits())
                     .assured("a notice fits a frame"),

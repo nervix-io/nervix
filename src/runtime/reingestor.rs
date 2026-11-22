@@ -2391,7 +2391,7 @@ mod tests {
             .expect("the runtime keeps publishing its events");
         let expected = "reingestor 'tenant_partition' internal error in domain 'default': relay \
                         'tenant_orders' has no branched entrypoint on this node";
-        assert_eq!(message, expected);
+        assert_eq!(message.message, expected);
         assert_eq!(
             timeout(Duration::from_secs(10), completion.wait())
                 .await

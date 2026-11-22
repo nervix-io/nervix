@@ -34,8 +34,8 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, MessageErrorCode, MessageErrorOperation,
-    StructuredMessageError, Timestamp,
+    ClientConfigEntry, ConnectorKind, MessageErrorOperation, RaisedMessageError,
+    RejectedErrorClass, Timestamp,
 };
 use nervix_primitives::time::Instant;
 use reqwest::{
@@ -315,16 +315,20 @@ impl RecordEmitter for SentryEventEmitter {
         &mut self,
         payload: Vec<u8>,
         occurred_at: Timestamp,
-    ) -> Result<Vec<u8>, StructuredMessageError> {
+    ) -> Result<Vec<u8>, RaisedMessageError<RejectedErrorClass>> {
+        // An event Sentry's envelope contract can never carry (an event JSON it cannot read, an id
+        // or timestamp it does not accept, an event over its size limit) is refused for good before
+        // it is sent, as Sentry would refuse it.
         Self::encode_envelope(&payload, occurred_at, &self.platform).map_err(|error| {
-            StructuredMessageError {
+            RaisedMessageError {
                 reference: uuid::Uuid::now_v7(),
-                code: MessageErrorCode::External,
+                class: RejectedErrorClass::Refused,
                 message: format!("{error:#}"),
                 operation: MessageErrorOperation::Publish,
                 operation_index: None,
                 fields: Default::default(),
                 occurred_at,
+                external_code: None,
             }
         })
     }

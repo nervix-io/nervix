@@ -1042,13 +1042,20 @@ message-error model; this section defines the route behavior and available expre
 ```plexus,ignore
 ON MESSAGE ERROR SEND TO processing_errors
 SET error_reference = error.reference,
-    error_code = error.code,
+    error_class = error.class,
+    failed_node = error.node,
+    failed_node_kind = error.node_kind,
+    outside_code = error.external_code,
     operation = error.operation,
     source_id = input.id,
     attempted_total = partial_output.total
 ```
 
-`error` is structured; `partial_output` is an all-optional view of the failed route output. Eligible
+`error` is structured: `error.class` is one of the ten [error
+classes](./errors-and-diagnostics.md#the-message-error-record), `error.node` and `error.node_kind`
+name the node whose route failed, and `error.external_code`, when an outside system refused the
+row with a code of its own such as a PostgreSQL SQLSTATE, holds that code and is null otherwise.
+`partial_output` is an all-optional view of the failed route output. Eligible
 handlers may also read the original `input` (or correlator `left` and `right`) and the exact
 `relay_state` snapshot. Error routes preserve the branch in which the failed operation executed and
 never construct a new key. Error-route assignments run through the same typed expression VM as

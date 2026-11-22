@@ -87,7 +87,36 @@ pub(super) fn check(bytes: &[u8]) -> BTreeSet<wire::ServerBody> {
                 ServerNotice {
                     level,
                     kind,
-                    message: values.arbitrary.string()
+                    message: values.arbitrary.string(),
+                    error: None,
+                }
+            );
+            let kinds = crate::common::ALL_MODEL_KINDS;
+            let node_kind =
+                kinds[values
+                    .arbitrary
+                    .entropy()
+                    .index(meticulous::OptionExt::assured(
+                        std::num::NonZeroUsize::new(kinds.len()),
+                        "the wire declares model kinds",
+                    ))];
+            let error = nervix_models::ReportedError {
+                class: values
+                    .arbitrary
+                    .entropy()
+                    .pick(nervix_models::MessageErrorClass::ALL),
+                node: nervix_models::NodeRef::new(
+                    node_kind,
+                    values.arbitrary.name::<nervix_models::ModelName>(),
+                ),
+            };
+            event!(
+                Notice,
+                ServerNotice {
+                    level,
+                    kind,
+                    message: values.arbitrary.string(),
+                    error: Some(error),
                 }
             );
         }

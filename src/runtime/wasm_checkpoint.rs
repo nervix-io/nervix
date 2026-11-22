@@ -78,6 +78,7 @@ impl WasmCallbackReporting<'_> {
         self,
         ack_map: &mut WasmAckMap,
         holds: &mut WasmCheckpointHolds,
+        class: MessageErrorClass,
         error: &Report<C>,
     ) {
         let held = std::mem::take(ack_map);
@@ -86,10 +87,10 @@ impl WasmCallbackReporting<'_> {
         }
         self.runtime.handle_general_error_for_acks(
             self.domain,
-            self.node_kind,
-            self.processor,
+            &NodeRef::new(self.node_kind, self.processor),
             self.error_policies,
             held.values().map(|context| &context.acks),
+            class,
             error,
         );
     }
@@ -112,7 +113,14 @@ impl WasmCallbackReporting<'_> {
             .verified("a guest callback only runs on a branch that holds an instance")
             .module;
         let reported = module.guest_failure(failure, None);
-        self.fail_held_inputs(ack_map, holds, &reported);
+        // A guest that exhausted MAX FUEL or MAX MEMORY ran into a declared limit; any other
+        // failed callback, a trap among them, is the guest breaking its contract.
+        let class = if resource_limit_exceeded {
+            MessageErrorClass::LIMIT
+        } else {
+            MessageErrorClass::INTERNAL
+        };
+        self.fail_held_inputs(ack_map, holds, class, &reported);
         if resource_limit_exceeded {
             *instance = None;
         }
