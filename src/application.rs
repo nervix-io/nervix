@@ -54,7 +54,7 @@ pub use cli::DiagnosticArgs;
 pub use cli::{
     Args, CapacityArgs, Command, ConsensusArgs, ExecutionArgs, MembershipArgs, MemoryPressureArgs,
     NODE_TAGS_OPTION, NodeArgs, ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride,
-    SettingsArgs, ShutdownArgs, TracingArgs, TransactionArgs,
+    SettingsArgs, ShutdownArgs, TransactionArgs,
 };
 pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
 #[cfg(test)]
@@ -2925,7 +2925,7 @@ impl Application {
 pub use error::AppError;
 pub use termination_signals::TerminationSignals;
 pub use tracing_setup::{
-    TraceSampleRatio, TraceSampleRatioError, TracingGuard, init_tracing, init_tracing_to_file,
+    NodeTraceExport, TraceCollector, TracingGuard, init_tracing, init_tracing_to_file,
 };
 pub use transaction::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
 

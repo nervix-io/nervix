@@ -56,7 +56,6 @@ pub use self::{
     scheduling::SchedulingArgs,
     settings::{SettingOverride, SettingsArgs},
     shutdown::ShutdownArgs,
-    trace_export::TracingArgs,
     transactions::TransactionArgs,
 };
 
@@ -70,8 +69,6 @@ pub struct Args {
     /// Every setting, one group per area.
     #[command(flatten)]
     pub settings: SettingsArgs,
-    #[command(flatten)]
-    pub tracing: TracingArgs,
     #[cfg(feature = "deloxide")]
     #[command(flatten)]
     pub diagnostics: DiagnosticArgs,

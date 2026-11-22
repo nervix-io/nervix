@@ -18,9 +18,7 @@ use std::{fmt, time::Duration};
 
 use clap::ValueEnum;
 use error_stack::{Report, ResultExt as _};
-use nervix_models::{SettingDefinition as _, parse_duration_text};
-
-use super::tracing_setup::TraceSampleRatio;
+use nervix_models::{SampleRatio, SettingDefinition as _, TraceSampleRatio, parse_duration_text};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lower")]
@@ -195,10 +193,11 @@ impl std::str::FromStr for HumanBytes {
 /// Reads a trace sample ratio, refusing one its setting's definition does not accept.
 pub(in crate::application) fn parse_trace_sample_ratio(
     input: &str,
-) -> Result<f64, RefusedCliValue> {
+) -> Result<SampleRatio, RefusedCliValue> {
     let ratio = input
         .parse::<f64>()
         .change_context(CliValueError::TraceSampleRatio)?;
+    let ratio = SampleRatio::new(ratio);
     TraceSampleRatio::validate(&ratio, &()).change_context(CliValueError::TraceSampleRatio)?;
     Ok(ratio)
 }

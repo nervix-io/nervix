@@ -155,8 +155,12 @@ impl ServerProcessLaunch {
 pub(crate) enum ServerProcessOption {
     /// The files and authority the node's resolver loads.
     Dns(DnsConfiguration),
-    /// Enable the node's own exporter with a distinct service identity for each process.
-    TraceExport { endpoint: String, service: String },
+    /// Provision the node's own trace export: the collector endpoint, which alone turns export
+    /// on, and a distinct service identity for each process.
+    TraceExport {
+        endpoint: TraceCollectorEndpoint,
+        service: String,
+    },
     /// `--drain-timeout`.
     DrainTimeout(Duration),
     /// The first bootstrap's `--domain-drain-timeout` seed.
@@ -180,6 +184,15 @@ pub(crate) enum ServerProcessOption {
     /// `--grpc-mode https`, with the session listener on the port a plaintext one would use. The
     /// explicitly provisioned development certificate is trusted by the suite's clients.
     GrpcTls,
+}
+
+/// Where a process reads its trace collector endpoint from.
+#[derive(Clone, Debug)]
+pub(crate) enum TraceCollectorEndpoint {
+    /// `--otel-otlp-endpoint`.
+    Option(String),
+    /// `NERVIX_OTEL_OTLP_ENDPOINT`, the option's environment twin.
+    EnvironmentTwin(String),
 }
 
 impl ServerProcessOption {
@@ -209,10 +222,15 @@ impl ServerProcessOption {
                 }
             }
             Self::TraceExport { endpoint, service } => {
+                match endpoint {
+                    TraceCollectorEndpoint::Option(endpoint) => {
+                        command.arg("--otel-otlp-endpoint").arg(endpoint);
+                    }
+                    TraceCollectorEndpoint::EnvironmentTwin(endpoint) => {
+                        command.env("NERVIX_OTEL_OTLP_ENDPOINT", endpoint);
+                    }
+                }
                 command
-                    .arg("--otel-enabled")
-                    .arg("--otel-otlp-endpoint")
-                    .arg(endpoint)
                     .arg("--otel-service-name")
                     .arg(format!("{service}-{node_id}"));
             }
