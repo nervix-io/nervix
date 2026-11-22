@@ -225,16 +225,6 @@ impl TraceExportCapabilities {
             .assured("the batch is at most the queue, which fits the portable channel capacity")
     }
 
-    pub fn values(&self) -> TraceExportCapabilityValues {
-        TraceExportCapabilityValues {
-            sample_ratio: Some(self.sample_ratio()),
-            export_timeout: Some(self.export_timeout()),
-            export_interval: Some(self.export_interval()),
-            queue_capacity: Some(self.queue_capacity()),
-            export_batch_spans: Some(self.export_batch_spans()),
-        }
-    }
-
     pub fn described(&self) -> Vec<(&'static str, String)> {
         vec![
             (TraceSampleRatio::NAME, self.sample_ratio().to_string()),
@@ -413,5 +403,34 @@ mod tests {
         let restored = rkyv::from_bytes::<TraceExportCapabilities, rkyv::rancor::Error>(&archived)
             .assured("a valid archive restores");
         assert_eq!(restored, capabilities);
+    }
+
+    #[test]
+    fn an_archive_whose_batch_exceeds_its_queue_is_refused() {
+        let wide_queue = Setting::<TraceQueueCapacity>::new(
+            NonZeroU64::new(64).assured("a literal positive count"),
+            &(),
+        )
+        .assured("64 spans fit the queue's bound");
+        let defaults = TraceExportCapabilities::default();
+        let stored = TraceExportCapabilities {
+            queue_capacity: Setting::new(
+                NonZeroU64::new(16).assured("a literal positive count"),
+                &(),
+            )
+            .assured("16 spans fit the queue's bound"),
+            export_batch_spans: Setting::new(
+                NonZeroU64::new(32).assured("a literal positive count"),
+                &wide_queue,
+            )
+            .assured("32 spans fit a 64-span queue"),
+            ..defaults
+        };
+        let archived =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&stored).assured("capabilities archive");
+        assert!(
+            rkyv::from_bytes::<TraceExportCapabilities, rkyv::rancor::Error>(&archived).is_err(),
+            "a 32-span batch over a 16-span queue must not restore"
+        );
     }
 }

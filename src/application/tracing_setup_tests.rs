@@ -17,7 +17,7 @@ use nervix_primitives::{
     time::{Instant, timeout},
 };
 use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
-use opentelemetry_sdk::trace::SpanExporter as _;
+use opentelemetry_sdk::{error::OTelSdkError, trace::SpanExporter as _};
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt as _;
 use tower_service::Service as _;
@@ -209,6 +209,28 @@ async fn https_trace_export_requires_configured_tonic_tls() {
             .assured("the exporting task completes")
             .is_err()
     );
+}
+
+#[nervix_primitives::test]
+async fn a_shut_down_exporter_refuses_further_exports_and_a_second_shutdown() {
+    let mut trace = TraceExporter::new(http::Uri::from_static(ENDPOINT), TEST_WAIT);
+    assert_eq!(
+        format!("{:?}", trace.exporter),
+        "NodeSpanExporter { shut_down: false, .. }"
+    );
+    assert!(trace.exporter.shutdown().is_ok());
+    assert_eq!(
+        format!("{:?}", trace.exporter),
+        "NodeSpanExporter { shut_down: true, .. }"
+    );
+    assert!(matches!(
+        trace.exporter.export(Vec::new()).await,
+        Err(OTelSdkError::AlreadyShutdown)
+    ));
+    assert!(matches!(
+        trace.exporter.shutdown(),
+        Err(OTelSdkError::AlreadyShutdown)
+    ));
 }
 
 #[test]
