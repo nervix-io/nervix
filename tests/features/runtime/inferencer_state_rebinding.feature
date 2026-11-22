@@ -27,7 +27,7 @@ Feature: Stateful inference resource and declaration identity
         TO features INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2]
           INITIAL [1 AS F32, 10 AS F32] }
@@ -214,7 +214,7 @@ Feature: Stateful inference resource and declaration identity
       DELETE SUBSCRIPTION scores_restarted;
       DROP INFERENCER running;
       CREATE INFERENCER running FROM features
-        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/running_sum.onnx' WORKING MEMORY RELEASED
         INPUTS { 'features' <tensor_type>[2] = input.vector }
         STATE { 'state_in' FROM 'state_out' <tensor_type>[2]
           INITIAL [10 AS F32, 100 AS F32] }

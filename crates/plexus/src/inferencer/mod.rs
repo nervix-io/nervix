@@ -18,7 +18,7 @@ use nervix_models::{
     CreateInferencer, CreateStatement, InferencerStateBinding, InferencerStateInitial,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
-    RequestedResourceVersion,
+    InferencerWorkingMemory, RequestedResourceVersion,
 };
 
 use crate::{
@@ -132,6 +132,16 @@ fn state_bindings<'src>()
     )
 }
 
+/// `WORKING MEMORY RELEASED` or `WORKING MEMORY RETAINED`, which every inferencer states right
+/// after its `FILE`; the language gives it no default.
+fn working_memory<'src>()
+-> impl Parser<'src, &'src [Token], InferencerWorkingMemory, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Working, Identifier::Memory).ignore_then(choice((
+        kw(Identifier::Released).to(InferencerWorkingMemory::Released),
+        kw(Identifier::Retained).to(InferencerWorkingMemory::Retained),
+    )))
+}
+
 fn output_declaration<'src>()
 -> impl Parser<'src, &'src [Token], InferencerTensorDeclaration, extra::Err<ParseError<'src>>> + Clone
 {
@@ -177,6 +187,7 @@ pub fn create_inferencer_parser<'src>() -> impl Parser<
             .then(resource_version_clause())
             .then_ignore(kw(Identifier::File))
             .then(string_lit())
+            .then(working_memory())
             .boxed()
             .then(input_mappings())
             .then(state_bindings().or_not())
@@ -190,7 +201,16 @@ pub fn create_inferencer_parser<'src>() -> impl Parser<
                     (
                         (
                             (
-                                (((((base, resource), resource_version), file), inputs), state),
+                                (
+                                    (
+                                        (
+                                            (((base, resource), resource_version), file),
+                                            working_memory,
+                                        ),
+                                        inputs,
+                                    ),
+                                    state,
+                                ),
                                 output_schema,
                             ),
                             branched_by,
@@ -210,6 +230,7 @@ pub fn create_inferencer_parser<'src>() -> impl Parser<
                         resource,
                         resource_version,
                         file,
+                        working_memory,
                         inputs,
                         state: state.unwrap_or_default(),
                         output_schema,
@@ -268,9 +289,10 @@ mod tests {
     fn input_acknowledgement_clause() {
         crate::conformance_support::assert_input_acknowledgement_clause(
             "CREATE INFERENCER tested FROM incoming",
-            "USING RESOURCE model VERSION 1 FILE 'model.onnx' INPUTS { 'features' DENSE \
-             TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] } \
-             UNBRANCHED TO outgoing SET value = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG",
+            "USING RESOURCE model VERSION 1 FILE 'model.onnx' WORKING MEMORY RELEASED INPUTS { \
+             'features' DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { 'score' DENSE \
+             TENSOR<F32>[1] } UNBRANCHED TO outgoing SET value = score FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG",
         );
         crate::conformance_support::assert_offers_exactly(
             "CREATE INFERENCER tested FROM incoming DETACHED ",
@@ -278,13 +300,107 @@ mod tests {
         );
     }
 
+    /// One inferencer statement with `clause` in the place `WORKING MEMORY` takes, after `FILE`.
+    fn working_memory_statement(clause: &str) -> String {
+        format!(
+            "CREATE INFERENCER scoring FROM events USING RESOURCE model VERSION 1 FILE \
+             'model.onnx' {clause} INPUTS {{ 'features' DENSE TENSOR<F32>[2] = input.features }} \
+             OUTPUT SCHEMA {{ 'score' DENSE TENSOR<F32>[1] }} UNBRANCHED TO scores SET score = \
+             score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"
+        )
+    }
+
+    #[test]
+    fn each_working_memory_policy_parses_renders_after_file_and_reparses() {
+        for (clause, expected) in [
+            ("WORKING MEMORY RELEASED", InferencerWorkingMemory::Released),
+            ("WORKING MEMORY RETAINED", InferencerWorkingMemory::Retained),
+            ("working memory released", InferencerWorkingMemory::Released),
+            ("Working Memory Retained", InferencerWorkingMemory::Retained),
+        ] {
+            let parsed = parse_create_inferencer(&working_memory_statement(clause))
+                .expect("a stated working memory policy parses");
+            assert_eq!(parsed.working_memory, expected, "{clause}");
+            let canonical = nervix_models::Model::Inferencer(parsed.body.clone())
+                .to_canonical_plexus()
+                .expect("the current inferencer renders");
+            let file = canonical
+                .find("FILE 'model.onnx'")
+                .expect("the canonical declaration names its file");
+            let policy = canonical
+                .find(&format!("WORKING MEMORY {}", expected.as_ref()))
+                .expect("the canonical declaration states its working memory");
+            let inputs = canonical
+                .find("INPUTS")
+                .expect("the canonical declaration maps its inputs");
+            assert!(file < policy && policy < inputs, "{canonical}");
+            assert_eq!(
+                parse_create_inferencer(&canonical).expect("the canonical declaration reparses"),
+                parsed
+            );
+        }
+    }
+
+    #[test]
+    fn an_inferencer_without_its_working_memory_policy_is_refused_naming_the_clause() {
+        let refusal = parse_create_inferencer(&working_memory_statement(""))
+            .expect_err("the working memory policy has no default");
+        let rendered = format!("{refusal:?}");
+        assert!(
+            rendered.contains("WORKING MEMORY"),
+            "the refusal must name the clause it expected: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_working_memory_clause_without_one_of_its_two_policies_or_out_of_place_is_refused() {
+        for clause in [
+            "WORKING MEMORY",
+            "WORKING MEMORY KEPT",
+            "WORKING MEMORY RELEASED RETAINED",
+            "MEMORY RELEASED",
+            "WORKING RELEASED",
+        ] {
+            assert!(
+                parse_create_inferencer(&working_memory_statement(clause)).is_err(),
+                "{clause}"
+            );
+        }
+        let after_inputs = "CREATE INFERENCER scoring FROM events USING RESOURCE model VERSION 1 \
+                            FILE 'model.onnx' INPUTS { 'features' DENSE TENSOR<F32>[2] = \
+                            input.features } WORKING MEMORY RELEASED OUTPUT SCHEMA { 'score' \
+                            DENSE TENSOR<F32>[1] } UNBRANCHED TO scores SET score = score FLUSH \
+                            IMMEDIATE ON MESSAGE ERROR LOG;";
+        assert!(parse_create_inferencer(after_inputs).is_err());
+    }
+
+    #[test]
+    fn completion_offers_the_working_memory_clause_after_file_and_then_its_two_policies() {
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE INFERENCER scoring FROM events USING RESOURCE model VERSION 1 FILE \
+             'model.onnx' ",
+            &["WORKING MEMORY"],
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE INFERENCER scoring FROM events USING RESOURCE model VERSION 1 FILE \
+             'model.onnx' WORKING MEMORY ",
+            &["RELEASED", "RETAINED"],
+        );
+        crate::conformance_support::assert_offers_exactly(
+            "CREATE INFERENCER scoring FROM events USING RESOURCE model VERSION 1 FILE \
+             'model.onnx' WORKING MEMORY RETAINED ",
+            &["INPUTS"],
+        );
+    }
+
     #[test]
     fn parses_stateful_inferencer_with_an_initial_tensor() {
         let input = "CREATE INFERENCER running FROM events USING RESOURCE model VERSION 1 FILE \
-                     'running_sum.onnx' INPUTS { 'features' DENSE TENSOR<F32>[2] = input.features \
-                     } STATE { 'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] INITIAL ZEROS } \
-                     OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] } UNBRANCHED TO scores SET \
-                     score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;";
+                     'running_sum.onnx' WORKING MEMORY RELEASED INPUTS { 'features' DENSE \
+                     TENSOR<F32>[2] = input.features } STATE { 'state_in' FROM 'state_out' DENSE \
+                     TENSOR<F32>[2] INITIAL ZEROS } OUTPUT SCHEMA { 'score' DENSE TENSOR<F32>[1] \
+                     } UNBRANCHED TO scores SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR \
+                     LOG;";
         let parsed = parse_create_inferencer(input);
         assert!(parsed.is_ok(), "a state declaration must parse: {parsed:?}");
     }
@@ -294,10 +410,11 @@ mod tests {
         for initial in ["[1 AS F32, 2 AS F32]", "(zeros)", "zeros()", "zeros + 1"] {
             let text = format!(
                 "CREATE INFERENCER running FROM events USING RESOURCE model VERSION 1 FILE \
-                 'running_sum.onnx' INPUTS {{ 'features' DENSE TENSOR<F32>[2] = input.features }} \
-                 STATE {{ 'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] INITIAL {initial} }} \
-                 OUTPUT SCHEMA {{ 'score' DENSE TENSOR<F32>[1] }} UNBRANCHED TO scores SET score \
-                 = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"
+                 'running_sum.onnx' WORKING MEMORY RELEASED INPUTS {{ 'features' DENSE \
+                 TENSOR<F32>[2] = input.features }} STATE {{ 'state_in' FROM 'state_out' DENSE \
+                 TENSOR<F32>[2] INITIAL {initial} }} OUTPUT SCHEMA {{ 'score' DENSE \
+                 TENSOR<F32>[1] }} UNBRANCHED TO scores SET score = score FLUSH IMMEDIATE ON \
+                 MESSAGE ERROR LOG;"
             );
             let parsed = parse_create_inferencer(&text)
                 .expect("a constant expression parses independently of INITIAL ZEROS");
@@ -318,8 +435,8 @@ mod tests {
     #[test]
     fn stateful_inferencer_completion_offers_state_after_inputs() {
         let input = "CREATE INFERENCER running FROM events USING RESOURCE model VERSION 1 FILE \
-                     'running_sum.onnx' INPUTS { 'features' DENSE TENSOR<F32>[2] = input.features \
-                     } ";
+                     'running_sum.onnx' WORKING MEMORY RELEASED INPUTS { 'features' DENSE \
+                     TENSOR<F32>[2] = input.features } ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(
             suggestions.contains(&"STATE".to_string()),
@@ -331,8 +448,9 @@ mod tests {
     #[test]
     fn stateful_inferencer_completion_keeps_the_state_entry_context() {
         let prefix = "CREATE INFERENCER running FROM events USING RESOURCE model VERSION 1 FILE \
-                      'running_sum.onnx' INPUTS { 'features' DENSE TENSOR<F32>[2] = \
-                      input.features } STATE { 'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] ";
+                      'running_sum.onnx' WORKING MEMORY RELEASED INPUTS { 'features' DENSE \
+                      TENSOR<F32>[2] = input.features } STATE { 'state_in' FROM 'state_out' DENSE \
+                      TENSOR<F32>[2] ";
         let suggestions = suggest_create_inferencer(prefix, prefix.len());
         assert!(
             suggestions.contains(&"INITIAL ZEROS".to_string()),
@@ -360,9 +478,10 @@ mod tests {
         ] {
             let input = format!(
                 "CREATE INFERENCER running FROM events USING RESOURCE model VERSION 1 FILE \
-                 'running_sum.onnx' INPUTS {{ 'features' DENSE TENSOR<F32>[2] = input.features }} \
-                 {state} OUTPUT SCHEMA {{ 'score' DENSE TENSOR<F32>[1] }} UNBRANCHED TO scores \
-                 SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"
+                 'running_sum.onnx' WORKING MEMORY RELEASED INPUTS {{ 'features' DENSE \
+                 TENSOR<F32>[2] = input.features }} {state} OUTPUT SCHEMA {{ 'score' DENSE \
+                 TENSOR<F32>[1] }} UNBRANCHED TO scores SET score = score FLUSH IMMEDIATE ON \
+                 MESSAGE ERROR LOG;"
             );
             assert!(parse_create_inferencer(&input).is_err(), "{input}");
         }
@@ -382,7 +501,7 @@ mod tests {
             CREATE INFERENCER score_model
             FROM features DETACHED FILTER WHERE input.present
             USING RESOURCE fraud_model VERSION 3
-            FILE 'models/fraud.onnx'
+            FILE 'models/fraud.onnx' WORKING MEMORY RELEASED
             INPUTS { "features" DENSE TENSOR<F32>[BATCH, 2] = input.vector }
             OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[BATCH, 1] }
             BRANCHED BY tenant
@@ -446,9 +565,9 @@ mod tests {
     #[test]
     fn parses_inferencer_bound_to_the_latest_resource_version() {
         let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION LATEST FILE 'm.onnx' \
-                     INPUTS { \"x\" DENSE TENSOR<F32>[1] = input.x } OUTPUT SCHEMA { \"y\" DENSE \
-                     TENSOR<F32>[1] } UNBRANCHED TO b SET y = y FLUSH IMMEDIATE ON MESSAGE ERROR \
-                     LOG;";
+                     WORKING MEMORY RELEASED INPUTS { \"x\" DENSE TENSOR<F32>[1] = input.x } \
+                     OUTPUT SCHEMA { \"y\" DENSE TENSOR<F32>[1] } UNBRANCHED TO b SET y = y FLUSH \
+                     IMMEDIATE ON MESSAGE ERROR LOG;";
 
         let parsed = parse_create_inferencer(input).expect("parse should work");
 
@@ -457,10 +576,10 @@ mod tests {
 
     #[test]
     fn a_tensor_input_reads_a_field_named_like_a_keyword() {
-        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' INPUTS { \
-                     \"x\" DENSE TENSOR<F32>[1] = output, \"z\" DENSE TENSOR<F32>[1] = `in` } \
-                     OUTPUT SCHEMA { \"y\" DENSE TENSOR<F32>[1] } UNBRANCHED TO b SET y = y FLUSH \
-                     IMMEDIATE ON MESSAGE ERROR LOG;";
+        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING \
+                     MEMORY RELEASED INPUTS { \"x\" DENSE TENSOR<F32>[1] = output, \"z\" DENSE \
+                     TENSOR<F32>[1] = `in` } OUTPUT SCHEMA { \"y\" DENSE TENSOR<F32>[1] } \
+                     UNBRANCHED TO b SET y = y FLUSH IMMEDIATE ON MESSAGE ERROR LOG;";
 
         let parsed = parse_create_inferencer(input).expect("parse should work");
 
@@ -477,9 +596,10 @@ mod tests {
 
     #[test]
     fn requires_a_resource_version() {
-        let input = "CREATE INFERENCER p FROM a USING RESOURCE r FILE 'm.onnx' INPUTS { \"x\" \
-                     DENSE TENSOR<F32>[1] = input.x } OUTPUT SCHEMA { \"y\" DENSE TENSOR<F32>[1] \
-                     } UNBRANCHED TO b SET y = y FLUSH IMMEDIATE ON MESSAGE ERROR LOG;";
+        let input = "CREATE INFERENCER p FROM a USING RESOURCE r FILE 'm.onnx' WORKING MEMORY \
+                     RELEASED INPUTS { \"x\" DENSE TENSOR<F32>[1] = input.x } OUTPUT SCHEMA { \
+                     \"y\" DENSE TENSOR<F32>[1] } UNBRANCHED TO b SET y = y FLUSH IMMEDIATE ON \
+                     MESSAGE ERROR LOG;";
 
         assert!(parse_create_inferencer(input).is_err());
     }
@@ -504,7 +624,7 @@ mod tests {
     #[test]
     fn parses_scalar_fixed_dynamic_and_non_leading_batch_tensor_dimensions() {
         let input = r#"
-            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx'
+            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING MEMORY RELEASED
             INPUTS {
                 "scalar" DENSE TENSOR<F32>[] = input.scalar,
                 "image" DENSE TENSOR<F32>[3, 224, 224] = input.image,
@@ -542,7 +662,7 @@ mod tests {
     #[test]
     fn rejects_zero_sized_tensor_dimension() {
         let input = r#"
-            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx'
+            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING MEMORY RELEASED
             INPUTS { "x" DENSE TENSOR<F32>[0] = input.x }
             OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
             UNBRANCHED TO b SET y = y FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -553,13 +673,13 @@ mod tests {
     #[test]
     fn rejects_unsupported_tensor_representation_and_element_type() {
         let sparse = r#"
-            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx'
+            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING MEMORY RELEASED
             INPUTS { "x" SPARSE TENSOR<F32>[1] = input.x }
             OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
             UNBRANCHED TO b SET y = y FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
         "#;
         let f64 = r#"
-            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx'
+            CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING MEMORY RELEASED
             INPUTS { "x" DENSE TENSOR<F64>[1] = input.x }
             OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] }
             UNBRANCHED TO b SET y = y FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -571,7 +691,7 @@ mod tests {
     #[test]
     fn rejects_binding_without_complete_tensor_schema() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r VERSION 1 FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b FLUSH IMMEDIATE ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING MEMORY RELEASED
             INPUTS { "x" = a.x }
             OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
@@ -581,7 +701,7 @@ mod tests {
     #[test]
     fn rejects_inferencer_without_flush_policy() {
         let input = r#"
-            CREATE INFERENCER p FROM a TO b ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r VERSION 1 FILE 'm.onnx'
+            CREATE INFERENCER p FROM a TO b ON MESSAGE ERROR LOG UNBRANCHED USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING MEMORY RELEASED
             INPUTS { "x" DENSE TENSOR<F32>[1] = a.x }
             OUTPUT SCHEMA { "y" DENSE TENSOR<F32>[1] };
         "#;
@@ -590,7 +710,8 @@ mod tests {
 
     #[test]
     fn suggests_inputs_after_filter_map_without_schema_leakage() {
-        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' ";
+        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING \
+                     MEMORY RELEASED ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"INPUTS".to_string()));
         assert!(!suggestions.contains(&"JSON".to_string()));
@@ -599,7 +720,8 @@ mod tests {
 
     #[test]
     fn suggests_braced_tensor_mapping_without_branch_value_leakage() {
-        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' INPUTS ";
+        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING \
+                     MEMORY RELEASED INPUTS ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"{".to_string()));
         assert!(!suggestions.contains(&"VALUES".to_string()));
@@ -608,8 +730,8 @@ mod tests {
 
     #[test]
     fn suggests_dense_tensor_schema_without_output_keyword_leakage() {
-        let input =
-            "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' INPUTS { \"x\" ";
+        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING \
+                     MEMORY RELEASED INPUTS { \"x\" ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"DENSE".to_string()));
         assert!(!suggestions.contains(&"OUTPUT SCHEMA".to_string()));
@@ -618,8 +740,8 @@ mod tests {
 
     #[test]
     fn suggests_composed_output_schema_without_flush_leakage() {
-        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' INPUTS { \
-                     \"x\" DENSE TENSOR<F32>[1] = input.x } ";
+        let input = "CREATE INFERENCER p FROM a USING RESOURCE r VERSION 1 FILE 'm.onnx' WORKING \
+                     MEMORY RELEASED INPUTS { \"x\" DENSE TENSOR<F32>[1] = input.x } ";
         let suggestions = suggest_create_inferencer(input, input.len());
         assert!(suggestions.contains(&"OUTPUT SCHEMA".to_string()));
         assert!(!suggestions.contains(&"OUTPUT_SCHEMA".to_string()));

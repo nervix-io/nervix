@@ -126,7 +126,7 @@ Feature: Input acknowledgement mode is a Plexus body clause
       CREATE RELAY scored SCHEMA scored UNBRANCHED;
       CREATE INFERENCER scoring FROM features COLLECT FOR 10ms MAX BATCH SIZE 1MiB
         DETACHED USING RESOURCE model VERSION 1
-        FILE 'models/simple_score.onnx'
+        FILE 'models/simple_score.onnx' WORKING MEMORY RELEASED
         INPUTS {'features' <tensor_type>[2] = input.vector}
         OUTPUT SCHEMA {'score' <tensor_type>[1]}
         UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;

@@ -876,8 +876,13 @@ Catalog pages derive their entry and variable-key byte allowance from the replic
 they preserve ordered cursor progress without materializing the entire catalog. Task teardown
 receives one fifteenth of the domain drain budget, two seconds at the default. Internal drain,
 freeze and replication rechecks derive from their owning deadline or replication cadence, with a
-one-nanosecond floor. ONNX sessions use one intra-operation and one inter-operation thread because
-the Extension executor already owns the parallel admission of model runs. State admission spins
+one-nanosecond floor. Every ONNX session, a branch's and a binding inspection's alike, uses one
+intra-operation and one inter-operation thread because the executor already owns the parallel
+admission of model runs, and ONNX Runtime's full graph optimization level, the library's own
+default, declared so that an upgrade cannot change it. Whether a session keeps a memory arena and
+memory patterns is not a node setting: each inferencer states it in Plexus with `WORKING MEMORY`
+(see [Working memory](processors.md#working-memory)), and a binding inspection, which never runs
+the model, keeps neither. State admission spins
 only with parallel Data workers; its bounded spin is followed by the selected thread yield.
 
 Framing, packed identity bits, sequential single-slot handoffs, accounting granules and persisted
