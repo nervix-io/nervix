@@ -511,10 +511,15 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[&body[..]],
     )
     .await;
-    let received =
-        ReceivedProcessorPage::decode(&executor, &stream, descriptor_room(&executor, &stream), &read(10), &expected_sections())
-            .await
-            .assured("the page agrees with its descriptor and the read");
+    let received = ReceivedProcessorPage::decode(
+        &executor,
+        &stream,
+        descriptor_room(&executor, &stream),
+        &read(10),
+        &expected_sections(),
+    )
+    .await
+    .assured("the page agrees with its descriptor and the read");
     let Ok(page) = received else {
         panic!("an owner that returned rows did not refuse the read");
     };
@@ -544,9 +549,15 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         &[],
     )
     .await;
-    let received = ReceivedProcessorPage::decode(&executor, &counted, descriptor_room(&executor, &counted), &read(0), &[])
-        .await
-        .assured("a page that returns no row agrees with a count-only read");
+    let received = ReceivedProcessorPage::decode(
+        &executor,
+        &counted,
+        descriptor_room(&executor, &counted),
+        &read(0),
+        &[],
+    )
+    .await
+    .assured("a page that returns no row agrees with a count-only read");
     let Ok(page) = received else {
         panic!("an owner that counted its rows did not refuse the read");
     };
@@ -561,10 +572,15 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
 
     // An owner's typed refusal arrives as that refusal, and carries no body.
     let refused = sent_page(&executor, Err(StateInspectionRejection::NotReady), &[]).await;
-    let received =
-        ReceivedProcessorPage::decode(&executor, &refused, descriptor_room(&executor, &refused), &read(10), &expected_sections())
-            .await
-            .assured("a refusal is a complete reply");
+    let received = ReceivedProcessorPage::decode(
+        &executor,
+        &refused,
+        descriptor_room(&executor, &refused),
+        &read(10),
+        &expected_sections(),
+    )
+    .await
+    .assured("a refusal is a complete reply");
     assert!(
         matches!(received, Err(StateInspectionRejection::NotReady)),
         "the coordinator reports the owner's refusal as the owner typed it"
@@ -576,7 +592,14 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     )
     .await;
     let error = refusal(
-        ReceivedProcessorPage::decode(&executor, &trailing, descriptor_room(&executor, &trailing), &read(10), &expected_sections()).await,
+        ReceivedProcessorPage::decode(
+            &executor,
+            &trailing,
+            descriptor_room(&executor, &trailing),
+            &read(10),
+            &expected_sections(),
+        )
+        .await,
     );
     assert!(matches!(
         error.current_context(),
@@ -603,8 +626,14 @@ async fn a_body_whose_columns_or_types_disagree_with_its_declared_fields_is_refu
         )
         .await;
         let error = refusal(
-            ReceivedProcessorPage::decode(&executor, &stream, descriptor_room(&executor, &stream), &read(10), &expected_sections())
-                .await,
+            ReceivedProcessorPage::decode(
+                &executor,
+                &stream,
+                descriptor_room(&executor, &stream),
+                &read(10),
+                &expected_sections(),
+            )
+            .await,
         );
         assert!(
             matches!(error.current_context(), StatePageExchangeError::Columns),
@@ -753,8 +782,16 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
     ));
 
     for (case, stream, request) in cases {
-        let error =
-            refusal(ReceivedProcessorPage::decode(&executor, &stream, descriptor_room(&executor, &stream), &request, &expected).await);
+        let error = refusal(
+            ReceivedProcessorPage::decode(
+                &executor,
+                &stream,
+                descriptor_room(&executor, &stream),
+                &request,
+                &expected,
+            )
+            .await,
+        );
         assert!(
             matches!(error.current_context(), StatePageExchangeError::Framing),
             "{case} is a framing violation, found {error:?}"

@@ -1883,9 +1883,7 @@ async fn a_grant_the_relay_budget_has_no_room_for_waits_and_is_granted_once_room
 
     let sender = transport_a.clone();
     let sending = nervix_primitives::task::spawn(async move {
-        sender
-            .send(&node_b, Envelope::RelayPayload(payload))
-            .await
+        sender.send(&node_b, Envelope::RelayPayload(payload)).await
     });
     nervix_primitives::time::sleep(Duration::from_millis(300)).await;
     assert!(

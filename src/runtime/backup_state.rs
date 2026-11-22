@@ -654,9 +654,9 @@ impl Runtime {
             .change_context(BackupStateCaptureError::Storage)
     }
 
-    /// [`Self::capture_backup_state_with`], charging the node's executor directly.
+    /// [`Self::capture_backup_state`], charging the node's executor directly.
     #[cfg(test)]
-    pub(crate) fn capture_backup_state(
+    pub(crate) fn capture_backup_state_on_node(
         &self,
         domain: &DomainName,
         quiesced: bool,
@@ -664,7 +664,7 @@ impl Runtime {
         primaries: &ahash::HashSet<NodeUnitRef>,
         cancellation: &Cancellation,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
-        self.capture_backup_state_with(
+        self.capture_backup_state(
             self.executor(),
             BackupCut {
                 domain,
@@ -685,7 +685,7 @@ impl Runtime {
     /// Everything the cut holds is charged through `executor`, which draws from the capture's
     /// allowances: a share without room for the cut fails with the share it needs, and the
     /// capture is made again within it.
-    pub(crate) fn capture_backup_state_with(
+    pub(crate) fn capture_backup_state(
         &self,
         executor: &Executor,
         cut: BackupCut<'_>,
@@ -976,7 +976,11 @@ impl Runtime {
             let held = ReplicatedMaterializedRelayState::read(state.value())
                 .backup_capture_bytes()
                 .unwrap_or(u64::MAX);
-            bytes = bytes.saturating_add(held.max(1));
+            bytes = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a first share beyond u64 bytes is capped at the class below",
+                bytes.saturating_add(held.max(1))
+            );
         }
         bytes.min(self.executor().memory(MemoryClass::Bulk).capacity_bytes)
     }
@@ -1408,7 +1412,7 @@ mod tests {
         let capturing = runtime.clone();
         let domain = domain.clone();
         in_storage_job(runtime, move |cancellation| {
-            capturing.capture_backup_state(
+            capturing.capture_backup_state_on_node(
                 &domain,
                 true,
                 DomainStatus::Stopped,
@@ -1752,7 +1756,7 @@ mod tests {
             let domain = domain.clone();
             let scheduled = scheduled.clone();
             in_storage_job(&runtime, move |cancellation| {
-                capturing.capture_backup_state(
+                capturing.capture_backup_state_on_node(
                     &domain,
                     true,
                     DomainStatus::Running,

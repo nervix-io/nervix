@@ -2322,7 +2322,10 @@ mod tests {
         let outcome = nervix_primitives::time::timeout(Duration::from_secs(30), handling)
             .await
             .assured("the request is decoded once its class has room");
-        assert!(outcome.is_err(), "the test's handler answers with its own error");
+        assert!(
+            outcome.is_err(),
+            "the test's handler answers with its own error"
+        );
         assert!(
             reached.load(Ordering::Acquire),
             "the request reaches its handler once its class has room"

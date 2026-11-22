@@ -490,7 +490,7 @@ impl SessionServiceImpl {
                         let declarations = RestoredBranchDeclarations::of(scheduled, &reference)
                             .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
                         let artifact = Arc::new(
-                            super::materialized::prepare_materialized_checkpoint(
+                            super::materialized::convert_materialized_checkpoint(
                                 &self.inner.runtime,
                                 archive,
                                 descriptor,
@@ -807,7 +807,7 @@ impl SessionServiceImpl {
                 nervix_primitives::task::consume_budget().await;
                 // The unit's own archived rows come first, so a key archived twice keeps them.
                 archived.sort_by_key(|source| source.descriptor.unit != *unit);
-                let artifact = super::materialized::prepare_regrouped_materialized_checkpoint(
+                let artifact = super::materialized::regroup_materialized_checkpoint(
                     &self.inner.runtime,
                     regrouped.archive,
                     &archived,

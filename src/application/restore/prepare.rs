@@ -615,7 +615,7 @@ impl SessionServiceImpl {
                         .change_context_lazy(refusal)?;
                     // Validate the same bounded conversion used by installation before admission.
                     // Its temporary file drops here; no checkpoint namespace is published.
-                    super::materialized::prepare_materialized_checkpoint(
+                    super::materialized::convert_materialized_checkpoint(
                         &self.inner.runtime,
                         archive,
                         descriptor,
@@ -668,7 +668,7 @@ impl SessionServiceImpl {
             for unit in node.units.keys() {
                 nervix_primitives::task::consume_budget().await;
                 archived.sort_by_key(|source| source.descriptor.unit != *unit);
-                super::materialized::prepare_regrouped_materialized_checkpoint(
+                super::materialized::regroup_materialized_checkpoint(
                     &self.inner.runtime,
                     archive,
                     &archived,

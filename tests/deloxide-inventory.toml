@@ -4483,6 +4483,17 @@ workloads = [
 ]
 
 [[owner]]
+path = "src/application/backup/interconnect.rs"
+workloads = [
+  "scenario.wasm-kafka-restore",
+  "scenario.backup-cut-diagnostics",
+  "scenario.guest-save-backup",
+  "stress.wasm-kafka-restore",
+  "stress.backup-cut-diagnostics",
+  "stress.guest-save-backup",
+]
+
+[[owner]]
 path = "src/application/backup/retained.rs"
 workloads = [
   "scenario.wasm-kafka-restore",

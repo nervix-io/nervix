@@ -547,8 +547,7 @@ impl ExecutionConfig {
                 ExecutionConfigError::UnaddressableCommandStorage,
             ));
         };
-        let (commands_operation, commands_required) = if follower_required >= replication_required
-        {
+        let (commands_operation, commands_required) = if follower_required >= replication_required {
             (
                 "resident replication batches beside one command state storage working set",
                 follower_required,

@@ -185,7 +185,10 @@ pub(super) async fn send_response(
     body: Option<ChargedBytes>,
     progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
-    let length = body.as_ref().map_or(0, ChargedBytes::len);
+    let length = match &body {
+        Some(body) => body.len(),
+        None => 0,
+    };
     let response = Response::builder()
         .status(status)
         .version(Version::HTTP_2)

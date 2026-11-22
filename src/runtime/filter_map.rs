@@ -399,7 +399,7 @@ pub(super) async fn plan_filter_map_messages(
     let result = match acks
         .as_slice()
         .keep_alive_while_pending(execute_program_with_selection_in_context(
-            &run.executor,
+            run.executor,
             &program.compiled,
             &vm_batch,
             &VmExecutionContext {
@@ -827,7 +827,7 @@ pub(super) async fn execute_prepared_filter_map(
     let result = match acks
         .as_slice()
         .keep_alive_while_pending(execute_program_with_selection_in_context(
-            &run.executor,
+            run.executor,
             &program.compiled,
             &vm_batch,
             &VmExecutionContext {
@@ -1033,7 +1033,7 @@ pub(super) async fn evaluate_output_branch_program(
     )
     .change_context(PlannedGeneralError::PrepareInput { operation })?;
     let result = execute_program_with_selection_in_context(
-        &run.executor,
+        run.executor,
         &program.program.compiled,
         &vm_input,
         &VmExecutionContext {

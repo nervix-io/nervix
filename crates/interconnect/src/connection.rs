@@ -107,9 +107,9 @@ pub(crate) mod stream_slots;
 mod targets;
 
 use body::{
-    ReceivedBody, declared_length, exchange_reset, read_body, read_body_into,
-    read_body_to_decode, read_error_response, send_body, send_decode_refusal, send_response,
-    send_static_error, until_reset,
+    ReceivedBody, declared_length, exchange_reset, read_body, read_body_into, read_body_to_decode,
+    read_error_response, send_body, send_decode_refusal, send_response, send_static_error,
+    until_reset,
 };
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
@@ -2576,8 +2576,10 @@ impl TransportState {
                 .await?;
                 return Ok(());
             }
-            let declared =
-                declared_length(request.headers(), peer.class.control_body_limit(&self.executor))?;
+            let declared = declared_length(
+                request.headers(),
+                peer.class.control_body_limit(&self.executor),
+            )?;
             // An ack carries the outcome of a delivery the peer already resolved, so a full class
             // holds it back rather than losing that outcome, until the peer gives up on it.
             let reading = read_body_to_decode(
@@ -2706,8 +2708,10 @@ impl TransportState {
         request: Request<RecvStream>,
         mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        let declared =
-            declared_length(request.headers(), peer.class.control_body_limit(&self.executor))?;
+        let declared = declared_length(
+            request.headers(),
+            peer.class.control_body_limit(&self.executor),
+        )?;
         let reading = read_body_to_decode(
             &self.executor,
             peer.class.memory_class(),

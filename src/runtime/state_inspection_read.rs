@@ -171,15 +171,95 @@ impl Runtime {
             .run_cpu(
                 CpuClass::Bulk,
                 executor.charge_nothing(MemoryClass::Bulk),
-                move |_charge, cancellation| {
-                    capture_live_generation(
-                        &captured_routing,
-                        &captured_relay,
-                        captured_schema,
-                        unit,
-                        GrowingCharge::new(memory),
-                        cancellation,
-                    )
+                move |_charge,
+                      cancellation|
+                      -> Result<LiveCapture, Report<StatePageReadError>> {
+                    // The first step of a page: the unit's live generation, with its row views
+                    // counted in `memory`.
+                    let routing = &captured_routing;
+                    let relay = &captured_relay;
+                    let schema = captured_schema;
+                    let mut memory = GrowingCharge::new(memory);
+                    let reads = routing
+                        .materialized_stream_reads
+                        .get(relay)
+                        .ok_or_else(|| Report::new(StatePageReadError::NotReady))?;
+                    let mut records = Vec::new();
+                    let mut views = 0_u64;
+                    #[cfg_attr(
+                        nervix_lint,
+                        expect(
+                            nervix::branch_inversion,
+                            reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+                        )
+                    )]
+                    let mut sources = Vec::new();
+                    let mut source_views = 0_u64;
+                    reads.visit_unit_states(unit, |branch, state| {
+                        cancellation
+                            .check()
+                            .change_context(StatePageReadError::Admission)?;
+                        let captured = state
+                            .capture_for_inspection(&mut memory)
+                            .change_context(StatePageReadError::Admission)?;
+                        let generation = &captured.generation;
+                        let grown = reserve_views(&mut records, generation.records().len(), &mut memory)?;
+                        views = views
+                            .checked_add(grown)
+                            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+                        records.extend_from_slice(generation.records());
+                        let grown = reserve_views(&mut sources, 1, &mut memory)?;
+                        source_views = source_views
+                            .checked_add(grown)
+                            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+                        sources.push((
+                            branch.map(|branch| branch.fingerprint()),
+                            state.inspection_instance(),
+                            generation.revision(),
+                            generation.fence(),
+                            generation.branch_generation(),
+                        ));
+                        // The captured generation's row views go with it, and so does what they were counted.
+                        let counted = captured.counted;
+                        drop(captured);
+                        memory.release(counted);
+                        Ok::<_, Report<StatePageReadError>>(())
+                    })?;
+                    if sources.is_empty() {
+                        return Ok(LiveCapture { live: None, memory });
+                    }
+                    records.sort_unstable_by(|a, b| super::BranchKey::canonical_order(&a.branch, &b.branch));
+                    sources.sort_unstable();
+                    let mut digest = nervix_crypto::digest::Sha256::new();
+                    digest.update(b"nervix/state-inspection/unit-generations");
+                    let mut revision = 0;
+                    let mut fence = 0;
+                    let mut generation = 0;
+                    for (branch, instance, rev, source_fence, membership) in sources {
+                        match branch {
+                            Some(branch) => {
+                                digest.update(&[1]);
+                                digest.update(branch.fingerprint());
+                            }
+                            None => digest.update(&[0]),
+                        }
+                        digest.update(&instance.to_be_bytes());
+                        digest.update(&rev.to_be_bytes());
+                        digest.update(&source_fence.to_be_bytes());
+                        digest.update(&membership.to_be_bytes());
+                        revision = revision.max(rev);
+                        fence = fence.max(source_fence);
+                        generation = generation.max(membership);
+                    }
+                    memory.release(source_views);
+                    Ok(LiveCapture {
+                        live: Some(LiveGeneration {
+                            generation: MaterializedGeneration::new(revision, fence, generation, schema, records),
+                            sources: digest.finish(),
+                            views,
+                        }),
+                        memory,
+                    })
                 },
             )
             .await
@@ -272,95 +352,86 @@ impl Runtime {
     }
 }
 
-/// The first step of a page: the unit's live generation, with its row views counted in `memory`.
-fn capture_live_generation(
-    routing: &super::DomainRoutingSnapshot,
-    relay: &RelayName,
-    schema: StdArc<arrow_schema::Schema>,
-    unit: Unit,
-    mut memory: GrowingCharge,
-    cancellation: &nervix_execution::Cancellation,
-) -> Result<LiveCapture, Report<StatePageReadError>> {
-    let reads = routing
-        .materialized_stream_reads
-        .get(relay)
-        .ok_or_else(|| Report::new(StatePageReadError::NotReady))?;
-    let mut records = Vec::new();
-    let mut views = 0_u64;
-    #[cfg_attr(
-        nervix_lint,
-        expect(
-            nervix::branch_inversion,
-            reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
-        )
-    )]
-    let mut sources = Vec::new();
-    let mut source_views = 0_u64;
-    reads.visit_unit_states(unit, |branch, state| {
-        cancellation
-            .check()
-            .change_context(StatePageReadError::Admission)?;
-        let captured = state
-            .capture_for_inspection(&mut memory)
-            .change_context(StatePageReadError::Admission)?;
-        let generation = &captured.generation;
-        let grown = reserve_views(&mut records, generation.records().len(), &mut memory)?;
-        views = views
-            .checked_add(grown)
+/// Charge `memory` for a page's key catalog, when it is requested, and for the metadata of the most
+/// rows the page selects from `records`, and return that most.
+fn charge_page_metadata(
+    memory: &mut GrowingCharge,
+    records: usize,
+    catalog_requested: bool,
+    max_rows: usize,
+    max_bytes: u64,
+) -> Result<usize, Report<StatePageReadError>> {
+    if catalog_requested {
+        let bytes = records
+            .checked_mul(
+                64 * (std::mem::size_of::<BranchKeyFingerprint>()
+                    + std::mem::size_of::<Option<nervix_models::InheritedPartitionOrigin>>()),
+            )
             .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-        records.extend_from_slice(generation.records());
-        let grown = reserve_views(&mut sources, 1, &mut memory)?;
-        source_views = source_views
-            .checked_add(grown)
-            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-        sources.push((
-            branch.map(|branch| branch.fingerprint()),
-            state.inspection_instance(),
-            generation.revision(),
-            generation.fence(),
-            generation.branch_generation(),
-        ));
-        // The captured generation's row views go with it, and so does what they were counted.
-        let counted = captured.counted;
-        drop(captured);
-        memory.release(counted);
-        Ok::<_, Report<StatePageReadError>>(())
-    })?;
-    if sources.is_empty() {
-        return Ok(LiveCapture { live: None, memory });
-    }
-    records.sort_unstable_by(|a, b| super::BranchKey::canonical_order(&a.branch, &b.branch));
-    sources.sort_unstable();
-    let mut digest = nervix_crypto::digest::Sha256::new();
-    digest.update(b"nervix/state-inspection/unit-generations");
-    let mut revision = 0;
-    let mut fence = 0;
-    let mut generation = 0;
-    for (branch, instance, rev, source_fence, membership) in sources {
-        match branch {
-            Some(branch) => {
-                digest.update(&[1]);
-                digest.update(branch.fingerprint());
-            }
-            None => digest.update(&[0]),
+        let bytes = u64::try_from(bytes).map_err(|_| Report::new(StatePageReadError::Admission))?;
+        if bytes > max_bytes {
+            return Err(Report::new(StatePageReadError::RowTooLarge));
         }
-        digest.update(&instance.to_be_bytes());
-        digest.update(&rev.to_be_bytes());
-        digest.update(&source_fence.to_be_bytes());
-        digest.update(&membership.to_be_bytes());
-        revision = revision.max(rev);
-        fence = fence.max(source_fence);
-        generation = generation.max(membership);
+        memory
+            .grow_by(bytes)
+            .change_context(StatePageReadError::Admission)?;
     }
-    memory.release(source_views);
-    Ok(LiveCapture {
-        live: Some(LiveGeneration {
-            generation: MaterializedGeneration::new(revision, fence, generation, schema, records),
-            sources: digest.finish(),
-            views,
-        }),
-        memory,
-    })
+    let capacity = max_rows.min(records);
+    let metadata_bytes = capacity
+        .checked_mul(
+            std::mem::size_of::<MaterializedGenerationRecord>()
+                + std::mem::size_of::<std::ops::Range<usize>>(),
+        )
+        .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+    let metadata_bytes =
+        u64::try_from(metadata_bytes).map_err(|_| Report::new(StatePageReadError::Admission))?;
+    memory
+        .grow_by(metadata_bytes)
+        .change_context(StatePageReadError::Admission)?;
+    Ok(capacity)
+}
+
+/// Whether a row of `branch` belongs to the page's branch `selection`.
+fn in_selection(
+    selection: StateInspectionBranchSelection,
+    branch: Option<BranchKeyFingerprint>,
+) -> bool {
+    match selection {
+        StateInspectionBranchSelection::All => true,
+        StateInspectionBranchSelection::Unbranched => branch.is_none(),
+        StateInspectionBranchSelection::Branch(wanted) => branch == Some(wanted),
+    }
+}
+
+/// Add one selected row's branch and ingestion watermarks to the page's metadata fingerprint.
+fn fingerprint_row(
+    fingerprint: &mut nervix_crypto::digest::Sha256,
+    branch: Option<BranchKeyFingerprint>,
+    record: &MaterializedGenerationRecord,
+) {
+    match branch {
+        Some(branch) => {
+            fingerprint.update(&[1]);
+            fingerprint.update(branch.fingerprint());
+        }
+        None => fingerprint.update(&[0]),
+    }
+    fingerprint.update(
+        &record
+            .row
+            .metadata()
+            .ingested_at_low_watermark()
+            .unix_nanos()
+            .to_be_bytes(),
+    );
+    fingerprint.update(
+        &record
+            .row
+            .metadata()
+            .ingested_at_high_watermark()
+            .unix_nanos()
+            .to_be_bytes(),
+    );
 }
 
 /// The last step of a page: select the page's rows from `source`, under its charge.
@@ -399,36 +470,13 @@ fn select_page(
     } else {
         nervix_models::StateInspectionKeyCatalog::Unrequested
     };
-    if catalog_requested {
-        let bytes = generation
-            .records()
-            .len()
-            .checked_mul(
-                64 * (std::mem::size_of::<BranchKeyFingerprint>()
-                    + std::mem::size_of::<Option<nervix_models::InheritedPartitionOrigin>>()),
-            )
-            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-        let bytes = u64::try_from(bytes).map_err(|_| Report::new(StatePageReadError::Admission))?;
-        if bytes > max_bytes {
-            return Err(Report::new(StatePageReadError::RowTooLarge));
-        }
-        memory
-            .grow_by(bytes)
-            .change_context(StatePageReadError::Admission)?;
-    }
-    let capacity = max_rows.min(generation.records().len());
-    let metadata_bytes = capacity
-        .checked_mul(
-            std::mem::size_of::<MaterializedGenerationRecord>()
-                + std::mem::size_of::<std::ops::Range<usize>>(),
-        )
-        .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-    memory
-        .grow_by(
-            u64::try_from(metadata_bytes)
-                .map_err(|_| Report::new(StatePageReadError::Admission))?,
-        )
-        .change_context(StatePageReadError::Admission)?;
+    let capacity = charge_page_metadata(
+        &mut memory,
+        generation.records().len(),
+        catalog_requested,
+        max_rows,
+        max_bytes,
+    )?;
     let mut fingerprint = nervix_crypto::digest::Sha256::new();
     fingerprint.update(b"nervix/state-inspection/materialized-metadata");
     fingerprint.update(&sources);
@@ -454,11 +502,7 @@ fn select_page(
             continue;
         }
         let branch = record.branch.as_ref().map(|branch| branch.fingerprint());
-        if !match selection {
-            StateInspectionBranchSelection::All => true,
-            StateInspectionBranchSelection::Unbranched => branch.is_none(),
-            StateInspectionBranchSelection::Branch(wanted) => branch == Some(wanted),
-        } {
+        if !in_selection(selection, branch) {
             continue;
         }
         if catalog_requested && let Some(key) = &record.branch {
@@ -470,29 +514,7 @@ fn select_page(
         {
             continue;
         }
-        match branch {
-            Some(branch) => {
-                fingerprint.update(&[1]);
-                fingerprint.update(branch.fingerprint());
-            }
-            None => fingerprint.update(&[0]),
-        }
-        fingerprint.update(
-            &record
-                .row
-                .metadata()
-                .ingested_at_low_watermark()
-                .unix_nanos()
-                .to_be_bytes(),
-        );
-        fingerprint.update(
-            &record
-                .row
-                .metadata()
-                .ingested_at_high_watermark()
-                .unix_nanos()
-                .to_be_bytes(),
-        );
+        fingerprint_row(&mut fingerprint, branch, record);
         let index = counts.rows;
         let bytes =
             batch_payload_bytes(&record.row.batch().batch().slice(record.row.row_index(), 1));

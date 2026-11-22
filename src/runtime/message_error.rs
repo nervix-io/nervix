@@ -1019,7 +1019,7 @@ impl Runtime {
         let result = message
             .acks
             .keep_alive_while_pending(execute_program_with_selection_in_context(
-                &run.executor,
+                run.executor,
                 &program.compiled,
                 &batch,
                 &VmExecutionContext {

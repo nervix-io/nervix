@@ -1151,7 +1151,9 @@ impl HubHost {
         assert_eq!(liveness.peer, *self.transport.node_id());
         for (index, result) in results.iter().enumerate() {
             if let Err(error) = result {
-                panic!("bulk request {index} of the burst is answered once a place frees: {error:?}");
+                panic!(
+                    "bulk request {index} of the burst is answered once a place frees: {error:?}"
+                );
             }
         }
         let bulk_before = before.executor.bulk_memory.reserved_bytes;
@@ -1163,10 +1165,8 @@ impl HubHost {
                 && observation.executor.bulk_memory.reserved_bytes == bulk_before
         })
         .await;
-        self.trace.record(
-            HUB,
-            format!("{burst_size} bulk requests answered; drained"),
-        );
+        self.trace
+            .record(HUB, format!("{burst_size} bulk requests answered; drained"));
     }
 
     /// The stalled peer opens resource streams and never reads them. HTTP/2 flow control stops

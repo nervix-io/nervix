@@ -359,7 +359,7 @@ impl SessionServiceImpl {
                 nervix_execution::StorageClass::Filesystem,
                 reservation,
                 move |_charge, cancellation| {
-                    runtime.capture_backup_state_with(
+                    runtime.capture_backup_state(
                         &cut_executor,
                         crate::runtime::BackupCut {
                             domain: &domain_owned,

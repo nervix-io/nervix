@@ -77,6 +77,12 @@ impl ArrowBodyError {
         failure.change_context(context)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the typed Arrow encoding failure conversion"
+        )
+    )]
     fn encoding(error: impl ToString) -> Report<Self> {
         Report::new(Self::Encode {
             reason: error.to_string(),
@@ -376,6 +382,10 @@ fn write_ipc_stream(
 /// One attempt of an admitted snapshot projection: project the rows under the projection's share
 /// of `charge`, then write the section under the rest. An attempt short of room asks for the
 /// projection's share and the section's need together, and leaves no projection behind.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the caller supplies the projection of the rows the section encodes")
+)]
 fn project_and_write<E: error_stack::Context>(
     project: &mut impl FnMut() -> error_stack::Result<RuntimeRecordBatch, E>,
     projection_bytes: u64,

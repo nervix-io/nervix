@@ -750,7 +750,7 @@ pub(super) mod tests {
                 nervix_execution::StorageClass::Filesystem,
                 charge,
                 move |_charge, cancellation| {
-                    runtime.capture_backup_state(
+                    runtime.capture_backup_state_on_node(
                         &placement.domain,
                         true,
                         nervix_models::DomainStatus::Stopped,

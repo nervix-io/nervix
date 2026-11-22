@@ -125,10 +125,11 @@ struct ActiveInput {
 impl ActiveInput {
     /// Everything the request holds of the class: its input and its body's copy.
     fn held(&self) -> u64 {
-        self.reservation
-            .bytes()
-            .checked_add(self.copied)
-            .unwrap_or(u64::MAX)
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "input beyond u64 bytes counts as the most, which no class can hold",
+            self.reservation.bytes().saturating_add(self.copied)
+        )
     }
 }
 
@@ -138,7 +139,11 @@ impl ActiveInput {
 /// The bytes the request received cannot be given back and read again, so it is refused instead.
 fn within_the_class(executor: &Executor, held: u64, more: u64) -> Result<(), Report<InputRefusal>> {
     let capacity = executor.memory(MemoryClass::Intake).capacity_bytes;
-    let requested = held.checked_add(more).unwrap_or(u64::MAX);
+    let requested = nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "a need beyond u64 bytes counts as the most, which no class can hold",
+        held.saturating_add(more)
+    );
     if requested <= capacity {
         return Ok(());
     }
@@ -419,12 +424,10 @@ impl InputGuard {
 
     /// The input the request holds beside its body's copy: its read scratch and allocations.
     fn input_bytes(&self) -> u64 {
-        self.accounting
-            .ledger
-            .lock()
-            .active
-            .as_ref()
-            .map_or(0, |active| active.reservation.bytes())
+        match self.accounting.ledger.lock().active.as_ref() {
+            Some(active) => active.reservation.bytes(),
+            None => 0,
+        }
     }
 
     /// Record the charge of the body's copy, which the request holds beside its input, so a read

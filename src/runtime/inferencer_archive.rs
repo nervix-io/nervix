@@ -167,9 +167,20 @@ impl CapturedInferencer {
             .checked_add(buffers)
             .ok_or_else(|| Report::new(SnapshotStagingError::Admission))?;
         let retained = self.charge.take();
-        let held = retained.as_ref().map_or(0, Reservation::bytes);
+        let held = match &retained {
+            Some(retained) => retained.bytes(),
+            None => 0,
+        };
         let charge = executor
-            .reserve(MemoryClass::Bulk, working.saturating_sub(held).max(1))
+            .reserve(
+                MemoryClass::Bulk,
+                nervix_primitives::expect_lint!(
+                    nervix::clamped_arithmetic,
+                    "a retained charge that already covers the working set leaves nothing to add",
+                    working.saturating_sub(held)
+                )
+                .max(1),
+            )
             .await
             .change_context(SnapshotStagingError::Admission)?;
         Ok((charge, retained))

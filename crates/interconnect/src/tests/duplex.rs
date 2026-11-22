@@ -645,9 +645,7 @@ async fn an_answer_waits_for_a_place_on_its_responders_full_class_and_arrives_on
     eventually(
         &executor_b,
         "the answer waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
 
@@ -687,9 +685,7 @@ async fn an_initiators_reset_ends_an_answers_wait_for_a_place_on_its_responders_
     eventually(
         &executor_b,
         "the answer waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
 
@@ -802,9 +798,7 @@ async fn a_submitted_frame_waits_for_a_place_on_its_responders_full_class() {
     eventually(
         &executor_b,
         "the frame's decoding waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
 
@@ -846,9 +840,7 @@ async fn a_submitted_frame_waits_for_a_place_on_its_initiators_full_class() {
     eventually(
         &executor_a,
         "the frame's encoding waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
 

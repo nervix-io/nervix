@@ -823,6 +823,39 @@ per armed name until its injector ends. This observation does not supply protoco
 concurrency evidence; production-owner checks and public delivery assertions keep their own
 contracts.
 
+## Control Commands Beside Data Work
+
+A runtime owner serves two planes that want opposite things. Its control commands are light and
+rare, and someone waits for each answer: lifecycle steps, checkpoints, handoffs, resets,
+partition-move steps, inspections and stops. Its data work is heavy and backpressured: batches,
+branch builds, restores, encodes and decodes wait for a place on a worker class or for room in a
+memory class whenever the node is busy, as [Execution Primitives](./execution-primitives.md)
+requires.
+
+So no control command is answered from behind work that waits for executor capacity. A loop that
+answers commands never waits for a place or for room itself. Heavy work a command needs runs on the
+owner's data side, and the command is answered when that work completes, while the owner keeps
+answering its other commands. The loop never refuses heavy work to stay responsive either: the work
+still waits, and only the commands stop waiting behind it.
+
+New owners serve the two planes from separate tasks. A processor unit still serves both from one
+supervisor loop, which dispatches the unit's input to its branches and handles every
+`ProcessorNodeCommand`. A checkpoint, a handoff and a WASM reset's preparation drain that input
+before they are handled, which orders them within the data stream.
+
+Until the planes are separate there, each heavy step that loop starts runs as an attempt:
+
+- restoring the unit's branches;
+- installing a claimed key's branch;
+- rebuilding branches for a WASM reset;
+- building the branch of a key the unit has not seen.
+
+An attempt runs alone while it makes progress, so commands keep their order behind work that moves.
+While it waits for capacity, the loop keeps answering its commands beside it. What each command
+answers meanwhile is stated with its owner: [Restoring Processor
+Branches](./shutdown.md#restoring-processor-branches) for the restore and [Partition transitions and
+key claims](#partition-transitions-and-key-claims) for a claim.
+
 ## Mutable Execution State
 
 Per-row mutation is kept close to the lane that orders it. A global concurrent map is an index into

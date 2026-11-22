@@ -52,7 +52,10 @@ impl ClientConnection {
                 })?;
             request_url.set_path(path);
             // Every body declares its length, which its receiver charges before reading it.
-            let length = body.as_ref().map_or(0, ChargedBytes::len);
+            let length = match &body {
+                Some(body) => body.len(),
+                None => 0,
+            };
             let mut builder = Request::builder()
                 .method(Method::POST)
                 .version(Version::HTTP_2)
@@ -171,7 +174,10 @@ impl ClientConnection {
                 })?;
             request_url.set_path(path);
             // Every body declares its length, which its receiver charges before reading it.
-            let length = body.as_ref().map_or(0, ChargedBytes::len);
+            let length = match &body {
+                Some(body) => body.len(),
+                None => 0,
+            };
             let mut builder = Request::builder()
                 .method(Method::POST)
                 .version(Version::HTTP_2)

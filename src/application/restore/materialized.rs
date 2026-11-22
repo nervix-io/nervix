@@ -127,7 +127,7 @@ async fn stage_piece(
 
 /// The native sealed checkpoint of one archived materialized relay. Every record identity's branch
 /// key is admitted under `declarations`, the branching of the restored relay, before it is staged.
-pub(super) async fn prepare_materialized_checkpoint(
+pub(super) async fn convert_materialized_checkpoint(
     runtime: &Runtime,
     archive: &VerifiedArchive,
     descriptor: &MaterializedRelayDescriptor,
@@ -174,7 +174,7 @@ pub(super) async fn prepare_materialized_checkpoint(
     let declarations = &declarations;
     executor
         .within_allowance(MemoryClass::Bulk, share, |bulk| async move {
-            convert_materialized_groups(
+            prepare_materialized_checkpoint(
                 runtime,
                 &bulk,
                 archive,
@@ -192,7 +192,7 @@ pub(super) async fn prepare_materialized_checkpoint(
 /// One attempt to convert an archived materialized relay's groups into its native sealed
 /// checkpoint, charging bulk memory through `executor`, which draws from the conversion's share.
 /// Everything it holds ends with it.
-async fn convert_materialized_groups(
+async fn prepare_materialized_checkpoint(
     runtime: &Runtime,
     executor: &Executor,
     archive: &VerifiedArchive,
@@ -338,21 +338,36 @@ fn materialized_bulk_share<'a>(
     groups: impl IntoIterator<Item = (&'a DescribedSection, &'a DescribedSection)>,
     held: u64,
 ) -> u64 {
+    let identity_working = MATERIALIZED_IDENTITIES_BYTES
+        .checked_mul(4)
+        .verified("the fixed identity working size fits 64 bits");
     let mut largest = 0_u64;
     for (identities, columns) in groups {
-        let identities = identities
-            .length
-            .saturating_add(MATERIALIZED_IDENTITIES_BYTES.saturating_mul(4));
-        largest = largest
-            .max(identities)
-            .max(columns.length.saturating_mul(3));
+        let identities = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a first share beyond u64 bytes is capped at the class below",
+            identities.length.saturating_add(identity_working)
+        );
+        let columns = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a first share beyond u64 bytes is capped at the class below",
+            columns.length.saturating_mul(3)
+        );
+        largest = largest.max(identities).max(columns);
     }
     let chunk = u64::try_from(crate::runtime::RESTORE_STATE_CHUNK_BYTES)
         .verified("one bounded chunk fits 64 bits");
-    largest
-        .saturating_add(chunk)
-        .saturating_add(held)
-        .min(executor.memory(MemoryClass::Bulk).capacity_bytes)
+    let share = nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "a first share beyond u64 bytes is capped at the class below",
+        largest.saturating_add(chunk)
+    );
+    nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "a first share beyond u64 bytes is capped at the class below",
+        share.saturating_add(held)
+    )
+    .min(executor.memory(MemoryClass::Bulk).capacity_bytes)
 }
 
 /// Writes `pieces`, a checkpoint's header and sections in order, into one staged checkpoint file,
@@ -588,7 +603,7 @@ async fn inherited_row_owners(
 /// in `unit`. `archived` lists the archived unit that is `unit` first, so a key archived in two
 /// units keeps the row of its own unit, where its claim installed it. None when no archived row
 /// lands in `unit`. Every kept row's key is admitted under `declarations` before it is staged.
-pub(super) async fn prepare_regrouped_materialized_checkpoint(
+pub(super) async fn regroup_materialized_checkpoint(
     runtime: &Runtime,
     archive: &VerifiedArchive,
     archived: &[ArchivedMaterializedUnit<'_>],
@@ -605,7 +620,16 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
     let mut census = 0_u64;
     for source in archived {
         for group in source.groups {
-            census = census.saturating_add(group.identities.length.saturating_mul(4));
+            let group_census = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a census beyond u64 bytes asks for the largest share, which no budget grants",
+                group.identities.length.saturating_mul(4)
+            );
+            census = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a census beyond u64 bytes asks for the largest share, which no budget grants",
+                census.saturating_add(group_census)
+            );
         }
     }
     let share = materialized_bulk_share(
@@ -623,7 +647,7 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
     let declarations = &declarations;
     executor
         .within_allowance(MemoryClass::Bulk, share, |bulk| async move {
-            regroup_materialized_units(
+            prepare_regrouped_materialized_checkpoint(
                 runtime,
                 &bulk,
                 archive,
@@ -648,7 +672,7 @@ struct RegroupTarget<'a> {
 /// One attempt to regroup archived materialized units into the native sealed checkpoint of one
 /// restored unit, charging bulk memory through `executor`, which draws from the conversion's
 /// share. Everything it holds ends with it.
-async fn regroup_materialized_units(
+async fn prepare_regrouped_materialized_checkpoint(
     runtime: &Runtime,
     executor: &Executor,
     archive: &VerifiedArchive,

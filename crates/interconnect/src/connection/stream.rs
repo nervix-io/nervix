@@ -229,7 +229,8 @@ impl TransportState {
         request: Request<RecvStream>,
         mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        let declared = declared_length(request.headers(), class.control_body_limit(&self.executor))?;
+        let declared =
+            declared_length(request.headers(), class.control_body_limit(&self.executor))?;
         let reading = read_body_to_decode(
             &self.executor,
             class.memory_class(),

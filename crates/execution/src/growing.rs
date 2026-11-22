@@ -10,6 +10,7 @@
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
+use nervix_recovery::Discarded as _;
 
 use crate::{
     Cancellation, CpuClass, ExecutionFailure, Executor, MemoryClass, Reservation, Shortfall,
@@ -90,7 +91,10 @@ impl Executor {
                     shortfall.needed
                 }
             };
-            drop(outcome);
+            outcome.discarded(
+                "an attempt that ran short runs again within a larger share; its own outcome is \
+                 not the operation's answer",
+            );
             drop(watch);
             share = next_charge(share, needed, self.budget_capacity(class));
         }
@@ -161,7 +165,10 @@ impl Executor {
 /// held would meet the same shortfall again, so each attempt asks for more than the last; a need
 /// beyond the capacity is asked for as it is, and refused as larger than the budget.
 fn next_charge(current: u64, needed: u64, capacity: u64) -> u64 {
-    let doubled = current.saturating_mul(2).min(capacity);
+    let doubled = match current.checked_mul(2) {
+        Some(doubled) => doubled.min(capacity),
+        None => capacity,
+    };
     let more = current
         .checked_add(1)
         .assured("a granted charge fits the u32 class capacity, so one more byte fits u64");

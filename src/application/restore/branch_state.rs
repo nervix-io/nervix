@@ -273,10 +273,13 @@ fn conversion_bulk_share<'a>(
         largest = largest.max(section.length);
     }
     let encoding = VerifiedArchive::native_checkpoint_encoding_bytes(executor);
-    largest
-        .saturating_mul(3)
-        .max(encoding)
-        .min(executor.memory(MemoryClass::Bulk).capacity_bytes)
+    nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "a first share beyond u64 bytes is capped at the class below",
+        largest.saturating_mul(3)
+    )
+    .max(encoding)
+    .min(executor.memory(MemoryClass::Bulk).capacity_bytes)
 }
 
 /// The native keyspace checkpoint of one archived deduplicator branch, every key normalized as the

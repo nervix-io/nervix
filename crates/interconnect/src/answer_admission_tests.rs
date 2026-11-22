@@ -238,18 +238,14 @@ impl OccupiedWorkers {
         let class = self.class;
         let (joined, has_joined) = nervix_primitives::sync::oneshot::channel();
         self.jobs.push(nervix_primitives::task::spawn(async move {
-            let job = holder.run_cpu(
-                class,
-                charge,
-                move |_charge, _cancellation| {
-                    started
-                        .send(())
-                        .expect("the test awaits the job that keeps the class full");
-                    released
-                        .blocking_recv()
-                        .expect("the test releases the job that keeps the class full");
-                },
-            );
+            let job = holder.run_cpu(class, charge, move |_charge, _cancellation| {
+                started
+                    .send(())
+                    .expect("the test awaits the job that keeps the class full");
+                released
+                    .blocking_recv()
+                    .expect("the test releases the job that keeps the class full");
+            });
             announce_after_first_poll(job, joined)
                 .await
                 .expect("the job that keeps the class full takes a worker");
@@ -265,11 +261,7 @@ impl OccupiedWorkers {
             let waiter = self.executor.clone();
             let (joined, has_joined) = nervix_primitives::sync::oneshot::channel();
             self.jobs.push(nervix_primitives::task::spawn(async move {
-                let job = waiter.run_cpu(
-                    class,
-                    charge,
-                    |_charge, _cancellation| (),
-                );
+                let job = waiter.run_cpu(class, charge, |_charge, _cancellation| ());
                 announce_after_first_poll(job, joined)
                     .await
                     .expect("a job that keeps a place runs once the class is released");
@@ -391,9 +383,7 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_receivers_full_control_cl
         eventually(
             &executor_b,
             "the grant's answer waiting with its charge",
-            |executor| {
-                executor.memory(MemoryClass::Management).reserved_bytes > reserved
-            },
+            |executor| executor.memory(MemoryClass::Management).reserved_bytes > reserved,
         )
         .await;
 
@@ -481,9 +471,7 @@ async fn a_relay_grant_answer_waits_for_a_place_on_its_senders_full_control_clas
             eventually(
                 &executor_a,
                 "the grant's answer waiting to be decoded with its charge",
-                |executor| {
-                    executor.memory(MemoryClass::Management).reserved_bytes > reserved
-                },
+                |executor| executor.memory(MemoryClass::Management).reserved_bytes > reserved,
             )
             .await;
             held.release().await;
@@ -862,9 +850,7 @@ async fn an_ack_waits_for_a_place_on_its_senders_full_data_class() {
             eventually(
                 &executor_a,
                 "the ack's encoding waiting with its charge",
-                |executor| {
-                    executor.memory(MemoryClass::Management).reserved_bytes > reserved
-                },
+                |executor| executor.memory(MemoryClass::Management).reserved_bytes > reserved,
             )
             .await;
             held.release().await;

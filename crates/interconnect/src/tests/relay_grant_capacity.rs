@@ -187,9 +187,7 @@ async fn a_grant_asked_while_the_relay_budget_is_full_waits_and_is_granted_once_
 
     let sender = transport_a.clone();
     let sending = nervix_primitives::task::spawn(async move {
-        sender
-            .send(&node_b, Envelope::RelayPayload(payload))
-            .await
+        sender.send(&node_b, Envelope::RelayPayload(payload)).await
     });
     nervix_primitives::time::sleep(Duration::from_millis(300)).await;
     assert!(
@@ -216,8 +214,7 @@ async fn a_grant_asked_while_the_relay_budget_is_full_waits_and_is_granted_once_
 /// once room returns. Every record's metadata and acknowledgement travel in the request, so a large
 /// batch asks with a request well past the room the test leaves.
 #[nervix_primitives::test]
-async fn a_grant_request_larger_than_the_free_relay_room_waits_and_is_granted_once_room_returns()
-{
+async fn a_grant_request_larger_than_the_free_relay_room_waits_and_is_granted_once_room_returns() {
     let ConnectedTransports {
         transport_a,
         transport_b,
@@ -270,9 +267,7 @@ async fn a_grant_request_larger_than_the_free_relay_room_waits_and_is_granted_on
 
     let sender = transport_a.clone();
     let sending = nervix_primitives::task::spawn(async move {
-        sender
-            .send(&node_b, Envelope::RelayPayload(payload))
-            .await
+        sender.send(&node_b, Envelope::RelayPayload(payload)).await
     });
     nervix_primitives::time::sleep(Duration::from_millis(300)).await;
     assert!(

@@ -854,14 +854,10 @@ async fn an_encoding_that_outgrows_a_full_class_waits_for_room_and_completes() {
             u64::try_from(encoded.len()).assured("the encoded envelope's length fits u64"),
         )
         .assured("the class has room to decode the envelope");
-    let decoded = super::decode_rkyv_within::<RequestEnvelope>(
-        &executor,
-        CpuClass::Bulk,
-        encoded,
-        decoding,
-    )
-    .await
-    .assured("the completed encoding decodes as an envelope");
+    let decoded =
+        super::decode_rkyv_within::<RequestEnvelope>(&executor, CpuClass::Bulk, encoded, decoding)
+            .await
+            .assured("the completed encoding decodes as an envelope");
     assert_eq!(decoded.value.payload, vec![7; 64 * 1024]);
     drop(decoded);
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);

@@ -109,10 +109,12 @@ impl AllowanceHold {
     /// The share an operation needs to take `more` bytes beyond the `drawn` it holds now, counting
     /// the most it held at once.
     fn needed(&self, drawn: u64, more: u64) -> u64 {
-        drawn
-            .checked_add(more)
-            .unwrap_or(u64::MAX)
-            .max(self.peak.load(Ordering::Acquire))
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a need beyond u64 bytes is asked for as the largest share, which no budget grants",
+            drawn.saturating_add(more)
+        )
+        .max(self.peak.load(Ordering::Acquire))
     }
 
     /// Record that a charge the operation needed found the share too small, so its owner runs the
@@ -629,7 +631,11 @@ impl GrowingCharge {
     /// operation still holds, but never less than it was granted at the start. A release of more
     /// than the operation holds leaves it holding nothing.
     pub fn release(&mut self, bytes: u64) {
-        self.required = self.required.saturating_sub(bytes);
+        self.required = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a release of more than the operation holds leaves it holding nothing",
+            self.required.saturating_sub(bytes)
+        );
         self.reservation.shrink_to(self.required.max(self.floor));
     }
 

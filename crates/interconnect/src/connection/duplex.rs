@@ -255,7 +255,8 @@ impl FrameReader {
         self.carry.shrink_to(self.carry.len());
         let carried: u64 = self.carry.capacity().arch_into();
         if carried < self.charge.bytes() {
-            let charge = std::mem::replace(&mut self.charge, self.executor.charge_nothing(self.class));
+            let charge =
+                std::mem::replace(&mut self.charge, self.executor.charge_nothing(self.class));
             let (kept, released) = charge
                 .split(carried)
                 .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;

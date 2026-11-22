@@ -324,7 +324,14 @@ pub(crate) struct ArchivedDeduplicatorKeys {
 }
 
 impl ArchivedDeduplicatorKeys {
-    /// The restore metadata a keyspace charges before its first key.
+    /// The restore metadata a keyspace charges before its first key: one resident growth increment.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a keyspace's first restore metadata charge is one resident growth increment"
+        )
+    )]
     pub(crate) const FIRST_CHARGE_BYTES: u64 = RESIDENT_GROWTH_BYTES;
 
     /// An empty keyspace whose charges are drawn through `executor`, which draws from its
