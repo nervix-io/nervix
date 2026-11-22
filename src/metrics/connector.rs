@@ -39,9 +39,7 @@ pub(crate) use ingestor_reads::IngestorReadMetrics;
 mod payloads;
 pub(crate) use payloads::{EmitterWork, EmitterWorkKind};
 mod outcomes;
-pub(crate) use outcomes::{
-    EmitterFinishOutcome, EmitterOpenOutcome, EmitterRejectionCode, EmitterRetryCause,
-};
+pub(crate) use outcomes::{EmitterFinishOutcome, EmitterOpenOutcome, EmitterRetryCause};
 mod events;
 mod status;
 pub(crate) use status::TaskFailureBinding;

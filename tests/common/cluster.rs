@@ -2193,6 +2193,7 @@ impl Cluster {
                     &addressed_node,
                     Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
                         message: "interconnect identity probe".to_string(),
+                        error: None,
                     })),
                 )
                 .await
@@ -2207,6 +2208,7 @@ impl Cluster {
                         &peer_node_id,
                         Envelope::Control(ControlEnvelope::RuntimeErrorEvent(RuntimeErrorEvent {
                             message: "interconnect credential probe".to_string(),
+                            error: None,
                         })),
                     )
                     .await

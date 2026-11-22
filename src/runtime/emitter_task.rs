@@ -294,6 +294,53 @@ impl EmitterRuntimeError {
             | Self::SourceFilter { .. } => false,
         }
     }
+
+    /// The class the rows of a batch this failure ended carry: the destination or its connector
+    /// failing the batch for good is a refusal, a stop or shutdown deadline is Nervix cutting the
+    /// work, a batch the codec could not encode is a codec failure, a source filter that could not
+    /// run is an evaluation failure, and every broken invariant of the emitter's own bookkeeping
+    /// is Nervix breaking its contract.
+    pub(super) fn batch_failure_class(&self) -> MessageErrorClass {
+        match self {
+            Self::ConnectorNotInitialized
+            | Self::ResumeConnector
+            | Self::ConnectorWaiting
+            | Self::PublishBatch
+            | Self::PublishStalled
+            | Self::InvalidConnectorConfig
+            | Self::InitializeConnector
+            | Self::CloseConnector
+            | Self::FaultInjected
+            | Self::FinalFlush
+            | Self::FinishTransport => MessageErrorClass::REFUSED,
+            Self::ShutdownWhileStalled | Self::StopDeadlineElapsed => {
+                MessageErrorClass::INTERRUPTED
+            }
+            Self::EncodeBatch => MessageErrorClass::CODEC,
+            Self::SourceFilter { .. } => MessageErrorClass::EVALUATION,
+            Self::EncodingRefused
+            | Self::UnansweredEmitterRecords { .. }
+            | Self::FlushPolicyNotInitialized
+            | Self::HeaderCountMismatch { .. }
+            | Self::OrderingGroupCountMismatch { .. }
+            | Self::OrderingGroupRowOutOfBounds { .. }
+            | Self::HttpRequestCountMismatch { .. }
+            | Self::MissingHttpRequest { .. }
+            | Self::SelectOrderingGroups
+            | Self::DeliveryRowOutOfBounds { .. }
+            | Self::AcknowledgementRowOutOfBounds { .. }
+            | Self::RejectionRowOutOfBounds { .. }
+            | Self::PreparedRowOutOfBounds { .. }
+            | Self::RowAlreadyPrepared { .. }
+            | Self::UnknownEmitterRecord { .. }
+            | Self::EmitterRecordAnsweredTwice { .. }
+            | Self::RowPreparation { .. }
+            | Self::FlushTiming
+            | Self::RetryTiming
+            | Self::BuildPublishBatch
+            | Self::SplitFailedBatch { .. } => MessageErrorClass::INTERNAL,
+        }
+    }
 }
 
 #[cfg_attr(
@@ -624,7 +671,12 @@ impl EmitterBoundedExecution for EmitterConnectorContext {
 }
 
 impl EmitterGeneralErrorHandler for EmitterConnectorContext {
-    fn handle_general_error(&self, acks: &EmitterRecordAcknowledgements, reason: String) {
+    fn handle_general_error(
+        &self,
+        acks: &EmitterRecordAcknowledgements,
+        class: MessageErrorClass,
+        reason: String,
+    ) {
         match self.error_policies.general {
             GeneralErrorPolicy::Ignore => acks.acknowledge(),
             GeneralErrorPolicy::Log => {
@@ -634,10 +686,17 @@ impl EmitterGeneralErrorHandler for EmitterConnectorContext {
                     self.domain.as_str(),
                     reason
                 );
-                self.runtime.events().report_error(report.clone());
+                self.runtime.events().report_node_error(
+                    report.clone(),
+                    ReportedError {
+                        class,
+                        node: NodeRef::new(ModelKind::Emitter, self.emitter.clone()),
+                    },
+                );
                 warn!(
                     domain = self.domain.as_str(),
                     emitter = self.emitter.as_str(),
+                    error_class = class.as_str(),
                     reason = %reason,
                     "runtime node handled general error"
                 );
@@ -673,14 +732,31 @@ pub(super) fn emitter_publish_error_is_retryable(error: &Report<EmitterRuntimeEr
     error.current_context().is_retryable_publish_failure()
 }
 
-fn emitter_message_error_operation(
-    error: &Report<EmitterRuntimeError>,
-    codec_route: bool,
-) -> MessageErrorOperation {
-    match (error.current_context(), codec_route) {
-        (EmitterRuntimeError::EncodeBatch, true) => MessageErrorOperation::Encode,
-        (EmitterRuntimeError::EncodeBatch, false) => MessageErrorOperation::Values,
-        _ => MessageErrorOperation::Publish,
+/// How a failure of a whole publish batch reads in the message error of each of its rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmitterBatchFailure {
+    class: MessageErrorClass,
+    operation: MessageErrorOperation,
+}
+
+impl EmitterBatchFailure {
+    /// A batch the emitter's destination failed for good.
+    const REFUSED: Self = Self {
+        class: MessageErrorClass::REFUSED,
+        operation: MessageErrorOperation::Publish,
+    };
+
+    fn of(error: &Report<EmitterRuntimeError>, codec_route: bool) -> Self {
+        let context = error.current_context();
+        let operation = match (context, codec_route) {
+            (EmitterRuntimeError::EncodeBatch, true) => MessageErrorOperation::Encode,
+            (EmitterRuntimeError::EncodeBatch, false) => MessageErrorOperation::Values,
+            _ => MessageErrorOperation::Publish,
+        };
+        Self {
+            class: context.batch_failure_class(),
+            operation,
+        }
     }
 }
 
@@ -844,12 +920,10 @@ impl EmitterTaskState {
                     if let Err(retain_error) = self.buffer.push(context, batch.clone()) {
                         self.retry.clear();
                         let reason = emitter_error_message(&retain_error);
-                        let operation = emitter_message_error_operation(
-                            &retain_error,
-                            outcome_context.codec_route,
-                        );
+                        let failure =
+                            EmitterBatchFailure::of(&retain_error, outcome_context.codec_route);
                         batch_context
-                            .handle_publish_error_batch(batch, reason, operation)
+                            .handle_publish_error_batch(batch, reason, failure)
                             .await;
                         return;
                     }
@@ -878,10 +952,9 @@ impl EmitterTaskState {
                 let reason = emitter_error_message(&error);
                 context.record_failure(reason.clone());
                 outcome_context.report_error(context, &reason);
-                let operation =
-                    emitter_message_error_operation(&error, outcome_context.codec_route);
+                let failure = EmitterBatchFailure::of(&error, outcome_context.codec_route);
                 batch_context
-                    .handle_publish_error_batches(failed_batches, reason, operation)
+                    .handle_publish_error_batches(failed_batches, reason, failure)
                     .await;
             }
         }
@@ -1573,7 +1646,7 @@ impl EmitterTaskLoop<'_> {
                             .handle_publish_error_batches(
                                 pending,
                                 reason,
-                                MessageErrorOperation::Publish,
+                                EmitterBatchFailure::REFUSED,
                             )
                             .await;
                         break EmitterEnding::InteractionStopped;
@@ -1612,10 +1685,9 @@ impl EmitterTaskLoop<'_> {
                             self.context
                                 .report_flush_error(&self.connector_label, &reason);
                             let pending = self.state.buffer.drain_pending();
-                            let operation =
-                                emitter_message_error_operation(&error, self.codec.is_some());
+                            let failure = EmitterBatchFailure::of(&error, self.codec.is_some());
                             self.batch_context
-                                .handle_publish_error_batches(pending, reason, operation)
+                                .handle_publish_error_batches(pending, reason, failure)
                                 .await;
                         }
                     }
@@ -1756,10 +1828,9 @@ impl EmitterTaskLoop<'_> {
                             .retain_without_cadence(publish_batch.clone())
                         {
                             let reason = emitter_error_message(&error);
-                            let operation =
-                                emitter_message_error_operation(&error, self.codec.is_some());
+                            let failure = EmitterBatchFailure::of(&error, self.codec.is_some());
                             self.batch_context
-                                .handle_publish_error_batch(publish_batch, reason, operation)
+                                .handle_publish_error_batch(publish_batch, reason, failure)
                                 .await;
                         } else if !self.interaction.is_terminal_drain() {
                             self.state.retry.include_acks(publish_batch.merged_acks());
@@ -1784,10 +1855,9 @@ impl EmitterTaskLoop<'_> {
                             self.state.buffer.push(self.context, publish_batch.clone())
                         {
                             let reason = emitter_error_message(&error);
-                            let operation =
-                                emitter_message_error_operation(&error, self.codec.is_some());
+                            let failure = EmitterBatchFailure::of(&error, self.codec.is_some());
                             self.batch_context
-                                .handle_publish_error_batch(publish_batch, reason, operation)
+                                .handle_publish_error_batch(publish_batch, reason, failure)
                                 .await;
                             continue;
                         }
@@ -1876,10 +1946,10 @@ impl EmitterBatchContext<'_> {
         &self,
         batches: impl IntoIterator<Item = EmitterPublishBatch>,
         reason: String,
-        operation: MessageErrorOperation,
+        failure: EmitterBatchFailure,
     ) {
         for batch in batches {
-            self.handle_publish_error_batch(batch, reason.clone(), operation)
+            self.handle_publish_error_batch(batch, reason.clone(), failure)
                 .await;
         }
     }
@@ -1888,7 +1958,7 @@ impl EmitterBatchContext<'_> {
         &self,
         batch: EmitterPublishBatch,
         reason: String,
-        operation: MessageErrorOperation,
+        failure: EmitterBatchFailure,
     ) {
         // The rows an earlier attempt delivered are sent, and this is the last time the emitter
         // holds them, so they are counted before the rest follow the error policy.
@@ -1903,6 +1973,7 @@ impl EmitterBatchContext<'_> {
                 let failure = *error;
                 self.report_general_error(
                     failure.preserved.acks.iter(),
+                    MessageErrorClass::INTERNAL,
                     &failure
                         .error
                         .change_context(EmitterRuntimeError::SplitFailedBatch {
@@ -1926,11 +1997,11 @@ impl EmitterBatchContext<'_> {
                     source_route: None,
                     policy: &self.error_policies.message,
                     message,
-                    error: structured_message_error(
+                    error: raised_message_error(
                         execution_now,
-                        MessageErrorCode::External,
+                        failure.class,
                         reason.clone(),
-                        operation,
+                        failure.operation,
                         None,
                         std::iter::empty(),
                     ),
@@ -1949,14 +2020,15 @@ impl EmitterBatchContext<'_> {
     fn report_general_error<'a, C: error_stack::Context>(
         &self,
         acks: impl IntoIterator<Item = &'a AckSet>,
+        class: MessageErrorClass,
         error: &Report<C>,
     ) {
         self.runtime.handle_general_error_for_acks(
             self.domain,
-            ModelKind::Emitter,
-            self.emitter,
+            &NodeRef::new(ModelKind::Emitter, self.emitter),
             self.error_policies,
             acks,
+            class,
             error,
         );
     }
@@ -2076,7 +2148,11 @@ impl EmitterBatchContext<'_> {
                 match evaluated {
                     Ok(groups) => Some(groups),
                     Err(failure) => {
-                        self.report_general_error(failure.acks.iter(), &failure.error);
+                        self.report_general_error(
+                            failure.acks.iter(),
+                            failure.class(),
+                            &failure.error,
+                        );
                         return None;
                     }
                 }
@@ -2133,7 +2209,7 @@ impl EmitterBatchContext<'_> {
         let plan = match planned {
             Ok(plan) => plan,
             Err(failure) => {
-                self.report_general_error(failure.acks.iter(), &failure.error);
+                self.report_general_error(failure.acks.iter(), failure.class(), &failure.error);
                 return None;
             }
         };
@@ -2233,7 +2309,7 @@ impl EmitterBatchContext<'_> {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(failure) => {
-                self.report_general_error(failure.acks.iter(), &failure.error);
+                self.report_general_error(failure.acks.iter(), failure.class(), &failure.error);
                 return None;
             }
         };
@@ -2284,7 +2360,7 @@ impl EmitterBatchContext<'_> {
         match enveloped {
             Ok(publish_batch) => Some(publish_batch),
             Err(failure) => {
-                self.report_general_error(failure.acks.iter(), &failure.error);
+                self.report_general_error(failure.acks.iter(), failure.class(), &failure.error);
                 None
             }
         }
@@ -2313,6 +2389,7 @@ impl EmitterBatchContext<'_> {
     fn report_publish_batch_error(&self, error: Report<EmitterRuntimeError>) {
         self.report_general_error(
             std::iter::empty::<&AckSet>(),
+            MessageErrorClass::INTERNAL,
             &error.change_context(EmitterRuntimeError::BuildPublishBatch),
         );
     }
@@ -2343,8 +2420,10 @@ impl EmitterBatchContext<'_> {
         {
             Ok(plan) => plan,
             Err(failure) => {
+                let class = failure.class();
                 self.report_general_error(
                     failure.acks.iter(),
+                    class,
                     &failure
                         .error
                         .change_context(EmitterRuntimeError::SourceFilter {

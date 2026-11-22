@@ -401,7 +401,7 @@ pub(super) enum GeneratorProgramOutcome {
     Filtered,
     Output(RuntimeRow),
     MessageError {
-        error: StructuredMessageError,
+        error: RaisedMessageError,
         partial_output: Option<RuntimeRecordBatch>,
     },
 }

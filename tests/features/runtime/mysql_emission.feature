@@ -292,7 +292,7 @@ Feature: MySQL emission
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
-        SET error_code = error.code,
+        SET error_code = error.class,
             error_message = error.message,
             source_user_id = input.user_id,
             source_action = input.action
@@ -342,7 +342,7 @@ Feature: MySQL emission
     When the lock on MySQL table "first_held_{{test_id}}" is released
     Then within "30s" the relay subscription receives exactly one payload for each fragment set
       """
-      "error_code":"external" | "error_message":"MySQL rejected record with SQLSTATE HY000 and code 3819" | "source_user_id":2 | "source_action":"POISON"
+      "error_code":"refused" | "error_message":"MySQL rejected record with SQLSTATE HY000 and code 3819" | "source_user_id":2 | "source_action":"POISON"
       """
     And the MySQL table "poison_mysql_{{test_id}}" eventually holds exactly these rows
       """

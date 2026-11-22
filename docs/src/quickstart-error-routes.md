@@ -28,7 +28,7 @@ CREATE SCHEMA priced_order (
 
 CREATE SCHEMA order_error (
   error_reference STRING,
-  error_code STRING,
+  error_class STRING,
   error_message STRING,
   source_order STRING,
   attempted_price I64 OPTIONAL
@@ -55,7 +55,7 @@ CREATE JUNCTION price_orders
     FLUSH IMMEDIATE
     ON MESSAGE ERROR SEND TO order_errors
       SET error_reference = error.reference,
-          error_code = error.code,
+          error_class = error.class,
           error_message = error.message,
           source_order = input.order_id,
           attempted_price = partial_output.unit_price;
@@ -86,7 +86,7 @@ Produce one healthy record and one with `quantity` of zero:
 
 `o-3001` flows to `priced_orders` with `unit_price` of `300`. `o-3002` fails the division and
 arrives on `order_errors` as a structured record: a stable `error_reference`, the machine-readable
-`error_code`, the human-readable `error_message`, and a null `attempted_price` — the division
+`error_class` (`evaluation` for a failed expression), the human-readable `error_message`, and a null `attempted_price` — the division
 never produced one. Hot-path errors never leak sensitive payload values.
 
 Next: add a second way into the graph in [HTTP Ingestion](./quickstart-http-ingestion.md).

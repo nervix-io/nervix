@@ -1153,7 +1153,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::metrics::RuntimeMetrics;
+    use crate::{metrics::RuntimeMetrics, runtime::events::RuntimeErrorEvent};
 
     #[nervix_primitives::test]
     async fn a_reported_runtime_error_reaches_every_attached_observer() {
@@ -1173,7 +1173,13 @@ mod tests {
                 .recv()
                 .await
                 .expect("an attached observer must receive the report");
-            assert_eq!(message, "ingestor 'orders' failed to decode a message");
+            assert_eq!(
+                message,
+                RuntimeErrorEvent {
+                    message: "ingestor 'orders' failed to decode a message".to_string(),
+                    error: None,
+                }
+            );
         }
     }
 
@@ -1206,7 +1212,7 @@ mod tests {
             .recv()
             .await
             .expect("the observer must receive the later report");
-        assert_eq!(message, "reported after the observer attached");
+        assert_eq!(message.message, "reported after the observer attached");
         assert!(
             observer.recv().now_or_never().is_none(),
             "the bus must not replay reports that predate the observer"

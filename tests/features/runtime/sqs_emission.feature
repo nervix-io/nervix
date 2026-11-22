@@ -136,7 +136,7 @@ Feature: SQS emission
       INVOKE write_header(input.header_name, "test")
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           source_user_id = input.user_id
       ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
@@ -222,7 +222,7 @@ Feature: SQS emission
       INHERIT ALL
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
-      SET error_code = error.code,
+      SET error_code = error.class,
           source_user_id = input.user_id
       ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
@@ -494,7 +494,7 @@ Feature: SQS emission
       ON MESSAGE ERROR SEND TO rejected_orders
         SET tenant = input.tenant,
             sequence = input.sequence,
-            error_code = error.code,
+            error_code = error.class,
             error_message = error.message,
             operation = error.operation
       ON GENERAL ERROR LOG;
@@ -521,8 +521,8 @@ Feature: SQS emission
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
-      "tenant":"alpha" | "sequence":2 | "error_code":"external" | "operation":"publish" | ordering group expression failed with division_by_zero
-      "tenant":"beta" | "sequence":2 | "error_code":"external" | "operation":"publish" | ordering group expression failed with division_by_zero
+      "tenant":"alpha" | "sequence":2 | "error_code":"evaluation" | "operation":"publish" | ordering group expression failed with division_by_zero
+      "tenant":"beta" | "sequence":2 | "error_code":"evaluation" | "operation":"publish" | ordering group expression failed with division_by_zero
       """
 
     Examples:
