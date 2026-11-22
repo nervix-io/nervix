@@ -10432,6 +10432,7 @@ mod tests {
             level,
             kind,
             message: message.to_string(),
+            error: None,
         })
     }
 

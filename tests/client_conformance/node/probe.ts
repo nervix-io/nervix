@@ -1396,7 +1396,7 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
       let reported = '';
       if (noticeError !== null) {
         const node = member(noticeError.node());
-        reported = ` error=${wire.ErrorClass[member(noticeError.class())]} node=${wire.ModelKind[member(node.kind())]}/${node.name()}`;
+        reported = ` error=${wire.ErrorClass[member(noticeError.class_())]} node=${wire.ModelKind[member(node.kind())]}/${node.name()}`;
       }
       return [
         `EVENT NOTICE level=${wire.NoticeLevel[member(notice.level())]} kind=${wire.NoticeKind[member(notice.kind())]} message=${text(bytesOf((encoding) => notice.message(encoding)))}${reported}`,
