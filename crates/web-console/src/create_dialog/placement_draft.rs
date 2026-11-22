@@ -1,10 +1,12 @@
 //! Domain-owned placement creation drafts.
 //!
 //! Layer: edges.
-//! - **Owns.** Operator input for a named placement rule — its coverage, its ordered `FROM` and
-//!   `TO` members kept visible after the draft moves to another domain, its policy and rank — and
-//!   its one-way conversion into the current placement Model.
-//! - **Depends on.** Vocabulary names, policies, the placement Model and exact integer parsing.
+//! - **Owns.** Operator input for a named placement rule — whether it relates hops or selects
+//!   nodes, its coverage, its ordered `FROM`, `TO` and `FOR` members kept visible after the draft
+//!   moves to another domain, its policy, its node selector text and rank — and its one-way
+//!   conversion into the current placement Model.
+//! - **Depends on.** Vocabulary names, policies, the placement Model, the Plexus expression parser
+//!   and exact integer parsing.
 //! - **Must not know.** Which runtime nodes are placement-eligible, graph validation, scheduling
 //!   or browser transport.
 
@@ -18,32 +20,66 @@ use std::num::NonZeroU64;
 use error_stack::{Report, ResultExt as _};
 use indexmap::IndexMap;
 use meticulous::ResultExt as _;
-use nervix_models::{CreatePlacement, ModelName, NodeRef, PlacementName, PlacementPolicy};
+use nervix_models::{
+    CreatePlacement, ModelName, NodePolicy, NodeRef, NodeRuleScope, PlacementName, PlacementPolicy,
+};
 use thiserror::Error;
+
+/// Whether the rule relates the units on either side of a hop, or selects the cluster nodes the
+/// units of its members run on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum PlacementForm {
+    #[default]
+    Colocation,
+    Nodes,
+}
 
 /// What a placement rule covers, as far as the operator has decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum PlacementCoverage {
-    /// `DOMAIN WIDE`: every eligible hop of the domain.
+    /// `DOMAIN WIDE`: every eligible hop, or every eligible runtime node, of the domain.
     #[default]
     DomainWide,
-    /// The directed paths from each `FROM` member to each `TO` member.
+    /// A colocation rule's directed paths from each `FROM` member to each `TO` member.
     Corridor,
+    /// A node rule's `FOR` members.
+    Members,
 }
 
-/// One side of a corridor.
+/// How a node rule judges a cluster node, before its selector is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum NodePolicyChoice {
+    #[default]
+    Require,
+    Prefer,
+    Any,
+}
+
+impl NodePolicyChoice {
+    /// Whether the policy reads a selector.
+    pub(super) fn selects(self) -> bool {
+        match self {
+            Self::Require | Self::Prefer => true,
+            Self::Any => false,
+        }
+    }
+}
+
+/// One list of members: a corridor's sides, or a node rule's members.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CorridorSide {
     From,
     To,
+    For,
 }
 
 impl CorridorSide {
-    /// The keyword that introduces this side in `CREATE PLACEMENT`.
+    /// The keyword that introduces this list in `CREATE PLACEMENT`.
     pub(super) fn keyword(self) -> &'static str {
         match self {
             Self::From => "FROM",
             Self::To => "TO",
+            Self::For => "FOR",
         }
     }
 }
@@ -78,12 +114,19 @@ pub(super) type CorridorMembers = IndexMap<ModelName, MemberContext>;
 pub(super) struct PlacementDraft {
     pub name: String,
     pub if_not_exists: bool,
+    pub form: PlacementForm,
     pub coverage: PlacementCoverage,
     /// The corridor's members. A draft switched to domain-wide coverage keeps them, so switching
     /// back restores the corridor the operator had chosen.
     pub from: CorridorMembers,
     pub to: CorridorMembers,
+    /// A node rule's members, kept the same way.
+    pub members: CorridorMembers,
     pub policy: PlacementPolicy,
+    pub node_policy: NodePolicyChoice,
+    /// A node rule's selector as the operator writes it: a Plexus expression over the `node`
+    /// scope, read when the rule is built.
+    pub selector: String,
     pub rank: String,
 }
 
@@ -103,6 +146,10 @@ pub(super) enum PlacementDraftError {
         side: CorridorSide,
         member: ModelName,
     },
+    #[error("Write the node selector")]
+    SelectorRequired,
+    #[error("The node selector is not a valid expression")]
+    Selector,
 }
 
 impl PlacementDraft {
@@ -121,6 +168,7 @@ impl PlacementDraft {
         match side {
             CorridorSide::From => &self.from,
             CorridorSide::To => &self.to,
+            CorridorSide::For => &self.members,
         }
     }
 
@@ -128,7 +176,19 @@ impl PlacementDraft {
         match side {
             CorridorSide::From => &mut self.from,
             CorridorSide::To => &mut self.to,
+            CorridorSide::For => &mut self.members,
         }
+    }
+
+    /// Switches the rule's form, keeping each form's members: a corridor becomes a member list
+    /// and back, and domain-wide coverage stays domain-wide.
+    pub fn choose_form(&mut self, form: PlacementForm) {
+        self.form = form;
+        self.coverage = match (form, self.coverage) {
+            (_, PlacementCoverage::DomainWide) => PlacementCoverage::DomainWide,
+            (PlacementForm::Colocation, _) => PlacementCoverage::Corridor,
+            (PlacementForm::Nodes, _) => PlacementCoverage::Members,
+        };
     }
 
     /// Adds the runtime node a member choice selected to the end of `side`. A member already on
@@ -176,13 +236,19 @@ impl PlacementDraft {
         self.from
             .values()
             .chain(self.to.values())
+            .chain(self.members.values())
             .any(|context| *context == MemberContext::Changed)
     }
 
     /// Keeps every selected member visible after the draft moved to another domain, but requires
     /// selecting each of them again.
     pub fn invalidate_references(&mut self) {
-        for context in self.from.values_mut().chain(self.to.values_mut()) {
+        for context in self
+            .from
+            .values_mut()
+            .chain(self.to.values_mut())
+            .chain(self.members.values_mut())
+        {
             *context = MemberContext::Changed;
         }
     }
@@ -200,11 +266,14 @@ impl PlacementDraft {
                     .change_context(PlacementDraftError::Rank)?,
             )
         };
-        match self.coverage {
-            PlacementCoverage::DomainWide => {
+        match (self.form, self.coverage) {
+            (PlacementForm::Colocation, PlacementCoverage::DomainWide) => {
                 Ok(CreatePlacement::domain_wide(name, self.policy, rank))
             }
-            PlacementCoverage::Corridor => {
+            (
+                PlacementForm::Colocation,
+                PlacementCoverage::Corridor | PlacementCoverage::Members,
+            ) => {
                 let from = Self::current_members(&self.from, CorridorSide::From)?;
                 let to = Self::current_members(&self.to, CorridorSide::To)?;
                 let placement = CreatePlacement::new(name, from, to, self.policy, rank).verified(
@@ -213,7 +282,42 @@ impl PlacementDraft {
                 );
                 Ok(placement)
             }
+            (PlacementForm::Nodes, coverage) => {
+                let scope = match coverage {
+                    PlacementCoverage::DomainWide => NodeRuleScope::DomainWide,
+                    PlacementCoverage::Members | PlacementCoverage::Corridor => {
+                        NodeRuleScope::Members(Self::current_members(
+                            &self.members,
+                            CorridorSide::For,
+                        )?)
+                    }
+                };
+                let policy = self.build_node_policy()?;
+                let placement = CreatePlacement::node_rule(name, scope, policy, rank).verified(
+                    "the member list was checked non-empty above, the only node rule the \
+                     vocabulary refuses",
+                );
+                Ok(placement)
+            }
         }
+    }
+
+    /// The node policy, with the selector parsed as the server parses it.
+    fn build_node_policy(&self) -> Result<NodePolicy, Report<PlacementDraftError>> {
+        if !self.node_policy.selects() {
+            return Ok(NodePolicy::Any);
+        }
+        let text = self.selector.trim();
+        if text.is_empty() {
+            return Err(Report::new(PlacementDraftError::SelectorRequired));
+        }
+        let selector =
+            nervix_plexus::parse_expression(text).change_context(PlacementDraftError::Selector)?;
+        Ok(match self.node_policy {
+            NodePolicyChoice::Require => NodePolicy::Require(selector),
+            NodePolicyChoice::Prefer => NodePolicy::Prefer(selector),
+            NodePolicyChoice::Any => NodePolicy::Any,
+        })
     }
 
     /// The names of one side in order, once every member belongs to the draft's domain.
@@ -247,7 +351,8 @@ impl PlacementDraft {
 )]
 mod tests {
     use nervix_models::{
-        CreateStatement, Model, ModelKind, PlacementScope, RequestedResourceVersion, Statement,
+        CreateStatement, Model, ModelKind, PlacementRule, PlacementScope, RequestedResourceVersion,
+        Statement,
     };
     use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
@@ -276,7 +381,11 @@ mod tests {
     }
 
     fn names(placement: &CreatePlacement) -> CorridorNames<'_> {
-        let PlacementScope::Corridor { from, to } = &placement.scope else {
+        let PlacementRule::Colocation {
+            scope: PlacementScope::Corridor { from, to },
+            ..
+        } = &placement.rule
+        else {
             panic!("a corridor draft builds a corridor");
         };
         CorridorNames {
@@ -380,7 +489,13 @@ mod tests {
         draft.name = "everywhere".to_string();
         draft.coverage = PlacementCoverage::DomainWide;
         let domain_wide = draft.build().assured("a domain-wide rule needs no members");
-        assert_eq!(domain_wide.scope, PlacementScope::DomainWide);
+        assert_eq!(
+            domain_wide.rule,
+            PlacementRule::Colocation {
+                scope: PlacementScope::DomainWide,
+                policy: PlacementPolicy::Neutral,
+            }
+        );
         assert_eq!(draft.from.len(), 1, "switching coverage keeps the members");
 
         draft.rank = "0".to_string();
@@ -396,23 +511,105 @@ mod tests {
     fn filled(value: &CreatePlacement) -> PlacementDraft {
         let mut draft = PlacementDraft {
             name: value.name.to_string(),
-            policy: value.policy,
             rank: match value.rank {
                 Some(rank) => rank.to_string(),
                 None => String::new(),
             },
             ..PlacementDraft::default()
         };
-        if let PlacementScope::Corridor { from, to } = &value.scope {
-            draft.coverage = PlacementCoverage::Corridor;
-            for member in from {
-                draft.add_member(CorridorSide::From, &NodeRef::new(ModelKind::Relay, member));
+        match &value.rule {
+            PlacementRule::Colocation { scope, policy } => {
+                draft.policy = *policy;
+                if let PlacementScope::Corridor { from, to } = scope {
+                    draft.coverage = PlacementCoverage::Corridor;
+                    for member in from {
+                        draft.add_member(
+                            CorridorSide::From,
+                            &NodeRef::new(ModelKind::Relay, member),
+                        );
+                    }
+                    for member in to {
+                        draft.add_member(
+                            CorridorSide::To,
+                            &NodeRef::new(ModelKind::Junction, member),
+                        );
+                    }
+                }
             }
-            for member in to {
-                draft.add_member(CorridorSide::To, &NodeRef::new(ModelKind::Junction, member));
+            PlacementRule::Nodes { scope, policy } => {
+                draft.choose_form(PlacementForm::Nodes);
+                if let NodeRuleScope::Members(members) = scope {
+                    draft.coverage = PlacementCoverage::Members;
+                    for member in members {
+                        draft.add_member(
+                            CorridorSide::For,
+                            &NodeRef::new(ModelKind::Junction, member),
+                        );
+                    }
+                }
+                draft.node_policy = match policy {
+                    NodePolicy::Require(_) => NodePolicyChoice::Require,
+                    NodePolicy::Prefer(_) => NodePolicyChoice::Prefer,
+                    NodePolicy::Any => NodePolicyChoice::Any,
+                };
+                if let Some(selector) = policy.selector() {
+                    draft.selector = nervix_models::expression_to_plexus(selector)
+                        .assured("a current selector renders canonical Plexus");
+                }
             }
         }
         draft
+    }
+
+    #[test]
+    fn a_node_rule_keeps_its_members_policy_and_selector_and_refuses_a_bad_selector() {
+        let mut draft = PlacementDraft {
+            name: "eu_only".to_string(),
+            ..PlacementDraft::default()
+        };
+        draft.choose_form(PlacementForm::Nodes);
+        assert_eq!(draft.coverage, PlacementCoverage::DomainWide);
+        draft.coverage = PlacementCoverage::Members;
+        let empty = draft.build().expect_err("a member list must not be empty");
+        assert_eq!(
+            *empty.current_context(),
+            PlacementDraftError::MemberRequired {
+                side: CorridorSide::For
+            }
+        );
+        draft.add_member(CorridorSide::For, &node(ModelKind::Junction, "scorer"));
+        let missing = draft.build().expect_err("REQUIRE NODES needs a selector");
+        assert_eq!(
+            *missing.current_context(),
+            PlacementDraftError::SelectorRequired
+        );
+        draft.selector = "tag('zone') =".to_string();
+        let invalid = draft
+            .build()
+            .expect_err("an unfinished selector is refused");
+        assert_eq!(*invalid.current_context(), PlacementDraftError::Selector);
+        draft.selector = "tag('zone') = 'eu'".to_string();
+        draft.rank = "2".to_string();
+        assert_eq!(
+            draft
+                .build()
+                .assured("a complete node rule builds")
+                .to_canonical_plexus()
+                .assured("a node rule renders canonical Plexus"),
+            "CREATE PLACEMENT eu_only FOR scorer REQUIRE NODES WHERE tag('zone') = 'eu' RANK 2;"
+        );
+        draft.node_policy = NodePolicyChoice::Any;
+        assert_eq!(
+            draft
+                .build()
+                .assured("ANY NODE reads no selector")
+                .to_canonical_plexus()
+                .assured("a node rule renders canonical Plexus"),
+            "CREATE PLACEMENT eu_only FOR scorer ANY NODE RANK 2;"
+        );
+        draft.choose_form(PlacementForm::Colocation);
+        assert_eq!(draft.coverage, PlacementCoverage::Corridor);
+        assert_eq!(draft.members.len(), 1, "switching form keeps the members");
     }
 
     #[test]

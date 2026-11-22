@@ -161,6 +161,21 @@ host_enum! { ClockEndReason from ClockEndReason {
 DomainRemoved = 1 as "DOMAIN_REMOVED",
 } }
 
+host_enum! { NoticeLevel from NoticeLevel {
+    Info = 1 as "INFO",
+    Warning = 2 as "WARNING",
+    Error = 3 as "ERROR",
+} }
+
+host_enum! { NoticeKind from NoticeKind {
+    Membership = 1 as "MEMBERSHIP",
+    Leadership = 2 as "LEADERSHIP",
+    ClusterParameters = 3 as "CLUSTER_PARAMETERS",
+    Runtime = 4 as "RUNTIME",
+    ControlPlane = 5 as "CONTROL_PLANE",
+    Licensing = 6 as "LICENSING",
+} }
+
 host_enum! { EndpointState from EndpointState {
 Active = 1 as "ACTIVE",
         Interrupted = 2 as "INTERRUPTED",
@@ -272,9 +287,8 @@ pub(crate) fn register(module: RModule) -> Result<(), Error> {
     CellState::register(module)?;
     FieldType::register(module)?;
     Part::register(module)?;
-    ClockEventKind::register(module)?;
-    ClockState::register(module)?;
-    ClockEndReason::register(module)?;
+    register_clocks(module)?;
+    register_notices(module)?;
     EndpointState::register(module)?;
     OpenRefusal::register(module)?;
     ReopenReason::register(module)?;
@@ -291,6 +305,21 @@ pub(crate) fn register(module: RModule) -> Result<(), Error> {
     let tls = module.define_module("Tls")?;
     tls.const_set("PREFERRED", 1)?;
     tls.const_set("REQUIRED", 2)?;
+    Ok(())
+}
+
+/// The values a domain clock event reports.
+fn register_clocks(module: RModule) -> Result<(), Error> {
+    ClockEventKind::register(module)?;
+    ClockState::register(module)?;
+    ClockEndReason::register(module)?;
+    Ok(())
+}
+
+/// The values a server notice reports.
+fn register_notices(module: RModule) -> Result<(), Error> {
+    NoticeLevel::register(module)?;
+    NoticeKind::register(module)?;
     Ok(())
 }
 

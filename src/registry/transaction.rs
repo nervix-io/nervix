@@ -1167,7 +1167,8 @@ fn ensure_domain_not_paused(
 }
 
 /// Applies scheduling only to a complete mutation that changes the graph, retaining the
-/// current schedule for incomplete and no-op model runs.
+/// current schedule for incomplete and no-op model runs and the current placement for a run that
+/// changes nothing but metadata.
 fn schedule_model_run<F>(
     domain: &DomainName,
     planned: Option<&PlannedMutations>,
@@ -1185,6 +1186,21 @@ where
     if let Some(planned) = planned
         && !planned.is_noop()
     {
+        // Labels are control-plane metadata. A run that changes nothing else keeps every unit
+        // where the current schedule placed it, whichever nodes placement would choose now, so it
+        // plans no ownership move.
+        if planned.changes_only_metadata()
+            && let Some(current) = current_schedule.as_ref()
+            && let Some(schedule) = planned.definitions_in_place(current)
+        {
+            return Ok((
+                TransactionScheduleDecision {
+                    schedule: Some(schedule),
+                    ownership_moves: CanonicalImpactSet::default(),
+                },
+                planned.quiesce().level(),
+            ));
+        }
         let decision = schedule(
             planned.candidate_graph(),
             current_schedule.as_ref(),
@@ -1234,7 +1250,7 @@ fn ensure_branch_partitions_change_is_settled(
             requested == current
         }
         _ => schedule.nodes.get(&NodeRef::new(nervix_models::ModelKind::Parametrizer, &alter.parametrizer))
-            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Parametrizer(branch) if branch.partitions == requested)),
+            .is_some_and(|node| matches!(node.config.as_ref(), nervix_models::Model::Parametrizer(parametrizer) if parametrizer.partitions == requested)),
     };
     if unchanged {
         return Ok(());

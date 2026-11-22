@@ -26,8 +26,8 @@
  *   or is cancelled. A session, a producer, a consumer, a delivery and a batch may be used from
  *   several threads at once; a field list and a batch builder are used from one thread at a time.
  *   Releasing an object while another thread still uses it is the caller's error; releasing an
- *   event, a clock event, a domain clock, a delivery or a batch while another thread holds a
- *   retained reference to it is not.
+ *   event, a clock event, a domain clock, a notice, a delivery or a batch while another thread
+ *   holds a retained reference to it is not.
  *
  * Cancellation and deadlines
  *   Every blocking call accepts an optional `nx_cancel`. Triggering it, from any thread, makes the
@@ -80,6 +80,7 @@ typedef struct nx_schema nx_schema;
 typedef struct nx_event nx_event;
 typedef struct nx_clock_event nx_clock_event;
 typedef struct nx_domain_clock nx_domain_clock;
+typedef struct nx_notice nx_notice;
 typedef struct nx_cancel nx_cancel;
 typedef struct nx_error nx_error;
 typedef struct nx_suggestions nx_suggestions;
@@ -124,7 +125,8 @@ typedef enum nx_error_kind {
     NX_ERROR_DEADLINE = 6,
     /* The call was cancelled, by its token or by the server. */
     NX_ERROR_CANCELLED = 7,
-    /* The session could not retain more subscription events for the caller. */
+    /* The session could not retain more subscription events, or more server notices, for the
+       caller. */
     NX_ERROR_OVERFLOW = 8,
     /* The server answered with something the protocol does not allow here. */
     NX_ERROR_PROTOCOL = 9,
@@ -312,6 +314,30 @@ typedef enum nx_clock_end_reason {
     /* The domain no longer exists on the serving node. */
     NX_CLOCK_END_DOMAIN_REMOVED = 1
 } nx_clock_end_reason;
+
+/* How urgently a server notice asks for an operator's attention. */
+typedef enum nx_notice_level {
+    NX_NOTICE_LEVEL_INFO = 1,
+    NX_NOTICE_LEVEL_WARNING = 2,
+    NX_NOTICE_LEVEL_ERROR = 3
+} nx_notice_level;
+
+/* What a server notice reports. A host routes a notice by its kind, never by its text. */
+typedef enum nx_notice_kind {
+    /* A node of the serving node's live set joined, left, or restarted as a new incarnation. */
+    NX_NOTICE_KIND_MEMBERSHIP = 1,
+    /* A Raft transition of the serving node, or a membership operation it proposes as leader. */
+    NX_NOTICE_KIND_LEADERSHIP = 2,
+    /* A committed cluster-parameter revision the serving node installed. */
+    NX_NOTICE_KIND_CLUSTER_PARAMETERS = 3,
+    /* A failure the runtime of the serving node, or of another node, recovered from. When it is a
+       classified error of a graph node, nx_notice_error reads its class and the node. */
+    NX_NOTICE_KIND_RUNTIME = 4,
+    /* A control-plane failure the serving node recovered from. */
+    NX_NOTICE_KIND_CONTROL_PLANE = 5,
+    /* A licensing lifecycle observation or policy warning. */
+    NX_NOTICE_KIND_LICENSING = 6
+} nx_notice_kind;
 
 /* Why the server refused to open a producer or a consumer. Nothing is left attached. */
 typedef enum nx_open_refusal {
@@ -508,7 +534,7 @@ nx_error *nx_session_connect(const uint8_t *server, size_t server_len, const uin
                              size_t domain_len, const nx_connect_options *options,
                              const nx_cancel *cancel, nx_session **out);
 /* Releases the host's session, which ends once every producer, consumer and delivery of it is
-   released too. Events, outcomes and batches read from it stay valid. */
+   released too. Events, notices, outcomes and batches read from it stay valid. */
 void nx_session_free(nx_session *session);
 
 /* Captures one statement and an execution reference before anything is sent. Only durable commands
@@ -836,6 +862,43 @@ nx_error *nx_domain_clock_admits(const nx_domain_clock *clock, int64_t utc, int6
    released once with nx_domain_clock_release; the clock is freed with the last one. */
 nx_domain_clock *nx_domain_clock_retain(nx_domain_clock *clock);
 void nx_domain_clock_release(nx_domain_clock *clock);
+
+/* ---- Server notices ----------------------------------------------------------------------- */
+
+/* Waits for the next server notice: a condition worth an operator's attention that belongs to no
+   request, such as a node joining the cluster or a message error a graph node's route reported
+   with ON MESSAGE ERROR LOG. Each notice the session receives is read once, in the order it
+   arrived. Notices end with the session that delivered them, including those not read yet: the
+   wait continues across a lost session with the notices of the next session the library opens,
+   and never opens a session itself. When notices arrive faster than they are read, the library
+   drops the ones it holds and the call returns NX_ERROR_OVERFLOW once; the next call returns the
+   notices that arrived after the gap. NX_ERROR_CLOSED is returned only when the session ended and
+   no server is known to open another session on. */
+nx_error *nx_session_next_notice(nx_session *session, const nx_cancel *cancel, nx_notice **out);
+
+/* A notice never changes, and it stays valid after the session is freed. */
+
+/* How urgently the notice asks for an operator's attention. */
+nx_notice_level nx_notice_level_of(const nx_notice *notice);
+/* What the notice reports, which a host routes the notice by. */
+nx_notice_kind nx_notice_kind_of(const nx_notice *notice);
+/* The notice's display text, borrowed until the notice is released. A host shows it, and never
+   routes by it or parses it. */
+void nx_notice_message(const nx_notice *notice, const uint8_t **message, size_t *message_len);
+/* Whether the notice reports a classified error of a graph node, and that error when it does: its
+   class, as the class's canonical lower-case name such as `evaluation`, `refused` or `limit`; the
+   kind of the graph node that produced it, as the model kind's snake_case name such as `junction`,
+   `emitter` or `window_processor`; and that node's name. Only a RUNTIME notice reports one, and a
+   runtime failure that is no classified error of a graph node, such as a connector failure an
+   emitter recovered from, reports none, so nothing is written. The names are borrowed until the
+   notice is released. Any out-parameter may be NULL. */
+bool nx_notice_error(const nx_notice *notice, const uint8_t **error_class,
+                     size_t *error_class_len, const uint8_t **node_kind, size_t *node_kind_len,
+                     const uint8_t **node, size_t *node_len);
+/* Adds a reference. Every reference, including the one nx_session_next_notice returned, is
+   released once with nx_notice_release, on any thread; the notice is freed with the last one. */
+nx_notice *nx_notice_retain(nx_notice *notice);
+void nx_notice_release(nx_notice *notice);
 
 /* ---- Expected fields ---------------------------------------------------------------------- */
 

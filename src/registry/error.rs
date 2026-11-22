@@ -717,6 +717,52 @@ pub(crate) enum RegistryError {
         right_identifier: String,
     },
     #[error(
+        "placements '{first_rule}' and '{second_rule}' conflict on runtime node {kind} \
+         '{identifier}' in domain '{domain}': ANY NODE and REQUIRE NODES win at the same rank"
+    )]
+    PlacementNodeRuleConflict {
+        domain: DomainName,
+        first_rule: nervix_models::PlacementName,
+        second_rule: nervix_models::PlacementName,
+        kind: &'static str,
+        identifier: ModelName,
+    },
+    #[error(
+        "placement '{placement}' does not admit node '{node}', which runs {kind} '{identifier}' \
+         in domain '{domain}'"
+    )]
+    PlacementNodeRuleViolation {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(node, reason = "the node the refused rule does not admit")
+        )]
+        node: nervix_models::ClusterNodeName,
+        kind: &'static str,
+        identifier: ModelName,
+    },
+    #[error(
+        "no cluster node satisfies placement '{placement}' for {kind} '{identifier}' in domain \
+         '{domain}'"
+    )]
+    PlacementNodeRuleUnsatisfiable {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
+        kind: &'static str,
+        identifier: ModelName,
+    },
+    #[error("placement '{placement}' in domain '{domain}' has an invalid node selector")]
+    PlacementNodeSelector {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
+    },
+    #[error("placement '{placement}' in domain '{domain}' could not evaluate its node selector")]
+    PlacementNodeSelectorEvaluation {
+        domain: DomainName,
+        placement: nervix_models::PlacementName,
+    },
+    #[error(
         "model '{identifier}' in domain '{domain}' has incompatible schema relationship: {reason}"
     )]
     IncompatibleSchema {
@@ -1021,11 +1067,13 @@ mod tests {
                 vec![Model::Placement(CreatePlacement {
                     labels: Default::default(),
                     name: named("pin_nothing"),
-                    scope: nervix_models::PlacementScope::Corridor {
-                        from: Vec::new(),
-                        to: vec![named("emit")],
+                    rule: nervix_models::PlacementRule::Colocation {
+                        scope: nervix_models::PlacementScope::Corridor {
+                            from: Vec::new(),
+                            to: vec![named("emit")],
+                        },
+                        policy: PlacementPolicy::Neutral,
                     },
-                    policy: PlacementPolicy::Neutral,
                     rank: None,
                 })],
             )

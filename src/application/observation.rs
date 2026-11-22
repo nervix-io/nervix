@@ -463,7 +463,7 @@ impl SessionServiceImpl {
         lines.push("placement:".to_string());
         let placement_plan = self.inner.registry.placement_plan(domain);
         let rule_count = match placement_plan.as_ref() {
-            Some(plan) => plan.rules.len(),
+            Some(plan) => plan.rules.len() + plan.node_rules.len(),
             None => 0,
         };
         lines.push(format!("  rule count: {rule_count}"));
@@ -503,30 +503,22 @@ impl SessionServiceImpl {
                     None => "(unassigned)",
                 };
                 lines.push(format!("    host: {host}"));
+                let members = group
+                    .members
+                    .iter()
+                    .map(|member| member.node.clone())
+                    .collect::<Vec<_>>();
                 for bond in &group.bonds {
                     lines.push(format!(
                         "    bond: {} <-> {} ({})",
-                        format_placement_runtime_node(
-                            &bond.left,
-                            &group
-                                .members
-                                .iter()
-                                .map(|member| member.node.clone())
-                                .collect::<Vec<_>>()
-                        ),
-                        format_placement_runtime_node(
-                            &bond.right,
-                            &group
-                                .members
-                                .iter()
-                                .map(|member| member.node.clone())
-                                .collect::<Vec<_>>()
-                        ),
+                        format_placement_runtime_node(&bond.left, &members),
+                        format_placement_runtime_node(&bond.right, &members),
                         placement_claim_owner(&bond.winning_rules),
                     ));
                 }
             }
         }
+        lines.extend(self.describe_domain_node_rules(domain).await);
         append_entity_label_lines(&mut lines, labels.labels());
         CommandResult {
             entity_labels: Some(Box::new(labels)),
@@ -544,9 +536,13 @@ impl SessionServiceImpl {
         let Some(plan) = self.inner.registry.placement_plan(domain) else {
             return command_ok("no placements".to_string());
         };
-        if plan.rules.is_empty() {
+        if plan.rules.is_empty() && plan.node_rules.is_empty() {
             return command_ok("no placements".to_string());
         }
+        let node_rule_lines = match self.show_domain_node_rules(domain, &plan).await {
+            Ok(lines) => lines,
+            Err(error) => return command_error(format!("{error:#}")),
+        };
         let lines = plan
             .rules
             .iter()
@@ -578,6 +574,7 @@ impl SessionServiceImpl {
                 ));
             }
         }
+        lines.extend(node_rule_lines);
         command_ok(lines.join("\n"))
     }
 
@@ -599,7 +596,7 @@ impl SessionServiceImpl {
             .iter()
             .find(|rule| rule.name == ModelName::from(&describe.name))
         else {
-            return command_error(format!("placement '{}' not found", describe.name.as_str()));
+            return self.describe_node_rule(domain, &describe).await;
         };
         let mut label_lines = Vec::new();
         let form = match self

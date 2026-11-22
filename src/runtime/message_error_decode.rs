@@ -90,7 +90,7 @@ impl fmt::Display for TransportPosition {
 /// it once the ingestor consumed it.
 ///
 /// Presenting the payload again would only repeat the refusal, so the payload is consumed rather
-/// than retried. Every decode rejection has the code [`Self::CODE`] and the operation
+/// than retried. Every decode rejection has the class [`Self::CLASS`] and the operation
 /// [`Self::OPERATION`]. It never holds the payload: its message is the codec's own diagnostic, which
 /// names the codec and the field at fault and never a payload value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +109,7 @@ pub(crate) struct DecodeRejection {
 
 impl DecodeRejection {
     /// The payload does not satisfy its codec's contract.
-    pub(crate) const CODE: MessageErrorCode = MessageErrorCode::Validation;
+    pub(crate) const CLASS: MessageErrorClass = MessageErrorClass::CODEC;
     pub(crate) const OPERATION: MessageErrorOperation = MessageErrorOperation::Decode;
 
     /// The rejection of the payload an ingestor read at `metadata` and `codec` refused with `report`,
@@ -173,6 +173,8 @@ pub(super) struct DecodeRejections {
     policy: GeneralErrorPolicy,
     count: prometheus::IntCounter,
     status: Arc<IngestorStatus>,
+    /// The ingestor's error counters, which count every decode rejection under its class.
+    errors: NodeMessageErrors,
 }
 
 impl DecodeRejections {
@@ -180,11 +182,13 @@ impl DecodeRejections {
         policy: GeneralErrorPolicy,
         count: prometheus::IntCounter,
         status: Arc<IngestorStatus>,
+        errors: NodeMessageErrors,
     ) -> Self {
         Self {
             policy,
             count,
             status,
+            errors,
         }
     }
 
@@ -199,6 +203,8 @@ impl DecodeRejections {
     ) {
         runtime.report_decode_rejection(domain, ingestor, &self.policy, &rejection);
         self.count.inc();
+        self.errors
+            .count(DecodeRejection::CLASS, DecodeRejection::OPERATION);
         self.status.record_decode_rejection(rejection);
     }
 }
@@ -229,17 +235,23 @@ impl Runtime {
                 );
             }
             GeneralErrorPolicy::Log => {
-                self.inner.events.report_error(format!(
-                    "ingestor '{}' general error in domain '{}': decode rejection {rejection}",
-                    ingestor.as_str(),
-                    domain.as_str(),
-                ));
+                self.inner.events.report_node_error(
+                    format!(
+                        "ingestor '{}' general error in domain '{}': decode rejection {rejection}",
+                        ingestor.as_str(),
+                        domain.as_str(),
+                    ),
+                    ReportedError {
+                        class: DecodeRejection::CLASS,
+                        node: NodeRef::new(ModelKind::Ingestor, ingestor.clone()),
+                    },
+                );
                 warn!(
                     domain = domain.as_str(),
                     node_kind = ModelKind::Ingestor.as_str(),
                     node = ingestor.as_str(),
                     error_reference = %rejection.reference,
-                    error_code = DecodeRejection::CODE.as_ref(),
+                    error_class = DecodeRejection::CLASS.as_str(),
                     error_operation = DecodeRejection::OPERATION.as_ref(),
                     codec = rejection.codec.as_str(),
                     rejection = %rejection,

@@ -181,6 +181,16 @@ draft stays editable. Switching a corridor to the entire domain keeps its member
 restores them. The graph's **PLACE** action on a runtime node or relay opens a new corridor draft
 whose first `FROM` member is that item.
 
+The form's **Rule** choice switches between **Colocation**, the rules above, and **Cluster nodes**,
+a [node rule](placement.md#node-rules). A node rule's coverage is **Entire domain**, which writes
+`DOMAIN WIDE`, or **Members**, which writes `FOR` members chosen from the same list of runtime
+nodes, kept in their chosen order and editable the same way. Its policy is `REQUIRE NODES WHERE`,
+`PREFER NODES WHERE` or `ANY NODE`, and the two selecting policies take a node selector written in
+an expression field that the form parses as the server does. An empty member list, a missing
+selector or one that does not parse is refused inline before submission, and the preview shows the
+canonical rule. Switching between the two rules keeps each one's members, and switching to
+`ANY NODE` and back keeps the selector text.
+
 A resource draft captures the selected domain the first time it opens. If the console later
 selects another domain, reopening the retained draft keeps its captured scope and offers **Use
 current domain** as an explicit change. Domain and user creation are cluster scoped. Passwords are
@@ -484,7 +494,7 @@ as its form; where a contract is source text, the form embeds an editor for exac
 | `CREATE USER` | User | — | — |
 | `CREATE RESOURCE` | Resource | — | — |
 | `CREATE SUBSCRIPTION` | Subscription | a session subscription to one relay | filter expression |
-| `CREATE PLACEMENT` | Placement | `DOMAIN WIDE`, corridor `FROM` / `TO`, all four policies | — |
+| `CREATE PLACEMENT` | Placement | `DOMAIN WIDE`, corridor `FROM` / `TO`, all four colocation policies; node rules with `FOR` members or `DOMAIN WIDE`, `REQUIRE NODES WHERE`, `PREFER NODES WHERE` and `ANY NODE` | node selector |
 | `CREATE SCHEMA` | Schema | every internal scalar type with vector and array layers | — |
 | `CREATE WIRE JSON`, `CBOR`, `AVRO SCHEMA` | Wire schema, one per format | each format's wire types, `STRICT` and `LOOSE` | — |
 | `CREATE PARAMETRIZER` | Parametrizer | key schema, TTL, partitions, LRU eviction | — |

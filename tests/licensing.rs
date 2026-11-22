@@ -561,7 +561,49 @@ async fn repeated_activation_is_recovered(world: &mut ScenarioWorld) {
 async fn unchanged_decision(world: &mut ScenarioWorld, name: String) {
     let saved = saved_license(world, &name);
     let current = current_license(world).await;
-    assert_same_decision(&current, &saved);
+    let ledger = service_ledger(world).await;
+    assert_same_decision(&current, &saved, &ledger);
+}
+
+/// The licensing service's request-level record, so a changed decision names what moved it: each
+/// verified request with its operation, the requests that consumed a scripted fault, each initial
+/// sync the stream sent with the requests recorded before it, and the decision hints sent.
+async fn service_ledger(world: &ScenarioWorld) -> String {
+    let Some(service) = world.licensing_service.as_ref() else {
+        return "no licensing test service".to_owned();
+    };
+    let requests = service.requests().await;
+    let requests = requests
+        .iter()
+        .map(|request| {
+            format!(
+                "{} {}",
+                request.operation().as_str(),
+                request.common().request_id
+            )
+        })
+        .collect::<Vec<_>>();
+    /// What the service recorded beside its requests.
+    struct Recorded {
+        faults: Vec<nervix_licensing_test_service::FaultObservation>,
+        syncs: Vec<nervix_licensing_test_service::SyncObservation>,
+        hints: u64,
+    }
+    let Recorded {
+        faults,
+        syncs,
+        hints,
+    } = service
+        .configure(|model| Recorded {
+            faults: model.fault_observations(),
+            syncs: model.notification_syncs(),
+            hints: model.notification_hints_sent(),
+        })
+        .await;
+    format!(
+        "service requests={requests:?}; fault consumers={faults:?}; stream syncs={syncs:?}; \
+         decision hints sent={hints}"
+    )
 }
 
 #[then(
@@ -583,12 +625,14 @@ async fn unchanged_decision_with_revoked_key(world: &mut ScenarioWorld, name: St
         "verified (signing key revoked)".into(),
     );
     let current = current_license(world).await;
-    assert_same_decision(&current, &saved);
+    let ledger = service_ledger(world).await;
+    assert_same_decision(&current, &saved, &ledger);
 }
 
 fn assert_same_decision(
     current: &std::collections::BTreeMap<String, String>,
     saved: &std::collections::BTreeMap<String, String>,
+    ledger: &str,
 ) {
     for field in [
         "decision",
@@ -600,26 +644,106 @@ fn assert_same_decision(
         assert_eq!(
             current.get(field),
             saved.get(field),
-            "{field} changed after rejection"
+            "{field} changed after rejection; {ledger}"
         );
     }
+}
+
+/// The activation id a saved or current public description names.
+fn described_activation(observation: &std::collections::BTreeMap<String, String>) -> uuid::Uuid {
+    let description = observation
+        .get("activation")
+        .verified("an activated description names its activation");
+    let activation = description
+        .split_whitespace()
+        .next()
+        .verified("an activation description starts with its id");
+    uuid::Uuid::parse_str(activation).assured("the public activation id is a UUID")
+}
+
+fn described_revision(observation: &std::collections::BTreeMap<String, String>) -> u64 {
+    observation
+        .get("decision revision")
+        .verified("an activated description names its decision revision")
+        .parse::<u64>()
+        .assured("typed revision renders as u64")
+}
+
+#[then("the committed license decision is the licensing service's current decision")]
+async fn service_current_decision(world: &mut ScenarioWorld) {
+    let current = current_license(world).await;
+    let activation = described_activation(&current);
+    let service = world.licensing_service.as_ref().verified("fixture started");
+    let (held, faults) = service
+        .configure(|model| (model.held_decision(activation), model.fault_observations()))
+        .await;
+    let held = held.verified("the service holds the activation the cluster describes");
+    let ledger = service_ledger(world).await;
+    assert_eq!(
+        current.get("verification").map(String::as_str),
+        Some("verified"),
+        "{ledger}"
+    );
+    assert_eq!(
+        described_revision(&current),
+        held.decision_revision,
+        "the committed decision is not the service's current one; {ledger}"
+    );
+    assert_eq!(
+        current.get("conditions revision"),
+        Some(&held.conditions.conditions_revision.to_string()),
+        "{ledger}"
+    );
+    assert!(
+        faults
+            .iter()
+            .all(|fault| fault.request_id != held.in_reply_to),
+        "the service's current decision answers a request that consumed a scripted fault; {ledger}"
+    );
+}
+
+#[then(
+    expr = "the licensing stream's first sync reported a newer decision than placeholder {string}"
+)]
+async fn first_sync_reported_newer_decision(world: &mut ScenarioWorld, name: String) {
+    let saved = saved_license(world, &name);
+    let service = world.licensing_service.as_ref().verified("fixture started");
+    let requests = service.requests().await;
+    let (faults, syncs) = service
+        .configure(|model| (model.fault_observations(), model.notification_syncs()))
+        .await;
+    let ledger = service_ledger(world).await;
+    let Some(sync) = syncs.first() else {
+        panic!("the licensing stream sent no sync; {ledger}");
+    };
+    assert!(
+        sync.state.decision_revision > described_revision(&saved),
+        "the first sync reported no newer decision; {ledger}"
+    );
+    let Some(fault) = faults.first() else {
+        panic!("no request consumed the scripted fault; {ledger}");
+    };
+    let Some(refused) = requests
+        .iter()
+        .position(|request| request.common().request_id == fault.request_id)
+    else {
+        panic!("the fault consumer is not a recorded request; {ledger}");
+    };
+    assert!(
+        sync.recorded_requests > refused,
+        "the first sync was built before the refused request reached the service; {ledger}"
+    );
 }
 
 #[then(expr = "the committed license decision is newer than placeholder {string}")]
 async fn newer_decision(world: &mut ScenarioWorld, name: String) {
     let saved = saved_license(world, &name);
-    let revision = |observation: &std::collections::BTreeMap<String, String>| {
-        observation
-            .get("decision revision")
-            .verified("activated revision")
-            .parse::<u64>()
-            .assured("typed revision renders as u64")
-    };
+    let saved_revision = described_revision(&saved);
     let current = timeout(STATUS_WAIT_BUDGET, async {
         loop {
             let current = current_license(world).await;
             if current.get("decision revision").is_some_and(|value| {
-                value.parse::<u64>().assured("typed revision") > revision(&saved)
+                value.parse::<u64>().assured("typed revision") > saved_revision
             }) {
                 break current;
             }
@@ -819,12 +943,7 @@ async fn both_clocks_pass_deadline(world: &mut ScenarioWorld, name: String) {
 #[then(expr = "the licensing service marks placeholder {string} expired and frees its slot")]
 async fn service_expired_activation(world: &mut ScenarioWorld, name: String) {
     let saved = saved_license(world, &name);
-    let activation = saved
-        .get("activation")
-        .and_then(|text| text.split_whitespace().next())
-        .verified("the saved description names its activation");
-    let activation =
-        uuid::Uuid::parse_str(activation).assured("the public activation id is a UUID");
+    let activation = described_activation(&saved);
     let (expired, occupied) = world
         .licensing_service
         .as_ref()

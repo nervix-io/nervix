@@ -558,7 +558,7 @@ pub(super) enum SchemaDraftError {
     SchemaName,
     #[error("Wire schema name is invalid")]
     WireSchemaName,
-    #[error("Branch name is invalid")]
+    #[error("Parametrizer name is invalid")]
     ParametrizerName,
     #[error("Add at least one field")]
     FieldsRequired,
@@ -808,7 +808,7 @@ mod tests {
         let schema = SchemaName::parse("branch_key").assured("the test name is valid");
         let mut selected = SelectedReference::chosen(schema.clone());
         selected.invalidate();
-        let mut branch = ParametrizerDraft {
+        let mut parametrizer = ParametrizerDraft {
             name: "by_key".to_string(),
             schema: Some(selected),
             ttl: "5m".to_string(),
@@ -817,11 +817,11 @@ mod tests {
             ..ParametrizerDraft::default()
         };
         assert_eq!(
-            draft_error(branch.build()),
+            draft_error(parametrizer.build()),
             SchemaDraftError::SchemaReferenceChanged
         );
-        branch.schema = Some(SelectedReference::chosen(schema.clone()));
-        let model = branch
+        parametrizer.schema = Some(SelectedReference::chosen(schema.clone()));
+        let model = parametrizer
             .build()
             .assured("the selected schema and positive limit are valid");
         assert_eq!(model.schema, schema);
@@ -834,27 +834,32 @@ mod tests {
             Some(3)
         );
         assert_canonical_round_trip(Model::Parametrizer(model), false);
-        branch.max_instances = "0".to_string();
-        assert_eq!(draft_error(branch.build()), SchemaDraftError::MaxInstances);
+        parametrizer.max_instances = "0".to_string();
+        assert_eq!(
+            draft_error(parametrizer.build()),
+            SchemaDraftError::MaxInstances
+        );
     }
 
     #[test]
     fn branch_partitions_default_to_one_and_keep_the_typed_count() {
         let schema = SchemaName::parse("branch_key").assured("the test name is valid");
-        let mut branch = ParametrizerDraft {
+        let mut parametrizer = ParametrizerDraft {
             name: "by_key".to_string(),
             schema: Some(SelectedReference::chosen(schema)),
             ttl: "5m".to_string(),
             ..ParametrizerDraft::default()
         };
-        assert_eq!(branch.partitions, "1");
-        let model = branch
+        assert_eq!(parametrizer.partitions, "1");
+        let model = parametrizer
             .build()
             .assured("a new draft declares the default single partition");
         assert_eq!(model.partitions, nervix_models::ParametrizerPartitions::ONE);
 
-        branch.partitions = " 4 ".to_string();
-        let model = branch.build().assured("four partitions are a valid count");
+        parametrizer.partitions = " 4 ".to_string();
+        let model = parametrizer
+            .build()
+            .assured("four partitions are a valid count");
         assert_eq!(
             model.partitions,
             nervix_models::ParametrizerPartitions::Direct(
@@ -864,9 +869,9 @@ mod tests {
         assert_canonical_round_trip(Model::Parametrizer(model), false);
 
         for invalid in ["0", "65536", "", "four", "-1"] {
-            branch.partitions = invalid.to_string();
+            parametrizer.partitions = invalid.to_string();
             assert_eq!(
-                draft_error(branch.build()),
+                draft_error(parametrizer.build()),
                 SchemaDraftError::Partitions,
                 "{invalid:?} is not a partition count"
             );
@@ -971,18 +976,21 @@ mod tests {
             }
         );
 
-        let mut branch = ParametrizerDraft {
+        let mut parametrizer = ParametrizerDraft {
             name: "by_tenant".to_string(),
             ..ParametrizerDraft::default()
         };
         assert_eq!(
-            draft_error(branch.build()),
+            draft_error(parametrizer.build()),
             SchemaDraftError::SchemaReferenceRequired
         );
-        branch.schema = Some(SelectedReference::chosen(
+        parametrizer.schema = Some(SelectedReference::chosen(
             SchemaName::parse("tenant_key").assured("valid schema name"),
         ));
-        assert_eq!(draft_error(branch.build()), SchemaDraftError::TtlRequired);
+        assert_eq!(
+            draft_error(parametrizer.build()),
+            SchemaDraftError::TtlRequired
+        );
     }
 
     #[test]

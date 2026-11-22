@@ -1216,7 +1216,7 @@ mod tests {
     /// One branch of eight partitions with a materialized relay, which keeps state per key, and a
     /// plain relay beside it, both placed on one node, in partition epoch two.
     fn repartitioned_schedule(transition: bool) -> DomainSchedule {
-        let branch = || named::<nervix_models::ParametrizerName>("by_tenant");
+        let parametrizer = || named::<nervix_models::ParametrizerName>("by_tenant");
         let partitions = |count: u16| {
             nervix_models::ResolvedParametrizerPartitions::Direct(
                 std::num::NonZeroU16::new(count).expect("test counts are positive"),
@@ -1235,14 +1235,14 @@ mod tests {
                     name: named(name),
                     schema: named("event"),
                     buffer: nonzero!(8usize),
-                    branching: RelayBranching::branched_by(branch()),
+                    branching: RelayBranching::branched_by(parametrizer()),
                     materialized_state: materialized
                         .then_some(nervix_models::MaterializedRelayState::LastByTimestamp),
                 }),
                 SchemaFingerprint::from_digest([1; 32]),
             )
             .with_resolved_branching(Some(ResolvedBranching::branched(
-                branch(),
+                parametrizer(),
                 key_schema.clone(),
                 partitions(8),
             )))
@@ -1260,7 +1260,7 @@ mod tests {
             vec![relay("profiles", true), relay("events", false)],
             Vec::new(),
         )
-        .with_partition_epochs(std::collections::BTreeMap::from([(branch(), epoch)]))
+        .with_partition_epochs(std::collections::BTreeMap::from([(parametrizer(), epoch)]))
     }
 
     #[test]

@@ -19,7 +19,17 @@ use super::*;
 
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
-    Error(String),
+    Error(RuntimeErrorEvent),
+}
+
+/// A failure the node recovered from: its display text, and, when it reports an error of a graph
+/// node, that error's class and node as typed fields that readers route by instead of the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeErrorEvent {
+    pub message: String,
+    /// The class and producing node of the error the event reports, absent for a failure that is
+    /// no classified error, such as a connector failure the emitter recovered from.
+    pub error: Option<ReportedError>,
 }
 
 /// The node's runtime event bus, and the one way a connector failure becomes observable.
@@ -54,12 +64,31 @@ impl RuntimeEvents {
         nervix::dispatch(reason = "the caller supplies the event message conversion")
     )]
     pub(crate) fn report_error(&self, message: impl Into<String>) {
-        let message = message.into();
-        debug!(error = %message, "reported runtime error to observers");
-        if let Err(broadcast::error::SendError(RuntimeEvent::Error(message))) =
-            self.sender.send(RuntimeEvent::Error(message))
+        self.publish(RuntimeErrorEvent {
+            message: message.into(),
+            error: None,
+        });
+    }
+
+    /// Report an error of a graph node the node recovered from: its text, as
+    /// [`Self::report_error`] takes it, and the error's class and producing node beside it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the event message conversion")
+    )]
+    pub(crate) fn report_node_error(&self, message: impl Into<String>, error: ReportedError) {
+        self.publish(RuntimeErrorEvent {
+            message: message.into(),
+            error: Some(error),
+        });
+    }
+
+    fn publish(&self, event: RuntimeErrorEvent) {
+        debug!(error = %event.message, "reported runtime error to observers");
+        if let Err(broadcast::error::SendError(RuntimeEvent::Error(event))) =
+            self.sender.send(RuntimeEvent::Error(event))
         {
-            warn!(error = %message, "runtime error raised while no observer is attached");
+            warn!(error = %event.message, "runtime error raised while no observer is attached");
         }
     }
 

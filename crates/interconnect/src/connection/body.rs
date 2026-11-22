@@ -155,6 +155,18 @@ pub(super) async fn send_body(
     Ok(())
 }
 
+/// Resolves once the caller resets the exchange `respond` would answer, or the connection under
+/// it fails. An answer that waits for a place on a full class waits only while this is pending,
+/// because no answer can reach the caller afterwards.
+pub(super) async fn exchange_reset(
+    respond: &mut server::SendResponse<Bytes>,
+) -> Result<(), Report<TransportError>> {
+    match poll_fn(|context| respond.poll_reset(context)).await {
+        Ok(_reason) => Ok(()),
+        Err(error) => Err(Report::new(TransportError::from(error))),
+    }
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::context(

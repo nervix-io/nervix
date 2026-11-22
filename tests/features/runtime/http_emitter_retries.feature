@@ -444,7 +444,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
         ON MESSAGE ERROR SEND TO rejected_requests
           SET event_id = input.event_id,
               tenant = input.tenant,
-              error_code = error.code,
+              error_code = error.class,
               error_message = error.message,
               operation = error.operation,
               state_prefix = relay_state.routes.prefix,
@@ -466,7 +466,7 @@ Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "event_id":"2" | "tenant":"south" | "error_code":"external" | "error_message":"HTTP endpoint answered with status <status>" | "operation":"publish" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND"
+      "event_id":"2" | "tenant":"south" | "error_code":"refused" | "error_message":"HTTP endpoint answered with status <status>" | "operation":"publish" | "state_prefix":"/tenants/north" | "attempted_payload":"SECOND"
       """
     And HTTP receiver "api" eventually receives at least 3 requests
     And HTTP receiver "api" request 2 is

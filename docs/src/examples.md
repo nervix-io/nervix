@@ -86,7 +86,7 @@ CREATE DEDUPLICATOR project_notifications
     FLUSH IMMEDIATE
     ON MESSAGE ERROR SEND TO processing_errors
       SET error_reference = error.reference,
-          error_code = error.code,
+          error_class = error.class,
           source_id = input.event_id,
           attempted_amount = partial_output.amount;
 ```
