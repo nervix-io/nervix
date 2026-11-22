@@ -6012,6 +6012,21 @@ selections = [
 ]
 
 [[workload]]
+coverage = "A parameter change whose admitting leader moves under its durable admission, on three nodes: with the leader's own resumption held, the request's retry on the next leader meets the refused finalization, and a later retry records the outcome. The fault-injection holds and the leadership move are untracked."
+examples = 1
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.moved-finalization-refusal"
+invariant = "A finalization the next leader refuses after a leadership move leaves the parameter change's outcome unknown to its request, and a retry under the same reference commits the change once."
+invocation = "cluster-parameters"
+scenario = "A parameter change whose leader moves after admitting it still reports its refused finalization as unknown"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
 coverage = "An atomic cap refusal identifies the existing model."
 examples = 2
 feature = "tests/features/cluster/cluster_parameters.feature"

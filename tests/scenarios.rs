@@ -599,6 +599,10 @@ struct ScenarioWorld {
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
+    /// The payloads single-payload subscription waits read and passed over while waiting for
+    /// another payload, so a later wait that times out can name the payload it expects when it
+    /// already arrived before that wait began.
+    passed_over_subscription_payloads: Vec<String>,
     /// The metric values each named subscription passed from sampling, recorded once every value
     /// that was sampled had been drawn for.
     sampled_metric_values: BTreeMap<String, Vec<i64>>,
@@ -1113,6 +1117,7 @@ impl ScenarioWorld {
         self.active_session_node = None;
         self.active_session_has_subscription = false;
         self.last_subscription_payload = None;
+        self.passed_over_subscription_payloads.clear();
         self.last_command_error = None;
         self.last_command_output = None;
         self.last_server_error = None;
@@ -8944,6 +8949,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.active_session_node = None;
     world.active_session_has_subscription = false;
     world.last_subscription_payload = None;
+    world.passed_over_subscription_payloads.clear();
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_server_error = None;
@@ -23258,6 +23264,7 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
     world.last_command_output = None;
     world.last_server_error = None;
     world.last_subscription_payload = None;
+    world.passed_over_subscription_payloads.clear();
 
     let transport = IngestorLogicTransportFixture::parse(&transport_fixture);
     let output_schema = IngestorLogicOutputSchemaFixture::parse(&output_schema_fixture);
@@ -23337,6 +23344,7 @@ async fn when_the_ingestor_logic_fixture_fails_to_start_with_output_schema_and_p
     world.last_command_output = None;
     world.last_server_error = None;
     world.last_subscription_payload = None;
+    world.passed_over_subscription_payloads.clear();
     world.active_session = None;
     world.active_session_node = None;
     world.active_session_has_subscription = false;
@@ -38862,9 +38870,10 @@ async fn capture_and_assert_subscription_payload(
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out waiting for subscription payload containing {}. observed {:?}",
+            "timed out waiting for subscription payload containing {}. observed {:?}.{}",
             expected_payload,
-            observed
+            observed,
+            earlier_arrival_note(world, &expected_payload)
         );
         let wait = deadline.saturating_duration_since(now);
         let event = world
@@ -38885,22 +38894,44 @@ async fn capture_and_assert_subscription_payload(
                 domain_descriptions.push(format!("{node_id}: {result:?}"));
             }
             panic!(
-                "timed out waiting for subscription payload containing {}. observed {:?}. domain \
-                 descriptions: {:?}",
-                expected_payload, observed, domain_descriptions
+                "timed out waiting for subscription payload containing {}. observed {:?}.{} \
+                 domain descriptions: {:?}",
+                expected_payload,
+                observed,
+                earlier_arrival_note(world, &expected_payload),
+                domain_descriptions
             );
         };
         let payload = event.payload;
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
 
-        if expect_topic_key && !payload.contains("key=notifications") {
-            continue;
-        }
-        if payload.contains(&expected_payload) {
+        let carries_topic_key = !expect_topic_key || payload.contains("key=notifications");
+        if carries_topic_key && payload.contains(&expected_payload) {
             break;
         }
+        world.passed_over_subscription_payloads.push(payload);
     }
+}
+
+/// What a timed-out single-payload wait adds when an earlier wait already read past the payload it
+/// expects. Rows of different branches have no delivery order, so a row can arrive while an earlier
+/// step still waits for another branch's row, and that step reads past it.
+fn earlier_arrival_note(world: &ScenarioWorld, expected_payload: &str) -> String {
+    let mut arrived_earlier = Vec::new();
+    for payload in &world.passed_over_subscription_payloads {
+        if payload.contains(expected_payload) {
+            arrived_earlier.push(payload.as_str());
+        }
+    }
+    if arrived_earlier.is_empty() {
+        return String::new();
+    }
+    format!(
+        " An earlier wait for another payload read past {arrived_earlier:?}, so the expected \
+         payload arrived before this wait began. Rows of different branches have no delivery \
+         order: wait for them together with \"the relay subscription receives payloads\"."
+    )
 }
 
 #[then(
@@ -38960,6 +38991,72 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
             arrived_after >= expected_delay,
             "expected the payload no sooner than {expected_delay:?} after publishing, but it \
              arrived after {arrived_after:?}"
+        );
+        break;
+    }
+}
+
+/// Bounds a payload's delivery from the instant its publishing request began, the anchor of the
+/// "no sooner than" step above. A budget that opened at this step's start would grow by however
+/// long the publishing request took, so a scenario that compares the budget with a route's
+/// cadence could not rely on the two windows staying apart.
+#[then(expr = "the relay subscription receives a payload within {string} after it was published")]
+async fn then_stream_subscription_receives_payload_within_publication_budget(
+    world: &mut ScenarioWorld,
+    budget: String,
+    #[step] step: &Step,
+) {
+    let budget = parse_duration_text(&budget).assured("the receive budget is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("a delivery-budget assertion follows a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step))
+        .trim()
+        .to_string();
+    append_cucumber_log_line(&format!(
+        "awaiting subscription payload containing {} within {budget:?} after publishing",
+        expected_payload.replace('\n', "\\n")
+    ));
+    let deadline = published_at
+        .checked_add(budget)
+        .assured("a scenario's receive budget lies seconds after a recent instant");
+    let mut observed = Vec::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for subscription payload containing {expected_payload} within \
+             {budget:?} after publishing. observed {observed:?}"
+        );
+        let event = world
+            .active_session
+            .as_mut()
+            .assured("the scenario opened its subscription before publishing")
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .unwrap_or_else(|error| panic!("the subscription session failed: {error}"));
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for subscription payload containing {expected_payload} within \
+                 {budget:?} after publishing. observed {observed:?}"
+            );
+        };
+        let read_after = published_at.elapsed();
+        let payload = event.payload;
+        observed.push(payload.clone());
+        world.last_subscription_payload = Some(payload.clone());
+        if !payload.contains(&expected_payload) {
+            continue;
+        }
+        append_cucumber_log_line(&format!(
+            "subscription payload containing {} read {read_after:?} after publishing",
+            expected_payload.replace('\n', "\\n")
+        ));
+        assert!(
+            read_after <= budget,
+            "expected the payload within {budget:?} after publishing, but it was read after \
+             {read_after:?}"
         );
         break;
     }
