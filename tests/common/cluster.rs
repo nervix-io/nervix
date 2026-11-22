@@ -2657,6 +2657,47 @@ impl Cluster {
         }
     }
 
+    /// The member id of Kafka consumer group `group` once the group is stable with exactly one
+    /// member. The broker gives a consumer a new member id whenever its client joins the group
+    /// again, so an unchanged id shows the same consumer kept its membership in between.
+    pub(crate) async fn kafka_consumer_group_stable_member(
+        &self,
+        group: &str,
+    ) -> io::Result<String> {
+        let inspect = || {
+            let dependencies = self.dependencies.clone();
+            let group = group.to_owned();
+            async move {
+                nervix_primitives::task::spawn_blocking(move || {
+                    inspect_kafka_consumer_group(&dependencies, &group, |info| {
+                        let members = info.members().iter().map(|member| member.id().to_owned());
+                        (info.state().to_owned(), members.collect::<Vec<_>>())
+                    })
+                })
+                .await
+                .map_err(io::Error::other)?
+            }
+        };
+        let (_, members) = PhaseDeadline::after(STATUS_WAIT_BUDGET)
+            .poll_until(
+                POLL_INTERVAL,
+                |_| inspect(),
+                |(state, members)| state == "Stable" && members.len() == 1,
+            )
+            .await
+            .map_err(|observed| {
+                io::Error::other(format!(
+                    "Kafka consumer group '{group}' did not become stable with one member: \
+                     {observed:?}"
+                ))
+            })?;
+        let mut members = members.into_iter();
+        let member = members
+            .next()
+            .verified("the poll ends only once the group has exactly one member");
+        Ok(member)
+    }
+
     /// Whether the Kafka broker knows `topic`. The metadata request names the topic from a
     /// consumer, which never lets the broker create it.
     pub(crate) fn kafka_topic_exists(&self, topic: &str) -> io::Result<bool> {

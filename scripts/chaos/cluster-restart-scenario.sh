@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Sourced by run-baseline.sh after the external cluster and graph are ready. SIGKILLs every Nervix
 # node at once, starts each from its own container, image and volume, and checks the committed
-# configuration, ownership against the voter observation grace, and delivery of every accepted
-# record. The evidence is process-crash evidence: the host, its page cache and its disks survive.
+# configuration, the label probe's complete label maps through every node, ownership against the
+# voter observation grace, and delivery of every accepted record. The evidence is process-crash
+# evidence: the host, its page cache and its disks survive.
 
 # shellcheck source=recovery-scenario.sh
 source "${script_dir}/recovery-scenario.sh"
@@ -108,6 +109,11 @@ run_cluster_restart() {
         'CREATE RESOURCE chaos_restart_before;' "created resource 'chaos_restart_before'")"
     [[ "${outcome}" == acknowledged ]] \
         || recovery_fail product "the control canary before the crash was ${outcome}, not acknowledged"
+    label_probe_install "${case_dir}" "${leader_host}"
+    label_probe_edit "${case_dir}" "${leader_host}" restart before-crash
+    jq -s -e '[.[] | select(.kind == "label")] | all(.outcome == "acknowledged")' \
+        "${case_dir}/changes.ndjson" >/dev/null \
+        || recovery_fail product 'a label edit before the crash was not acknowledged'
     local host
     for host in "${node_hosts[@]}"; do
         wait_for "committed configuration through ${host} before the crash" 60 \
@@ -296,6 +302,12 @@ run_cluster_restart() {
         [[ -z "${differences}" ]] \
             || recovery_finding "${case_dir}" "${host} reports different committed ${differences//$'\n'/, } after the restart"
     done
+    for host in "${node_hosts[@]}"; do
+        wait_for "every probed owner's labels through ${host} after the restart" 60 \
+            label_probe_read "${host}" "${case_dir}/labels/${host}" || true
+    done
+    label_probe_judge "${case_dir}" "${case_dir}/labels" "${case_dir}/labels.json" "${node_hosts[@]}" \
+        || recovery_finding "${case_dir}" "the nodes do not report the same complete labels with every acknowledged edit after the restart: $(jq -c '{unanswered, disagreements, missing}' "${case_dir}/labels.json")"
     if [[ "${node_count}" == 3 ]] \
         && ! wait_for 'Kafka ingestion runs only on the scheduled ingestor owner' \
             "${cluster_restart_delivery_bound}" ingestion_converged "${case_dir}/recovered"; then
@@ -340,6 +352,10 @@ run_cluster_restart() {
     output_after="$(topic_end_offset chaos_output)"
     capture_cluster_parameters "${case_dir}/cluster-parameters" "${node_names[@]}" \
         || recovery_fail product 'the restarted nodes did not install the committed cluster policy'
+    # Last, so the restored copy enters no configuration comparison of the restart.
+    phase 'cluster restart: label scope of a domain backup after the restart'
+    label_probe_backup_scope "${case_dir}" "${node_hosts[0]}" \
+        || recovery_finding "${case_dir}" "a domain backup after the restart does not keep its label scope: $(jq -c '{copied, expected, scope, archived_users, user_before, user_after}' "${case_dir}/backup-scope/verdict.json" 2>/dev/null || printf 'its backup, restore or reads did not complete')"
     jq -n \
         --arg fault_since "${fault_since}" \
         --argjson nodes "${node_count}" \
@@ -381,6 +397,7 @@ run_cluster_restart() {
           source_offsets: {before: $source_before, while_down: $source_while_down, after: $source_after},
           output_offsets: {before: $output_before, while_down: $output_while_down, after: $output_after},
           configuration: {before: "restart/configuration-before", after: "restart/configuration-after"},
+          labels: {verdict: "restart/labels.json", backup_scope: "restart/backup-scope/verdict.json"},
           status_samples: "restart/status-samples.ndjson",
           node_events: "restart/node-events.ndjson",
           findings: "restart/findings.ndjson"}' \
