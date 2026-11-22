@@ -186,7 +186,8 @@ and acknowledgement boundaries.
 
 PyCapsules share Arrow array buffers across the language boundary; this does not remove IPC
 encoding or transport copies. Ruby and Java bulk arrays copy, while their retained native buffer
-views borrow. Widths, float bits, signed DATETIME nanoseconds, embedded NULs and non-UTF-8 bytes
+views borrow. Widths, float bits, signed DATETIME and DURATION nanoseconds, embedded NULs and
+non-UTF-8 bytes
 survive their declared mappings; Java uses a `long`'s bits for unsigned 64-bit values. No binding
 introduces row-map payloads, implicit numeric conversions or per-cell callbacks from Rust.
 

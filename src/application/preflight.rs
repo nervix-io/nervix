@@ -33,7 +33,6 @@ use super::{NodeDetection, NodeSettings, startup::STORAGE_JOB_RESERVATION_BYTES}
 use crate::{
     capacity::{DetectedMemory, NodeMemory, VolumeCapacityError, volume_capacity},
     memory_pressure::MemoryHighWatermark,
-    resource::{ResourceMaxArchiveBytes, ResourceMaxExtractedBytes},
     runtime::RestoreStagingMaxBytes,
 };
 
@@ -136,7 +135,6 @@ pub(in crate::application) struct PreflightOutcome {
     pub(in crate::application) memory_pressure: crate::memory_pressure::MemoryPressureSettings,
     /// The restore staging the node's state store may hold, resolved against the database volume.
     pub(in crate::application) restore_staging_max_bytes: ByteUnit,
-    pub(in crate::application) database_volume: ByteUnit,
 }
 
 /// What the preflight checks: the node's paths and settings.
@@ -265,33 +263,10 @@ impl Preflight<'_> {
             .peer_receive
             .resolve(executor.limits())
             .change_context(PreflightError::PeerReceiveLimits)?;
-        let mut capabilities = nervix_models::NodeCapabilities {
-            runtime: self.settings.runtime.data_plane.capabilities(),
-            shutdown: self.settings.shutdown.capabilities(),
-            interconnect: self.settings.interconnect.capabilities(),
-            dns: self.settings.dns.capabilities(),
-            node_database: self.settings.node_database.capabilities(cpu_count),
-            consensus_database: self.settings.consensus_database.capabilities(cpu_count),
-            consensus: self.settings.consensus_operations.capabilities(
-                *self
-                    .settings
-                    .raft_retention
-                    .snapshot_entry_threshold
-                    .value(),
-                executor.limits(),
-            ),
-            engines: self.settings.runtime.engine_capabilities(),
-            connector_host: self.settings.runtime.connector_host.capabilities(),
-            listeners: self.settings.listeners.bounds(),
-            cpu_count,
-            memory_bytes,
-            receive: peer_receive.bounds(),
-        };
+        let node_database = self.settings.node_database.capabilities(cpu_count);
+        let consensus_database = self.settings.consensus_database.capabilities(cpu_count);
         let mut budget_bytes = budgets.as_u64();
-        for cache_bytes in [
-            capabilities.node_database.cache_bytes,
-            capabilities.consensus_database.cache_bytes,
-        ] {
+        for cache_bytes in [node_database.cache_bytes, consensus_database.cache_bytes] {
             budget_bytes = match budget_bytes.checked_add(cache_bytes) {
                 Some(total) => total,
                 None => return Err(Report::new(PreflightError::UnaddressableBudgets)),
@@ -325,7 +300,6 @@ impl Preflight<'_> {
         let temporary =
             prepare_directory(&executor, StagingDirectory::Temporary, self.temp_dir).await?;
         let data_plane = self.runtime_capacity_for_volume(temporary.capacity)?;
-        capabilities.runtime = data_plane.capabilities();
         let restore_staging_max_bytes = self
             .settings
             .runtime
@@ -342,6 +316,31 @@ impl Preflight<'_> {
                 }));
             }
         }
+        // The claim is built once every volume is measured, so it records the sizes the checks
+        // above judged.
+        let capabilities = nervix_models::NodeCapabilities {
+            runtime: data_plane.capabilities(),
+            shutdown: self.settings.shutdown.capabilities(),
+            interconnect: self.settings.interconnect.capabilities(),
+            dns: self.settings.dns.capabilities(),
+            node_database,
+            consensus_database,
+            consensus: self.settings.consensus_operations.capabilities(
+                *self
+                    .settings
+                    .raft_retention
+                    .snapshot_entry_threshold
+                    .value(),
+                executor.limits(),
+            ),
+            engines: self.settings.runtime.engine_capabilities(),
+            connector_host: self.settings.runtime.connector_host.capabilities(),
+            listeners: self.settings.listeners.bounds(),
+            cpu_count,
+            memory_bytes,
+            database_volume_bytes: database.capacity.as_u64(),
+            receive: peer_receive.bounds(),
+        };
 
         let dns = DnsResolver::load(self.dns.clone(), self.settings.dns)
             .instrument(tracing::info_span!("load_dns_configuration"))
@@ -375,7 +374,6 @@ impl Preflight<'_> {
             client_endpoints,
             memory_pressure,
             restore_staging_max_bytes,
-            database_volume: database.capacity,
         })
     }
 }
@@ -453,30 +451,19 @@ mod tests;
 /// Local defaults on a returning node are never a substitute for that policy.
 pub(in crate::application) fn validate_resource_volume(
     parameters: &nervix_models::ClusterParameterValues,
-    capacity: ByteUnit,
+    database_volume_bytes: u64,
     path: &Path,
 ) -> Result<(), Report<PreflightError>> {
-    for (setting, quota) in [
-        (
-            ResourceMaxArchiveBytes::NAME,
-            ByteUnit::Byte(parameters.resource_max_archive_bytes()),
-        ),
-        (
-            ResourceMaxExtractedBytes::NAME,
-            ByteUnit::Byte(parameters.resource_max_extracted_bytes()),
-        ),
-    ] {
-        if quota > capacity {
-            return Err(Report::new(PreflightError::QuotaExceedsVolume {
-                setting,
-                quota,
-                capacity,
-                directory: StagingDirectory::Database,
-                path: path.to_path_buf(),
-            }));
-        }
-    }
-    Ok(())
+    let Some(beyond) = parameters.resource_quota_beyond_volume(database_volume_bytes) else {
+        return Ok(());
+    };
+    Err(Report::new(PreflightError::QuotaExceedsVolume {
+        setting: beyond.parameter.setting_name(),
+        quota: ByteUnit::Byte(beyond.quota),
+        capacity: ByteUnit::Byte(database_volume_bytes),
+        directory: StagingDirectory::Database,
+        path: path.to_path_buf(),
+    }))
 }
 
 /// Validate the selected bootstrap or committed policy before running a domain or publishing

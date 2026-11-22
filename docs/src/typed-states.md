@@ -357,7 +357,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX NODE RULE` archive signature identifies the current Model layout, including
+The registry's `NERVIX DURATIONS` archive signature identifies the current Model layout, including
 the `parametrizer` kind text of the declared entity that defines a parametrization, that union, a
 placement's colocation or node rule with its `FOR` members or domain-wide scope and its
 `REQUIRE NODES`, `PREFER NODES` or `ANY NODE` policy and selector, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
@@ -369,8 +369,10 @@ the receive count an SQS QUEUE ingestor's `ACK PARALLEL MAX` declares, the sessi
 service an MQTT TOPIC ingestor writes beside its delivery mode, the quality of service an MQTT TOPIC
 emitter writes beside its publishing mode, its retained-publication flag and MQTT 5 property
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
-that header state, inferencer state bindings with their initial expressions, the typed `payload`
-expression scope and an emitter's `INSTANCES` declaration.
+that header state, inferencer state bindings with their initial expressions, an inferencer's
+required working memory, the typed `payload` expression scope, an emitter's `INSTANCES`
+declaration, and the `DURATION` type with the duration literals expressions, subscription
+bindings and branch selections hold.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
@@ -381,9 +383,12 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_shutdown_` keyspaces and `ClusterState`
-metadata encoding 47 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
-domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules and the partition count of every resolved
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_shutdown_` keyspaces and `ClusterState`
+metadata encoding 52 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
+inferencer working memory, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, the database volume size each node record's capacity claim carries, interconnect capabilities
+that carry no relay watermark count, and the partition
+count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes

@@ -56,6 +56,7 @@ RENDER = {
     "F64": lambda value: f"f64:{bits64(value):016x}",
     "BOOL": lambda value: f"bool:{'true' if value else 'false'}",
     "DATETIME": lambda value: f"datetime:{value}",
+    "DURATION": lambda value: f"duration:{value}",
     "STRING": lambda value: f"str:{value.encode().hex()}",
     "BYTES": lambda value: f"bytes:{value.hex()}",
 }
@@ -63,7 +64,7 @@ RENDER = {
 # The struct format of each fixed-width scalar, in native byte order.
 PACKING = {
     "U8": "=B", "I8": "=b", "U16": "=H", "I16": "=h", "U32": "=I", "I32": "=i", "U64": "=Q",
-    "I64": "=q", "F32": "=f", "F64": "=d", "BOOL": "=?", "DATETIME": "=q",
+    "I64": "=q", "F32": "=f", "F64": "=d", "BOOL": "=?", "DATETIME": "=q", "DURATION": "=q",
 }
 
 
@@ -554,6 +555,7 @@ INPUT_FIELDS = [
     ("grid", [("FIXED_LIST", 2), ("FIXED_LIST", 2), ("I16", 0)], False, False),
     ("spans", [("LIST", 0), ("FIXED_LIST", 2), ("DATETIME", 0)], True, False),
     ("secret", [("STRING", 0)], False, True),
+    ("wait", [("DURATION", 0)], False, False),
 ]
 ECHO_FIELD = ("echo", [("U32", 0)], False, False)
 
@@ -566,7 +568,7 @@ def plain_row(identifier, tenant):
         "id": identifier, "tenant": tenant, "u8v": 0, "i8v": 0, "u16v": 0, "i16v": 0, "u32v": 0,
         "i32v": 0, "u64v": 0, "i64v": 0, "f32v": 0, "f64v": 0, "flag": False, "text": None,
         "raw": None, "at": 0, "maybe": None, "tags": [], "grid": [[0, 0], [0, 0]], "spans": None,
-        "secret": "s",
+        "secret": "s", "wait": 0,
     }
 
 
@@ -580,20 +582,21 @@ def typed_rows():
             "text": "héllo 世界 \U0001f680".encode(), "raw": b"\x00\xff\xfe\x80\x00",
             "at": I64_MAX, "maybe": None, "tags": ["a", "", "héllo"],
             "grid": [[1, -2], [32767, -32768]], "spans": [[I64_MIN, I64_MAX]], "secret": "s1",
+            "wait": I64_MAX,
         },
         {
             "id": 2, "tenant": "acme", "u8v": 0, "i8v": -128, "u16v": 0, "i16v": -32768,
             "u32v": 0, "i32v": -2147483648, "u64v": 0, "i64v": I64_MIN, "f32v": 0x80000000,
             "f64v": 0x0000000000000001, "flag": False, "text": b"a\x00b", "raw": b"",
             "at": I64_MIN, "maybe": 0, "tags": [], "grid": [[0, 0], [0, 0]], "spans": None,
-            "secret": "s2",
+            "secret": "s2", "wait": I64_MIN,
         },
         {
             "id": 3, "tenant": "acme", "u8v": 1, "i8v": -1, "u16v": 1, "i16v": -1, "u32v": 1,
             "i32v": -1, "u64v": 9007199254740993, "i64v": -9007199254740993,
             "f32v": 0x3FC00000, "f64v": 0x3FB999999999999A, "flag": True, "text": None,
             "raw": None, "at": 1, "maybe": 9007199254740992, "tags": ["x"],
-            "grid": [[-1, 1], [2, -2]], "spans": [], "secret": "s3",
+            "grid": [[-1, 1], [2, -2]], "spans": [], "secret": "s3", "wait": 1,
         },
     ]
 
@@ -603,7 +606,7 @@ def typed_rows():
 WRITTEN = {
     "id": "=I", "u8v": "=B", "i8v": "=b", "u16v": "=H", "i16v": "=h", "u32v": "=I",
     "i32v": "=i", "u64v": "=Q", "i64v": "=q", "f32v": "=I", "f64v": "=Q", "flag": "=B",
-    "at": "=q",
+    "at": "=q", "wait": "=q",
 }
 
 
@@ -857,6 +860,7 @@ class Endpoints:
             ),
             "spans": pyarrow.array([None, [[0, 1]]], pyarrow.list_(pyarrow.list_(utc, 2))),
             "secret": pyarrow.array(["s", "s"], pyarrow.string()),
+            "wait": pyarrow.array([0, 0], pyarrow.duration("ns")),
         }
         names = [field["name"] for field in reported_fields(input_schema)]
         brought = pyarrow.record_batch([arrays[name] for name in names], names=names)

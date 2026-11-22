@@ -3,11 +3,12 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The subscriber the process installs and the filter that decides what it records,
-//!   including the dependency events no filter may select, the OTLP exporter it may add, the guard
-//!   that flushes them on shutdown, and the trace sample ratio setting the exporter samples with.
-//! - **Depends on.** The tracing command-line arguments, the node resolver and telemetry transport
-//!   hooks.
-//! - **Must not know.** What any other module records.
+//!   including the dependency events no filter may select, the provisioned trace collector, the
+//!   OTLP span exporter the node adds for it, configured only by that collector and the trace
+//!   export capabilities, and the guard that flushes them on shutdown.
+//! - **Depends on.** The node's provisioned collector and trace export capabilities, the node
+//!   resolver, the telemetry SDK and the OpenTelemetry protocol crate's generated client.
+//! - **Must not know.** What any other module records, or any `OTEL_*` environment variable.
 
 #![cfg_attr(
     nervix_lint,
@@ -28,17 +29,30 @@ use error_stack::{Report, ResultExt};
 use hyper_util::client::legacy::connect::HttpConnector;
 use meticulous::OptionExt as _;
 use nervix_dns::DnsResolver;
-use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
+use nervix_models::TraceExportCapabilities;
 use nervix_primitives::{
     sync::{Arc, blocking::Mutex as ParkingMutex, watch},
     time::timeout,
 };
 use nervix_recovery::{Discarded, Reported};
 use opentelemetry::trace::TracerProvider;
-use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
+use opentelemetry_proto::{
+    tonic::collector::trace::v1::{
+        ExportTraceServiceRequest, trace_service_client::TraceServiceClient,
+    },
+    transform::{
+        common::tonic::ResourceAttributesWithSchema,
+        trace::tonic::group_spans_by_resource_and_scope,
+    },
+};
 use opentelemetry_sdk::{
     Resource,
-    trace::{Sampler, SdkTracerProvider},
+    error::{OTelSdkError, OTelSdkResult},
+    resource::TelemetryResourceDetector,
+    trace::{
+        BatchConfigBuilder, BatchSpanProcessor, Sampler, SdkTracerProvider, SpanData, SpanExporter,
+        SpanLimits,
+    },
 };
 use tower_service::Service;
 use tracing::{
@@ -51,7 +65,7 @@ use tracing_subscriber::{
     registry::LookupSpan, util::SubscriberInitExt,
 };
 
-use super::{AppError, TracingArgs};
+use super::AppError;
 
 const DEFAULT_TRACE_FILTER: &str =
     "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
@@ -197,38 +211,47 @@ impl std::fmt::Write for MqttWarningPrefix {
     }
 }
 
-/// The share of root traces the node exports, between nothing and everything.
-pub struct TraceSampleRatio;
+/// The collector a node is provisioned to export its own traces to, and the service name its
+/// spans carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceCollector {
+    endpoint: http::Uri,
+    service_name: String,
+}
 
-impl SettingDefinition for TraceSampleRatio {
-    type Class = NodeCapabilities;
-    type Value = f64;
-    type Context = ();
-    type Error = TraceSampleRatioError;
-
-    const NAME: &'static str = "otel-trace-sample-ratio";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> f64 {
-        1.0
-    }
-
-    fn validate(ratio: &f64, _: &()) -> Result<(), Report<TraceSampleRatioError>> {
-        if (0.0..=1.0).contains(ratio) {
-            Ok(())
-        } else {
-            Err(Report::new(TraceSampleRatioError::OutOfRange {
-                ratio: *ratio,
-            }))
-        }
+impl TraceCollector {
+    /// Reads the collector's endpoint before the node does any I/O; text that is not a URI, the
+    /// empty text included, refuses the node.
+    pub(super) fn new(endpoint: &str, service_name: String) -> Result<Self, Report<AppError>> {
+        let endpoint = endpoint
+            .parse::<http::Uri>()
+            .change_context(AppError::ParseTraceCollectorEndpoint)?;
+        Ok(Self {
+            endpoint,
+            service_name,
+        })
     }
 }
 
-/// Why a trace sample ratio is refused.
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
-pub enum TraceSampleRatioError {
-    #[error("trace sample ratio {ratio} must be between 0.0 and 1.0")]
-    OutOfRange { ratio: f64 },
+/// The node's own trace export: the collector it is provisioned with and the capabilities it
+/// exports with.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeTraceExport<'a> {
+    pub collector: &'a TraceCollector,
+    pub capabilities: &'a TraceExportCapabilities,
+}
+
+impl super::Application {
+    /// The node's own trace export, when the node is provisioned with a collector. Only the
+    /// process entry point installs it, and a Shuttle build has no process entry point.
+    #[cfg(not(feature = "shuttle"))]
+    pub(in crate::application) fn trace_export(&self) -> Option<NodeTraceExport<'_>> {
+        let collector = self.identity.trace_collector.as_ref()?;
+        Some(NodeTraceExport {
+            collector,
+            capabilities: &self.settings.operational.traces,
+        })
+    }
 }
 
 pub struct TracingGuard {
@@ -336,110 +359,140 @@ impl Service<http::Uri> for NodeTraceConnector {
     }
 }
 
+/// Exports the node's spans to its collector with the OpenTelemetry protocol crate's generated
+/// gRPC client and span transform. Only the node's provisioning and capabilities configure it:
+/// it sends no request metadata, compresses nothing and reads no environment variable, which
+/// the OTLP exporter library's builder always does.
+struct NodeSpanExporter {
+    client: Option<TraceServiceClient<otel_tonic::transport::Channel>>,
+    resource: ResourceAttributesWithSchema,
+}
+
+impl NodeSpanExporter {
+    fn new(channel: otel_tonic::transport::Channel) -> Self {
+        Self {
+            client: Some(TraceServiceClient::new(channel)),
+            resource: ResourceAttributesWithSchema::default(),
+        }
+    }
+}
+
+impl std::fmt::Debug for NodeSpanExporter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NodeSpanExporter")
+            .field("shut_down", &self.client.is_none())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SpanExporter for NodeSpanExporter {
+    async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+        let Some(client) = &self.client else {
+            return Err(OTelSdkError::AlreadyShutdown);
+        };
+        let mut client = client.clone();
+        let resource_spans = group_spans_by_resource_and_scope(batch, &self.resource);
+        let request = ExportTraceServiceRequest { resource_spans };
+        match client.export(request).await {
+            Ok(_) => Ok(()),
+            Err(status) => Err(OTelSdkError::InternalFailure(status.to_string())),
+        }
+    }
+
+    fn shutdown(&mut self) -> OTelSdkResult {
+        match self.client.take() {
+            Some(_) => Ok(()),
+            None => Err(OTelSdkError::AlreadyShutdown),
+        }
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        self.resource = resource.into();
+    }
+}
+
 struct TraceExporter {
-    exporter: opentelemetry_otlp::SpanExporter,
+    exporter: NodeSpanExporter,
     dns: watch::Sender<Option<DnsResolver>>,
 }
 
 impl TraceExporter {
-    fn new(args: &TracingArgs) -> Result<Self, Report<AppError>> {
-        let traces_endpoint =
-            std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).ok();
-        let general_endpoint = std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_ENDPOINT).ok();
-        let endpoint = Self::endpoint_from(
-            &args.otel_otlp_endpoint,
-            [traces_endpoint.as_deref(), general_endpoint.as_deref()],
-        );
-        let traces_timeout =
-            std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_TIMEOUT).ok();
-        let general_timeout = std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_TIMEOUT).ok();
-        let timeout = Self::timeout_from([traces_timeout.as_deref(), general_timeout.as_deref()]);
-        Self::from_endpoint(endpoint, timeout)
-    }
-
-    fn endpoint_from(configured: &str, variables: [Option<&str>; 2]) -> String {
-        // Preserve the SDK's endpoint precedence at its external configuration boundary.
-        if !configured.is_empty() {
-            return configured.to_string();
-        }
-        for variable in variables {
-            let Some(endpoint) = variable else {
-                continue;
-            };
-            return endpoint.to_string();
-        }
-        "http://localhost:4317".to_string()
-    }
-
-    fn timeout_from(variables: [Option<&str>; 2]) -> Duration {
-        for variable in variables {
-            if let Some(value) = variable
-                && let Ok(milliseconds) = value.parse::<u64>()
-            {
-                return Duration::from_millis(milliseconds);
-            }
-        }
-        opentelemetry_otlp::OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT
-    }
-
-    fn from_endpoint(endpoint: String, timeout: Duration) -> Result<Self, Report<AppError>> {
-        let endpoint = otel_tonic::transport::Endpoint::from_shared(endpoint)
-            .change_context(AppError::InitTracing)?
-            .timeout(timeout);
+    /// A lazy channel to the collector: creating it performs no lookup or dial. The export
+    /// timeout bounds reaching the collector and each export request.
+    fn new(endpoint: http::Uri, timeout: Duration) -> Self {
+        let endpoint = otel_tonic::transport::Endpoint::from(endpoint).timeout(timeout);
         let (dns, receiver) = watch::channel(None);
         let channel =
             endpoint.connect_with_connector_lazy(NodeTraceConnector { receiver, timeout });
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
-            .with_channel(channel)
-            .with_timeout(timeout)
-            .build()
-            .change_context(AppError::InitTracing)?;
-        Ok(Self { exporter, dns })
+        Self {
+            exporter: NodeSpanExporter::new(channel),
+            dns,
+        }
     }
 }
 
-pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>> {
-    let sample_ratio = Setting::<TraceSampleRatio>::new(args.otel_trace_sample_ratio, &())
-        .change_context(AppError::InitTracing)?;
+/// Installs the process's subscriber, and the node's own trace export when it has a collector.
+///
+/// Every value the export runs with comes from the collector's provisioning and the trace export
+/// capabilities, never from an `OTEL_*` variable: the SDK still reads its environment while it
+/// builds its defaults, and each such default is replaced here.
+pub fn init_tracing(export: Option<NodeTraceExport<'_>>) -> Result<TracingGuard, Report<AppError>> {
     let subscriber = LogFilter::from_environment(DEFAULT_TRACE_FILTER).into_subscriber();
     let fmt_layer = fmt::layer().with_ansi(false);
-
-    if args.otel_enabled {
-        let trace = TraceExporter::new(args)?;
-        let resource = Resource::builder()
-            .with_service_name(args.otel_service_name.clone())
-            .build();
-        let tracer_provider = SdkTracerProvider::builder()
-            .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-                *sample_ratio.value(),
-            ))))
-            .with_resource(resource)
-            .with_batch_exporter(trace.exporter)
-            .build();
-        let tracer = tracer_provider.tracer("nervix");
-        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-        subscriber
-            .with(fmt_layer)
-            .with(otel_layer)
-            .try_init()
-            .change_context(AppError::InitTracing)?;
-
-        Ok(TracingGuard {
-            traces: Some(TraceExportGuard {
-                tracer_provider,
-                dns: trace.dns,
-            }),
-        })
-    } else {
+    let Some(export) = export else {
         subscriber
             .with(fmt_layer)
             .try_init()
             .change_context(AppError::InitTracing)?;
+        return Ok(TracingGuard { traces: None });
+    };
+    let capabilities = export.capabilities;
+    let trace = TraceExporter::new(
+        export.collector.endpoint.clone(),
+        capabilities.export_timeout(),
+    );
+    // The thread-based batch processor uses these three values; the export timeout it reads from
+    // OTEL_BSP_EXPORT_TIMEOUT and the concurrency it reads from OTEL_BSP_MAX_CONCURRENT_EXPORTS
+    // belong to the SDK's experimental asynchronous processor, which the node does not run.
+    let batch = BatchConfigBuilder::default()
+        .with_max_queue_size(capabilities.queued_spans())
+        .with_scheduled_delay(capabilities.export_interval())
+        .with_max_export_batch_size(capabilities.batched_spans())
+        .build();
+    let processor = BatchSpanProcessor::builder(trace.exporter)
+        .with_batch_config(batch)
+        .build();
+    // No environment detector: OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME add nothing.
+    let resource = Resource::builder_empty()
+        .with_detector(Box::new(TelemetryResourceDetector))
+        .with_service_name(export.collector.service_name.clone())
+        .build();
+    // The sampler and the specification's default span limits replace those the SDK reads from
+    // OTEL_TRACES_SAMPLER and OTEL_SPAN_*_COUNT_LIMIT.
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+            capabilities.sample_ratio().value(),
+        ))))
+        .with_span_limits(SpanLimits::default())
+        .with_resource(resource)
+        .with_span_processor(processor)
+        .build();
+    let tracer = tracer_provider.tracer("nervix");
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-        Ok(TracingGuard { traces: None })
-    }
+    subscriber
+        .with(fmt_layer)
+        .with(otel_layer)
+        .try_init()
+        .change_context(AppError::InitTracing)?;
+
+    Ok(TracingGuard {
+        traces: Some(TraceExportGuard {
+            tracer_provider,
+            dns: trace.dns,
+        }),
+    })
 }
 
 #[cfg(all(test, not(any(feature = "shuttle", feature = "loom"))))]

@@ -4,16 +4,10 @@ use super::*;
 pub(super) enum ScheduledNodeHandoffError {
     #[error("scheduled node task is unavailable for handoff")]
     CommandUnavailable,
-    #[error("scheduled node task timed out accepting handoff")]
-    CommandTimeout,
     #[error("scheduled node task dropped its handoff response")]
     ResponseDropped,
-    #[error("scheduled node task timed out producing handoff residue")]
-    ResponseTimeout,
     #[error("scheduled node task failed while stopping for handoff")]
     TaskJoin,
-    #[error("scheduled node task timed out stopping for handoff")]
-    TaskStopTimeout,
 }
 
 /// The node-local surfaces of one domain execution that the programs of its tasks bind against.
@@ -155,11 +149,34 @@ impl ScheduledNodeTask {
         (&mut self.task).join_after_shutdown("scheduled node").await;
     }
 
+    /// Asks the task to hand its branches over and waits until it has: the task stops every branch
+    /// it holds, each under that branch's own stop grace, answers with what they hand over, and
+    /// ends. A handover is waited for however many branches it takes, because a limit belongs to
+    /// one operation, never to a batch of them. Only a task that can no longer answer fails it,
+    /// and it is aborted then.
     pub(super) async fn handoff(
-        self,
-        grace: Duration,
+        mut self,
     ) -> error_stack::Result<Vec<ProcessorBranchHandoff>, ScheduledNodeHandoffError> {
-        self.handoff_within(grace).await
+        let (response, receiver) = oneshot::channel();
+        if self
+            .commands
+            .send(ProcessorNodeCommand::Handoff { response })
+            .await
+            .is_err()
+        {
+            self.abort_and_join().await;
+            return Err(Report::new(ScheduledNodeHandoffError::CommandUnavailable));
+        }
+        let Ok(handoffs) = receiver.await else {
+            self.abort_and_join().await;
+            return Err(Report::new(ScheduledNodeHandoffError::ResponseDropped));
+        };
+        match (&mut self.task).await {
+            Ok(()) => Ok(handoffs),
+            Err(error) => {
+                Err(Report::new(ScheduledNodeHandoffError::TaskJoin).attach_printable(error))
+            }
+        }
     }
 
     pub(super) async fn checkpoint_via(
@@ -178,52 +195,6 @@ impl ScheduledNodeTask {
         receiver.await.map_err(|_| {
             OwnershipHandoffError::checkpoint("scheduled node task dropped its checkpoint response")
         })?
-    }
-
-    pub(super) async fn handoff_within(
-        mut self,
-        grace_period: Duration,
-    ) -> error_stack::Result<Vec<ProcessorBranchHandoff>, ScheduledNodeHandoffError> {
-        let (response, receiver) = oneshot::channel();
-        match nervix_primitives::time::timeout(
-            grace_period,
-            self.commands
-                .send(ProcessorNodeCommand::Handoff { response }),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) => {
-                self.abort_and_join().await;
-                return Err(Report::new(ScheduledNodeHandoffError::CommandUnavailable));
-            }
-            Err(_) => {
-                self.abort_and_join().await;
-                return Err(Report::new(ScheduledNodeHandoffError::CommandTimeout));
-            }
-        }
-        let handoffs = match nervix_primitives::time::timeout(grace_period, receiver).await {
-            Ok(Ok(handoffs)) => handoffs,
-            Ok(Err(_)) => {
-                self.abort_and_join().await;
-                return Err(Report::new(ScheduledNodeHandoffError::ResponseDropped));
-            }
-            Err(_) => {
-                self.abort_and_join().await;
-                return Err(Report::new(ScheduledNodeHandoffError::ResponseTimeout));
-            }
-        };
-        match nervix_primitives::time::timeout(grace_period, &mut self.task).await {
-            Ok(Ok(())) => Ok(handoffs),
-            Ok(Err(error)) => {
-                Err(Report::new(ScheduledNodeHandoffError::TaskJoin).attach_printable(error))
-            }
-            Err(_) => {
-                self.task.abort();
-                self.task.join_after_shutdown("scheduled node").await;
-                Err(Report::new(ScheduledNodeHandoffError::TaskStopTimeout))
-            }
-        }
     }
 }
 

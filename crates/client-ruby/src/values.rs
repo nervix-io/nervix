@@ -104,6 +104,7 @@ pub(crate) fn cell(ruby: &Ruby, value: CellView<'_>) -> Result<Value, Error> {
         CellView::String(value) => ruby.str_new(value).as_value(),
         CellView::Bytes(value) => ruby.str_from_slice(value).as_value(),
         CellView::Datetime(value) => value.unix_nanos().into_value_with(ruby),
+        CellView::Duration(value) => value.nanoseconds().into_value_with(ruby),
         CellView::List(items) => {
             let array = ruby.ary_new_capa(items.len());
             for item in items.iter() {
@@ -115,8 +116,9 @@ pub(crate) fn cell(ruby: &Ruby, value: CellView<'_>) -> Result<Value, Error> {
     Ok(value)
 }
 
-/// A scalar is converted only at this language boundary. DATETIME remains signed nanoseconds;
-/// float columns also expose their complete original bits through the bulk fixed-width API.
+/// A scalar is converted only at this language boundary. DATETIME and DURATION remain signed
+/// nanoseconds; float columns also expose their complete original bits through the bulk
+/// fixed-width API.
 pub(crate) fn arrow(
     ruby: &Ruby,
     array: &dyn Array,
@@ -187,6 +189,11 @@ pub(crate) fn arrow(
             .into_value_with(ruby),
         ParseAsType::Datetime => array
             .as_primitive_opt::<types::TimestampNanosecondType>()
+            .assured(TYPED)
+            .value(row)
+            .into_value_with(ruby),
+        ParseAsType::Duration => array
+            .as_primitive_opt::<types::DurationNanosecondType>()
             .assured(TYPED)
             .value(row)
             .into_value_with(ruby),

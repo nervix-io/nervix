@@ -105,8 +105,9 @@ shared C binding always loads the host's `/etc/resolv.conf` and `/etc/hosts`.
 
 ## Node Trace Export
 
-With `--otel-enabled`, the process installs its subscriber and batch span exporter before node
-startup. The lazy Tonic 0.14 connector waits for startup to publish the node's resolver. Creating
+A node provisioned with a collector through `--otel-otlp-endpoint` installs its subscriber and
+batch span exporter before node startup; [Trace Export](node-settings.md#trace-export) lists the
+options. The lazy Tonic 0.14 connector waits for startup to publish the node's resolver. Creating
 the channel performs no lookup or dial. The startup preflight loads DNS before the node binds a
 listener, and startup publishes a clone to this service once it has bound its listeners and read
 its interconnect credentials. Early spans remain in the batch exporter's existing bounded queue.
@@ -114,11 +115,11 @@ No second resolver is constructed, and a DNS configuration failure remains a nod
 
 Every new collector connection uses the node's configuration, hosts snapshot, cache and concurrency
 bound. The endpoint retains its hostname and authority. Waiting for resolver installation stays
-outside the connection timeout so slow startup retains its early spans. Once installed, the OTLP
-export timeout bounds DNS and TCP address attempts together; the request uses the same timeout.
-It defaults to ten seconds; `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` overrides
-`OTEL_EXPORTER_OTLP_TIMEOUT`, both in milliseconds, with invalid values ignored as the exporter
-defines. Compression and metadata environment settings remain interpreted by `opentelemetry-otlp`.
+outside the connection timeout so slow startup retains its early spans. Once installed,
+`--otel-trace-export-timeout` bounds DNS and TCP address attempts together, and the request uses
+the same timeout. It defaults to ten seconds. The exporter is the OpenTelemetry protocol crate's
+generated gRPC client: it sends no request metadata, compresses nothing and reads no `OTEL_*`
+variable, so the environment changes neither the timeout nor where the node connects.
 
 The node's exporter configures no Tonic TLS roots or identity. An `https` collector therefore fails
 at export time with Tonic's TLS-required error even though the connector dependencies enable TLS

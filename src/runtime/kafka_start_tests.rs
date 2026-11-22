@@ -15,7 +15,7 @@ use nervix_models::{
     IngestorInstances, KafkaIngestor, Model, NodeUnitRef, Statement,
 };
 
-use super::*;
+use super::{entity_swap_restore::EntitySwapJournal, *};
 use crate::runtime::state_replication::{
     OwnershipHandoffActivation, OwnershipHandoffActivationAuthorization,
 };
@@ -264,6 +264,7 @@ async fn regroup_reinstalls_prepared_offsets_on_a_unit_that_keeps_its_owner() {
             std::slice::from_ref(&unit_ref.entity.node),
             Some(node),
             &BTreeSet::new(),
+            &mut EntitySwapJournal::new(None),
         )
         .await
         .assured("the remaining units can install the regrouped layout");

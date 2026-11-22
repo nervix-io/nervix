@@ -1620,6 +1620,66 @@ mod shuttle_checks {
         check_random_and_pct(dropped_waiting_admission_invariant);
     }
 
+    fn reported_wait_invariant() {
+        shuttle::future::block_on(async {
+            let executor = small_executor();
+            let full = FullDataQueue::fill(&executor).await;
+            let waits = crate::CapacityWaits::new();
+            let reporting = executor.reporting_waits_to(&waits);
+
+            // The owner watches from a task of its own, so its watch races the submission that
+            // begins the wait.
+            let (began, has_begun) = nervix_primitives::sync::oneshot::channel();
+            let watched = waits.clone();
+            let watcher = nervix_primitives::task::spawn(async move {
+                watched.began().await;
+                began
+                    .send(())
+                    .assured("the check awaits the owner seeing the wait begin");
+                watched.ended().await;
+            });
+            let charge = executor
+                .try_reserve(MemoryClass::Relay, 1024)
+                .assured("the relay class has room for the waiting job");
+            let submitted = nervix_primitives::task::spawn(async move {
+                reporting
+                    .run_cpu_with(
+                        CpuClass::Data,
+                        QueueAdmission::WaitForPlace,
+                        charge,
+                        |_, _| "ran",
+                    )
+                    .await
+            });
+            has_begun
+                .await
+                .assured("the owner sees its job begin waiting while the queue is full");
+            assert!(waits.is_waiting(), "the wait lasts until a place frees");
+            assert_eq!(executor.snapshot().data_cpu.refused, 0);
+
+            // The freed place races the owner's watch for the end of the wait.
+            full.release().await;
+            let ran = submitted
+                .await
+                .assured("the waiting job is joined")
+                .assured("a job waiting for a place runs once one frees");
+            assert_eq!(ran, "ran");
+            watcher
+                .await
+                .assured("the owner sees the wait end once its job takes the freed place");
+            assert!(!waits.is_waiting());
+            assert_every_permit_returned(&executor);
+        });
+    }
+
+    /// An owner watching its work through `CapacityWaits` sees its job begin waiting for a place in
+    /// a full class and sees the wait end once a place frees, whichever of its watch and the job's
+    /// wait comes first.
+    #[test]
+    fn shuttle_an_owner_sees_its_job_begin_and_end_waiting_for_a_place() {
+        check_random_and_pct(reported_wait_invariant);
+    }
+
     #[test]
     fn shuttle_accepted_cpu_preparation_returns_waiting_and_reserved_places_with_their_charges() {
         check_random_and_pct(|| {

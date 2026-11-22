@@ -332,7 +332,7 @@ impl SessionServiceImpl {
         }
         if let Err(error) = self.apply_current_cluster_state().await {
             if let Some(handoff) = handoff.take() {
-                self.defer_planned_ownership_handoff_release(&domain, handoff, &error, None);
+                self.hold_planned_ownership_handoff_until_applied(&domain, handoff, &error, None);
             }
             return Err(error.change_context(context()));
         }

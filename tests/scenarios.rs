@@ -171,7 +171,7 @@ use crate::common::{
     node_bound_address::{NodeBoundAddress, NodeBoundListener, bind_as_its_node},
     node_execution::{NodeExecutionEndpoint, ProbeExecution},
     node_startup::StartupPorts,
-    node_trace_export::NodeTraceExport,
+    node_trace_export::{CollectorProvisioning, NodeTraceExport, TraceExportLaunch},
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     process_program::{
@@ -234,6 +234,7 @@ mod emitter_lifecycle;
 mod emitter_metrics;
 mod endpoint_intake;
 mod engine_settings;
+mod entity_swap_failure;
 mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
@@ -3709,14 +3710,71 @@ async fn given_jaeger_is_running(world: &mut ScenarioWorld) {
             {string} through fixture DNS"
 )]
 async fn when_node_trace_export(world: &mut ScenarioWorld, node_count: usize, receiver: String) {
-    let cluster = NodeTraceExport::start(
-        node_count,
-        grpc_receiver(world, &receiver),
-        world.test_id.clone(),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    let launch = TraceExportLaunch::option(grpc_receiver(world, &receiver));
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
     world.node_trace_export = Some(cluster);
+}
+
+/// The option names one collector, its environment twin a second and every OpenTelemetry
+/// environment variable a third, with every other OpenTelemetry variable set beside them.
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string}, the option's environment twin naming OTLP receiver {string} and every \
+            OpenTelemetry environment variable naming OTLP receiver {string}"
+)]
+async fn when_node_trace_export_beside_environment(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    receiver: String,
+    twin: String,
+    opentelemetry: String,
+) {
+    let launch = TraceExportLaunch {
+        collector: grpc_receiver(world, &receiver),
+        provisioning: CollectorProvisioning::Option {
+            twin: Some(grpc_receiver(world, &twin)),
+        },
+        opentelemetry: Some(grpc_receiver(world, &opentelemetry)),
+    };
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[when(
+    expr = "a {int} node server process cluster starts with its own trace export to OTLP receiver \
+            {string} named only by the option's environment twin"
+)]
+async fn when_node_trace_export_from_environment_twin(
+    world: &mut ScenarioWorld,
+    node_count: usize,
+    receiver: String,
+) {
+    let launch = TraceExportLaunch {
+        collector: grpc_receiver(world, &receiver),
+        provisioning: CollectorProvisioning::EnvironmentTwin,
+        opentelemetry: None,
+    };
+    let cluster = NodeTraceExport::start(node_count, launch, world.test_id.clone())
+        .await
+        .unwrap_or_else(|error| panic!("trace-exporting nodes failed to start: {error}"));
+    world.node_trace_export = Some(cluster);
+}
+
+#[then(expr = "OTLP receiver {string} received nothing the OpenTelemetry environment asked for")]
+async fn then_node_trace_export_follows_declared_options(
+    world: &mut ScenarioWorld,
+    receiver: String,
+) {
+    world
+        .node_trace_export
+        .as_ref()
+        .verified("the preceding step started trace-exporting processes")
+        .assert_declared_export_only(grpc_receiver(world, &receiver))
+        .unwrap_or_else(|error| panic!("node trace export followed its environment: {error}"));
 }
 
 #[then(expr = "OTLP receiver {string} eventually receives the server's own spans from every node")]
@@ -10865,20 +10923,6 @@ async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld
     world
         .fault_injection
         .force_next_domain_drain_timeout(domain);
-}
-
-#[given(expr = "the next entity schedule swap in domain {string} on the leader is forced to fail")]
-async fn given_next_entity_schedule_swap_on_leader_fails(
-    world: &mut ScenarioWorld,
-    domain: String,
-) {
-    let leader = current_leader_node(world).await;
-    let domain = expand_placeholders(world, &domain);
-    let domain = nervix_models::DomainName::try_from(domain.as_str())
-        .assured("the scenario uses an identifier-shaped domain name");
-    world
-        .fault_injection
-        .fail_next_entity_schedule_swap_on(crate::common::cluster::node_name(&leader), domain);
 }
 
 #[given("graceful shutdown drain is enabled")]
@@ -21842,40 +21886,6 @@ async fn then_transaction_report_records_actual_quiescence(
     }
 }
 
-#[then(expr = "transaction {string} report step {int} eventually records recovery rebuild effects")]
-async fn then_transaction_report_records_recovery_rebuilds(
-    world: &mut ScenarioWorld,
-    transaction_id: String,
-    step_number: usize,
-) {
-    let transaction_id = expand_placeholders(world, &transaction_id);
-    let index = step_number
-        .checked_sub(1)
-        .assured("transaction report step numbers are one-based");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        assert!(
-            Instant::now() < deadline,
-            "transaction '{transaction_id}' report step {step_number} did not record recovery \
-             rebuild effects"
-        );
-        if let Ok(report) = read_transaction_impact_report(world, &transaction_id).await
-            && let Some(step) = report.execution_steps().get(index)
-        {
-            let rebuilds = step.actual().effects.rebuilds.as_slice();
-            if rebuilds.len() > step.planned().effects.rebuilds.len()
-                && rebuilds
-                    .iter()
-                    .any(|rebuild| rebuild.reason == nervix_models::RebuildReason::Recovery)
-            {
-                return;
-            }
-        }
-        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 #[then(expr = "transaction {string} is eventually removed")]
 async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, transaction_id: String) {
     let transaction_id = expand_placeholders(world, &transaction_id);
@@ -22281,6 +22291,64 @@ async fn when_bulk_execution_is_occupied_on_every_node_for(
             fault_injection.release_execution(node_name);
         }
     });
+}
+
+/// The window processor of the scenario's domain named `processor`.
+fn window_processor_ref(world: &ScenarioWorld, processor: &str) -> nervix_models::DomainNodeRef {
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let processor =
+        nervix_models::ModelName::try_from(expand_placeholders(world, processor).as_str())
+            .assured("the scenario window processor is an identifier-shaped name");
+    nervix_models::DomainNodeRef::node_in(
+        domain,
+        nervix_models::ModelKind::WindowProcessor,
+        processor,
+    )
+}
+
+/// The window processor's next restore of its branches stops after reading their lifecycle and
+/// before it opens any of their windows, wherever its task starts.
+#[when(expr = "the next branch restore of window processor {string} is held")]
+async fn when_window_processor_branch_restore_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .pause_processor_branch_restore(processor);
+}
+
+#[then(expr = "within {string} the branch restore of window processor {string} reaches its hold")]
+async fn then_window_processor_branch_restore_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let processor = window_processor_ref(world, &processor);
+    nervix_primitives::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_processor_branch_restore(&processor),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the branch restore of {processor:?} did not reach its hold within {duration:?}")
+    });
+}
+
+#[when(expr = "the held branch restore of window processor {string} is released")]
+async fn when_held_window_processor_branch_restore_is_released(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .release_processor_branch_restore(&processor);
 }
 
 /// Leave room for transport on the selected node while refusing larger decoding reservations.
@@ -28663,6 +28731,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let expected: f64 = expected.approx_into();
+    // A node that exposes no such family counts nothing, since it never ran an instance the family
+    // counts; at least one node must expose it, so a misspelled family still fails.
     let mut observed = BTreeMap::new();
     let outcome =
         nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
@@ -28670,22 +28740,26 @@ async fn then_cluster_observability_metric_eventually_totals(
                 nervix_primitives::task::consume_budget().await;
                 observed.clear();
                 let mut total = 0.0;
+                let mut exposed = false;
                 for node in world.cluster().node_ids() {
                     nervix_primitives::task::consume_budget().await;
                     let value = match world
                         .cluster()
-                        .sum_observability_metric(&node, &metric_name, &labels)
+                        .sum_declared_observability_metric(&node, &metric_name, &labels)
                         .await
                     {
                         Ok(value) => value,
                         Err(error) => {
-                            panic!("node '{node}' did not expose '{metric_name}': {error}")
+                            panic!("node '{node}' did not report '{metric_name}': {error}")
                         }
                     };
-                    total += value;
+                    if let Some(value) = value {
+                        exposed = true;
+                        total += value;
+                    }
                     observed.insert(node, value);
                 }
-                if total == expected {
+                if exposed && total == expected {
                     break;
                 }
                 nervix_primitives::time::sleep(Duration::from_millis(100)).await;
@@ -28694,7 +28768,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .await;
     assert!(
         outcome.is_ok(),
-        "metric '{metric_name}' with labels {labels:?} did not total {expected}: {observed:?}"
+        "metric '{metric_name}' with labels {labels:?} did not total {expected} (a node without \
+         the family shows None): {observed:?}"
     );
 }
 
@@ -38791,6 +38866,72 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
             arrived_after >= expected_delay,
             "expected the payload no sooner than {expected_delay:?} after publishing, but it \
              arrived after {arrived_after:?}"
+        );
+        break;
+    }
+}
+
+/// Bounds a payload's delivery from the instant its publishing request began, the anchor of the
+/// "no sooner than" step above. A budget that opened at this step's start would grow by however
+/// long the publishing request took, so a scenario that compares the budget with a route's
+/// cadence could not rely on the two windows staying apart.
+#[then(expr = "the relay subscription receives a payload within {string} after it was published")]
+async fn then_stream_subscription_receives_payload_within_publication_budget(
+    world: &mut ScenarioWorld,
+    budget: String,
+    #[step] step: &Step,
+) {
+    let budget = parse_duration_text(&budget).assured("the receive budget is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("a delivery-budget assertion follows a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step))
+        .trim()
+        .to_string();
+    append_cucumber_log_line(&format!(
+        "awaiting subscription payload containing {} within {budget:?} after publishing",
+        expected_payload.replace('\n', "\\n")
+    ));
+    let deadline = published_at
+        .checked_add(budget)
+        .assured("a scenario's receive budget lies seconds after a recent instant");
+    let mut observed = Vec::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for subscription payload containing {expected_payload} within \
+             {budget:?} after publishing. observed {observed:?}"
+        );
+        let event = world
+            .active_session
+            .as_mut()
+            .assured("the scenario opened its subscription before publishing")
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .unwrap_or_else(|error| panic!("the subscription session failed: {error}"));
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for subscription payload containing {expected_payload} within \
+                 {budget:?} after publishing. observed {observed:?}"
+            );
+        };
+        let read_after = published_at.elapsed();
+        let payload = event.payload;
+        observed.push(payload.clone());
+        world.last_subscription_payload = Some(payload.clone());
+        if !payload.contains(&expected_payload) {
+            continue;
+        }
+        append_cucumber_log_line(&format!(
+            "subscription payload containing {} read {read_after:?} after publishing",
+            expected_payload.replace('\n', "\\n")
+        ));
+        assert!(
+            read_after <= budget,
+            "expected the payload within {budget:?} after publishing, but it was read after \
+             {read_after:?}"
         );
         break;
     }

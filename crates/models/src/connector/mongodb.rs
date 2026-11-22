@@ -102,6 +102,7 @@ const _: () = assert!(MAX_COLLECTION_BYTES > 0);
 /// | STRING | String |
 /// | BYTES | Generic Binary |
 /// | DATETIME | Date, rounded down to whole Unix milliseconds |
+/// | DURATION | Rejected: no BSON type holds a DURATION losslessly |
 /// | ARRAY, VEC | Array, recursively following this table |
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,

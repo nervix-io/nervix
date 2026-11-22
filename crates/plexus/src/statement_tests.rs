@@ -1138,7 +1138,7 @@ fn parses_deduplicator_statement_with_implicit_attached_mode() {
 #[test]
 fn parses_inferencer_statement() {
     let parsed = parse_statement(
-            r#"CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
+            r#"CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' WORKING MEMORY RELEASED INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;"#,
         )
         .expect("parse should succeed");
 
@@ -1365,7 +1365,7 @@ fn runtime_nodes_require_supported_error_policy_blocks() {
         ),
         (
             "inferencer",
-            r#"CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG"#,
+            r#"CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' WORKING MEMORY RELEASED INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG"#,
         ),
     ];
 
@@ -1444,9 +1444,9 @@ fn branch_preserving_processors_accept_unbranched() {
         "CREATE WINDOW PROCESSOR window_metrics FROM raw WIDTH 2 MESSAGES STEP 2 MESSAGES \
          UNBRANCHED TO projected SET value = COUNT(input.value) ON MESSAGE ERROR LOG;",
         "CREATE INFERENCER score FROM features USING RESOURCE fraud_model VERSION 1 FILE \
-         'models/simple_score.onnx' INPUTS { \"features\" DENSE TENSOR<F32>[2] = input.vector } \
-         OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score \
-         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+         'models/simple_score.onnx' WORKING MEMORY RELEASED INPUTS { \"features\" DENSE \
+         TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] } \
+         UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
         "CREATE WASM PROCESSOR filter_even FROM raw USING RESOURCE wasm_filter VERSION 1 FILE \
          'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO \
          projected ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;",

@@ -37,6 +37,8 @@ pub enum AppError {
     ParseHttpsListenAddress,
     #[error("failed to parse observability listen address")]
     ParseObservabilityListenAddress,
+    #[error("failed to parse the trace collector endpoint --otel-otlp-endpoint")]
+    ParseTraceCollectorEndpoint,
     #[error("failed to parse web console listen address")]
     ParseWebConsoleListenAddress,
     #[error("failed to parse web console https listen address")]
@@ -138,6 +140,8 @@ pub enum AppError {
     InvalidExecutionSettings,
     #[error("invalid operational node capabilities")]
     InvalidOperationalCapabilities,
+    #[error("invalid trace export settings")]
+    InvalidTraceExportSettings,
     #[error("invalid native runtime capacity")]
     InvalidRuntimeCapacity,
     #[error("invalid peer receive settings")]

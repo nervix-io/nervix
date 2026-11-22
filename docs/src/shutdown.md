@@ -1495,19 +1495,33 @@ See [checkpoint synchronization](./interconnect.md).
 
 A restore installs every branch or none. It builds each branch and opens its retained state first,
 starts the branch tasks only once all of them are built, and releases a transferred checkpoint only
-after that. When a branch cannot be built, because storage cannot be read, a checkpoint does not
-decode, or the bounded executor refuses the decode, the task installs nothing and logs `failed to
-restore processor branches; their input waits for the next attempt` at `warn` with the cause. It
-tries again after a backoff that starts at a quarter of a second and doubles up to thirty seconds.
-Until an attempt succeeds:
+after that.
+
+Opening a branch's retained state waits for capacity rather than being refused. A window decode
+that finds every bulk worker busy and the bulk wait queue full waits for a place there, ahead of any
+job that asks after it, and a charge or a storage job of an inferencer's carried state waits for
+room or a place the same way. While the restore waits, the task answers its commands as one that
+has not restored its branches, as listed below, and the first place that frees goes to the waiting
+restore, which goes on without a retry. While the restore makes progress instead, the task answers
+nothing: a command that arrives as the task starts, such as the lifecycle checkpoint of an
+ownership handoff, is answered once an ordinary restore has installed every branch.
+
+When a branch cannot be built, because storage cannot be read or a checkpoint does not decode, the
+task installs nothing and logs `failed to restore processor branches; their input waits for the
+next attempt` at `warn` with the cause. It tries again after a backoff that starts at a quarter of a
+second and doubles up to thirty seconds. Until an attempt succeeds, whether the restore waits for
+capacity or for its next attempt:
 
 - The processor dequeues no input. Its relays keep their records and apply backpressure upstream,
   so no record starts a new lifetime for a branch the restore resumes and discards its retained
   state. Input a drain still delivers is negatively acknowledged.
 - A lifecycle checkpoint request is refused, so a backup capture or an ownership handoff that needs
   one fails instead of recording a lifecycle without the processor's branches. A WASM guest-state
-  reset is refused the same way.
-- A task that replaces it receives the branches it never installed, and restores them itself.
+  reset is refused the same way, and an inspection of the processor's state is refused as
+  `not_ready`.
+- A task that replaces it receives the branches it never installed, and restores them itself. A
+  replacement or a stop also ends a wait for capacity at once: the restore gives up its place in
+  line, nothing it built starts, and the next task builds those branches again.
 
 A failure that persists, such as a checkpoint written in a shape the node no longer reads, keeps
 the processor waiting and repeats its warning on every attempt.

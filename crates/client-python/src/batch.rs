@@ -118,6 +118,11 @@ fn arrow_value<'py>(
             .assured(TYPED)
             .value(row)
             .into_bound_py_any(py),
+        ParseAsType::Duration => array
+            .as_primitive_opt::<types::DurationNanosecondType>()
+            .assured(TYPED)
+            .value(row)
+            .into_bound_py_any(py),
         ParseAsType::Bool => array
             .as_boolean_opt()
             .assured(TYPED)
@@ -190,8 +195,8 @@ impl Batch {
     }
 
     /// The rows of column `index` as Python values: an `int`, `float`, `bool`, `str` or `bytes`
-    /// for a scalar, the nanoseconds since the Unix epoch for a `DATETIME`, a `list` for a list,
-    /// and `None` for a null.
+    /// for a scalar, the nanoseconds since the Unix epoch for a `DATETIME`, the signed nanoseconds
+    /// of a `DURATION`, a `list` for a list, and `None` for a null.
     fn column<'py>(&self, py: Python<'py>, index: usize) -> PyResult<Bound<'py, PyList>> {
         let field = match self.batch.schema().field(host::Part::Rows, index) {
             Ok(field) => field,

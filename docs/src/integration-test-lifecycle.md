@@ -2606,7 +2606,7 @@ its command line: the scenario's cluster configuration becomes the owners' class
 groups, through the same validation. A scenario names any other setting for one node with
 `Given <node> starts with <setting> = <value>`, where the setting is the option's long name without
 its leading dashes and the value is written as the command line reads it, for example
-`Given node-2 starts with drain-timeout = 1m`. The harness applies such settings over the
+`Given node-2 starts with shutdown-timeout = 1m`. The harness applies such settings over the
 cluster's own from that node's next launch on, in the order the scenario named them, by rendering
 the node's settings as options, appending the named ones and reading the result with the server's
 own options groups, so a later setting of the same name replaces an earlier one and no setting
@@ -3567,8 +3567,10 @@ goes back with the scenario's other fixture ports at the end of cleanup.
 
 ## gRPC Receivers
 
-The node trace-export scenarios start one or three real server processes with `--otel-enabled`,
-separate service names and the scenario's DNS configuration. A local gRPC collector captures their
+The node trace-export scenarios start one or three real server processes with a collector
+endpoint, given as `--otel-otlp-endpoint` or as its environment twin, separate service names and
+the scenario's DNS configuration. One scenario also sets every OpenTelemetry environment variable
+and requires that none of them reaches the export. A local gRPC collector captures their
 OTLP trace requests; the steps decode the current trace schema and require spans from every node
 and a query for the collector's fixture name. This uses the process cluster's existing readiness
 and failure diagnostics. Processes are dropped before the DNS authority, resolver files and

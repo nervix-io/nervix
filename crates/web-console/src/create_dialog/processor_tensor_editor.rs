@@ -1,10 +1,10 @@
-//! The model tensors of a visual inferencer.
+//! The working memory and model tensors of a visual inferencer.
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Browser editing of an inferencer's ordered `INPUTS`, `STATE` and `OUTPUT SCHEMA`
-//!   tensors, each tensor's dense shape axis by axis, the input-field picker of its mappings, and
-//!   the execution mode its shapes imply.
+//! - **Owns.** Browser editing of an inferencer's `WORKING MEMORY` choice, its ordered `INPUTS`,
+//!   `STATE` and `OUTPUT SCHEMA` tensors, each tensor's dense shape axis by axis, the input-field
+//!   picker of its mappings, and the execution mode its shapes imply.
 //! - **Depends on.** The inferencer draft, typed choice controls and Leptos signals.
 //! - **Must not know.** ONNX inspection, tensor conversion or model execution.
 
@@ -14,7 +14,7 @@
 )]
 
 use leptos::prelude::*;
-use nervix_models::InferencerExecutionMode;
+use nervix_models::{InferencerExecutionMode, InferencerWorkingMemory};
 
 use super::{
     ChoiceControl, CreateSignals, RequestSender,
@@ -24,6 +24,7 @@ use super::{
     processor_editor::indices,
     processor_inferencer_draft::{
         DimensionKind, InferencerDraft, StateInitialDraft, TensorList, TensorListEdit,
+        working_memory_consequence,
     },
 };
 
@@ -442,6 +443,34 @@ fn execution_mode_text(inferencer: &InferencerDraft) -> String {
         }
         Some(Err(refusal)) => format!("Execution mode refused: {refusal:#}"),
     }
+}
+
+/// The `WORKING MEMORY` choice every inferencer states right after its `FILE`, with what the chosen
+/// policy keeps between runs. Nothing is chosen until the author chooses: the language gives the
+/// clause no default.
+#[component]
+pub(super) fn ProcessorWorkingMemoryEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    let chosen = move || read_inferencer(signals, |inferencer| inferencer.working_memory);
+    let section = view! {
+        <section class="create-inferencer-memory">
+            <h3>"Working memory"</h3>
+            <fieldset class="create-field create-inferencer-working-memory">
+                <legend>"WORKING MEMORY"</legend>
+                <button type="button" data-memory="released"
+                    class:active=move || chosen() == Some(InferencerWorkingMemory::Released)
+                    disabled=pending
+                    on:click=move |_| edit_inferencer(signals, |inferencer| inferencer.working_memory = Some(InferencerWorkingMemory::Released))>"RELEASED"</button>
+                <button type="button" data-memory="retained"
+                    class:active=move || chosen() == Some(InferencerWorkingMemory::Retained)
+                    disabled=pending
+                    on:click=move |_| edit_inferencer(signals, |inferencer| inferencer.working_memory = Some(InferencerWorkingMemory::Retained))>"RETAINED"</button>
+            </fieldset>
+            <p class="create-inferencer-working-memory-consequence">{move || working_memory_consequence(chosen())}</p>
+        </section>
+    };
+    // Erased at the section boundary, as the tensor section is below.
+    section.into_any()
 }
 
 #[component]

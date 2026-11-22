@@ -424,6 +424,7 @@ fn inferencer_draft(value: &CreateInferencer<RequestedResourceVersion>) -> Proce
         .inferencer_mut()
         .assured("an inferencer draft holds its model");
     inferencer.binding = binding(&value.resource, value.resource_version, &value.file);
+    inferencer.working_memory = Some(value.working_memory);
     inferencer.inputs = ordered(value.inputs.iter().map(tensor_mapping).collect());
     inferencer.state = ordered(value.state.iter().map(state_binding).collect());
     inferencer.outputs = ordered(value.output_schema.iter().map(tensor_declaration).collect());

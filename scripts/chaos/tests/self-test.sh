@@ -929,6 +929,7 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/lifetimes-self-test.sh"
 "${script_dir}/correctness-harness-self-test.sh"
 "${script_dir}/graceful-stop-self-test.sh"
+"${script_dir}/alteration-handover-self-test.sh"
 "${script_dir}/backup-fault-self-test.sh"
 "${script_dir}/restore-self-test.sh"
 "${script_dir}/backup-state-self-test.sh"

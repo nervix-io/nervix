@@ -53,21 +53,22 @@ fn forced_routing_fence_ends_changed_channels_until_publication(#[case] move_own
 
 #[test]
 fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
+    let rotation = default_idle_rotation();
     let slot = RelayOutboundSlot::new();
     let start = Instant::now();
     let first = slot.next_delivery_at(start);
     let active_at = start
         .checked_add(
-            RELAY_CHANNEL_IDLE_ROTATION
+            rotation
                 .checked_sub(Duration::from_nanos(1))
                 .expect("the relay idle duration is longer than one nanosecond"),
         )
-        .expect("the fixed relay idle duration should fit the monotonic clock");
+        .expect("the default relay idle duration should fit the monotonic clock");
     let second = slot.next_delivery_at(active_at);
     let reopened = slot.next_delivery_at(
         active_at
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
+            .checked_add(rotation)
+            .expect("the default relay idle duration should fit the monotonic clock"),
     );
 
     assert_eq!(first.channel_incarnation, second.channel_incarnation);
@@ -82,26 +83,27 @@ fn idle_relay_channel_reopens_with_a_fresh_incarnation() {
 /// incarnation for its first batch.
 #[test]
 fn a_channel_left_unused_since_it_opened_reopens_before_its_first_delivery() {
+    let rotation = default_idle_rotation();
     let slot = RelayOutboundSlot::new();
     let after_opening = Instant::now();
     let opened_later = uuid::Uuid::now_v7().into_bytes();
 
     let first = slot.next_delivery_at(
         after_opening
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
+            .checked_add(rotation)
+            .expect("the default relay idle duration should fit the monotonic clock"),
     );
 
     assert!(
         first.channel_incarnation > opened_later,
-        "the first delivery used the incarnation the slot opened {RELAY_CHANNEL_IDLE_ROTATION:?} \
-         before it"
+        "the first delivery used the incarnation the slot opened {rotation:?} before it"
     );
     assert_eq!(first.sequence, 0);
 }
 
 #[test]
 fn a_channel_left_unused_since_it_reopened_reopens_before_its_next_delivery() {
+    let rotation = default_idle_rotation();
     let slot = RelayOutboundSlot::new();
     let unresolved = slot.next_delivery();
     slot.reopen_delivery_channel();
@@ -110,14 +112,14 @@ fn a_channel_left_unused_since_it_reopened_reopens_before_its_next_delivery() {
 
     let next = slot.next_delivery_at(
         after_reopening
-            .checked_add(RELAY_CHANNEL_IDLE_ROTATION)
-            .expect("the fixed relay idle duration should fit the monotonic clock"),
+            .checked_add(rotation)
+            .expect("the default relay idle duration should fit the monotonic clock"),
     );
 
     assert!(unresolved.channel_incarnation < reopened_later);
     assert!(
         next.channel_incarnation > reopened_later,
-        "the next delivery used the incarnation reopened {RELAY_CHANNEL_IDLE_ROTATION:?} before it"
+        "the next delivery used the incarnation reopened {rotation:?} before it"
     );
     assert_eq!(next.sequence, 0);
 }

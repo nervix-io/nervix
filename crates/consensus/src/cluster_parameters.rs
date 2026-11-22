@@ -227,11 +227,13 @@ mod tests {
                 .node_capability_record();
         record.identity = nervix_models::ClusterNodeIdentity::new(current.clone(), incarnation);
         record.capabilities.shutdown = nervix_models::ShutdownSettings::default().capabilities();
+        record.capabilities.database_volume_bytes = u64::MAX;
         state
             .node_records
             .insert(current.clone(), committed_capability(record.clone()));
         record.identity = nervix_models::ClusterNodeIdentity::new(departed.clone(), incarnation);
         record.capabilities.shutdown.shutdown_timeout = Duration::from_secs(1);
+        record.capabilities.database_volume_bytes = 1;
         state
             .node_records
             .insert(departed.clone(), committed_capability(record));
@@ -258,13 +260,81 @@ mod tests {
         assert_eq!(state.node_records.len(), 2, "history remains retained");
     }
 
+    #[test]
+    fn runtime_capabilities_name_the_first_admitted_node_whose_volume_is_too_small() {
+        const GIB: u64 = 1 << 30;
+        let claim = |node: &str, database_volume_bytes: u64| {
+            let mut record =
+                nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                    .node_capability_record();
+            record.identity = nervix_models::ClusterNodeIdentity::new(
+                ClusterNodeName::parse(node).assured("fixture node"),
+                ClusterNodeIncarnation::new(1),
+            );
+            record.capabilities.shutdown =
+                nervix_models::ShutdownSettings::default().capabilities();
+            record.capabilities.database_volume_bytes = database_volume_bytes;
+            record
+        };
+        let values = ClusterParameterValues::default();
+        let roomy = claim("node-1", 64 * GIB);
+        let small = claim("node-2", 8 * GIB);
+        let tiny = claim("node-3", GIB);
+
+        values
+            .validate_runtime_capabilities([&roomy])
+            .assured("a volume above both quotas admits the policy");
+        let refused = values
+            .validate_runtime_capabilities([&roomy, &small, &tiny])
+            .err()
+            .assured("a node whose volume cannot hold the extracted quota refuses the policy");
+        let nervix_models::ClusterParameterError::NodeVolume {
+            parameter, node, ..
+        } = refused.current_context()
+        else {
+            panic!("a quota beyond a volume refuses as one: {refused:?}");
+        };
+        assert_eq!(
+            *parameter,
+            nervix_models::ClusterParameterKey::ResourceMaxExtractedBytes
+        );
+        assert_eq!(node.as_str(), "node-2");
+
+        let mut short_budget = roomy.clone();
+        short_budget.capabilities.shutdown.shutdown_timeout = Duration::from_secs(1);
+        short_budget.capabilities.database_volume_bytes = GIB;
+        assert!(
+            matches!(
+                values
+                    .validate_runtime_capabilities([&short_budget])
+                    .err()
+                    .assured("both checks refuse this claim")
+                    .current_context(),
+                nervix_models::ClusterParameterError::NodeDeadline { .. }
+            ),
+            "the lifecycle budget is still judged first for each claim"
+        );
+    }
+
     fn admit(state: &mut StateMachineData, name: &str, seconds: u64) -> CommandExecutionReference {
+        admit_changes(
+            state,
+            name,
+            vec![ClusterParameterChange::NodeUnavailabilityTimeout(
+                Duration::from_secs(seconds),
+            )],
+        )
+    }
+
+    fn admit_changes(
+        state: &mut StateMachineData,
+        name: &str,
+        changes: Vec<ClusterParameterChange>,
+    ) -> CommandExecutionReference {
         let reference =
             CommandExecutionReference::parse(name).assured("the test execution reference is valid");
-        let changes = ClusterParameterUpdates::try_from(vec![
-            ClusterParameterChange::NodeUnavailabilityTimeout(Duration::from_secs(seconds)),
-        ])
-        .assured("the command assigns one key");
+        let changes =
+            ClusterParameterUpdates::try_from(changes).assured("the command assigns each key once");
         let execution = CommandExecution::applying(
             reference.clone(),
             UserName::parse("operator").assured("the fixture user is valid"),
@@ -339,6 +409,78 @@ mod tests {
                 .and_then(CommandExecution::effect),
             Some(CommandExecutionEffect::AlterCluster { applied: None, .. })
         ));
+    }
+
+    #[test]
+    fn a_quota_beyond_an_admitted_node_volume_refuses_the_entire_parameter_publication() {
+        let mut state = seeded();
+        let node = ClusterNodeName::parse("small").assured("fixture node");
+        let mut record =
+            nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_capability_record();
+        record.identity =
+            nervix_models::ClusterNodeIdentity::new(node.clone(), ClusterNodeIncarnation::new(3));
+        record.capabilities.shutdown = nervix_models::ShutdownSettings::default().capabilities();
+        let volume: u64 = 32 << 30;
+        record.capabilities.database_volume_bytes = volume;
+        state
+            .node_records
+            .insert(node.clone(), committed_capability(record));
+        let nodes = BTreeMap::from([(node.clone(), BasicNode::new("localhost:9000"))]);
+        let membership = openraft::Membership::new(vec![nodes.keys().cloned().collect()], nodes)
+            .assured("one admitted member");
+        state.last_membership = Arc::new(StoredMembership::new(None, membership));
+
+        let beyond = admit_changes(
+            &mut state,
+            "quota.1",
+            vec![ClusterParameterChange::ResourceMaxExtractedBytes(
+                volume + 1,
+            )],
+        );
+        let captured = inputs(&state).assured("the cluster is seeded");
+        let before = state.parameters;
+        assert_eq!(
+            apply(&mut state, &beyond, &captured).response,
+            ConsensusResponse::Conflict(ConsensusConflict::InvalidClusterParameter {
+                issue: nervix_models::ClusterParameterError::NodeVolume {
+                    parameter: nervix_models::ClusterParameterKey::ResourceMaxExtractedBytes,
+                    node,
+                    requested: volume + 1,
+                    available: volume,
+                },
+            })
+        );
+        assert_eq!(
+            state.parameters, before,
+            "a refused change publishes nothing"
+        );
+        assert!(matches!(
+            state
+                .command_executions
+                .get(&beyond)
+                .and_then(CommandExecution::effect),
+            Some(CommandExecutionEffect::AlterCluster { applied: None, .. })
+        ));
+
+        let fitting = admit_changes(
+            &mut state,
+            "quota.2",
+            vec![ClusterParameterChange::ResourceMaxExtractedBytes(volume)],
+        );
+        let captured = inputs(&state).assured("the cluster is seeded");
+        assert_eq!(
+            apply(&mut state, &fitting, &captured).response,
+            ConsensusResponse::Applied
+        );
+        assert_eq!(
+            state
+                .parameters
+                .assured("the publication exists")
+                .values
+                .resource_max_extracted_bytes(),
+            volume
+        );
     }
 
     #[test]

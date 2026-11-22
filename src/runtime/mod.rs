@@ -32,10 +32,10 @@ use arrow_array::{
     Array, ArrayRef, BooleanArray, ListArray, RecordBatch, RecordBatchOptions, StringArray,
     UInt64Array,
     builder::{
-        ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
-        Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
-        TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
-        make_builder,
+        ArrayBuilder, BooleanBuilder, DurationNanosecondBuilder, FixedSizeListBuilder,
+        Float32Builder, Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder,
+        ListBuilder, StringBuilder, TimestampNanosecondBuilder, UInt8Builder, UInt16Builder,
+        UInt32Builder, UInt64Builder, make_builder,
     },
     new_empty_array, new_null_array,
 };
@@ -257,6 +257,8 @@ mod endpoint_acknowledgement;
 mod endpoint_pause;
 mod endpoint_route_table;
 mod entity_gate;
+mod entity_swap;
+mod entity_swap_restore;
 mod entrypoint_routes;
 mod error;
 mod events;
@@ -594,7 +596,9 @@ use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,
     materialize_ingestor_route_template, parse_branch_flush_policy, parse_input_collect_policy,
 };
-use processor_branch_restore::PendingProcessorBranchRestore;
+use processor_branch_restore::{
+    PendingProcessorBranchRestore, ProcessorBranchRestoreAttempt, RestoreProgress,
+};
 use processor_branch_task::{
     PreparedProcessorBranch, ProcessorBranchCommand, ProcessorBranchHandoff,
     ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError,
@@ -622,7 +626,7 @@ pub(crate) use processor_state_inspection::{
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
-    wasm_guest_call_schemas, wasm_instance_next_deadline,
+    RetainedStateOpening, wasm_guest_call_schemas, wasm_instance_next_deadline,
 };
 use processors::{
     BranchInstanceTemplate, CompiledCorrelatorOutputProgram, CompiledCorrelatorWhereProgram,
@@ -652,7 +656,8 @@ use relay_boundary::{
     RelayRuntimeFanIn, RemoteRuntimeConsumer, addressable_count,
 };
 pub(in crate::runtime) use relay_channel::{
-    OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
+    OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateHold, RelayDispatchGateLease,
+    RelayTryRecv,
 };
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
@@ -1046,7 +1051,7 @@ pub(crate) use entity_gate::{
 pub(crate) use error::{ApplicationWait, RuntimeError};
 pub(crate) use events::RuntimeEvent;
 use execution_build_error::{ExecutionBuildError, ExecutionStep};
-pub(crate) use inferencer::onnx_environment;
+pub(crate) use inferencer::{OnnxSessionOptions, onnx_environment};
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;

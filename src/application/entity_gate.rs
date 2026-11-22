@@ -200,8 +200,18 @@ pub(in crate::application) struct ClusterEntityGate {
     /// Nodes whose gate engagement was attempted and not yet released. Membership decides both
     /// what still needs releasing and what a repeated attempt must not duplicate, so this is a set.
     nodes: BTreeSet<ClusterNodeName>,
+    /// What every node holds, which a renewal engages again with a later deadline.
+    held: Option<HeldEntityGateScope>,
     impact_attempt: Option<QuiescenceAttempt>,
     release_owner: Option<SessionServiceImpl>,
+}
+
+/// The relays, entities and purpose of a cluster gate, as each node it engaged holds them.
+struct HeldEntityGateScope {
+    relays: Vec<RelayName>,
+    targets: EntityGateTargets,
+    purpose: EntityGatePurpose,
+    reason: &'static str,
 }
 
 enum EntityGateEngagementOutcome {
@@ -217,6 +227,12 @@ impl EntityGateEngagementOutcome {
             Self::Rejected(message) | Self::Uncertain(message) => message,
         }
     }
+}
+
+/// A node that refused to renew a cluster gate, and why.
+pub(in crate::application) struct RefusedEntityGateRenewal {
+    pub(in crate::application) node: ClusterNodeName,
+    pub(in crate::application) reason: String,
 }
 
 struct PendingClusterEntityGateRelease {
@@ -281,6 +297,7 @@ impl ClusterEntityGate {
             coordination,
             domain: domain.clone(),
             nodes: BTreeSet::new(),
+            held: None,
             impact_attempt: None,
             release_owner: Some(service.clone()),
         }
@@ -715,6 +732,54 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Renews `gate` on every node that holds it until `lease` from now, engaging each again with
+    /// the same identity and scope, as a coordinator keeping a committed change's hold does.
+    /// Answers each node that no longer holds the gate, with why: its hold ends at its lease.
+    pub(in crate::application) async fn renew_cluster_entity_gates(
+        &self,
+        gate: &ClusterEntityGate,
+        lease: std::time::Duration,
+    ) -> Vec<RefusedEntityGateRenewal> {
+        let Some(held) = gate.held.as_ref() else {
+            return Vec::new();
+        };
+        let mut refused = Vec::new();
+        let Some(deadline) = nervix_primitives::time::Instant::now().checked_add(lease) else {
+            for node in &gate.nodes {
+                refused.push(RefusedEntityGateRenewal {
+                    node: node.clone(),
+                    reason: "the renewed lease exceeds the monotonic clock".to_owned(),
+                });
+            }
+            return refused;
+        };
+        for node in &gate.nodes {
+            nervix_primitives::task::consume_budget().await;
+            let outcome = self
+                .engage_entity_gate_on_node(
+                    node,
+                    EntityGateEngagement {
+                        coordination: &gate.coordination,
+                        domain: &gate.domain,
+                        relays: &held.relays,
+                        targets: &held.targets,
+                        purpose: held.purpose,
+                        deadline,
+                        reason: held.reason,
+                    },
+                )
+                .await;
+            if let EntityGateEngagementOutcome::Confirmed = outcome {
+                continue;
+            }
+            refused.push(RefusedEntityGateRenewal {
+                node: node.clone(),
+                reason: outcome.message().to_owned(),
+            });
+        }
+        refused
+    }
+
     pub(in crate::application) async fn engage_cluster_entity_gates(
         &self,
         scope: ClusterEntityGateScope<'_>,
@@ -902,6 +967,12 @@ impl SessionServiceImpl {
             EntityGatePurpose::OwnershipHandoff => "leader-orchestrated ownership handoff",
             EntityGatePurpose::WasmStateReset(_) => "leader-orchestrated WASM guest-state reset",
         };
+        gate.held = Some(HeldEntityGateScope {
+            relays: relays.to_vec(),
+            targets: targets.clone(),
+            purpose,
+            reason,
+        });
         let mut engaged_node = false;
         for node in &nodes {
             nervix_primitives::task::consume_budget().await;

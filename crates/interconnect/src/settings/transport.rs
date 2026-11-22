@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** One declaration, default and validation for each local transport policy input,
-//!   and peer-relative connection, request, health and watermark capacities.
+//!   and peer-relative connection, request and health capacities.
 //! - **Depends on.** Vocabulary setting classes, primitive admission and transport pool geometry.
 //! - **Must not know.** Command-line parsing, membership admission, graphs or placement.
 
@@ -466,13 +466,6 @@ impl TransportSettings {
         }
     }
 
-    pub fn watermark_capacity(&self) -> usize {
-        self.incoming_queue_capacity.value().checked_mul(8).assured(
-            "the incoming capacity validation leaves room for eight retained watermarks per \
-             pending request",
-        )
-    }
-
     /// A normal append stream and its replacement for every peer, inside node admission.
     fn derived_request_quota(&self) -> usize {
         self.max_peers
@@ -507,7 +500,6 @@ impl TransportSettings {
             request_quota: positive(self.request_quota()),
             completion_quota: positive(self.completion_requests()),
             health_probes: positive(self.health_probes()),
-            relay_watermarks: positive(self.watermark_capacity()),
             stream_window_bytes: u32::try_from(self.stream_receive_window.value().as_u64())
                 .verified("validated HTTP/2 window"),
             connection_window_bytes: u32::try_from(self.connection_receive_window.value().as_u64())
@@ -528,14 +520,12 @@ impl TransportSettings {
         TransportOptions {
             accept_retry_delay: Setting::<crate::AcceptRetryDelay>::resolve(None, &())
                 .assured("the declared accept-retry default is positive and clock-representable"),
-            relay_retention: super::RelayRetentionSettings::default(),
             reconnect_jitter_permille: *self.reconnect_jitter_permille.value(),
             peer_receive,
             max_peers: *self.max_peers.value(),
             max_connections: self.max_connections(),
             max_concurrent_handshakes: *self.concurrent_handshakes.value(),
             incoming_queue_capacity: *self.incoming_queue_capacity.value(),
-            relay_channel_watermark_capacity: self.watermark_capacity(),
             request_quota: self.request_quota(),
             append_request_quota: self.request_quota(),
             completion_request_quota: self.completion_requests(),

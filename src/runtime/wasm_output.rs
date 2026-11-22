@@ -1521,7 +1521,13 @@ mod tests {
         install_unpaced_test_domain(&runtime, &domain);
         let processor = named("node");
         let mut branch = junction_branch_template("node", "incoming")
-            .instantiate(&runtime, &domain, None, 1)
+            .instantiate(
+                &runtime,
+                &domain,
+                None,
+                1,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .assured("the branch instantiates")
             .into_inner();

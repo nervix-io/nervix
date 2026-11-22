@@ -1511,6 +1511,21 @@ coverage-wasm-state-description output: coverage-clean-profiles build-deps build
     cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/runtime/wasm_state_description.feature") }} --retry 0
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
+# Measure the frame bounds of forwarded client producers and consumers through the configured
+# compiler cache: the server's client producer and consumer unit tests and frame properties, and the
+# public scenarios that forward a producer and a consumer between nodes whose relay bounds differ,
+# which reach both ends of a producer link and a consumer stream. Workspace artifacts are cleaned
+# first, because the report reads every instrumented binary in the target directory, and one an
+# earlier build left would add the line counters of the source it was built from.
+coverage-client-link-frames output: build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- application::client_producers application::client_consumers
+    cargo llvm-cov --no-report --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/cluster/client_link_frame_bounds.feature") }} --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
 # Measure the Rust client library's unit tests, for a patch confined to it, through the configured
 # compiler cache.
 coverage-client-core output *args:
@@ -5568,6 +5583,11 @@ test-chaos-lifetimes-verifiers:
 # harness checks.
 test-chaos-correctness-harness:
     exec bash scripts/chaos/tests/correctness-harness-self-test.sh
+
+# Run the alteration-handover option checks, its fixture generator and its verdict over the
+# alteration answer and the node logs without the other external harness checks.
+test-chaos-alteration-handover:
+    exec bash scripts/chaos/tests/alteration-handover-self-test.sh
 
 # Run the graceful-stop option checks, its fixture generator and its STOP answer verdict without the
 # other external harness checks.

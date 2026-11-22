@@ -104,6 +104,7 @@ public final class Probe {
             case "F32" -> String.format("f32:%08x", data.getInt());
             case "F64" -> String.format("f64:%016x", data.getLong());
             case "DATETIME" -> "datetime:" + data.getLong();
+            case "DURATION" -> "duration:" + data.getLong();
             case "BOOL" -> "bool:" + (data.get() != 0);
             default -> throw new IllegalStateException("a leaf is not a scalar");
         });
@@ -548,7 +549,8 @@ public final class Probe {
                         new Level("I16", 0)), false, false),
                 new FieldSpec("spans", List.of(new Level("LIST", 0), new Level("FIXED_LIST", 2),
                         new Level("DATETIME", 0)), true, false),
-                scalar("secret", "STRING", false, true));
+                scalar("secret", "STRING", false, true),
+                scalar("wait", "DURATION", false, false));
     }
 
     /** One row of an input batch, as the probe's application holds it. */
@@ -565,6 +567,7 @@ public final class Probe {
         short[][] grid = {{0, 0}, {0, 0}};
         List<long[]> spans;
         String secret = "s";
+        long wait;
 
         static Row plain(int id, String tenant) {
             Row row = new Row();
@@ -599,6 +602,7 @@ public final class Probe {
         first.grid = new short[][] {{1, -2}, {Short.MAX_VALUE, Short.MIN_VALUE}};
         first.spans = List.of(new long[] {Long.MIN_VALUE, Long.MAX_VALUE});
         first.secret = "s1";
+        first.wait = Long.MAX_VALUE;
 
         Row second = Row.plain(2, "acme");
         second.i8v = -128;
@@ -612,6 +616,7 @@ public final class Probe {
         second.at = Long.MIN_VALUE;
         second.maybe = 0L;
         second.secret = "s2";
+        second.wait = Long.MIN_VALUE;
 
         Row third = Row.plain(3, "acme");
         third.u8v = 1;
@@ -631,6 +636,7 @@ public final class Probe {
         third.grid = new short[][] {{-1, 1}, {2, -2}};
         third.spans = List.of();
         third.secret = "s3";
+        third.wait = 1;
         return List.of(first, second, third);
     }
 
@@ -698,6 +704,7 @@ public final class Probe {
                 case "f64v" -> values.put(row.f64v, 8);
                 case "flag" -> values.put(row.flag ? 1 : 0, 1);
                 case "at" -> values.put(row.at, 8);
+                case "wait" -> values.put(row.wait, 8);
                 case "tenant", "secret" -> {
                     byte[] value = bytes(name.equals("tenant") ? row.tenant : row.secret);
                     column.varlen = true;

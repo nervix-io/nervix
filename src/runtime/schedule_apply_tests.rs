@@ -674,60 +674,6 @@ async fn scheduled_processor_entity_swap_is_not_junction_specific() {
         Unit::SINGLE
     )));
     drop(execution);
-
-    #[cfg(feature = "testing")]
-    {
-        let node = ClusterNodeName::parse("node-1")
-            .assured("the test node is an identifier-shaped literal");
-        let mut recovered = desired.clone();
-        let nervix_models::Model::Deduplicator(config) = recovered
-            .nodes
-            .values_mut()
-            .find(|node| node.kind() == ModelKind::Deduplicator)
-            .assured("the test schedule contains the processor")
-            .config
-            .as_mut()
-        else {
-            panic!("scheduled processor must contain a deduplicator model");
-        };
-        config.mode = AckMode::Attached;
-        runtime
-            .inner
-            .fault_injection
-            .fail_next_entity_schedule_swap_on(node.clone(), domain.clone());
-
-        let recovered_revision = ExecutionRevision::from_schedule(&recovered)
-            .assured("the recovered processor has a complete execution revision");
-        let delta = ExecutionDelta::between(Some(&desired), Some(&recovered));
-        let application = runtime
-            .apply_schedule_delta(&node, &recovered_revision, &delta, true)
-            .await
-            .assured("the domain rebuild recovers the injected entity swap failure");
-        assert!(application.applied_incrementally);
-        let expansion = application
-            .recovery_expansion
-            .assured("entity swap fallback reports its wider recovery scope");
-        assert_eq!(expansion.domain, domain);
-        assert!(
-            expansion
-                .reason
-                .contains("injected entity-level schedule apply failure")
-        );
-        assert_eq!(
-            expansion.scope,
-            recovered.nodes.keys().cloned().collect::<Vec<_>>()
-        );
-        assert_eq!(
-            runtime
-                .inner
-                .executions
-                .get(&domain)
-                .assured("recovery reinstalls the test domain")
-                .revision
-                .ownership_handoff_fingerprint,
-            recovered_revision.ownership_handoff_fingerprint
-        );
-    }
 }
 
 #[nervix_primitives::test]

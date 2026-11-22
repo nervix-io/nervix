@@ -402,6 +402,8 @@ pub enum StateValue {
     Bool(bool),
     String(String),
     Datetime(String),
+    /// A `DURATION`, as its signed count of nanoseconds.
+    Duration(i64),
     F32Bits(u32),
     F64Bits(u64),
     Array(#[rkyv(omit_bounds)] Vec<StateValue>),

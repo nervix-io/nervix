@@ -3,9 +3,9 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The command-line form of the node's identity, tags, listen and advertised
-//!   addresses, TLS files, name resolution files and storage paths, and their conversion into the
-//!   node's resolved identity, including the addresses derived from others when they are not
-//!   given.
+//!   addresses, TLS files, name resolution files, storage paths and trace collector, and their
+//!   conversion into the node's resolved identity, including the addresses derived from others
+//!   when they are not given.
 //! - **Depends on.** The vocabulary's node names, tags and endpoints, the resolver's configuration
 //!   and the cluster's interconnect address derivation.
 //! - **Must not know.** Settings, or what the node runs once it has started.
@@ -27,6 +27,7 @@ use crate::{
         authentication::DEFAULT_USER,
         error::AppError,
         node_identity::{GrpcTransport, NodeIdentity},
+        tracing_setup::TraceCollector,
     },
     cluster,
 };
@@ -61,6 +62,13 @@ pub struct NodeArgs {
         default_value = "0.0.0.0:9090"
     )]
     pub observability_listen_addr: String,
+    /// The OpenTelemetry collector the node exports its own traces to over OTLP gRPC, such as
+    /// `http://collector:4317`. Without it the node exports no traces.
+    #[arg(long, env = "NERVIX_OTEL_OTLP_ENDPOINT")]
+    pub otel_otlp_endpoint: Option<String>,
+    /// The OpenTelemetry service name the node's exported traces carry.
+    #[arg(long, env = "NERVIX_OTEL_SERVICE_NAME", default_value = "nervix")]
+    pub otel_service_name: String,
     #[arg(
         long,
         env = "NERVIX_WEB_CONSOLE_LISTEN_ADDR",
@@ -254,6 +262,10 @@ impl TryFrom<NodeArgs> for NodeIdentity {
             .observability_listen_addr
             .parse::<SocketAddr>()
             .change_context(AppError::ParseObservabilityListenAddress)?;
+        let trace_collector = match args.otel_otlp_endpoint.as_deref() {
+            Some(endpoint) => Some(TraceCollector::new(endpoint, args.otel_service_name)?),
+            None => None,
+        };
         let web_console_listen_addr = args
             .web_console_listen_addr
             .parse::<SocketAddr>()
@@ -301,6 +313,7 @@ impl TryFrom<NodeArgs> for NodeIdentity {
             .http_listen_addr(http_listen_addr)
             .https_listen_addr(https_listen_addr)
             .observability_listen_addr(observability_listen_addr)
+            .trace_collector(trace_collector)
             .web_console_listen_addr(web_console_listen_addr)
             .web_console_advertise_addr(web_console_advertise_addr)
             .web_console_https_listen_addr(web_console_https_listen_addr)

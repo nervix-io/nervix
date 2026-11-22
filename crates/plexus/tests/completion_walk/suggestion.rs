@@ -52,6 +52,8 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("config_key", "'nx.key'"),
     ("config_value", "'nx_value'"),
     ("duration_literal", "100ms"),
+    // The unit after a number in an expression makes the number a DURATION literal part.
+    ("duration_unit", "s"),
     ("endpoint_path", "'/nx/path'"),
     ("hostname", "nx-host"),
     ("hostname_label", "nx"),

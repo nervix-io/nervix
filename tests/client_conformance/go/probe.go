@@ -467,6 +467,10 @@ func renderValue(cell *session.Cell) (string, error) {
 		value := new(session.DatetimeCell)
 		value.Init(bytes, pos)
 		return fmt.Sprintf("datetime:%d", value.UnixNanos()), nil
+	case session.CellValueDurationCell:
+		value := new(session.DurationCell)
+		value.Init(bytes, pos)
+		return fmt.Sprintf("duration:%d", value.Nanoseconds()), nil
 	case session.CellValueListCell:
 		list := new(session.ListCell)
 		list.Init(bytes, pos)

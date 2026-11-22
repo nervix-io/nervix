@@ -103,7 +103,8 @@ pub use request::{
     DomainClockAttachRequest, HandlerRegistrationError, HttpsListenerInstallation,
     HttpsListenerInstallationRequest, HttpsListenerInstallationResponse, InterconnectDuplexRequest,
     InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure, RequestContext,
-    RequestError, RequestSubquota, StreamHandlerError, StreamingResponse,
+    RequestError, RequestSubquota, RuntimeApplicationFailure, StreamHandlerError,
+    StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
@@ -120,9 +121,8 @@ pub use settings::{
     InterconnectLiveness, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
     PeerReceiveSettingsError, PingInterval, PingTimeout, ProbeTimeout, ProgressTimeout,
     ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
-    RelayChannelSweep, RelayDecodedBytes, RelayRetentionSettings, RequestDeadline, RequestQuota,
-    RequestTimeout, StreamReceiveWindow, TransportSettingValues, TransportSettings,
-    TransportSettingsError,
+    RelayDecodedBytes, RequestDeadline, RequestQuota, RequestTimeout, StreamReceiveWindow,
+    TransportSettingValues, TransportSettings, TransportSettingsError,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
@@ -150,7 +150,6 @@ pub(crate) const RKYV_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct TransportOptions {
-    pub relay_retention: RelayRetentionSettings,
     pub reconnect_jitter_permille: u16,
     /// Positive pause after a node-local accept failure.
     pub accept_retry_delay: nervix_models::Setting<AcceptRetryDelay>,
@@ -164,11 +163,6 @@ pub struct TransportOptions {
     pub append_request_quota: usize,
     pub completion_request_quota: usize,
     pub max_concurrent_health_probes: usize,
-    /// The relay channel watermarks the protocol owner of one peer retains. A watermark keeps a
-    /// channel's position and last outcome after its batch resolved; when the budget is full, the
-    /// least recently used one is forgotten so the peer's next channel is still admitted. It must
-    /// exceed `incoming_queue_capacity`.
-    pub relay_channel_watermark_capacity: usize,
     /// The HTTP/2 receive windows of every pool but bulk: what one stream, and one connection,
     /// may receive before its reader returns any of it.
     pub initial_stream_window_bytes: u32,
@@ -197,11 +191,17 @@ impl TransportOptions {
     pub(crate) fn relay_grant_lifetime(&self) -> Duration {
         self.progress_timeout.min(self.request_timeout)
     }
-    pub(crate) fn relay_cancellation_retry_window(&self) -> Duration {
+    /// How long a sender keeps asking a receiver to cancel an abandoned delivery: three request
+    /// budgets, and never past `retention`, the delivery's own retention, after which its receiver
+    /// keeps nothing of it to cancel.
+    pub(crate) fn relay_cancellation_retry_window(
+        &self,
+        retention: RelayChannelRetention,
+    ) -> Duration {
         self.request_timeout
             .checked_mul(3)
             .verified("the request budget fits twelvefold")
-            .min(self.relay_retention.retention())
+            .min(retention.duration())
     }
     /// Progress control keeps its share of the local request budget and body-progress bound.
     /// The delivery's captured dispatch policy may shorten that host limit.
@@ -254,14 +254,6 @@ impl TransportOptions {
                     reason: format!("{name} must be greater than zero"),
                 }));
             }
-        }
-        // A channel holds at most one attempt, so a larger budget always retains the watermark of
-        // a channel with no attempt outstanding, which a full budget can forget for a new one.
-        if self.relay_channel_watermark_capacity <= self.incoming_queue_capacity {
-            return Err(Report::new(TransportError::InvalidOptions {
-                reason: "relay_channel_watermark_capacity must exceed incoming_queue_capacity"
-                    .to_string(),
-            }));
         }
         if self.initial_stream_window_bytes == 0
             || self.initial_connection_window_bytes == 0
@@ -1200,14 +1192,24 @@ impl Transport {
         .await
     }
 
-    /// Install the committed member-liveness policy on established and future connections.
+    /// Install the committed member-liveness policy on established and future connections, and the
+    /// relay channel retention the committed parameters give a delivery that starts now.
     pub fn install_cluster_parameters(&self, values: nervix_models::ClusterParameterValues) {
         self.inner
             .install_liveness(settings::InterconnectLiveness::from_parameters(&values));
+        self.inner
+            .install_relay_retention(RelayChannelRetention::committed(&values));
     }
 
     pub fn request_timeout(&self) -> Duration {
         self.inner.request_timeout()
+    }
+
+    /// What one relay channel watermark a receiver retains is charged to its relay memory class,
+    /// besides the text of a rejection reason it keeps. The grant that opens a channel reserves it
+    /// with the delivery's own memory, and the receiver holds it for the watermark's retention.
+    pub fn relay_channel_watermark_bytes() -> u64 {
+        connection::RelayChannelWatermarks::watermark_charge()
     }
 
     pub fn liveness(&self) -> settings::InterconnectLiveness {
@@ -1262,30 +1264,40 @@ impl Transport {
         self.inner.send_relay(peer_node_id, payload, progress).await
     }
 
+    /// Ask `peer_node_id` to cancel `delivery`, whose sender captured `timing`. A cancellation
+    /// that fences a position the receiver never granted keeps that delivery's retention there.
     pub async fn cancel_relay(
         &self,
         peer_node_id: &ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
     ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
-        self.inner.cancel_relay(peer_node_id, delivery).await
+        self.inner
+            .cancel_relay(peer_node_id, delivery, timing)
+            .await
     }
 
+    /// Ask `peer_node_id` for the status of `delivery`, whose sender captured `timing`.
     pub async fn relay_admission_status(
         &self,
         peer_node_id: &ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
     ) -> Result<RelayAdmissionStatus, Report<TransportError>> {
         self.inner
-            .relay_admission_status(peer_node_id, delivery)
+            .relay_admission_status(peer_node_id, delivery, timing)
             .await
     }
 
+    /// A guard that, unless disarmed, asks `peer_node_id` to cancel `delivery` once dropped, for
+    /// at most the cancellation window of `timing`, the timing the delivery captured.
     pub fn relay_cancellation_guard(
         &self,
         peer_node_id: ClusterNodeName,
         delivery: RelayDelivery,
+        timing: nervix_models::RemoteAckTiming,
     ) -> RelayCancellationGuard {
-        RelayCancellationGuard::new(self.inner.clone(), peer_node_id, delivery)
+        RelayCancellationGuard::new(self.inner.clone(), peer_node_id, delivery, timing)
     }
 
     /// Make `endpoints` the complete set of peers this node dials, each at its advertised endpoint.
