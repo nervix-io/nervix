@@ -831,7 +831,7 @@ and its decoding until the request's own deadline. Each protocol's waits end as 
 |---|---|---|
 | Typed request | The caller's encoding of the request, the peer's reading and decoding of it, the peer's encoding of the answer and the caller's reading and decoding of it | The caller's reset; the request's own deadline |
 | Connection handshake | The dialing node's hello and the accepting node's reading of it, then the accepting node's answer, accepted or refused, and the dialing node's reading of it | The dialing node's setup deadline, which closes the connection |
-| Relay admission status and cancellation | The sender's query, the receiver's reading of it, the receiver's status and the sender's reading of it | The sender's reset; the query's deadline |
+| Relay admission status and cancellation | The sender's query, the receiver's reading of it, the watermark charge of a cancellation that fences a position the receiver never granted, the receiver's status and the sender's reading of it | The sender's reset; the query's deadline |
 | Relay grant | The sender's grant request, the receiver's reading of it and the whole charge of the operation it grants, then the receiver's disposition and the sender's reading of it | The sender's reset; the wait the sender declared, after which the receiver answers a capacity refusal; the delivery's deadline |
 | Ack resolution | The sender's encoding of the ack and the registrar's reading and decoding of it | The sender's reset; the send's deadline |
 | One-way control frame | The sender's encoding of the frame and the receiver's reading and decoding of it | The sender's reset; the send's deadline |
@@ -846,7 +846,9 @@ The reasons, protocol by protocol:
   node's verdict on the dialing node's prerequisites, which the dialing node reports and counts as
   the reason its connection did not bind.
 - **Relay admission status and cancellation.** The status is the receiver's verdict on the attempt,
-  and a cancellation it answers is already applied. A terminal status whose answer never left stays answerable, so the query the sender
+  and a cancellation it answers is already applied. A cancellation that must fence a position waits
+  for its watermark's charge while the query holds nothing of the relay class, since the fence is
+  what makes the cancellation hold. A terminal status whose answer never left stays answerable, so the query the sender
   repeats finds the same status.
 - **Relay grant.** A grant the receiver has no relay memory for waits for that memory. Its request is
   read and decoded under one charge, and once it is known the whole charge of the operation it
@@ -1285,9 +1287,10 @@ grant still without room when the wait its sender declared ends is answered with
 refusal, and the sender holds the delivery back and asks again, as
 [Held Deliveries](#held-deliveries) describes. The outcome the delivery records takes that charge
 when its channel has no watermark yet, and returns it when the channel's watermark already holds
-one. A cancellation that fences a position the receiver never granted reserves the same charge;
-while the class has no room for it, the cancellation is answered `Unknown` and its sender asks
-again. When the class has no room for a rejection reason's text, the watermark keeps the rejection
+one. A cancellation that fences a position the receiver never granted takes the same charge. It
+waits for room for as long as its sender keeps the query open, and only a closed budget leaves it
+unrecorded, answered `Unknown`, so its sender asks again. A rejection reason's text is the one
+charge that does not wait: when the class has no room for it, the watermark keeps the rejection
 without it: the outcome is what reconciling the channel needs, and its reason only explains it.
 [Capacity Planning](./capacity-planning.md) describes sizing the relay memory class for the channels
 a graph keeps between two nodes.

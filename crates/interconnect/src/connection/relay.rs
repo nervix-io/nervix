@@ -655,18 +655,24 @@ impl TransportState {
         let attempt = self.relay_attempt_key(peer_node_id, request.sender_epoch, request.delivery);
         let control = if cancel {
             // A cancellation that fences a position this node never granted records a watermark
-            // there, so it reserves that watermark's charge first. Without room the fence is not
-            // recorded and the sender, answered `Unknown`, asks again.
-            let note = self.executor.try_reserve(
+            // there, so it takes that watermark's charge first. The request holds nothing of the
+            // relay class, so it waits for room for as long as its sender keeps it open. Only a
+            // closed executor leaves the fence unrecorded, and the sender, answered `Unknown`,
+            // asks again.
+            let reserving = self.executor.reserve(
                 MemoryClass::Relay,
                 RelayChannelWatermarks::watermark_charge(),
             );
+            let reserving = async { Ok::<_, Report<TransportError>>(reserving.await) };
+            let Some(note) = until_reset(&mut respond, reserving).await? else {
+                return Ok(());
+            };
             let fence = match note {
                 Ok(note) => Some(note),
                 Err(refusal) => {
                     debug!(
                         error = %format_args!("{refusal:#}"),
-                        "relay memory has no room to fence a cancelled position"
+                        "relay memory cannot take a cancelled position's fence"
                     );
                     None
                 }

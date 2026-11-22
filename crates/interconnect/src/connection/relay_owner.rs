@@ -173,7 +173,8 @@ pub(super) enum RelayControl {
     /// The attempt's status.
     Status,
     /// Cancel the attempt. `fence` is the charge of the watermark that fencing a position the
-    /// owner never granted records there, or `None` when the relay memory class had no room for it.
+    /// owner never granted records there, or `None` when the relay memory class could not take
+    /// it, which only a closed budget leaves.
     Cancel { fence: Option<Reservation> },
 }
 
