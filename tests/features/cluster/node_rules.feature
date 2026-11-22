@@ -585,6 +585,31 @@ Feature: Node rules
       status: stopped
       """
 
+  Scenario: A node that restarts without quorum reports its status for a domain with node rules
+    Given node-3 starts with node-tags = zone=eu
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA rule_event ( id I64 );
+      CREATE RELAY rule_input SCHEMA rule_event UNBRANCHED;
+      CREATE RELAY rule_output SCHEMA rule_event UNBRANCHED;
+      CREATE JUNCTION scorer FROM rule_input UNBRANCHED
+        TO rule_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE PLACEMENT eu_only FOR scorer REQUIRE NODES WHERE tag('zone') = 'eu';
+      START;
+      """
+    Then within "10s" node "node-1" eventually reports scheduled "junction" "scorer" owner "node-3"
+    When node "node-1" is stopped
+    And node "node-2" is stopped
+    And node "node-3" is stopped
+    And node "node-3" is started until public observation is available
+    Then node "node-3" eventually reports status containing "node.initialization=initializing"
+    When node "node-1" is started
+    Then node "node-3" eventually reports status containing "node.initialization=ready"
+    And within "30s" node "node-3" eventually reports scheduled "junction" "scorer" owner "node-3"
+
   Scenario: A backup restores a domain's node rules
     Given node-1 starts with node-tags = zone=eu
     And the production sticky scheduler is configured

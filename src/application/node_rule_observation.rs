@@ -61,23 +61,24 @@ pub(in crate::application) fn rule_list(rules: &[PlacementName]) -> String {
 
 impl SessionServiceImpl {
     /// `domain`'s committed schedule judged against its node rules, by the committed records of
-    /// the live nodes this node observes. `None` for a domain with no schedule or no graph.
+    /// the live nodes this node observes. `None` for a domain with no schedule, no graph or no
+    /// node rule. It reads no cluster parameter, so a node that still initializes reports it.
     pub(in crate::application) async fn node_rule_judgement(
         &self,
         domain: &DomainName,
     ) -> Option<Result<NodeRuleJudgement, Report<RegistryError>>> {
         let graph = self.inner.registry.active_graph(domain)?;
+        if !graph.has_node_rules() {
+            return None;
+        }
         let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let schedule = inputs.schedule()?.clone();
-        let planning = self
-            .capture_domain_schedule_planning_snapshot(&inputs)
-            .await;
-        let candidates = planning.cluster_nodes().iter().cloned().collect();
+        let (records, candidates) = self.capture_node_rule_inputs(&inputs).await;
         let activity = match inputs.state() {
             Some(state) => crate::registry::ScheduleActivity::of(&state.status),
             None => crate::registry::ScheduleActivity::Stopped,
         };
-        Some(graph.judge_node_rules(domain, &schedule, planning.records(), &candidates, activity))
+        Some(graph.judge_node_rules(domain, &schedule, &records, &candidates, activity))
     }
 
     /// Describes the node rule `describe` names: its form and labels, then what it declares,

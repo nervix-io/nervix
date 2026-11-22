@@ -107,6 +107,65 @@ pub(in crate::application) struct DomainSchedulePlanningSnapshot {
     standing_breaches: NodeRuleBreaches,
 }
 
+/// Where a domain's units can run, as the gossip availability and the domain's committed topology
+/// show it. Unlike a planning snapshot it reads no cluster parameter.
+struct DomainPlacementView {
+    voters: SortedSet<ClusterNodeName>,
+    live_identities: BTreeSet<ClusterNodeIdentity>,
+    placement_candidate_identities: BTreeSet<ClusterNodeIdentity>,
+    terminating_node_ids: BTreeSet<ClusterNodeName>,
+    live_voters: SortedSet<ClusterNodeName>,
+    cluster_nodes: SortedSet<ClusterNodeName>,
+    records: std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord>,
+}
+
+impl DomainPlacementView {
+    fn capture(
+        availability: &nervix_consensus::GossipState,
+        inputs: &DomainPlanningInputs,
+    ) -> Self {
+        let voters: SortedSet<ClusterNodeName> =
+            inputs.topology().voters().iter().cloned().collect();
+        let cordoned = inputs.topology().cordoned();
+        let (live_identities, placement_candidate_identities) =
+            DomainSchedulePlanningSnapshot::eligibility_inputs(availability, &voters, cordoned);
+        let records = inputs
+            .topology()
+            .records()
+            .iter()
+            .filter(|(_, committed)| live_identities.contains(committed.record.identity()))
+            .map(|(node, committed)| (node.clone(), committed.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let terminating_node_ids = availability
+            .latest_nodes_by_id()
+            .into_values()
+            .filter(|node| node.terminating && live_identities.contains(&node.identity()))
+            .map(|node| node.node_id)
+            .collect();
+        let live_voters: SortedSet<ClusterNodeName> = availability
+            .live_node_ids()
+            .into_iter()
+            .filter(|node| voters.contains(node))
+            .collect();
+        let cluster_nodes: SortedSet<ClusterNodeName> = availability
+            .placement_candidate_node_ids()
+            .into_iter()
+            .filter(|node| {
+                voters.contains(node) && !cordoned.contains(node) && records.contains_key(node)
+            })
+            .collect();
+        Self {
+            voters,
+            live_identities,
+            placement_candidate_identities,
+            terminating_node_ids,
+            live_voters,
+            cluster_nodes,
+            records,
+        }
+    }
+}
+
 impl DomainSchedulePlanningSnapshot {
     fn eligibility_inputs(
         availability: &nervix_consensus::GossipState,
@@ -394,36 +453,16 @@ impl SessionServiceImpl {
         inputs: &DomainPlanningInputs,
     ) -> DomainSchedulePlanningSnapshot {
         let availability = self.inner.cluster.availability_state().await;
-        let voters: SortedSet<ClusterNodeName> =
-            inputs.topology().voters().iter().cloned().collect();
+        let DomainPlacementView {
+            voters,
+            live_identities,
+            placement_candidate_identities,
+            terminating_node_ids,
+            live_voters,
+            cluster_nodes,
+            records,
+        } = DomainPlacementView::capture(&availability, inputs);
         let cordoned = inputs.topology().cordoned();
-        let (live_identities, placement_candidate_identities) =
-            DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, &voters, cordoned);
-        let records = inputs
-            .topology()
-            .records()
-            .iter()
-            .filter(|(_, committed)| live_identities.contains(committed.record.identity()))
-            .map(|(node, committed)| (node.clone(), committed.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let live_node_ids = availability.live_node_ids();
-        let placement_candidate_node_ids = availability.placement_candidate_node_ids();
-        let terminating_node_ids = availability
-            .latest_nodes_by_id()
-            .into_values()
-            .filter(|node| node.terminating && live_identities.contains(&node.identity()))
-            .map(|node| node.node_id)
-            .collect();
-        let live_voters: SortedSet<ClusterNodeName> = live_node_ids
-            .into_iter()
-            .filter(|node| voters.contains(node))
-            .collect();
-        let cluster_nodes: SortedSet<ClusterNodeName> = placement_candidate_node_ids
-            .into_iter()
-            .filter(|node| {
-                voters.contains(node) && !cordoned.contains(node) && records.contains_key(node)
-            })
-            .collect();
         #[cfg(feature = "testing")]
         let mode = match self.inner.runtime.scheduler_mode() {
             crate::registry::SchedulerMode::Sticky => SchedulePlanningMode::Sticky,
@@ -455,6 +494,21 @@ impl SessionServiceImpl {
             executing,
             standing_breaches,
         }
+    }
+
+    /// What `inputs`' node rules are judged against: the committed record of each live voter and
+    /// the voters that may take a unit, as a planning snapshot captures them. It reads no cluster
+    /// parameter, so observation can judge while this node still initializes.
+    pub(in crate::application) async fn capture_node_rule_inputs(
+        &self,
+        inputs: &DomainPlanningInputs,
+    ) -> (
+        std::collections::BTreeMap<ClusterNodeName, nervix_models::CommittedNodeRecord>,
+        BTreeSet<ClusterNodeName>,
+    ) {
+        let availability = self.inner.cluster.availability_state().await;
+        let view = DomainPlacementView::capture(&availability, inputs);
+        (view.records, view.cluster_nodes.iter().cloned().collect())
     }
 
     /// The units the committed schedule already places against a node rule of the committed

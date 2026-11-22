@@ -764,6 +764,11 @@ pub(crate) struct NodeRuleUnitCounts {
 }
 
 impl crate::registry::graph::ActiveGraph {
+    /// Whether this graph declares a node rule, so that a judgement has anything to judge.
+    pub(crate) fn has_node_rules(&self) -> bool {
+        !self.placement.node_rules().is_empty()
+    }
+
     /// Judges `schedule` against this graph's node rules, evaluated over `live_records`, the
     /// committed records of the live nodes; `candidates` are the nodes that can take new work, and
     /// `activity` whether the schedule's units execute where it assigns them.
