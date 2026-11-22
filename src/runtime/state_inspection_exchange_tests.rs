@@ -489,6 +489,20 @@ fn refusal(
 
 /// The room a page stream's descriptor decodes within, taken beside the stream as the coordinator
 /// takes it when the page arrives.
+/// The rooms a received page's decoders draw from, as the receive charges them with the page.
+fn page_rooms(executor: &Executor, stream: &ChargedBytes) -> PageRooms {
+    let length = u64::try_from(stream.len()).assured("a bounded fixture stream's length fits u64");
+    PageRooms {
+        descriptor: descriptor_room(executor, stream),
+        body: executor
+            .try_reserve(
+                MemoryClass::Bulk,
+                RestoredMaterializedSnapshot::decode_scratch_bound(executor, length),
+            )
+            .assured("the fixture class has room for a body's decoding"),
+    }
+}
+
 fn descriptor_room(executor: &Executor, stream: &ChargedBytes) -> Reservation {
     let length = u64::try_from(stream.len()).assured("a bounded fixture stream's length fits u64");
     executor
@@ -514,7 +528,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     let received = ReceivedProcessorPage::decode(
         &executor,
         &stream,
-        descriptor_room(&executor, &stream),
+        page_rooms(&executor, &stream),
         &read(10),
         &expected_sections(),
     )
@@ -552,7 +566,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     let received = ReceivedProcessorPage::decode(
         &executor,
         &counted,
-        descriptor_room(&executor, &counted),
+        page_rooms(&executor, &counted),
         &read(0),
         &[],
     )
@@ -575,7 +589,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
     let received = ReceivedProcessorPage::decode(
         &executor,
         &refused,
-        descriptor_room(&executor, &refused),
+        page_rooms(&executor, &refused),
         &read(10),
         &expected_sections(),
     )
@@ -595,7 +609,7 @@ async fn a_page_whose_bodies_agree_with_their_descriptor_and_the_read_presents_t
         ReceivedProcessorPage::decode(
             &executor,
             &trailing,
-            descriptor_room(&executor, &trailing),
+            page_rooms(&executor, &trailing),
             &read(10),
             &expected_sections(),
         )
@@ -629,7 +643,7 @@ async fn a_body_whose_columns_or_types_disagree_with_its_declared_fields_is_refu
             ReceivedProcessorPage::decode(
                 &executor,
                 &stream,
-                descriptor_room(&executor, &stream),
+                page_rooms(&executor, &stream),
                 &read(10),
                 &expected_sections(),
             )
@@ -786,7 +800,7 @@ async fn a_body_whose_rows_identity_or_bounds_disagree_with_the_descriptor_or_th
             ReceivedProcessorPage::decode(
                 &executor,
                 &stream,
-                descriptor_room(&executor, &stream),
+                page_rooms(&executor, &stream),
                 &request,
                 &expected,
             )
@@ -948,7 +962,7 @@ async fn a_coordinator_presents_a_received_page_once_its_full_bulk_class_frees_i
     let mut decoding = std::pin::pin!(ReceivedProcessorPage::decode(
         &coordinator,
         &stream,
-        descriptor_room(&coordinator, &stream),
+        page_rooms(&coordinator, &stream),
         &request,
         &expected,
     ));

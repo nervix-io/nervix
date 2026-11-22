@@ -64,6 +64,23 @@ impl CheckpointReader {
         }
     }
 
+    /// Read the checkpoint again from its first byte, its checksum started afresh.
+    pub(in crate::runtime) fn rewind(&mut self) {
+        match self {
+            Self::Inline(reader) => reader.set_position(0),
+            Self::Segmented {
+                offset,
+                buffer,
+                hasher,
+                ..
+            } => {
+                *offset = 0;
+                *buffer = Cursor::new(Vec::new());
+                *hasher = Box::new(blake3::Hasher::new());
+            }
+        }
+    }
+
     pub(in crate::runtime) fn remaining(&self) -> u64 {
         match self {
             Self::Inline(reader) => u64::try_from(reader.get_ref().len())

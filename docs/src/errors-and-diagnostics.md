@@ -319,19 +319,28 @@ names suspend, resume and close separately and retains the underlying typed repo
 is transient and keeps the emitter instance for its next policy attempt. Readiness changes do not
 clear pending-work failures; only a successful publish or commit clears the host's task failure.
 
-Snapshot metadata and Arrow decoders refuse additional bulk scratch without queueing while they
-retain encoded input from that pool. The report preserves `AdmissionError` beneath the snapshot
-context, and refusal releases the input. A generator reports the failed read and tries a complete
-read again on its next occurrence; memory pressure never becomes absent or corrupt state.
+A materialized snapshot's open takes each section's bytes and its decoder's scratch as one bulk
+charge, which it waits for while it holds nothing else of the class. A container already held in
+memory under a bulk charge carries its decoders' scratch, taken with it as one charge. The decoded
+columns and row metadata the snapshot keeps are drawn from one state-read share, which the open
+waits for while it holds nothing of that class; an open that outgrows its share gives everything
+back and opens the container again within the share it needed. Memory pressure therefore delays a
+snapshot's read and never fails it or becomes absent or corrupt state. The admission failure left is
+a share larger than its whole class, `AdmissionError::ExceedsBudget` beneath
+`MaterializedSnapshotError::Admission`. A decoder that draws from the share of an operation such as
+a backup's capture or a restore's conversion reports a shortfall, which that operation gives
+everything back for and waits on.
 
-Interconnect rkyv decoders also refuse overlapping admission without waiting while retaining
-encoded input. Their local reports preserve `AdmissionError` beneath `TransportError`; a nested
-decoder owns its input charge through CPU completion even if the enclosing request is cancelled.
-At request dispatch, memory exhaustion, a request above the whole memory budget, a closed memory
-budget, a full execution queue and a closed execution pool are distinct `RemoteRequestFailure`
-variants. They preserve the traffic class and applicable byte or queue bounds. Temporary memory
-or queue exhaustion is recognized by `RequestError::is_capacity_exhaustion`; a stream opening answers
-503 for temporary refusal and 413 for a request above its budget. Malformed archive validation
+Interconnect rkyv decoders take the room their decoding needs together with the encoded input,
+as one charge waited for while the decoder holds nothing else of the class. Their local reports
+preserve `AdmissionError` beneath `TransportError`; a nested decoder owns its input charge through
+CPU completion even if the enclosing request is cancelled. At request dispatch, a full request
+subquota, a request above the whole memory budget, a closed memory budget and a closed execution
+pool are distinct `RemoteRequestFailure` variants, which preserve the traffic class and applicable
+byte bounds. A full subquota is recognized by `RequestError::is_capacity_exhaustion`. A stream
+opening answers 503 for it and for a budget or pool closed because the node stops, and 413 for a
+request above its budget; a full memory class answers nothing, because every opening waits for its
+room. Malformed archive validation
 retains `InvalidPayload` with its complete rendered cause chain.
 
 ### Outcomes That Are Not Reports
@@ -858,9 +867,11 @@ A caller keeps the storage report beneath its own context:
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
 
-Bulk overlap refusals retain `AdmissionError` beneath `MaterializedSnapshotError::Admission`
-for captured checkpoint reads and group metadata, and beneath `SnapshotStagingError::Admission`
-for staged file operations. These are capacity failures, not malformed snapshots. A stopped
+A shortfall of the share a materialized backup's capture draws its checkpoint reads and group
+metadata from retains `AdmissionError` beneath `MaterializedSnapshotError::Admission`, and a staged
+file operation's charge larger than its class retains it beneath `SnapshotStagingError::Admission`.
+These are capacity outcomes, not malformed snapshots: a shortfall makes the capture give everything
+back and run again within the share it needed. A stopped
 materialized backup keeps the report beneath its capture context and refuses the backup without
 publishing an inventory. Its incomplete staged sections are released; a new backup after capacity
 returns reads the complete checkpoint afresh.

@@ -875,7 +875,7 @@ The reasons, protocol by protocol:
 - **Byte streams.** State inspection pages are the owner's answer to a read it has already served:
   the encoding of their rows, the identity of each body and the reply wait, and so do the reply's
   decoding, the body's identity check and the rows' decoding at the coordinator, which receives the
-  page together with the room its descriptor's decoding takes. Checkpoint, offset, captured-section, snapshot and resource-archive transfers
+  page together with the room its descriptor's decoding and its body's decoders take. Checkpoint, offset, captured-section, snapshot and resource-archive transfers
   already wait for a place on every job of their answers.
 
 A one-way control frame waits like every frame: a replica's state replication ack

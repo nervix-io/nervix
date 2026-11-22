@@ -2590,13 +2590,32 @@ impl Runtime {
         }
         let source = match self.take_transferred_runtime_state_snapshot(placement) {
             Some(snapshot) => {
-                let sealed = self
+                // The transferred container and the scratch its decoders draw from are one bulk
+                // charge, taken while this restore holds nothing of the class, so no decoder waits
+                // for bulk room behind the container it reads.
+                let length: u64 = snapshot.payload.len().arch_into();
+                let working = RestoredMaterializedSnapshot::decode_scratch_bound(
+                    &self.inner.executor,
+                    length,
+                );
+                let held = self
                     .inner
                     .executor
-                    .charge_owned(nervix_execution::MemoryClass::Bulk, snapshot.payload)
+                    .reserve(
+                        nervix_execution::MemoryClass::Bulk,
+                        length.checked_add(working).ok_or_else(|| {
+                            Report::new(RuntimePersistenceError::StorageAdmission)
+                        })?,
+                    )
                     .await
                     .change_context(RuntimePersistenceError::StorageAdmission)?;
-                SealedSource::memory(sealed)
+                let (container, working) = held
+                    .split(length)
+                    .change_context(RuntimePersistenceError::StorageAdmission)?;
+                SealedSource::memory_with_working(
+                    nervix_execution::ChargedBytes::from_owned(snapshot.payload, container),
+                    working,
+                )
             }
             None => {
                 if self

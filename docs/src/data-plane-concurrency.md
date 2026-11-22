@@ -473,10 +473,12 @@ Materialized capture shares row carriers under the existing assignment barrier, 
 revision, ownership fence and branch generation. Membership insertion and eviction use that same
 barrier; ordinary updates of existing branches keep their existing admission protocol. Fresh
 backup capture admits its bounded row-view metadata before allocation. Archive conversion stages
-one identity/Arrow group at a time. Native loading bounds row-view metadata by the resolved relay memory budget, admits its
-metadata through State Read, charges retained decoded columns to relay memory through installation, and
-uses bulk memory for one section's decoding scratch. A cumulative relay admission refusal ends
-loading instead of waiting while retaining earlier groups. A pinned database reader retains one
+one identity/Arrow group at a time. Native loading bounds row-view metadata by the resolved relay
+memory budget. Its row metadata and the decoded columns it retains through installation are drawn
+from one State Read share, which it waits for while it holds nothing of that class; a load that
+outgrows its share gives everything back and reads the container again within the share it
+needed, so it never waits for more while retaining earlier groups. Each section's bytes and its
+decoding scratch are one bulk charge, taken while the load holds nothing else of the bulk class. A pinned database reader retains one
 snapshot and one stored chunk through all section reads. Replica installation checks monotonic
 revision under the existing exclusive assignment barrier before replacing any entry.
 

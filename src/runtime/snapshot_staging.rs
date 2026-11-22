@@ -384,6 +384,7 @@ impl StagedSnapshotWriter {
             file: Some(file),
             offset: 0,
             length,
+            rewound: false,
             executor,
             _reservation: self._reservation,
         })
@@ -618,6 +619,8 @@ pub(in crate::runtime) struct StagedSnapshot {
     file: Option<tempfile::NamedTempFile>,
     offset: u64,
     length: u64,
+    /// Whether the next read starts again from the first byte, after a rewind.
+    rewound: bool,
     executor: Executor,
     _reservation: OwnedSemaphorePermit,
 }
@@ -633,6 +636,13 @@ impl StagedSnapshot {
         self.length
             .checked_sub(self.offset)
             .assured("a staged reader stays within its declared length")
+    }
+
+    /// Read the snapshot again from its first byte. The next read seeks there on its storage
+    /// place, so nothing touches the file on an async worker.
+    pub(in crate::runtime) fn rewind(&mut self) {
+        self.offset = 0;
+        self.rewound = true;
     }
 
     /// Read the next `length` bytes, charged to the bulk budget for as long as the caller holds
@@ -683,6 +693,7 @@ impl StagedSnapshot {
             .take()
             .assured("a staged snapshot holds its file between completed storage jobs");
         let block_bound = self.executor.limits().bulk_chunk_bytes.as_u64();
+        let rewound = std::mem::take(&mut self.rewound);
         let read = self
             .executor
             .run_storage(
@@ -692,6 +703,10 @@ impl StagedSnapshot {
                     let mut file = file;
                     let result = if cancellation.is_cancelled() {
                         Err(Report::new(SnapshotStagingError::Cancelled))
+                    } else if rewound
+                        && let Err(error) = file.as_file_mut().seek(SeekFrom::Start(0))
+                    {
+                        Err(Report::new(error).change_context(SnapshotStagingError::Read))
                     } else {
                         read_exact(&mut file, charge, length, block_bound, cancellation)
                     };

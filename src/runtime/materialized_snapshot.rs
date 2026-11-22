@@ -39,7 +39,8 @@ pub(crate) use checkpoint_reader::CapturedMaterializedCheckpoint;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{
-    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, StorageClass,
+    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    StorageClass,
 };
 use nervix_models::RemoteRuntimeRecordMetadata;
 use nervix_primitives::sync::{Arc, StdArc};
@@ -1211,12 +1212,20 @@ impl RestoredMaterializedSnapshot {
             .change_context(MaterializedSnapshotError::Execution)?
     }
 
-    /// Open a sealed snapshot against the schema installed here, its decoding jobs taking places
-    /// on the bulk workers as `admission` says.
+    /// Open a sealed snapshot against the schema installed here.
     ///
     /// Every length the container declares is checked against the limit for the section it names
     /// and against the bytes that actually remain, so a truncated or overstated snapshot is
     /// refused before it allocates anything.
+    ///
+    /// The decoded columns and their row metadata stay charged to the state-read class until
+    /// installation consumes the snapshot. An attempt takes one share of that class while it holds
+    /// nothing of it, and draws each of those charges from the share without waiting. An attempt
+    /// the share cannot cover gives everything back and opens the container again within the share
+    /// it needed. Each section's bytes and its decoder's scratch are one bulk charge, which the
+    /// open takes while it holds nothing else of the bulk class. So the open waits for room only
+    /// while it holds nothing of the class it waits for, and it fails only for a share larger than
+    /// the whole class.
     pub(in crate::runtime) async fn open(
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
@@ -1224,64 +1233,121 @@ impl RestoredMaterializedSnapshot {
         rows: RestoredRows,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
         let mut cursor = source;
+        let mut share = None;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match Self::open_within(executor, schema, &mut cursor, rows, share).await? {
+                OpenAttempt::Opened(snapshot) => return Ok(snapshot),
+                OpenAttempt::Short {
+                    share: held,
+                    needed,
+                } => {
+                    // A share short of the whole class still fits a larger one. A share as large
+                    // as the class needs more than the class can ever hold, which the next
+                    // reservation reports.
+                    let capacity = executor.memory(MemoryClass::StateRead).capacity_bytes;
+                    let next = if held < capacity {
+                        needed.min(capacity)
+                    } else {
+                        needed
+                    };
+                    share = Some(next);
+                    cursor.rewind().await?;
+                }
+            }
+        }
+    }
+
+    /// One attempt to open the container within a state-read share of `share` bytes, or of what
+    /// the container's size suggests when no earlier attempt found what it needed.
+    async fn open_within(
+        executor: &Executor,
+        schema: &StdArc<ArrowSchema>,
+        cursor: &mut SealedSource<'_>,
+        rows: RestoredRows,
+        share: Option<u64>,
+    ) -> Result<OpenAttempt, Report<MaterializedSnapshotError>> {
         let header = cursor.take_header(executor).await?;
         let identity_limit = executor.limits().snapshot_record_bytes.as_u64();
         let section_limit = executor.limits().snapshot_section_bytes.as_u64();
-        let layout =
-            header.metadata_layout(rows, executor.memory(MemoryClass::Relay).capacity_bytes)?;
+        let relay_capacity = executor.memory(MemoryClass::Relay).capacity_bytes;
+        let layout = header.metadata_layout(rows, relay_capacity)?;
+        let metadata_bytes = layout.metadata_bytes.max(1);
+        let share = match share {
+            Some(share) => share,
+            None => RetainedShare::first(
+                metadata_bytes,
+                cursor.remaining(),
+                executor.memory(MemoryClass::StateRead).capacity_bytes,
+            ),
+        };
+        let mut retained = RetainedShare::reserve(executor, share.max(metadata_bytes)).await?;
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
-        let mut metadata_charge = executor
-            .reserve(MemoryClass::StateRead, layout.metadata_bytes.max(1))
-            .await
-            .change_context(MaterializedSnapshotError::Admission)?;
+        let Some(mut metadata_charge) = retained.draw(metadata_bytes)? else {
+            return Ok(retained.short(metadata_bytes, cursor.remaining()));
+        };
         let mut records = Vec::with_capacity(layout.records);
         let mut column_charges = Vec::with_capacity(layout.groups);
         for _ in 0..header.groups {
             nervix_primitives::task::consume_budget().await;
-            let identities = cursor
-                .take_section(SealedSectionKind::RecordIdentities, identity_limit)
+            let (identities, scratch) = cursor
+                .take_section_with_scratch(
+                    executor,
+                    SealedSectionKind::RecordIdentities,
+                    identity_limit,
+                    |_| identity_limit,
+                )
                 .await?;
-            let identity_bytes = u64::try_from(identities.len())
+            let identity_growth = u64::try_from(identities.len())
                 .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?
                 .checked_mul(8)
                 .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
             let identity_bytes = metadata_charge
                 .bytes()
-                .checked_add(identity_bytes)
+                .checked_add(identity_growth)
                 .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-            if rows.exceeds_ceiling(
-                identity_bytes,
-                executor.memory(MemoryClass::Relay).capacity_bytes,
-            ) {
+            if rows.exceeds_ceiling(identity_bytes, relay_capacity) {
                 return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
             }
-            metadata_charge
-                .grow_to(identity_bytes)
-                .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?;
-            let identities =
-                decode_rkyv::<SealedRecordIdentities>(executor, identities, identity_limit).await?;
-            let columns = cursor
-                .take_section(SealedSectionKind::RecordColumns, section_limit)
+            let Some(growth) = retained.draw(identity_growth)? else {
+                // The decoder's scratch goes back to the container before the next attempt
+                // reads it again.
+                cursor.give_back(scratch)?;
+                return Ok(retained.short(identity_growth, cursor.remaining()));
+            };
+            metadata_charge = metadata_charge
+                .merge(growth)
+                .change_context(MaterializedSnapshotError::Admission)?;
+            let (identities, scratch) =
+                decode_rkyv_within::<SealedRecordIdentities>(executor, identities, scratch).await?;
+            cursor.give_back(scratch)?;
+            let (columns, scratch) = cursor
+                .take_section_with_scratch(
+                    executor,
+                    SealedSectionKind::RecordColumns,
+                    section_limit,
+                    |length| RuntimeRecordBatch::snapshot_section_scratch(executor, length),
+                )
                 .await?;
-            // Decoded carrier columns remain retained until installation consumes this snapshot.
-            // Charge that cumulative materialization separately from one section's bulk scratch.
-            // Refuse when full: waiting while retaining preceding groups cannot free this charge.
+            // Decoded carrier columns remain retained until installation consumes this snapshot,
+            // charged apart from one section's bulk scratch.
             let retained_bytes = u64::try_from(columns.len())
                 .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?
                 .checked_mul(2)
                 .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?
                 .min(section_limit)
                 .max(1);
-            column_charges.push(
-                executor
-                    .try_reserve(MemoryClass::StateRead, retained_bytes)
-                    .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?,
-            );
-            let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
+            let Some(column_charge) = retained.draw(retained_bytes)? else {
+                cursor.give_back(scratch)?;
+                return Ok(retained.short(retained_bytes, cursor.remaining()));
+            };
+            column_charges.push(column_charge);
+            let (batch, scratch) = RuntimeRecordBatch::decode_arrow_snapshot_section_within(
                 executor,
                 StdArc::clone(schema),
                 columns,
+                scratch,
             )
             .await
             .map_err(|error| {
@@ -1292,6 +1358,7 @@ impl RestoredMaterializedSnapshot {
                     },
                 )
             })?;
+            cursor.give_back(scratch)?;
             let batch = Arc::new(batch);
             if identities.identities.len() != batch.batch().num_rows() {
                 return Err(Report::new(MaterializedSnapshotError::LengthMismatch {
@@ -1332,14 +1399,118 @@ impl RestoredMaterializedSnapshot {
             }));
         }
         cursor.finish()?;
-        Ok(Self {
+        // What the share held beyond the snapshot's own charges goes back to the class now.
+        drop(retained);
+        Ok(OpenAttempt::Opened(Self {
             revision: header.revision,
             fence: header.fence,
             branch_generation: header.branch_generation,
             records,
             _metadata_charge: Arc::new(metadata_charge),
             _columns_charge: Arc::new(column_charges),
+        }))
+    }
+
+    /// The most bulk scratch a decoder of a container of `length` bytes takes for one section:
+    /// its header's, one record section's or one column section's.
+    pub(in crate::runtime) fn decode_scratch_bound(executor: &Executor, length: u64) -> u64 {
+        let limits = executor.limits();
+        limits
+            .snapshot_header_bytes
+            .as_u64()
+            .max(limits.snapshot_record_bytes.as_u64())
+            .max(RuntimeRecordBatch::snapshot_section_scratch(
+                executor, length,
+            ))
+    }
+}
+
+/// How one attempt to open a sealed snapshot ended.
+enum OpenAttempt {
+    /// The snapshot, with exactly the state-read charges it keeps.
+    Opened(RestoredMaterializedSnapshot),
+    /// The attempt's share of `share` bytes could not cover what it decoded; the next attempt
+    /// needs `needed`.
+    Short { share: u64, needed: u64 },
+}
+
+/// The state-read share one attempt to open a snapshot draws the charges it keeps from.
+struct RetainedShare {
+    /// What no charge has taken from the share yet; absent only while a draw splits it.
+    spare: Option<Reservation>,
+    /// The share's whole size.
+    share: u64,
+    /// What the attempt's charges took from the share so far.
+    drawn: u64,
+}
+
+impl RetainedShare {
+    /// The share a first attempt takes: the row metadata its header declares, and twice the bytes
+    /// still to read for the columns and record identities they hold, within the whole class.
+    fn first(metadata_bytes: u64, remaining: u64, capacity: u64) -> u64 {
+        // The estimate is clamped to the class: an attempt that needs more finds out, and asks
+        // for the whole class before it reports that even that is too little.
+        metadata_bytes
+            .saturating_add(remaining.saturating_mul(2))
+            .min(capacity)
+    }
+
+    /// Wait for a share of `share` bytes while the open holds nothing of the class.
+    async fn reserve(
+        executor: &Executor,
+        share: u64,
+    ) -> Result<Self, Report<MaterializedSnapshotError>> {
+        let spare = executor
+            .reserve(MemoryClass::StateRead, share)
+            .await
+            .change_context(MaterializedSnapshotError::Admission)?;
+        Ok(Self {
+            spare: Some(spare),
+            share,
+            drawn: 0,
         })
+    }
+
+    /// Take `bytes` from the share for a charge the snapshot keeps, or nothing when the share
+    /// has no room left for it.
+    fn draw(
+        &mut self,
+        bytes: u64,
+    ) -> Result<Option<Reservation>, Report<MaterializedSnapshotError>> {
+        let Some(spare) = self.spare.take() else {
+            return Ok(None);
+        };
+        if spare.bytes() < bytes {
+            self.spare = Some(spare);
+            return Ok(None);
+        }
+        let (charge, rest) = spare
+            .split(bytes)
+            .change_context(MaterializedSnapshotError::Admission)?;
+        self.spare = Some(rest);
+        self.drawn = self
+            .drawn
+            .checked_add(bytes)
+            .assured("the charges drawn from one share add up to at most the share");
+        Ok(Some(charge))
+    }
+
+    /// The end of an attempt whose share had no room for a charge of `bytes`, with `remaining`
+    /// bytes of the container still unread. The next attempt needs everything this one drew, the
+    /// charge it missed and room for the columns still to come, and at least twice this share,
+    /// so an open runs a few times rather than once per section.
+    fn short(self, bytes: u64, remaining: u64) -> OpenAttempt {
+        // The estimate saturates: the class bounds every share, and a share larger than the
+        // class is refused as one.
+        let needed = self
+            .drawn
+            .saturating_add(bytes)
+            .saturating_add(remaining.saturating_mul(2))
+            .max(self.share.saturating_mul(2));
+        OpenAttempt::Short {
+            share: self.share,
+            needed,
+        }
     }
 }
 
@@ -1353,6 +1524,9 @@ pub(in crate::runtime) enum SealedSource<'a> {
     Memory {
         sealed: ChargedBytes,
         offset: usize,
+        /// The bulk scratch the container's decoders draw from, when the container itself is
+        /// charged to the bulk class and its decoders therefore cannot wait for room of their own.
+        working: Option<Reservation>,
     },
     Borrowed {
         bytes: &'a [u8],
@@ -1392,13 +1566,18 @@ impl<'a> SealedSource<'a> {
                 limit: header_limit,
             }));
         }
-        let header = self.take(header_bytes, "header").await?;
-        decode_rkyv::<SealedSnapshotHeader>(executor, header, header_limit).await
+        let (header, scratch) = self
+            .take_with_scratch(executor, header_bytes, header_limit, "header")
+            .await?;
+        let (header, scratch) =
+            decode_rkyv_within::<SealedSnapshotHeader>(executor, header, scratch).await?;
+        self.give_back(scratch)?;
+        Ok(header)
     }
 
     fn finish(&self) -> Result<(), Report<MaterializedSnapshotError>> {
         let complete = match self {
-            Self::Memory { sealed, offset } => sealed.len() == *offset,
+            Self::Memory { sealed, offset, .. } => sealed.len() == *offset,
             Self::Borrowed { bytes, offset, .. } => bytes.len() == *offset,
             Self::Staged(staged) => staged.remaining() == 0,
             #[cfg(test)]
@@ -1415,8 +1594,18 @@ impl<'a> SealedSource<'a> {
         Ok(())
     }
 
-    pub(in crate::runtime) fn memory(sealed: ChargedBytes) -> Self {
-        Self::Memory { sealed, offset: 0 }
+    /// A container held under a bulk charge, with `working`, the bulk scratch its decoders draw
+    /// from. Its owner takes both as one charge, of the container and
+    /// [`RestoredMaterializedSnapshot::decode_scratch_bound`], while it holds nothing of the class.
+    pub(in crate::runtime) fn memory_with_working(
+        sealed: ChargedBytes,
+        working: Reservation,
+    ) -> Self {
+        Self::Memory {
+            sealed,
+            offset: 0,
+            working: Some(working),
+        }
     }
 
     /// Open an already resident snapshot one bounded section at a time, charging each copied
@@ -1472,39 +1661,12 @@ impl<'a> SealedSource<'a> {
                     .checked_add(super::RESTORE_STATE_WORKING_BYTES)
                     .ok_or_else(truncated)?;
                 let charge = executor
-                    .try_reserve(MemoryClass::Bulk, working)
-                    .change_context(MaterializedSnapshotError::Admission)?;
-                let mut source = reader
-                    .take()
-                    .assured("the selected checkpoint is held between storage reads");
-                let result = executor
-                    .run_storage(
-                        StorageClass::Filesystem,
-                        charge,
-                        move |charge, cancellation| {
-                            let result = (|| {
-                                cancellation
-                                    .check()
-                                    .change_context(MaterializedSnapshotError::Execution)?;
-                                let capacity = usize::try_from(length)
-                                    .map_err(MaterializedSnapshotError::decoding)?;
-                                let mut bytes = vec![0; capacity];
-                                source
-                                    .read_exact(&mut bytes)
-                                    .map_err(MaterializedSnapshotError::decoding)?;
-                                Ok::<_, Report<MaterializedSnapshotError>>(
-                                    ChargedBytes::from_owned(bytes, charge),
-                                )
-                            })();
-                            (source, result)
-                        },
-                    )
+                    .reserve(MemoryClass::Bulk, working)
                     .await
-                    .change_context(MaterializedSnapshotError::Execution)?;
-                *reader = Some(result.0);
-                result.1
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                Self::read_stored(reader, executor, length, charge).await
             }
-            Self::Memory { sealed, offset } => {
+            Self::Memory { sealed, offset, .. } => {
                 let length = usize::try_from(length).map_err(|_| truncated())?;
                 let end = offset.checked_add(length).ok_or_else(truncated)?;
                 let slice = sealed.slice(*offset, end).ok_or_else(truncated)?;
@@ -1537,6 +1699,215 @@ impl<'a> SealedSource<'a> {
         }
     }
 
+    /// Read the next `length` bytes of a stored checkpoint under `charge` on a filesystem place.
+    async fn read_stored(
+        reader: &mut Option<super::state_store::checkpoint_reader::CheckpointReader>,
+        executor: &Executor,
+        length: u64,
+        charge: Reservation,
+    ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
+        let mut source = reader
+            .take()
+            .assured("the selected checkpoint is held between storage reads");
+        let result = executor
+            .run_storage(
+                StorageClass::Filesystem,
+                charge,
+                move |charge, cancellation| {
+                    let result = (|| {
+                        cancellation
+                            .check()
+                            .change_context(MaterializedSnapshotError::Execution)?;
+                        let capacity =
+                            usize::try_from(length).map_err(MaterializedSnapshotError::decoding)?;
+                        let mut bytes = vec![0; capacity];
+                        source
+                            .read_exact(&mut bytes)
+                            .map_err(MaterializedSnapshotError::decoding)?;
+                        Ok::<_, Report<MaterializedSnapshotError>>(ChargedBytes::from_owned(
+                            bytes, charge,
+                        ))
+                    })();
+                    (source, result)
+                },
+            )
+            .await
+            .change_context(MaterializedSnapshotError::Execution)?;
+        *reader = Some(result.0);
+        result.1
+    }
+
+    /// How many bytes of the container are still to be read.
+    fn remaining(&self) -> u64 {
+        match self {
+            Self::Memory { sealed, offset, .. } => sealed
+                .len()
+                .checked_sub(*offset)
+                .assured("a container's read position stays within it")
+                .arch_into(),
+            Self::Borrowed { bytes, offset, .. } => bytes
+                .len()
+                .checked_sub(*offset)
+                .assured("a container's read position stays within it")
+                .arch_into(),
+            Self::Staged(staged) => staged.remaining(),
+            #[cfg(test)]
+            Self::Artifact { reader, .. } => reader.remaining(),
+            Self::Stored { reader, .. } => match reader {
+                Some(reader) => reader.remaining(),
+                None => 0,
+            },
+        }
+    }
+
+    /// Start reading the container again from its first byte, for an open that gave back
+    /// everything it held and opens it again within a larger share.
+    async fn rewind(&mut self) -> Result<(), Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Memory { offset, .. } | Self::Borrowed { offset, .. } => {
+                *offset = 0;
+                Ok(())
+            }
+            Self::Staged(staged) => {
+                staged.rewind();
+                Ok(())
+            }
+            #[cfg(test)]
+            Self::Artifact { _artifact, reader } => {
+                *reader = _artifact
+                    .open_reader()
+                    .await
+                    .change_context(MaterializedSnapshotError::Execution)?;
+                Ok(())
+            }
+            Self::Stored { reader, .. } => {
+                if let Some(reader) = reader.as_mut() {
+                    reader.rewind();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Read the next `length` bytes together with `scratch` bytes of bulk room for the decoder
+    /// that reads them, as one charge taken while the open holds nothing else of the class, and
+    /// return the scratch beside the bytes. A container in memory is read in place: only its
+    /// decoder's scratch is charged, drawn from the container's working charge when it has one.
+    async fn take_with_scratch(
+        &mut self,
+        executor: &Executor,
+        length: u64,
+        scratch: u64,
+        section: &'static str,
+    ) -> Result<(ChargedBytes, Reservation), Report<MaterializedSnapshotError>> {
+        let truncated = || Report::new(MaterializedSnapshotError::Truncated { section });
+        let charge = |bytes: u64| {
+            bytes
+                .checked_add(scratch)
+                .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))
+        };
+        match self {
+            Self::Memory {
+                sealed,
+                offset,
+                working,
+            } => {
+                let length = usize::try_from(length).map_err(|_| truncated())?;
+                let end = offset.checked_add(length).ok_or_else(truncated)?;
+                let slice = sealed.slice(*offset, end).ok_or_else(truncated)?;
+                *offset = end;
+                let scratch = match working.take() {
+                    Some(held) => {
+                        let (scratch, rest) = held
+                            .split(scratch)
+                            .change_context(MaterializedSnapshotError::Admission)?;
+                        *working = Some(rest);
+                        scratch
+                    }
+                    None => executor
+                        .reserve(MemoryClass::Bulk, scratch)
+                        .await
+                        .change_context(MaterializedSnapshotError::Admission)?,
+                };
+                Ok((slice, scratch))
+            }
+            Self::Borrowed { bytes, offset, .. } => {
+                let start = *offset;
+                let size = usize::try_from(length).map_err(|_| truncated())?;
+                let end = start.checked_add(size).ok_or_else(truncated)?;
+                let slice = bytes.get(start..end).ok_or_else(truncated)?;
+                *offset = end;
+                let held = executor
+                    .reserve(MemoryClass::Bulk, charge(length.max(1))?)
+                    .await
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                let (body, scratch) = held
+                    .split(length.max(1))
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                Ok((ChargedBytes::from_owned(slice.to_vec(), body), scratch))
+            }
+            Self::Staged(staged) => {
+                let held = executor
+                    .reserve(MemoryClass::Bulk, charge(length.max(1))?)
+                    .await
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                let (body, scratch) = held
+                    .split(length.max(1))
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                let bytes = staged
+                    .read_admitted(length, body)
+                    .await
+                    .change_context(MaterializedSnapshotError::Truncated { section })?;
+                Ok((bytes, scratch))
+            }
+            #[cfg(test)]
+            Self::Artifact { reader, .. } => {
+                let scratch = executor
+                    .reserve(MemoryClass::Bulk, scratch)
+                    .await
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                let bytes = reader
+                    .read(length)
+                    .await
+                    .change_context(MaterializedSnapshotError::Truncated { section })?;
+                Ok((bytes, scratch))
+            }
+            Self::Stored {
+                reader,
+                executor: storage,
+            } => {
+                let working = length
+                    .checked_add(super::RESTORE_STATE_WORKING_BYTES)
+                    .ok_or_else(truncated)?;
+                let held = executor
+                    .reserve(MemoryClass::Bulk, charge(working)?)
+                    .await
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                let (body, scratch) = held
+                    .split(working)
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                let bytes = Self::read_stored(reader, storage, length, body).await?;
+                Ok((bytes, scratch))
+            }
+        }
+    }
+
+    /// Take back the scratch a decoder of this container is done with: a container in memory
+    /// keeps it for its next decoder, and every other source gives it back to the class.
+    fn give_back(&mut self, scratch: Reservation) -> Result<(), Report<MaterializedSnapshotError>> {
+        let Self::Memory { working, .. } = self else {
+            return Ok(());
+        };
+        let Some(held) = working.take() else {
+            return Ok(());
+        };
+        let merged = held
+            .merge(scratch)
+            .change_context(MaterializedSnapshotError::Admission)?;
+        *working = Some(merged);
+        Ok(())
+    }
+
     async fn take_u32(
         &mut self,
         section: &'static str,
@@ -1549,12 +1920,27 @@ impl<'a> SealedSource<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    /// Read the next section, refusing one that names another kind or overstates its limit.
-    async fn take_section(
+    /// Read the next section with the bulk scratch its decoder needs, `scratch` of the section's
+    /// length, as one charge; refuses a section that names another kind or overstates its limit.
+    async fn take_section_with_scratch(
+        &mut self,
+        executor: &Executor,
+        expected: SealedSectionKind,
+        limit: u64,
+        scratch: impl FnOnce(u64) -> u64,
+    ) -> Result<(ChargedBytes, Reservation), Report<MaterializedSnapshotError>> {
+        let length = self.take_section_length(expected, limit).await?;
+        self.take_with_scratch(executor, length, scratch(length), "section body")
+            .await
+    }
+
+    /// Read the kind and length that frame the next section, refusing a section that names
+    /// another kind or overstates its limit before anything of its body is read.
+    async fn take_section_length(
         &mut self,
         expected: SealedSectionKind,
         limit: u64,
-    ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
+    ) -> Result<u64, Report<MaterializedSnapshotError>> {
         let kind_bytes = self.take(1, "section kind").await?;
         let Some(&kind) = kind_bytes.as_ref().first() else {
             return Err(Report::new(MaterializedSnapshotError::Truncated {
@@ -1581,6 +1967,16 @@ impl<'a> SealedSource<'a> {
                 },
             }));
         }
+        Ok(length)
+    }
+
+    /// Read the next section, refusing one that names another kind or overstates its limit.
+    async fn take_section(
+        &mut self,
+        expected: SealedSectionKind,
+        limit: u64,
+    ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
+        let length = self.take_section_length(expected, limit).await?;
         self.take(length, "section body").await
     }
 }
@@ -1698,7 +2094,10 @@ where
         .change_context(MaterializedSnapshotError::Execution)?
 }
 
-async fn decode_rkyv<T>(
+/// Decode an archived value of `bytes` on the bulk workers, drawing its scratch of `limit` bytes
+/// from the bulk share its caller's operation holds. A share without room reports the shortfall
+/// its operation gives everything back for and waits on, never a wait behind the input it holds.
+pub(in crate::runtime) async fn decode_rkyv<T>(
     executor: &Executor,
     bytes: ChargedBytes,
     limit: u64,
@@ -1708,20 +2107,41 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
         + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
-    // The encoded input holds a bulk charge until decoding ends. Refuse instead of queuing
-    // another grant behind that input and the inputs of concurrent snapshot readers.
-    let reservation = executor
+    let scratch = executor
         .try_reserve(MemoryClass::Bulk, limit)
         .change_context(MaterializedSnapshotError::Admission)?;
-    executor
-        .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
-            cancellation
+    let (decoded, scratch) = decode_rkyv_within(executor, bytes, scratch).await?;
+    drop(scratch);
+    Ok(decoded)
+}
+
+/// Decode an archived value of `bytes` on the bulk workers under `scratch`, a bulk charge of the
+/// decoder's limit that its caller took together with the input, while it held nothing else of the
+/// class, and hand the charge back with the value.
+async fn decode_rkyv_within<T>(
+    executor: &Executor,
+    bytes: ChargedBytes,
+    scratch: Reservation,
+) -> Result<(T, Reservation), Report<MaterializedSnapshotError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
+    let (decoded, scratch) = executor
+        .run_cpu(CpuClass::Bulk, scratch, move |charge, cancellation| {
+            let decoded = match cancellation
                 .check()
-                .change_context(MaterializedSnapshotError::Execution)?;
-            decode_aligned_rkyv(bytes.as_ref())
+                .change_context(MaterializedSnapshotError::Execution)
+            {
+                Ok(()) => decode_aligned_rkyv(bytes.as_ref()),
+                Err(error) => Err(error),
+            };
+            (decoded, charge)
         })
         .await
-        .change_context(MaterializedSnapshotError::Execution)?
+        .change_context(MaterializedSnapshotError::Execution)?;
+    Ok((decoded?, scratch))
 }
 
 /// Read an archived value out of a container.
@@ -1793,6 +2213,258 @@ mod tests {
     /// How many records the snapshot carries. Their columns alone exceed eight mebibytes and the
     /// bulk transfer budget the narrow executor allows.
     const RECORDS: usize = 80;
+
+    /// The sealed container of `records`, as a node persists it, with the schema its rows share.
+    async fn sealed_payload(
+        executor: &Executor,
+        records: Vec<MaterializedGenerationRecord>,
+    ) -> (StdArc<ArrowSchema>, Vec<u8>) {
+        let root = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            root.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let schema = records[0].row.arrow_schema();
+        let sealed = MaterializedGeneration::new(7, 3, 5, schema.clone(), records)
+            .seal(executor, &staging)
+            .await
+            .assured("the bounded generation seals");
+        let entry = sealed
+            .into_persisted_entry(executor)
+            .await
+            .assured("the sealed generation admits its resident entry");
+        (schema, entry.payload)
+    }
+
+    /// One record per tenant, whose one column is its index.
+    fn indexed_records(
+        count: usize,
+        tenant: impl Fn(usize) -> String,
+    ) -> Vec<MaterializedGenerationRecord> {
+        let mut records = Vec::with_capacity(count);
+        for index in 0..count {
+            records.push(MaterializedGenerationRecord {
+                branch: Some(tenant_branch(&tenant(index))),
+                row: test_runtime_row([(
+                    "index".to_string(),
+                    RuntimeValue::I64(test_index(index)),
+                )]),
+            });
+        }
+        records
+    }
+
+    /// What one opened snapshot keeps charged to the state-read class.
+    fn kept_bytes(snapshot: &RestoredMaterializedSnapshot) -> u64 {
+        let mut kept = snapshot._metadata_charge.bytes();
+        for charge in snapshot._columns_charge.iter() {
+            kept = kept
+                .checked_add(charge.bytes())
+                .assured("one snapshot's charges fit the class that admitted them");
+        }
+        kept
+    }
+
+    /// An open whose record identities need more of the state-read class than the container's size
+    /// suggests gives back everything its first attempt took and opens the container again within
+    /// a larger share. It ends holding exactly the charges the snapshot keeps.
+    #[nervix_primitives::test]
+    async fn an_open_whose_record_identities_outgrow_its_first_share_opens_again_within_a_larger_one()
+     {
+        let executor =
+            Executor::new(ExecutionConfig::default()).assured("default bounds are valid");
+        // Long branch keys beside one small column: the identities fill the container, and each of
+        // their bytes is eight bytes of row metadata once decoded.
+        let records = indexed_records(64, |index| format!("{index:04}-{}", "t".repeat(200)));
+        let (schema, payload) = sealed_payload(&executor, records).await;
+        let before = executor.memory(MemoryClass::StateRead);
+        let restored = RestoredMaterializedSnapshot::open_relay(
+            &executor,
+            &schema,
+            SealedSource::borrowed(&executor, &payload),
+        )
+        .await
+        .assured("the snapshot opens within a larger share");
+        let after = executor.memory(MemoryClass::StateRead);
+        assert_eq!(restored.records.len(), 64, "every record is restored");
+        assert!(
+            after.granted - before.granted >= 2,
+            "the open took a first share, gave it back and took a larger one"
+        );
+        assert_eq!(
+            after.reserved_bytes - before.reserved_bytes,
+            kept_bytes(&restored),
+            "the open keeps exactly the snapshot's own charges, nothing of its shares"
+        );
+    }
+
+    /// An open whose state-read class has room for its row metadata and no more waits for room
+    /// for everything it keeps, rather than refusing the snapshot once its decoded identities and
+    /// columns outgrow that room. It waits while it holds nothing of the bulk class, and opens the
+    /// snapshot once room frees.
+    #[nervix_primitives::test]
+    async fn an_open_waits_for_state_read_room_while_it_holds_no_bulk_charge() {
+        let executor =
+            Executor::new(ExecutionConfig::default()).assured("default bounds are valid");
+        let (schema, payload) = sealed_payload(
+            &executor,
+            indexed_records(4, |index| format!("tenant-{index}")),
+        )
+        .await;
+        let summary =
+            inspect_sealed_container(&payload, executor.limits().snapshot_header_bytes.as_u64())
+                .assured("the sealed container frames its header");
+        let metadata_bytes = SealedSnapshotHeader {
+            revision: summary.revision,
+            fence: summary.fence,
+            branch_generation: summary.branch_generation,
+            records: summary.records,
+            groups: summary.groups,
+        }
+        .metadata_layout(
+            RestoredRows::Relay,
+            executor.memory(MemoryClass::Relay).capacity_bytes,
+        )
+        .assured("the header's records fit the relay budget")
+        .metadata_bytes
+        .max(1);
+        let capacity = executor.memory(MemoryClass::StateRead).capacity_bytes;
+        let held = executor
+            .try_reserve(
+                MemoryClass::StateRead,
+                capacity
+                    .checked_sub(metadata_bytes)
+                    .assured("the row metadata of four records fits the class"),
+            )
+            .assured("the test holds the state-read class but the row metadata's room");
+        let waits = nervix_execution::CapacityWaits::new();
+        let reporting = executor.reporting_waits_to(&waits);
+        let opening = nervix_primitives::task::spawn(async move {
+            RestoredMaterializedSnapshot::open_relay(
+                &reporting,
+                &schema,
+                SealedSource::borrowed(&reporting, &payload),
+            )
+            .await
+        });
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(30), waits.began())
+            .await
+            .assured("the open waits for state-read room");
+        assert_eq!(
+            executor.memory(MemoryClass::Bulk).reserved_bytes,
+            0,
+            "an open waits for state-read room while it holds nothing of the bulk class"
+        );
+        drop(held);
+        let restored =
+            nervix_primitives::time::timeout(std::time::Duration::from_secs(30), opening)
+                .await
+                .assured("the open finishes once room frees")
+                .assured("the opening task joins")
+                .assured("the snapshot opens once room frees");
+        assert_eq!(restored.records.len(), 4, "every record is restored");
+    }
+
+    /// An open whose bulk class has room for a section's bytes and none for its decoder waits for
+    /// room for both as one charge, rather than refusing the decoding while it holds the bytes. It
+    /// waits while it holds nothing of the class, and opens the snapshot once room frees.
+    #[nervix_primitives::test]
+    async fn an_open_waits_for_bulk_room_while_it_holds_none_of_the_class() {
+        let executor =
+            Executor::new(ExecutionConfig::default()).assured("default bounds are valid");
+        let (schema, payload) = sealed_payload(
+            &executor,
+            indexed_records(4, |index| format!("tenant-{index}")),
+        )
+        .await;
+        let capacity = executor.memory(MemoryClass::Bulk).capacity_bytes;
+        // Room for the container's framing and header, none for the header's decoder.
+        let held = executor
+            .try_reserve(
+                MemoryClass::Bulk,
+                capacity
+                    .checked_sub(1024)
+                    .assured("the bulk class holds more than a kibibyte"),
+            )
+            .assured("the test holds the bulk class but a kibibyte");
+        let waits = nervix_execution::CapacityWaits::new();
+        let reporting = executor.reporting_waits_to(&waits);
+        let opening = nervix_primitives::task::spawn(async move {
+            RestoredMaterializedSnapshot::open_relay(
+                &reporting,
+                &schema,
+                SealedSource::borrowed(&reporting, &payload),
+            )
+            .await
+        });
+        nervix_primitives::time::timeout(std::time::Duration::from_secs(30), waits.began())
+            .await
+            .assured("the open waits for bulk room");
+        drop(held);
+        let restored =
+            nervix_primitives::time::timeout(std::time::Duration::from_secs(30), opening)
+                .await
+                .assured("the open finishes once room frees")
+                .assured("the opening task joins")
+                .assured("the snapshot opens once room frees");
+        assert_eq!(restored.records.len(), 4, "every record is restored");
+    }
+
+    /// A container held under a bulk charge carries the scratch its decoders draw from, taken with
+    /// it as one charge, so its open never waits for bulk room behind the container it reads, even
+    /// with the rest of the class held.
+    #[nervix_primitives::test]
+    async fn an_owned_container_decodes_within_the_scratch_charged_with_it() {
+        let executor =
+            Executor::new(ExecutionConfig::default()).assured("default bounds are valid");
+        let (schema, payload) = sealed_payload(
+            &executor,
+            indexed_records(4, |index| format!("tenant-{index}")),
+        )
+        .await;
+        let length: u64 = payload.len().arch_into();
+        let held = executor
+            .reserve(
+                MemoryClass::Bulk,
+                length
+                    .checked_add(RestoredMaterializedSnapshot::decode_scratch_bound(
+                        &executor, length,
+                    ))
+                    .assured("a bounded container and its scratch fit u64"),
+            )
+            .await
+            .assured("the container is charged with its decoders' scratch");
+        let (container, working) = held
+            .split(length)
+            .assured("the container's part fits the charge taken for it");
+        let snapshot = executor.memory(MemoryClass::Bulk);
+        let rest = executor
+            .try_reserve(
+                MemoryClass::Bulk,
+                snapshot
+                    .capacity_bytes
+                    .checked_sub(snapshot.reserved_bytes)
+                    .assured("the class holds no more than its capacity"),
+            )
+            .assured("the test holds the rest of the bulk class");
+        let restored = nervix_primitives::time::timeout(
+            std::time::Duration::from_secs(30),
+            RestoredMaterializedSnapshot::open_relay(
+                &executor,
+                &schema,
+                SealedSource::memory_with_working(
+                    ChargedBytes::from_owned(payload, container),
+                    working,
+                ),
+            ),
+        )
+        .await
+        .assured("the open draws its decoders' scratch from the container's charge")
+        .assured("the snapshot opens");
+        assert_eq!(restored.records.len(), 4, "every record is restored");
+        drop(rest);
+    }
 
     #[nervix_primitives::test]
     async fn snapshot_decoder_refuses_bulk_wait_while_retaining_its_metadata_input() {
@@ -2232,14 +2904,27 @@ mod tests {
                     );
                     drop(archived);
                     drop(columns);
+                    let length: u64 = bytes.len().arch_into();
+                    let held = executor
+                        .reserve(
+                            MemoryClass::Bulk,
+                            length
+                                .checked_add(RestoredMaterializedSnapshot::decode_scratch_bound(
+                                    &executor, length,
+                                ))
+                                .assured("a bounded container and its scratch fit u64"),
+                        )
+                        .await
+                        .assured("bounded container is charged with its decoders' scratch");
+                    let (container, working) = held
+                        .split(length)
+                        .assured("the container's part fits the charge taken for it");
                     let restored = RestoredMaterializedSnapshot::open_relay(
                         &executor,
                         &batch.schema(),
-                        SealedSource::memory(
-                            executor
-                                .charge_owned(MemoryClass::Bulk, bytes)
-                                .await
-                                .assured("bounded container is charged"),
+                        SealedSource::memory_with_working(
+                            ChargedBytes::from_owned(bytes, container),
+                            working,
                         ),
                     )
                     .await
