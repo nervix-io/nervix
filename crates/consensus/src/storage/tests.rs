@@ -2,6 +2,7 @@
 
 mod cluster_identity_tests;
 mod licensing_tests;
+mod management_working_set_tests;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

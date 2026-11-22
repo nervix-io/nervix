@@ -278,9 +278,9 @@ impl StreamFrame for ConsumerFrame {
 
     async fn encoded(self, codec: &DuplexCodec) -> Result<Vec<u8>, Report<TransportError>> {
         let encoded = match self {
-            Self::Opening(opening) => codec.encode(opening).await,
-            Self::Item(item) => codec.encode(item).await,
-            Self::Event(event) => codec.encode(event).await,
+            Self::Opening(opening) => codec.encode_opening(opening).await,
+            Self::Item(item) => codec.encode_item(item).await,
+            Self::Event(event) => codec.encode_answer(event).await,
         }?;
         Ok(encoded.bytes)
     }
@@ -292,15 +292,15 @@ impl StreamFrame for ConsumerFrame {
     ) -> Result<Self, Report<TransportError>> {
         match direction {
             ConsumerDirection::Opening => {
-                let decoded = codec.decode::<OpenConsumerStream>(bytes).await?;
+                let decoded = codec.decode_opening::<OpenConsumerStream>(bytes).await?;
                 Ok(Self::Opening(decoded.item))
             }
             ConsumerDirection::Serving => {
-                let decoded = codec.decode::<ConsumerItem>(bytes).await?;
+                let decoded = codec.decode_item::<ConsumerItem>(bytes).await?;
                 Ok(Self::Item(decoded.item))
             }
             ConsumerDirection::Owning => {
-                let decoded = codec.decode::<ConsumerEvent>(bytes).await?;
+                let decoded = codec.decode_answer::<ConsumerEvent>(bytes).await?;
                 Ok(Self::Event(decoded.item))
             }
         }

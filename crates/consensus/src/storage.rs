@@ -105,20 +105,6 @@ const KEYSPACE_SNAPSHOT: &str =
     "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_settings_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
-/// The working memory one Management storage operation reserves, in largest management events. A
-/// durable batch charges at most half of its reservation, two events, to the records and keys it
-/// writes, which holds a record as large as a whole event while its encoding buffer doubles; the
-/// other half is kept for Fjall's journal encoding and the moving batch descriptors.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the consensus storage chapter's Management working set is four largest \
-                  management events: two for a durable batch's records and keys, two for Fjall's \
-                  journal encoding beside them"
-    )
-)]
-const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
 /// The budget one storage operation is charged against. Storage writes votes and metadata as
 /// management work, log entries and normalized state as commands, and snapshot sections as bulk
@@ -139,14 +125,11 @@ impl StorageCharge {
         }
     }
 
-    /// The working memory one operation of this kind reserves.
+    /// The working memory one operation of this kind reserves. A management operation reserves
+    /// the working set the executor validated its management budget against.
     fn working_bytes(self, executor: &Executor) -> io::Result<u64> {
         let bytes = match self {
-            Self::Management => executor
-                .limits()
-                .management_event_bytes
-                .as_u64()
-                .checked_mul(STORAGE_RESERVATION_MULTIPLIER),
+            Self::Management => executor.limits().management_storage_working_bytes(),
             Self::Bulk => executor.limits().snapshot_section_working_bytes(),
             Self::Commands => executor.limits().command_state_storage_working_bytes(),
         };

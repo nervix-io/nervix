@@ -38,17 +38,17 @@ use nervix_models::{ClusterNodeName, ConsensusFloors, NodePrerequisites, Prerequ
 use nervix_primitives::{sync::watch, time::timeout};
 use tracing::{debug, warn};
 
-use super::{BoundInboundConnection, TransportState, send_response};
+use super::{BoundInboundConnection, TransportState, exchange_reset, send_response};
 use crate::{
     JoinProgress, JoinRefusal, TlsConfigBundle, TransportError,
-    wire::{self, ConnectionAccepted, ConnectionAnswer, WIRE_CONTRACT},
+    wire::{self, AnswerEncoding, ConnectionAccepted, ConnectionAnswer, WIRE_CONTRACT},
 };
 
 /// How a valid connection hello was answered.
 pub(super) enum InboundBindingAnswer {
     Bound(BoundInboundConnection),
-    /// The dialing node cannot run beside this one; it has been told why, and the connection
-    /// closes once that answer has left.
+    /// The dialing node cannot run beside this one; it has been told why, unless it reset the
+    /// binding before the answer could leave, and the connection closes once that answer has left.
     Refused(Report<TransportError>),
 }
 
@@ -151,11 +151,15 @@ impl TransportState {
     /// node reports for the binding.
     pub(super) async fn refuse_binding(
         &self,
-        respond: server::SendResponse<Bytes>,
+        mut respond: server::SendResponse<Bytes>,
         peer: &ClusterNodeName,
         mismatch: PrerequisiteMismatch,
     ) -> Result<InboundBindingAnswer, Report<TransportError>> {
-        let refusal = wire::encode_rkyv(
+        // The refusal is this node's verdict on the prerequisites the dialing node sent, which
+        // that node reports as the reason its connection did not bind. A full control queue
+        // therefore holds it back; the dialing node's setup deadline, which closes the connection,
+        // ends the wait.
+        let refusal = wire::encode_answer(
             &self.executor,
             MemoryClass::Management,
             CpuClass::Control,
@@ -163,15 +167,18 @@ impl TransportState {
             ConnectionAnswer::Refused {
                 mismatch: mismatch.clone(),
             },
+            exchange_reset(&mut respond),
         )
         .await?;
-        send_response(
-            respond,
-            StatusCode::OK,
-            Some(refusal),
-            self.options.progress_timeout,
-        )
-        .await?;
+        if let AnswerEncoding::Encoded(refusal) = refusal {
+            send_response(
+                respond,
+                StatusCode::OK,
+                Some(refusal),
+                self.options.progress_timeout,
+            )
+            .await?;
+        }
         Ok(InboundBindingAnswer::Refused(Report::new(
             TransportError::IncompatiblePeer {
                 peer: peer.clone(),
