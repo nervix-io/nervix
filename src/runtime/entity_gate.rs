@@ -88,6 +88,8 @@ pub(crate) enum EntityGateOperationError {
     EngagementExpired { domain: DomainName },
     #[error("entity gate for domain '{domain}' ended because the node's runtime stopped")]
     RuntimeStopped { domain: DomainName },
+    #[error("entity gate coordination identity '{coordination}' reached the end of its lease")]
+    LeaseEnded { coordination: CoordinationIdentity },
     #[error("entity gate coordination identity '{coordination}' is not held")]
     NotHeld { coordination: CoordinationIdentity },
     #[error("entity gate coordination identity '{coordination}' does not own the requested scope")]
@@ -130,7 +132,8 @@ impl EntityGateOperationError {
             | Self::ReleaseTaskTerminated
             | Self::RelayFenceDeadline { .. }
             | Self::EngagementExpired { .. }
-            | Self::RuntimeStopped { .. } => nervix_interconnect::RemoteOperationFailure::Failed {
+            | Self::RuntimeStopped { .. }
+            | Self::LeaseEnded { .. } => nervix_interconnect::RemoteOperationFailure::Failed {
                 subject,
                 reason: self.to_string(),
             },
@@ -152,6 +155,10 @@ pub(super) struct EntityGateOperation {
     scope: EntityGateScope,
     state: Mutex<EntityGateOperationState>,
     state_changed: Notify,
+    /// How long the hold may last. Its coordinator renews it with another engagement of the same
+    /// identity and scope; once it ends, nothing renews it again.
+    lease: Mutex<EntityGateLeaseState>,
+    lease_changed: Notify,
 }
 
 enum EntityGateOperationState {
@@ -161,12 +168,90 @@ enum EntityGateOperationState {
     Released,
 }
 
+/// Whether an engagement's lease still runs, and until when.
+#[derive(Debug, Clone, Copy)]
+enum EntityGateLeaseState {
+    /// The lease runs until this instant, unless its coordinator renews it first.
+    Runs { until: Instant },
+    /// The lease ended, at its deadline or with its runtime, and no renewal moves it again.
+    Ended,
+}
+
 impl EntityGateOperation {
-    fn new(scope: EntityGateScope) -> Self {
+    fn new(scope: EntityGateScope, lease_deadline: Instant) -> Self {
         Self {
             scope,
             state: Mutex::new(EntityGateOperationState::Engaging),
             state_changed: Notify::new(),
+            lease: Mutex::new(EntityGateLeaseState::Runs {
+                until: lease_deadline,
+            }),
+            lease_changed: Notify::new(),
+        }
+    }
+
+    /// Moves the end of the lease to `deadline` when that is later, as the coordinator renewing
+    /// the hold asks. Answers whether the lease still runs: one that ended is never renewed, so a
+    /// renewal racing the lease's end either keeps the hold or is refused, never both.
+    fn renew_lease(&self, deadline: Instant) -> bool {
+        let extended = {
+            let mut lease = self.lease.lock();
+            match &mut *lease {
+                EntityGateLeaseState::Ended => return false,
+                EntityGateLeaseState::Runs { until } => {
+                    if deadline > *until {
+                        *until = deadline;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        };
+        if extended {
+            self.lease_changed.notify_waiters();
+        }
+        true
+    }
+
+    /// Whether the lease runs at `now`.
+    fn lease_runs_at(&self, now: Instant) -> bool {
+        match *self.lease.lock() {
+            EntityGateLeaseState::Runs { until } => now < until,
+            EntityGateLeaseState::Ended => false,
+        }
+    }
+
+    /// Ends the lease now, as the runtime stopping or an engagement failing does.
+    fn end_lease(&self) {
+        *self.lease.lock() = EntityGateLeaseState::Ended;
+        self.lease_changed.notify_waiters();
+    }
+
+    /// Waits until the lease reaches its end, every renewal included, and ends it there, so no
+    /// renewal after this returns moves it.
+    async fn run_lease_to_its_end(&self) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            // Registered before the read, so a renewal after the read wakes this wait.
+            let changed = self.lease_changed.notified();
+            let until = {
+                let mut lease = self.lease.lock();
+                match *lease {
+                    EntityGateLeaseState::Ended => return,
+                    EntityGateLeaseState::Runs { until } => {
+                        if Instant::now() >= until {
+                            *lease = EntityGateLeaseState::Ended;
+                            return;
+                        }
+                        until
+                    }
+                }
+            };
+            nervix_primitives::select! {
+                _ = nervix_primitives::time::sleep_until(until) => {}
+                _ = changed => {}
+            }
         }
     }
 
@@ -923,13 +1008,15 @@ impl Runtime {
         relays
     }
 
+    /// Engages the whole-relay gate of every relay in `relays`, holding back what `hold` names.
     pub(in crate::runtime) fn engage_entity_gates(
         &self,
         domain: &DomainName,
         relays: &[RelayName],
-        deadline: Instant,
-        reason: &str,
+        lease: EntityGateLease<'_>,
+        hold: RelayDispatchGateHold,
     ) -> EntityGateHold {
+        let EntityGateLease { deadline, reason } = lease;
         let mut gates = Vec::with_capacity(relays.len());
         for relay in relays {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
@@ -942,7 +1029,7 @@ impl Runtime {
                 continue;
             };
             let gate = fanout.dispatch_gate();
-            gates.push(RelayDispatchGateLease::engage(gate, deadline, reason));
+            gates.push(Self::engage_relay_gate(gate, deadline, reason, hold));
         }
         EntityGateHold {
             gates,
@@ -957,12 +1044,13 @@ impl Runtime {
         domain: &DomainName,
         relays: &[RelayName],
         targets: &EntityGateTargets,
-        deadline: Instant,
-        reason: &str,
+        lease: EntityGateLease<'_>,
+        hold: RelayDispatchGateHold,
     ) -> EntityGateHold {
         let EntityGateTargets::Units(_) = targets else {
-            return self.engage_entity_gates(domain, relays, deadline, reason);
+            return self.engage_entity_gates(domain, relays, lease, hold);
         };
+        let EntityGateLease { deadline, reason } = lease;
         let revision = self
             .inner
             .executions
@@ -985,19 +1073,36 @@ impl Runtime {
                     let gate = fanout
                         .unit_dispatch_gate(unit)
                         .verified("a partition has its own dispatch gate");
-                    gates.push(RelayDispatchGateLease::engage(gate, deadline, reason));
+                    gates.push(Self::engage_relay_gate(gate, deadline, reason, hold));
                 }
             } else {
-                gates.push(RelayDispatchGateLease::engage(
+                gates.push(Self::engage_relay_gate(
                     fanout.dispatch_gate(),
                     deadline,
                     reason,
+                    hold,
                 ));
             }
         }
         EntityGateHold {
             gates,
             branch_gates: Vec::new(),
+        }
+    }
+
+    fn engage_relay_gate(
+        gate: Arc<RelayDispatchGate>,
+        deadline: Instant,
+        reason: &str,
+        hold: RelayDispatchGateHold,
+    ) -> RelayDispatchGateLease {
+        match hold {
+            RelayDispatchGateHold::Producers => {
+                RelayDispatchGateLease::engage_producers(gate, deadline, reason)
+            }
+            RelayDispatchGateHold::ProducersAndHandOn => {
+                RelayDispatchGateLease::engage(gate, deadline, reason)
+            }
         }
     }
 
@@ -1088,10 +1193,17 @@ impl Runtime {
                         coordination: coordination.clone(),
                     }));
                 }
+                // Another engagement of the same identity and scope is a retry or a renewal: it
+                // observes the operation, and its later deadline extends the lease.
+                if !operation.renew_lease(deadline) {
+                    return Err(Report::new(EntityGateOperationError::LeaseEnded {
+                        coordination: coordination.clone(),
+                    }));
+                }
                 operation
             }
             nervix_primitives::collections::dash_map::Entry::Vacant(entry) => {
-                let operation = Arc::new(EntityGateOperation::new(scope.clone()));
+                let operation = Arc::new(EntityGateOperation::new(scope.clone(), deadline));
                 entry.insert(operation.clone());
                 let runtime = self.clone();
                 let coordination = coordination.clone();
@@ -1129,6 +1241,7 @@ impl Runtime {
         coordination: &CoordinationIdentity,
         operation: &Arc<EntityGateOperation>,
     ) {
+        operation.end_lease();
         operation.fail(EntityGateOperationError::RuntimeStopped {
             domain: operation.scope().domain.clone(),
         });
@@ -1170,16 +1283,28 @@ impl Runtime {
                 };
                 gates
             }
+            // A coordinated hold waits for the relays to empty before any node changes a route,
+            // so it holds producers only: what the relays accepted goes on to its consumers.
             EntityGatePurpose::OwnershipHandoff => self.engage_entity_unit_gates(
                 domain,
                 &scope.relays,
                 &scope.targets,
-                deadline,
-                &reason,
+                EntityGateLease {
+                    deadline,
+                    reason: &reason,
+                },
+                RelayDispatchGateHold::Producers,
             ),
-            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => {
-                self.engage_entity_gates(domain, &scope.relays, deadline, &reason)
-            }
+            EntityGatePurpose::ModelAlteration | EntityGatePurpose::PartitionChange => self
+                .engage_entity_gates(
+                    domain,
+                    &scope.relays,
+                    EntityGateLease {
+                        deadline,
+                        reason: &reason,
+                    },
+                    RelayDispatchGateHold::Producers,
+                ),
         };
         if !gates.wait_quiescent().await {
             gates.release();
@@ -1243,7 +1368,8 @@ impl Runtime {
                 .pause_ownership_handoff_flush_if_armed(domain)
                 .await;
         }
-        if Instant::now() >= deadline {
+        if !operation.lease_runs_at(Instant::now()) {
+            operation.end_lease();
             Self::release_entity_alter_hold(
                 &self.inner.ingestors,
                 &self.inner.ingestor_quiescence,
@@ -1269,18 +1395,20 @@ impl Runtime {
         let frozen_ownership_handoff_entities =
             self.inner.frozen_ownership_handoff_entities.clone();
         let expiring_operation = operation.clone();
-        // The lease ends at its deadline, or with this runtime when the node stops first.
+        // The lease ends at its deadline, as its coordinator last renewed it, or with this runtime
+        // when the node stops first.
         drop(self.inner.entity_gate_tasks.spawn(async move {
             nervix_primitives::select! {
                 biased;
                 _ = stopping.cancelled() => {
+                    expiring_operation.end_lease();
                     debug!(
                         domain = expiring_operation.scope().domain.as_str(),
                         %coordination,
                         "entity gate lease ended with its runtime"
                     );
                 }
-                _ = nervix_primitives::time::sleep_until(deadline) => {
+                () = expiring_operation.run_lease_to_its_end() => {
                     debug!(
                         domain = expiring_operation.scope().domain.as_str(),
                         %coordination,

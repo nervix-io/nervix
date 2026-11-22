@@ -6,7 +6,8 @@
 //! - **Owns.** The ordering invariants of the dispatch gate: a fence counts every dispatch that
 //!   finds the gate open, a lease follows what every counted dispatch did, the last dispatch to
 //!   leave a closed gate wakes its fence, and a dispatch that finds the gate reopened follows what
-//!   the protected mutation changed. And the fan-out's: a consumer that frees room a waiting
+//!   the protected mutation changed, and the same two claims for the hand-on of what the relay
+//!   already accepted, which an engagement holds back with a flag of its own. And the fan-out's: a consumer that frees room a waiting
 //!   publisher needs either admits it or wakes it; an audience registering as its parent ends
 //!   either observes that ending or has its publication observed by the ending parent.
 //! - **Depends on.** The production gate and fan-out, and the Loom runner of
@@ -49,6 +50,10 @@ const LEASE_PUBLICATION: InvariantId =
 const DRAIN_WAKEUP: InvariantId = InvariantId::new("runtime.relay-dispatch-gate.drain-wakeup");
 const REOPEN_PUBLICATION: InvariantId =
     InvariantId::new("runtime.relay-dispatch-gate.reopen-publication");
+const HAND_ON_ENTRY_FENCE: InvariantId =
+    InvariantId::new("runtime.relay-dispatch-gate.hand-on-entry-fence");
+const HAND_ON_REOPEN_PUBLICATION: InvariantId =
+    InvariantId::new("runtime.relay-dispatch-gate.hand-on-reopen-publication");
 const ADMISSION_WAKEUP: InvariantId = InvariantId::new("runtime.relay-fanout.admission-wakeup");
 const AUDIENCE_ENDING: InvariantId = InvariantId::new("runtime.relay-fanout.audience-ending");
 
@@ -180,6 +185,54 @@ fn loom_a_dispatch_that_finds_the_gate_reopened_observes_the_protected_change() 
                 change.load(Ordering::Relaxed),
                 WITNESSED,
                 "a dispatch entered the reopened gate without the change made while it was closed"
+            );
+        }
+        release
+            .join()
+            .assured("the releasing side only writes the change and releases its engagement");
+    });
+}
+
+#[test]
+fn loom_a_fence_holding_hand_on_counts_every_hand_on_that_finds_it_open() {
+    explore(HAND_ON_ENTRY_FENCE, || {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let handing_on = Arc::clone(&gate);
+        // The hand-on keeps any count it raised: a permit that entered is never dropped here.
+        let hand_on = spawn(move || handing_on.try_enter_hand_on());
+
+        let generation = gate.engage(deadline_no_model_reaches(), "loom hand-on entry fence");
+        let fence = gate.poll_quiescence(generation);
+        // Both decisions were taken before the join below, which orders nothing either side read.
+        let entered = hand_on
+            .join()
+            .assured("the handing-on side only enters the gate");
+        assert!(
+            !(entered && fence == RelayDispatchFence::Quiescent),
+            "the fence took its lease while a hand-on it did not count was still running"
+        );
+    });
+}
+
+#[test]
+fn loom_a_hand_on_that_finds_the_gate_reopened_observes_the_protected_change() {
+    explore(HAND_ON_REOPEN_PUBLICATION, || {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let generation = gate.engage(deadline_no_model_reaches(), "loom hand-on reopen");
+        let change = Arc::new(AtomicUsize::new(0));
+        let releasing = Arc::clone(&gate);
+        let releasing_change = Arc::clone(&change);
+        let release = spawn(move || {
+            releasing_change.store(WITNESSED, Ordering::Relaxed);
+            releasing.release(generation);
+        });
+
+        if gate.try_enter_hand_on() {
+            // Read the moment the hand-on enters, before the join could order the threads.
+            assert_eq!(
+                change.load(Ordering::Relaxed),
+                WITNESSED,
+                "a hand-on entered the reopened gate without the change made while it was held"
             );
         }
         release

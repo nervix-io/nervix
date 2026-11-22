@@ -221,12 +221,7 @@ impl SessionServiceImpl {
                         );
                         continue;
                     }
-                    return Err(Report::new(
-                        crate::runtime::RuntimeError::RuntimeRevisionPreparation {
-                            revision: state.revision,
-                            pending_nodes: timeout.pending_nodes,
-                        },
-                    ));
+                    return Err(timeout.preparation_error(state.revision));
                 }
                 debug!(
                     %local_node_id,
@@ -307,12 +302,7 @@ impl SessionServiceImpl {
                         );
                         continue;
                     }
-                    return Err(Report::new(
-                        crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                            revision: state.revision,
-                            pending_nodes: timeout.pending_nodes,
-                        },
-                    ));
+                    return Err(timeout.readiness_error(state.revision));
                 }
                 debug!(
                     %local_node_id,
@@ -409,7 +399,14 @@ impl SessionServiceImpl {
                 "failed to install the HTTPS listener TLS configuration"
             );
         }
+        if let Err(error) = &runtime_application {
+            // The barriers waiting for this revision read why this node did not prepare it.
+            inner
+                .application_progress
+                .fail_runtime(state.revision, format!("{error:#}"));
+        }
         runtime_application.change_context(crate::runtime::RuntimeError::ApplyRevision {
+            node: local_node_id.clone(),
             revision: state.revision,
         })?;
         #[cfg(feature = "testing")]
