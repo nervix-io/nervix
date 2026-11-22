@@ -1549,25 +1549,6 @@ impl TransportState {
         *self.liveness.borrow()
     }
 
-    /// Install the relay channel retention the committed parameters give, and wake the sweep when
-    /// it changed so its cadence and the end of owners awaiting membership follow it.
-    pub(crate) fn install_relay_retention(&self, retention: RelayChannelRetention) {
-        let changed = self.relay_retention.send_if_modified(|current| {
-            if *current == retention {
-                return false;
-            }
-            *current = retention;
-            true
-        });
-        if changed {
-            self.relay_retention_changed.notify_one();
-        }
-    }
-
-    pub(crate) fn committed_relay_retention(&self) -> RelayChannelRetention {
-        *self.relay_retention.borrow()
-    }
-
     async fn acquire_connection_permits(
         &self,
         class: PoolClass,

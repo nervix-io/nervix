@@ -547,6 +547,26 @@ impl TransportState {
         }
     }
 
+    /// Install the relay channel retention the committed parameters give, and wake the sweep when
+    /// it changed so its cadence and the end of owners awaiting membership follow it.
+    pub(crate) fn install_relay_retention(&self, retention: RelayChannelRetention) {
+        let changed = self.relay_retention.send_if_modified(|current| {
+            if *current == retention {
+                return false;
+            }
+            *current = retention;
+            true
+        });
+        if changed {
+            self.relay_retention_changed.notify_one();
+        }
+    }
+
+    /// The relay channel retention the installed committed parameters give.
+    pub(crate) fn committed_relay_retention(&self) -> RelayChannelRetention {
+        *self.relay_retention.borrow()
+    }
+
     /// Forget what every peer's owner retains past its own retention. Each pass waits a tenth of
     /// the shortest retention it must honour: the installed committed one, which an owner still
     /// awaiting membership keeps, and that of everything an owner retains. An installed retention

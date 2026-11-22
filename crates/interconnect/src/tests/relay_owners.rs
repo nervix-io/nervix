@@ -238,12 +238,18 @@ async fn installed_cluster_parameters_give_the_transport_their_relay_channel_ret
         .assured("a twenty-second total admission budget fits every acknowledgement relationship");
     pair.transport_b.install_cluster_parameters(lowered);
     assert_eq!(
-        pair.transport_b.inner.committed_relay_retention().duration(),
+        pair.transport_b
+            .inner
+            .committed_relay_retention()
+            .duration(),
         Duration::from_secs(40)
     );
     pair.transport_b.install_cluster_parameters(lowered);
     assert_eq!(
-        pair.transport_b.inner.committed_relay_retention().duration(),
+        pair.transport_b
+            .inner
+            .committed_relay_retention()
+            .duration(),
         Duration::from_secs(40)
     );
     pair.transport_a.shutdown().await;

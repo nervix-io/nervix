@@ -1,5 +1,11 @@
 {
   "as_casts": 3,
+  "branch_inversions": 151,
+  "files_over_3000_lines": 8,
+  "functions_over_complexity_30": 110,
+  "hidden_tunables": 508,
+  "non_aws_lc_crypto": 60,
+  "testing_feature_struct_fields": 0,
   "branch_inversion_sites": [
     "nervix_interconnect::runtime_state::BranchCheckpointPage::removed",
     "nervix_interconnect::state_inspection::MaterializedPartitionFilter::excluded",
@@ -152,11 +158,5 @@
     "nervix_server::runtime::state_replication::{impl#1}::expected_ownership_handoff_placements::expected",
     "nervix_server::runtime::wasm_guest_state_reset::PendingGuestWasmStateResets::requests",
     "nervix_server::runtime::wasm_state_recovery::RaisedWasmStateRecoveries::raised"
-  ],
-  "branch_inversions": 151,
-  "files_over_3000_lines": 8,
-  "functions_over_complexity_30": 110,
-  "hidden_tunables": 511,
-  "non_aws_lc_crypto": 60,
-  "testing_feature_struct_fields": 0
+  ]
 }
