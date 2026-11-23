@@ -184,7 +184,11 @@ fn pubsub_declares_its_read_ahead_bound_connection_deadlines_and_server_limits()
         emit.bounds.driver_limits,
         &[
             "A payload above the server's proto-max-bulk-len is rejected, and Redis then closes \
-             the connection that sent it."
+             the connection that sent it.",
+            "The pool tries again to open a connection that failed, after 400 ms and then twice \
+             as long each time, at most half of connect_timeout_ms, and stops at the first \
+             failure after connect_timeout_ms has passed since its first try. A publish whose \
+             checkout ends without a connection fails, and RETRY POLICY decides the next attempt."
         ]
     );
 }

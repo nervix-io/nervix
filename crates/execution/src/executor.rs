@@ -483,7 +483,7 @@ impl Executor {
         }
     }
 
-    fn storage_pool(&self, class: StorageClass) -> &WorkerPool {
+    pub(crate) fn storage_pool(&self, class: StorageClass) -> &WorkerPool {
         match class {
             StorageClass::Consensus => &self.inner.consensus_storage,
             StorageClass::Filesystem => &self.inner.filesystem_storage,
