@@ -440,6 +440,7 @@ pub(crate) enum ClockRestorationScope {
 }
 
 /// What a caller waiting for clock events does next.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ClockReadStep {
     /// Return the earliest event the caller has not read.
     Report(DomainClockEvent),
@@ -624,18 +625,26 @@ impl DomainClockAttachments {
         interrupted
     }
 
-    /// Takes the earliest event a caller has not read.
+    /// Takes the earliest event a caller has not read, for a test that reads the events without
+    /// the restoration decision [`Self::read_step`] takes with them.
+    #[cfg(test)]
     pub(crate) fn take_event(&self) -> Option<DomainClockEvent> {
         self.inner.state.lock().take_event()
     }
 
     /// Decides what a caller waiting for clock events does next: return the earliest unread
     /// event, restore a clock that waits to be attached again, or wait for the next change.
+    ///
+    /// An unread event comes first, under the same lock that finds a clock waiting to be
+    /// restored. A session that ends while the caller decides marks its clocks interrupted and
+    /// queues their interruption under that lock too, so the caller returns the interruption
+    /// before it opens another session, which it could not do while no server can be reached.
     pub(crate) fn read_step(&self) -> ClockReadStep {
-        if let Some(event) = self.take_event() {
+        let mut state = self.inner.state.lock();
+        if let Some(event) = state.take_event() {
             return ClockReadStep::Report(event);
         }
-        if self.awaits_restoration() {
+        if state.awaits_restoration() {
             return ClockReadStep::Restore;
         }
         ClockReadStep::Wait
@@ -1169,6 +1178,43 @@ mod tests {
         );
         assert!(clocks.take_event().is_none());
         assert!(clocks.followed_domains().is_empty());
+    }
+
+    #[test]
+    fn a_read_returns_an_unread_interruption_before_it_restores() {
+        let clocks = DomainClockAttachments::new();
+        let lost = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 2.0)), &lost);
+        assert_eq!(
+            clocks.read_step(),
+            ClockReadStep::Wait,
+            "a held attachment leaves nothing to read or restore"
+        );
+        clocks.exchange_ended(&lost);
+        assert_eq!(
+            clocks.read_step(),
+            ClockReadStep::Report(DomainClockEvent::Interrupted(DomainClockInterruption {
+                domain: domain("sim"),
+            })),
+            "the interruption is read before the clock is restored"
+        );
+        assert_eq!(
+            clocks.read_step(),
+            ClockReadStep::Restore,
+            "once its interruption is read, the clock waits to be attached again"
+        );
+        let restored = Arc::new(());
+        clocks.apply_attach(&attach_reply("sim", paced(1, 2.0)), &restored);
+        assert_eq!(
+            clocks.read_step(),
+            ClockReadStep::Report(DomainClockEvent::Observed(observed("sim", paced(1, 2.0)))),
+            "the restored attachment reports the clock it found"
+        );
+        assert_eq!(
+            clocks.read_step(),
+            ClockReadStep::Wait,
+            "a restored attachment leaves nothing to read or restore"
+        );
     }
 
     #[test]
@@ -1795,6 +1841,60 @@ mod shuttle_tests {
                 assert!(
                     clocks.latest(&domain()).is_none(),
                     "the client follows a clock it released"
+                );
+            });
+        });
+    }
+
+    /// The session holding an attachment ends while a caller waiting for clock events decides
+    /// what to do next. The caller reads the interruption: it finds it unread, or finds nothing
+    /// and is woken by the end. It never decides to restore the clock while the interruption is
+    /// still unread, because the restoration reopens a session first and would hold the
+    /// interruption back for as long as no server can be reached.
+    #[test]
+    fn shuttle_a_reader_racing_the_end_of_its_session_reads_the_interruption_before_restoring() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let clocks = DomainClockAttachments::new();
+                let session = Arc::new(());
+                clocks.apply_attach(&attached(), &session);
+                let ending = {
+                    let clocks = clocks.clone();
+                    let session = session.clone();
+                    nervix_primitives::task::spawn(async move {
+                        clocks.exchange_ended(&session);
+                    })
+                };
+                let reading = {
+                    let clocks = clocks.clone();
+                    nervix_primitives::task::spawn(async move {
+                        loop {
+                            nervix_primitives::task::consume_budget().await;
+                            let mut changed = clocks.watch();
+                            match clocks.read_step() {
+                                ClockReadStep::Report(event) => return Some(event),
+                                ClockReadStep::Restore => return None,
+                                ClockReadStep::Wait => {
+                                    changed.changed().await.assured(
+                                        "the attachments hold the sender of their notifications",
+                                    );
+                                }
+                            }
+                        }
+                    })
+                };
+                ending
+                    .await
+                    .assured("the end only interrupts the session's attachments");
+                let read = reading
+                    .await
+                    .assured("the reader only decides and waits for a change");
+                assert_eq!(
+                    read,
+                    Some(DomainClockEvent::Interrupted(DomainClockInterruption {
+                        domain: domain(),
+                    })),
+                    "the reader decided to restore the clock before it read the interruption"
                 );
             });
         });
