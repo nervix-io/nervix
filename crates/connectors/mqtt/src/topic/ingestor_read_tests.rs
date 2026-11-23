@@ -25,9 +25,8 @@ use rumqttc::{Publish, QoS};
 
 use super::{
     GatherPublishOutcome, MqttReadAheadSettings, MqttSessionRetirement, MqttTopicIngestor,
-    MqttTopicIngestorError,
-    MqttTopicIngestorMessage, MqttTopicIngestorPlan, MqttTopicIngestorResult,
-    MqttTopicIngestorSettings, PublishRead, PublishReadOutcome,
+    MqttTopicIngestorError, MqttTopicIngestorMessage, MqttTopicIngestorPlan,
+    MqttTopicIngestorResult, MqttTopicIngestorSettings, PublishRead, PublishReadOutcome,
 };
 use crate::topic::{
     ingestor::overflow_fixture::ReadAheadOverflowFixture,
