@@ -119,7 +119,7 @@ pub use settings::{
     ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline, IncomingQueueCapacity,
     InterconnectLiveness, MAX_HTTP2_WINDOW_BYTES, MaxPeers, MaxReconnectBackoff,
     PeerReceiveOverrides, PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout,
-    ProbeTimeout, ProgressTimeout, ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes,
+    ProgressTimeout, ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes,
     RelayChannelRetention, RelayDecodedBytes, RequestDeadline, RequestQuota, RequestTimeout,
     StreamReceiveWindow, TransportSettingValues, TransportSettings, TransportSettingsError,
 };

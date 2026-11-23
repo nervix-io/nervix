@@ -539,7 +539,8 @@ mutation lease, typed recovery reply and typed mutation-fence and restore-instal
 It also covers the node record announcement: the `consensus.announce_node_record` request and the
 Raft command that commit a node's capacity claim, detected properties and tags as one record.
 That claim carries the size of the volume holding the node's database directory, and a parameter
-conflict can carry the typed refusal of a resource quota above an admitted node's volume. Its
+conflict can carry the typed refusal of a resource quota above an admitted node's volume or of a
+node-unavailability timeout that an admitted node's health-probe interval does not fit. Its
 listener bounds carry the gRPC listener's HTTP/2 windows, send buffer and reset limits, the HTTP/1
 header count and the WebSocket write buffer.
 The subscription-interest visibility request includes the advertisement version, and its current
@@ -2443,10 +2444,12 @@ and outbound connections through a Chitchat liveness loss while application heal
 observation of it from the node-unavailability interval, as described below. A different
 incarnation or advertised endpoint must establish a new target.
 
-Each health round has at most one probe in flight for each peer and at most 32 probes across the
-node. A probe has a one-second total deadline. Results are published as they complete, so a silent
-peer occupies only its own concurrency slot. The next regular round begins roughly one second after
-the previous round finishes. Gossip updates remain pending while those bounded probes finish and
+Each health round has at most one probe in flight for each peer and at most
+`interconnect-max-peers` probes across the node, 64 by default. A probe's total deadline is the
+probe timeout, a tenth of the node-unavailability interval: one second at the default ten seconds.
+Results are published as they complete, so a silent peer occupies only its own concurrency slot.
+The next regular round begins one `--control-plane-health-probe-interval` after the previous round
+finishes, one second by default. Gossip updates remain pending while those bounded probes finish and
 start the next round immediately afterward. They never cancel an in-flight round: repeated gossip
 updates must not prevent an unreachable peer's deadline from becoming a failed observation.
 
@@ -2473,7 +2476,11 @@ resets that run. Consensus membership continues to use the cluster topology esta
 
 The node-unavailability interval is installed live from the committed cluster parameters. A changed
 interval wakes retained health waiters, which recompute their next monotonic transition using the
-installed value. Republishing an unchanged interval does not wake those waiters.
+installed value. Republishing an unchanged interval does not wake those waiters. A node observes
+each peer again at most one health-probe interval plus one probe timeout after its last
+observation, so the node-unavailability interval must exceed both together on every admitted node.
+[Node Settings](node-settings.md#committed-parameter-changes) describes how a commit, a node
+announcement and a node start refuse a value that does not.
 
 Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
 listing live only while its latest application observation is younger than the node-unavailability
