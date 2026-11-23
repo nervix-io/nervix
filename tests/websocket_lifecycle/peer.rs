@@ -4,8 +4,8 @@
 //! - **Owns.** Listening connections, bounded events, opening cancellation, public connection
 //!   confirmation, payload release, graceful-close observations, a first message above the
 //!   client's limit, a first signaling handshake refused or left unanswered, how an unread
-//!   connection ended, measured reconnect instants, scripted subprotocol answers and measured
-//!   client ping arrivals.
+//!   connection ended and the messages the client wrote before it, measured reconnect instants,
+//!   scripted subprotocol answers and measured client ping arrivals.
 //! - **Depends on.** Execution primitives, I/O errors and the WebSocket protocol.
 //! - **Must not know.** Scenario state, connector internals or runtime ownership handles.
 
@@ -127,6 +127,8 @@ pub(super) enum PeerEvent {
     ReceivedPing(Instant),
     /// The client released the connection this peer never read, and this is how it ended.
     UnreadConnectionEnded(UnreadEnding),
+    /// The client released the connection this peer never read, and this is what it wrote there.
+    UnreadConnectionReplayed(UnreadConnection),
 }
 
 /// How the client ended a connection whose peer never read it.
@@ -137,7 +139,21 @@ pub(crate) enum UnreadEnding {
     WithoutClose,
 }
 
+/// What the client wrote on a connection whose peer never read it.
+pub(crate) struct UnreadConnection {
+    /// The text and binary messages that came before the connection's ending.
+    pub(crate) messages: usize,
+    pub(crate) ending: UnreadEnding,
+}
+
 impl UnreadEnding {
+    async fn read(unread: WebSocketStream<TcpStream>) -> io::Result<Self> {
+        let connection = UnreadConnection::read(unread).await?;
+        Ok(connection.ending)
+    }
+}
+
+impl UnreadConnection {
     /// Reads everything TCP delivered on a connection the peer never read, once the client has
     /// released it, then reads it again through the WebSocket driver. Nothing is written back: the
     /// pongs the driver queues for the unanswered pings go nowhere, so a reply cannot fail the
@@ -161,17 +177,25 @@ impl UnreadEnding {
             None,
         )
         .await;
+        let mut messages = 0_usize;
         loop {
             nervix_primitives::task::consume_budget().await;
-            match replay.next().await {
-                Some(Ok(Message::Close(frame))) => return Ok(Self::Closed(frame)),
-                Some(Ok(_)) => {}
+            let ending = match replay.next().await {
+                Some(Ok(Message::Close(frame))) => UnreadEnding::Closed(frame),
+                Some(Ok(Message::Text(_) | Message::Binary(_))) => {
+                    messages = messages
+                        .checked_add(1)
+                        .verified("the replay counts the messages of one bounded TCP read");
+                    continue;
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
                 Some(Err(WebsocketError::Protocol(
                     ProtocolError::ResetWithoutClosingHandshake,
                 )))
-                | None => return Ok(Self::WithoutClose),
+                | None => UnreadEnding::WithoutClose,
                 Some(Err(error)) => return Err(io::Error::other(error)),
-            }
+            };
+            return Ok(Self { messages, ending });
         }
     }
 }
@@ -656,6 +680,35 @@ impl WebsocketPeer {
                 }
             }
             Ok(())
+        });
+        Self {
+            events,
+            payload: None,
+            task: AbortOnDropHandle::new(task),
+        }
+    }
+
+    /// Accepts every connection the client opens and never reads one, so the client's handshake
+    /// messages, pongs and Close reach no reader. Once the client releases a connection it reports
+    /// what the client wrote there, then accepts the next, so a client that fails every handshake
+    /// keeps finding it. A report the observer has no room for is dropped.
+    pub(super) fn unread_connections(listener: TcpListener) -> Self {
+        let (events_tx, events) = mpsc::channel(8);
+        let task = nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let (stream, _) = listener.accept().await?;
+                let unread = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .map_err(io::Error::other)?;
+                if !report(&events_tx, PeerEvent::Connected(Instant::now())) {
+                    return Ok(());
+                }
+                let connection = UnreadConnection::read(unread).await?;
+                if !report(&events_tx, PeerEvent::UnreadConnectionReplayed(connection)) {
+                    return Ok(());
+                }
+            }
         });
         Self {
             events,

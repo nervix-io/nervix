@@ -30,8 +30,8 @@ use super::{
         model_mutation::{command_error, command_ok},
         session_service::SessionServiceImpl,
     },
-    admitted_command_result, is_queueable_transaction_statement, transaction_commit_result,
-    transaction_statement_label, transaction_status,
+    TransactionQueueRefusal, admitted_command_result, transaction_commit_result,
+    transaction_status,
 };
 
 impl SessionServiceImpl {
@@ -94,12 +94,8 @@ impl SessionServiceImpl {
         queued: TransactionStatementRequest,
         activity: TransactionActivity,
     ) -> CommandResult {
-        if !is_queueable_transaction_statement(&queued.statement) {
-            return command_error(format!(
-                "{} cannot be queued in a transaction; a transaction applies to one existing \
-                 domain and queues only that domain's configuration statements",
-                transaction_statement_label(&queued.statement)
-            ));
+        if let Some(refusal) = TransactionQueueRefusal::of(&queued.statement) {
+            return refusal.answer();
         }
         let Some(transaction) = self.inner.consensus.current_transaction(&id).await else {
             return command_error(format!("transaction '{id}' is unknown"));

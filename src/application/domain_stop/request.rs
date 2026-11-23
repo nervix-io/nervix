@@ -1,4 +1,4 @@
-//! A `STOP` statement's request and its answer, and the request of a transaction's `STOP` step.
+//! A `STOP` statement's request and its answer.
 //!
 //! Layer: control plane.
 //! - **Owns.** Making an operator's stop request, waiting until its stop ends or its `CANCEL`
@@ -112,7 +112,7 @@ impl SessionServiceImpl {
 
     /// Waits until the stop that holds operator request `reference` of `domain` ends, or until
     /// the request is withdrawn, and answers.
-    pub(in crate::application) async fn wait_for_stop_request(
+    async fn wait_for_stop_request(
         &self,
         domain: &DomainName,
         reference: &CommandExecutionReference,
