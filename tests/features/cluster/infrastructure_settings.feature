@@ -97,19 +97,38 @@ Feature: Declared infrastructure settings
     Given node-1 starts with database-cache-bytes = 1MiB
     And node-1 starts with database-journal-bytes = 64MiB
     And node-1 starts with database-workers = 1
+    And node-1 starts with database-max-open-files = 64
     And node-1 starts with raft-database-cache-bytes = 2MiB
     And node-1 starts with raft-database-journal-bytes = 64MiB
     And node-1 starts with raft-database-workers = 1
+    And node-1 starts with raft-database-max-open-files = 32
     And node-1 starts with dns-cache-entries = 16
     And node-1 starts with dns-positive-max-ttl = 2s
     And node-1 starts with dns-negative-max-ttl = 1s
     And node-1 starts with dns-concurrent-lookups = 8
     And a <cluster_size> node nervix cluster is started
-    Then node "node-<cluster_size>" eventually describes node "node-1" with "database: cache-bytes=1048576 journal-bytes=67108864 workers=1"
-    And node "node-<cluster_size>" eventually describes node "node-1" with "raft database: cache-bytes=2097152 journal-bytes=67108864 workers=1"
+    Then node "node-<cluster_size>" eventually describes node "node-1" with "database: cache-bytes=1048576 journal-bytes=67108864 workers=1 max-open-files=64"
+    And node "node-<cluster_size>" eventually describes node "node-1" with "raft database: cache-bytes=2097152 journal-bytes=67108864 workers=1 max-open-files=32"
     And node "node-<cluster_size>" eventually describes node "node-1" with "dns: cache-entries=16 positive-max-ttl=2s negative-max-ttl=1s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=8"
     When 2 domains named "configured_stores" are created on the leader node
     Then within "60s" every node has applied 2 domains named "configured_stores"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A node given a database open-file cap below the engine's floor refuses to start on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-<cluster_size>" is stopped
+    And node-<cluster_size> starts with raft-database-max-open-files = 9
+    When node "node-<cluster_size>" attempts to start
+    Then node "node-<cluster_size>" refused to start because "raft-database-max-open-files is outside the database engine's supported capacity"
+    Given node-<cluster_size> starts with raft-database-workers = 1
+    And node-<cluster_size> starts with raft-database-max-open-files = 10
+    When node "node-<cluster_size>" is started
+    Then node "node-<cluster_size>" eventually observes a stable leader
+    And node "node-1" eventually describes node "node-<cluster_size>" with "raft database: cache-bytes=33554432 journal-bytes=536870912 workers=1 max-open-files=10"
 
     Examples:
       | cluster_size |

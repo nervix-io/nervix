@@ -3078,6 +3078,10 @@ impl Consensus {
                             usize::try_from(capacity.workers.get())
                                 .assured("validated database workers fit the node"),
                         )
+                        .max_cached_files(Some(
+                            usize::try_from(capacity.max_open_files.get())
+                                .assured("validated open-file limits fit this platform"),
+                        ))
                         .open()
                         .map_err(io::Error::other)
                 },
