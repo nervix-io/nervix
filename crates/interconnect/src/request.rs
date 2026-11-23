@@ -2678,6 +2678,39 @@ mod tests {
         );
     }
 
+    // Worker threads of the ordinary runtime contend on one count here; a Shuttle build models its
+    // atomics only inside an explored execution.
+    #[cfg(not(feature = "shuttle"))]
+    #[nervix_primitives::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_admissions_and_resolutions_of_one_kind_keep_its_count_exact() {
+        let admissions = Arc::new(RequestAdmissions::new(&crate::TransportOptions::default()));
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let admissions = Arc::clone(&admissions);
+            workers.push(nervix_primitives::task::spawn(async move {
+                for _ in 0..10_000 {
+                    let admission =
+                        RequestAdmissions::try_admit(&admissions, RequestSubquota::Append).assured(
+                            "a reserved kind has no count of its own that could refuse it",
+                        );
+                    drop(admission);
+                }
+            }));
+        }
+        for worker in workers {
+            worker.await.assured(
+                "a worker ends: a reserved kind is never refused, and a count that loses no \
+                 update never leaves its bounds",
+            );
+        }
+
+        assert_eq!(
+            admissions.in_flight(),
+            [0; RequestSubquota::COUNT],
+            "every admission counted in and resolved out, however the workers interleaved"
+        );
+    }
+
     #[test]
     fn every_target_is_live_until_membership_is_published() {
         let requests = RequestState::new(
