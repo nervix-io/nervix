@@ -141,7 +141,10 @@ credits another 1/16, so a node's budgets come to a little over half of its memo
 
 These are ceilings that admission charges work against, not memory allocated at startup. Graph
 state, engines and thread stacks need memory beside them; the 8 MiB `--runtime-thread-stack-size`
-of each runtime thread, for example, is not part of any pool.
+of each runtime thread, for example, is not part of any pool. Neither are the public listeners'
+transport buffers, which their [listener bounds](node-settings.md#listener-bounds) cap instead:
+gRPC clients hold at most `--listener-max-connections` times `--grpc-connection-window-bytes` of
+input on a node, 1 GiB at the defaults.
 
 ## What A Node Needs To Start
 

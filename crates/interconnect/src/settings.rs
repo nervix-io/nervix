@@ -188,6 +188,8 @@ impl Default for PeerReceiveSettings {
 }
 
 /// The largest flow-control window HTTP/2 can advertise, for one stream or a whole connection.
+///
+/// The public gRPC listener validates its windows against the same RFC bound.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(

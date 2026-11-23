@@ -208,6 +208,13 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
+            holds: "the header lines of the upgrade request head",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-max-headers"),
+                overflow: BufferOverflow::RefuseOversized,
+            },
+        },
+        DeclaredBuffer {
             holds: "an incoming frame payload, per session",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("websocket-frame-bytes"),
@@ -219,6 +226,13 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("websocket-message-bytes"),
                 overflow: BufferOverflow::CloseSession,
+            },
+        },
+        DeclaredBuffer {
+            holds: "outgoing frames collected before a write, per session",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("websocket-write-buffer-bytes"),
+                overflow: BufferOverflow::Backpressure,
             },
         },
         DeclaredBuffer {

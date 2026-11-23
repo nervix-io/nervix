@@ -10,14 +10,15 @@
 //!   frame limit each close a download with their close code, that a vanished client ends a call
 //!   quietly, that a restore over a console WebSocket is answered once its declared bytes arrived
 //!   and not when the client leaves first, that both end going away when the node stops, and that
-//!   a text message closes a console session with its close code.
+//!   a text message closes a console session with its close code, and that a console socket whose
+//!   client stops reading takes one largest frame onto a full write buffer and then holds back.
 //! - **Depends on.** The console session and call transports, the session test service, and an
 //!   in-memory WebSocket pair.
 //! - **Must not know.** How downloads and restores are answered beyond their wire contract.
 
 use std::{num::NonZeroU64, time::Duration};
 
-use futures_util::{SinkExt as _, StreamExt as _, stream};
+use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     BackupDownloadFailed, BackupDownloadFailure, BackupDownloadFrame, BackupDownloadMessage,
@@ -40,6 +41,7 @@ use tokio_tungstenite::{
 
 use super::{ConsoleCallEnd, DeclaredProgress, DeclaredRestoreStream};
 use crate::application::{
+    listener_settings::{ListenerOverrides, ListenerSettings},
     session::websocket::console_websocket_config,
     test_fixtures::{TestService, build_test_service},
 };
@@ -143,13 +145,51 @@ async fn a_declared_restore_stream_reads_nothing_after_its_last_chunk() {
     assert_eq!(unread.bytes(), chunk(b"never read").bytes());
 }
 
+/// A console socket whose client stops reading accepts its largest frame even when its write
+/// buffer is exactly full, because its write capacity holds that buffer, one more frame and the
+/// frame's header. It then holds the next message back instead of growing past that capacity.
+#[nervix_primitives::test]
+async fn a_console_socket_takes_its_largest_frame_onto_a_full_write_buffer_and_then_holds_back() {
+    let settings = ListenerSettings::resolve(ListenerOverrides {
+        websocket_write_buffer_bytes: Some(ubyte::ByteUnit::Kibibyte(1)),
+        ..Default::default()
+    })
+    .assured("a 1 KiB write buffer is valid");
+    let limits = limits();
+    let config = console_websocket_config(&limits, &settings);
+    // The client end is held and never read, so the server's writes stop at the pipe's capacity.
+    let (_client, server) = tokio::io::duplex(64);
+    let mut server = WebSocketStream::from_raw_socket(server, Role::Server, Some(config)).await;
+    // A 1,020-byte payload takes a four-byte header, filling the 1 KiB buffer exactly; the
+    // socket writes only once its buffer holds more than that.
+    server
+        .feed(Message::binary(vec![0; 1020]))
+        .await
+        .assured("a frame within the write buffer is collected");
+    // One session frame of the largest size takes a ten-byte header on top of the full buffer.
+    server
+        .feed(Message::binary(vec![0; limits.frame_bytes()]))
+        .await
+        .assured("the write capacity holds the largest frame and its header beside a full buffer");
+    assert!(
+        server
+            .feed(Message::binary(vec![0; 1]))
+            .now_or_never()
+            .is_none(),
+        "a socket whose client stops reading holds back its next message"
+    );
+}
+
 /// One end of an in-memory WebSocket a test drives as the console.
 type ConsoleEnd = WebSocketStream<DuplexStream>;
 
 /// Opens an in-memory WebSocket whose server end `serve` takes.
 async fn console_connection() -> (ConsoleEnd, WebSocketStream<DuplexStream>) {
     let (console, server) = tokio::io::duplex(8 * 1024 * 1024);
-    let config = console_websocket_config(&limits());
+    let config = console_websocket_config(
+        &limits(),
+        &crate::application::listener_settings::ListenerSettings::default(),
+    );
     let server = WebSocketStream::from_raw_socket(server, Role::Server, Some(config)).await;
     let console = WebSocketStream::from_raw_socket(console, Role::Client, None).await;
     (console, server)
