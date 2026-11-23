@@ -364,7 +364,7 @@ mod tests {
         );
         assert_relay_question(
             "CREATE WASM PROCESSOR guest FROM readings USING RESOURCE guest VERSION 1 FILE \
-             'guest.wasm' MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO ",
+             'guest.wasm' MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO ",
             branch(),
         );
         assert_relay_question(

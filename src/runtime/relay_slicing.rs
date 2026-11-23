@@ -279,6 +279,6 @@ mod tests {
             dispatcher.executor.snapshot().relay_memory.reserved_bytes,
             0
         );
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 }

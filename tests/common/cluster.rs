@@ -166,7 +166,6 @@ pub(crate) use super::{
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const TEST_NODE_UNAVAILABILITY_TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_TEST_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
     match TEST_NODE_UNAVAILABILITY_TIMEOUT.checked_add(STATUS_WAIT_BUDGET) {
         Some(timeout) => timeout,
@@ -180,8 +179,13 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
 const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
     branch_task_stop_timeout(nervix_models::DomainDrainTimeout::DEFAULT);
+/// How long a node's moves may take unless a scenario configures its own shutdown timeout. Only a
+/// scenario about the shutdown timeout reaches it.
+const DEFAULT_TEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4 * 60);
+/// The bounded phases of a graceful shutdown with the default timeouts: the node's moves, then the
+/// stop of the branch tasks its terminal teardown waits for.
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
-    match DEFAULT_TEST_DRAIN_TIMEOUT.checked_add(DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT) {
+    match DEFAULT_TEST_SHUTDOWN_TIMEOUT.checked_add(DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT) {
         Some(timeout) => timeout,
         None => panic!("the default node shutdown phase budgets must fit in Duration"),
     };
@@ -197,18 +201,6 @@ const _: () = assert!(
 const _: () = assert!(
     NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos() >= DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR.as_nanos(),
     "the node shutdown watchdog must cover the default bounded shutdown phases"
-);
-/// A node's shutdown deadline unless a scenario configures its own. It leaves the bounded phases
-/// that scenarios configure by default room to finish, so only a scenario about the deadline
-/// reaches it.
-const DEFAULT_TEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(4 * 60);
-const _: () = assert!(
-    DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR.as_nanos() < DEFAULT_TEST_SHUTDOWN_TIMEOUT.as_nanos(),
-    "the default test shutdown timeout must cover the default bounded shutdown phases"
-);
-const _: () = assert!(
-    DEFAULT_TEST_SHUTDOWN_TIMEOUT.as_nanos() < NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos(),
-    "the node shutdown watchdog must outlast the default test shutdown timeout"
 );
 const _: () = assert!(
     CLUSTER_TEARDOWN_BUDGET.as_nanos() < NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos(),
@@ -1130,7 +1122,6 @@ pub(crate) struct TestClusterConfig {
     /// Whether the console's reserved port serves HTTP or HTTPS in this scenario.
     pub web_console_mode: InternalTransportMode,
     pub graceful_shutdown_drain: bool,
-    pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
     pub raft_heartbeat_interval: Duration,
@@ -1174,7 +1165,6 @@ impl Default for TestClusterConfig {
             http_intake_ip: HOST,
             web_console_mode: InternalTransportMode::Http,
             graceful_shutdown_drain: false,
-            drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
             memory_pressure: None,
             raft_heartbeat_interval: TEST_RAFT_HEARTBEAT_INTERVAL,
@@ -1225,12 +1215,7 @@ impl TestClusterConfig {
             )
             .map_err(|report| io::Error::other(format!("{report:#}")))?,
             memory_pressure: self.memory_pressure_settings()?,
-            shutdown: ShutdownSettings::resolve(
-                Some(self.shutdown_timeout),
-                Some(self.drain_timeout),
-                None,
-            )
-            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            shutdown: ShutdownSettings::resolve(Some(self.shutdown_timeout), None),
             ..NodeSettings::default()
         };
         settings.runtime.data_plane =
@@ -2229,6 +2214,22 @@ impl Cluster {
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         handle.request_stop();
+    }
+
+    /// Signals every node to stop without waiting for any of them.
+    pub(crate) fn begin_stopping_all_nodes(&mut self) {
+        for handle in self.nodes.values_mut() {
+            handle.request_stop();
+        }
+    }
+
+    /// Where the shutdown of `node_id` stands, or `None` once the node has ended.
+    pub(crate) fn node_stop_progress(&self, node_id: &str) -> Option<NodeStopProgress> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.stop_progress()
     }
 
     pub(crate) async fn shutdown(&mut self) -> io::Result<()> {
@@ -5126,8 +5127,10 @@ impl NodeHandle {
             Some(settings) => settings.shutdown,
             None => self.config.node_settings(&self.spec.node_id)?.shutdown,
         };
-        let application_drain_timeout = if self.config.graceful_shutdown_drain {
-            shutdown_settings.drain_timeout()
+        // Only a graceful shutdown moves the node's work, within its shutdown timeout. The save
+        // before the moves has no bound of its own, which the liveness watchdog covers.
+        let moves = if self.config.graceful_shutdown_drain {
+            shutdown_settings.shutdown_timeout()
         } else {
             Duration::ZERO
         };
@@ -5136,7 +5139,7 @@ impl NodeHandle {
             .runtime_parameters
             .domain_drain_timeout
             .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
-        let configured_phase_floor = application_drain_timeout
+        let configured_phase_floor = moves
             .checked_add(branch_task_stop_timeout(domain_drain_timeout))
             .ok_or_else(|| {
                 io::Error::new(
@@ -5144,9 +5147,7 @@ impl NodeHandle {
                     "configured bounded node shutdown phases exceed Duration::MAX",
                 )
             })?;
-        Ok(NODE_SHUTDOWN_LIVENESS_WATCHDOG
-            .max(configured_phase_floor)
-            .max(shutdown_settings.shutdown_timeout()))
+        Ok(NODE_SHUTDOWN_LIVENESS_WATCHDOG.max(configured_phase_floor))
     }
 
     /// Waits for a node a scenario stopped itself, within the product shutdown deadlines that

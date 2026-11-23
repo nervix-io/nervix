@@ -1,7 +1,8 @@
 //! I/O lifetimes and HTTP protocol timers at a listening boundary.
 //!
 //! Layer: edges.
-//! - **Owns.** Idle expiry, admission leases, Hyper timers and completed-refusal transport teardown.
+//! - **Owns.** Idle expiry, admission leases, Hyper timers, every limit the HTTP/1 and gRPC
+//!   protocol builders set, and completed-refusal transport teardown.
 //! - **Depends on.** Selected timers and permits, Tokio I/O traits and protocol timer traits.
 //! - **Must not know.** Routes, graphs or request execution.
 
@@ -228,26 +229,95 @@ pub(super) fn http_builder(settings: ListenerSettings) -> hyper::server::conn::h
             usize::try_from(settings.buffer_bytes().as_u64())
                 .assured("the buffer setting checks usize representation"),
         )
+        .max_headers(
+            usize::try_from(settings.max_headers())
+                .assured("the header count setting checks usize representation"),
+        )
         .keep_alive(settings.http_keepalive());
     builder
+}
+
+/// The largest HTTP/2 frame the gRPC listener accepts.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 9113 section 6.5.2 starts SETTINGS_MAX_FRAME_SIZE at 16,384 octets, the \
+                  frame every HTTP/2 peer must accept; the receive windows, not the frame size, \
+                  bound what a connection buffers"
+    )
+)]
+const GRPC_MAX_FRAME_BYTES: u32 = 16 * 1024;
+
+/// Every HTTP/2 option the gRPC listener sets, from its declared settings and fixed values, so
+/// that none is left to a library default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GrpcHttp2Limits {
+    max_streams: u32,
+    header_list_bytes: u32,
+    keepalive_interval: Duration,
+    keepalive_timeout: Duration,
+    stream_window_bytes: u32,
+    connection_window_bytes: u32,
+    max_frame_bytes: u32,
+    /// Whether flow control resizes the windows from measured bandwidth-delay. It never does: that
+    /// grows them past the declared windows, which bound a connection's buffered input.
+    adaptive_window: bool,
+    send_buffer_bytes: usize,
+    max_pending_reset_streams: usize,
+    max_error_reset_streams: usize,
+}
+impl GrpcHttp2Limits {
+    fn of(settings: &ListenerSettings) -> Self {
+        Self {
+            max_streams: settings.grpc_max_streams(),
+            header_list_bytes: u32::try_from(settings.grpc_header_bytes().as_u64())
+                .assured("the H2 header setting checks u32 representation"),
+            keepalive_interval: settings.grpc_keepalive_interval(),
+            keepalive_timeout: settings.grpc_keepalive_timeout(),
+            stream_window_bytes: u32::try_from(settings.grpc_stream_window_bytes().as_u64())
+                .assured("the stream window setting checks HTTP/2's 2^31-1 window bound"),
+            connection_window_bytes: u32::try_from(
+                settings.grpc_connection_window_bytes().as_u64(),
+            )
+            .assured("the connection window setting checks HTTP/2's 2^31-1 window bound"),
+            max_frame_bytes: GRPC_MAX_FRAME_BYTES,
+            adaptive_window: false,
+            send_buffer_bytes: usize::try_from(settings.grpc_send_buffer_bytes().as_u64())
+                .assured("the send buffer setting checks u32 and usize representation"),
+            max_pending_reset_streams: usize::try_from(settings.grpc_max_pending_reset_streams())
+                .assured("the reset stream setting checks usize representation"),
+            max_error_reset_streams: usize::try_from(settings.grpc_max_error_reset_streams())
+                .assured("the reset stream setting checks usize representation"),
+        }
+    }
+
+    fn apply(self, server: tonic::transport::Server) -> tonic::transport::Server {
+        server
+            .max_concurrent_streams(self.max_streams)
+            .http2_max_header_list_size(self.header_list_bytes)
+            .http2_keepalive_interval(Some(self.keepalive_interval))
+            .http2_keepalive_timeout(Some(self.keepalive_timeout))
+            .initial_stream_window_size(self.stream_window_bytes)
+            .initial_connection_window_size(self.connection_window_bytes)
+            .max_frame_size(self.max_frame_bytes)
+            .http2_adaptive_window(Some(self.adaptive_window))
+            .http2_max_send_buf_size(self.send_buffer_bytes)
+            .http2_max_pending_accept_reset_streams(Some(self.max_pending_reset_streams))
+            .http2_max_local_error_reset_streams(Some(self.max_error_reset_streams))
+    }
 }
 
 /// Tonic is served through a custom incoming stream, whose selected TCP owner applies kernel
 /// keepalive. The transport builder owns the HTTP/2 and request-head admission bounds.
 pub(super) fn grpc_builder(settings: ListenerSettings) -> tonic::transport::Server {
-    tonic::transport::Server::builder()
+    let server = tonic::transport::Server::builder()
         .concurrency_limit_per_connection(
             usize::try_from(settings.grpc_concurrency())
                 .assured("the concurrency setting checks native admission limits"),
         )
-        .timeout(settings.grpc_request_timeout())
-        .max_concurrent_streams(settings.grpc_max_streams())
-        .http2_max_header_list_size(
-            u32::try_from(settings.grpc_header_bytes().as_u64())
-                .assured("the H2 header setting checks u32 representation"),
-        )
-        .http2_keepalive_interval(Some(settings.grpc_keepalive_interval()))
-        .http2_keepalive_timeout(Some(settings.grpc_keepalive_timeout()))
+        .timeout(settings.grpc_request_timeout());
+    GrpcHttp2Limits::of(&settings).apply(server)
 }
 
 #[cfg(all(
@@ -258,8 +328,62 @@ mod tests {
     use meticulous::OptionExt as _;
     use nervix_primitives::sync::{Semaphore, StdArc};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use ubyte::ByteUnit;
 
     use super::*;
+    use crate::application::listener_settings::ListenerOverrides;
+
+    /// The defaults are the values hyper 1 and h2 0.4 applied while the listener left them to the
+    /// libraries; declared settings reach the listener, and the fixed frame size and window
+    /// policy never change with them.
+    #[test]
+    fn the_grpc_listener_sets_every_http2_option_to_its_declared_or_fixed_value() {
+        assert_eq!(
+            GrpcHttp2Limits::of(&ListenerSettings::default()),
+            GrpcHttp2Limits {
+                max_streams: 256,
+                header_list_bytes: 16 * 1024,
+                keepalive_interval: Duration::from_secs(30),
+                keepalive_timeout: Duration::from_secs(20),
+                stream_window_bytes: 1024 * 1024,
+                connection_window_bytes: 1024 * 1024,
+                max_frame_bytes: 16 * 1024,
+                adaptive_window: false,
+                send_buffer_bytes: 400 * 1024,
+                max_pending_reset_streams: 20,
+                max_error_reset_streams: 1024,
+            }
+        );
+        let declared = ListenerSettings::resolve(ListenerOverrides {
+            grpc_max_streams: Some(9),
+            grpc_header_bytes: Some(ByteUnit::Kibibyte(32)),
+            grpc_keepalive_interval: Some(Duration::from_secs(5)),
+            grpc_keepalive_timeout: Some(Duration::from_secs(2)),
+            grpc_stream_window_bytes: Some(ByteUnit::Kibibyte(96)),
+            grpc_connection_window_bytes: Some(ByteUnit::Kibibyte(80)),
+            grpc_send_buffer_bytes: Some(ByteUnit::Kibibyte(64)),
+            grpc_max_pending_reset_streams: Some(7),
+            grpc_max_error_reset_streams: Some(11),
+            ..Default::default()
+        })
+        .assured("the declared gRPC limits are valid");
+        assert_eq!(
+            GrpcHttp2Limits::of(&declared),
+            GrpcHttp2Limits {
+                max_streams: 9,
+                header_list_bytes: 32 * 1024,
+                keepalive_interval: Duration::from_secs(5),
+                keepalive_timeout: Duration::from_secs(2),
+                stream_window_bytes: 96 * 1024,
+                connection_window_bytes: 80 * 1024,
+                max_frame_bytes: 16 * 1024,
+                adaptive_window: false,
+                send_buffer_bytes: 64 * 1024,
+                max_pending_reset_streams: 7,
+                max_error_reset_streams: 11,
+            }
+        );
+    }
 
     #[nervix_primitives::test]
     async fn completed_io_keeps_its_byte_count_when_renewing_the_deadline_cannot_fit() {

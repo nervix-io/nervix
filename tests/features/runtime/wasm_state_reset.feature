@@ -803,12 +803,16 @@ Feature: Coordinated WASM processor state reset
       "tenant":"beta"
       """
     And the relay subscription does not receive a payload within "1500ms"
-    When the next relay subscription payload is timed
+    # The guest's timer bounds its buffering from above only: a node that applies a newer runtime
+    # revision during the hold, as every node does after a failover, asks the guest to release
+    # what it buffers.
+    When the runtime revision each node applied is recorded
+    And the next relay subscription payload is timed
     And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":2}
       """
-    Then within "5s" the timed relay subscription payload arrives no sooner than "3s" after publication and contains all fragments
+    Then within "5s" the timed relay subscription payload arrives no sooner than "3s" after publication and contains all fragments, unless a node applied a newer runtime revision
       """
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"released"
       """
@@ -1200,6 +1204,7 @@ Feature: Coordinated WASM processor state reset
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET value = value, tenant = tenant
@@ -1313,6 +1318,7 @@ Feature: Coordinated WASM processor state reset
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET value = value, tenant = tenant

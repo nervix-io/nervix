@@ -485,6 +485,156 @@ async fn oversize_headers(world: &mut ScenarioWorld, listener: String, node: Str
     assert_eq!(response.status(), 431);
 }
 
+/// The status a listener answers a request head of exactly `lines` header lines with, Host
+/// included, sent by hyper's HTTP/1 client so that no client adds a header of its own.
+async fn header_lines_status(
+    world: &ScenarioWorld,
+    node: &str,
+    listener: &str,
+    lines: usize,
+) -> http::StatusCode {
+    let address = address(world, node, listener);
+    let stream = TcpStream::connect(address)
+        .await
+        .assured("the listener accepts a connection");
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+            .await
+            .assured("an HTTP/1 connection needs no handshake exchange");
+    let _connection = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+        connection
+            .await
+            .discarded("the listener ends the connection after its answer");
+    }));
+    let mut request = http::Request::get("/").header(http::header::HOST, address.to_string());
+    for line in 1..lines {
+        request = request.header(format!("x-line-{line}"), "v");
+    }
+    let request = request
+        .body(http_body_util::Empty::<bytes::Bytes>::new())
+        .assured("the request names valid header lines");
+    timeout(WAIT, sender.send_request(request))
+        .await
+        .assured("the listener answers a complete request head")
+        .assured("the listener answers on the connection it accepted")
+        .status()
+}
+
+#[then(expr = "the {word} listener on node {string} admits a request head with {int} headers")]
+async fn admits_header_lines(
+    world: &mut ScenarioWorld,
+    listener: String,
+    node: String,
+    lines: usize,
+) {
+    let status = header_lines_status(world, &node, &listener, lines).await;
+    assert_ne!(
+        status,
+        http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+        "{lines} header lines fit the declared count"
+    );
+}
+
+#[then(
+    expr = "the {word} listener on node {string} refuses a request head with {int} headers with \
+            status 431"
+)]
+async fn refuses_header_lines(
+    world: &mut ScenarioWorld,
+    listener: String,
+    node: String,
+    lines: usize,
+) {
+    let status = header_lines_status(world, &node, &listener, lines).await;
+    assert_eq!(status, http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+}
+
+/// More than any receive window a scenario declares, so flow control alone limits the grant.
+const REQUESTED_SEND_BYTES: usize = 4 * 1024 * 1024;
+
+/// A gRPC client opens a session stream and asks to send more than any window allows. Once the
+/// listener has answered the stream, its settings and connection window update have arrived, so
+/// what flow control grants is the smaller of the stream's and the connection's windows.
+#[then(expr = "a gRPC client of node {string} may send {int} bytes ahead on a new stream")]
+async fn grpc_send_window(world: &mut ScenarioWorld, node: String, expected: usize) {
+    let endpoint = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the node serves gRPC");
+    let endpoint = url::Url::parse(&endpoint).assured("the gRPC endpoint is a URL");
+    assert_eq!(
+        endpoint.scheme(),
+        "http",
+        "the probe speaks to the plaintext test listener"
+    );
+    let host = endpoint
+        .host_str()
+        .assured("the gRPC endpoint names a host");
+    let port = endpoint
+        .port()
+        .assured("the test gRPC endpoint names a port");
+    let address = std::net::SocketAddr::new(
+        host.parse()
+            .assured("the test gRPC endpoint is a numeric address"),
+        port,
+    );
+    let socket = TcpStream::connect(address)
+        .await
+        .assured("the gRPC listener accepts a connection");
+    let (sender, connection) = h2::client::handshake(socket)
+        .await
+        .assured("the gRPC listener completes the HTTP/2 preface");
+    let _connection = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+        connection
+            .await
+            .discarded("the probe drops its connection once it read the grant");
+    }));
+    let mut sender = sender
+        .ready()
+        .await
+        .assured("the gRPC listener admits a stream");
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(
+            endpoint
+                .join(nervix_client_wire::grpc::EXCHANGE_PATH)
+                .assured("the exchange path joins the endpoint")
+                .as_str(),
+        )
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .header(http::header::TE, "trailers")
+        .header(
+            http::header::AUTHORIZATION,
+            crate::common::cluster::test_basic_authorization(),
+        )
+        .body(())
+        .assured("the session request is well formed");
+    let (response, mut stream) = sender
+        .send_request(request, false)
+        .assured("the gRPC listener accepts the stream");
+    let response = timeout(WAIT, response)
+        .await
+        .assured("the listener answers the stream")
+        .assured("the listener answers the stream with headers");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    stream.reserve_capacity(REQUESTED_SEND_BYTES);
+    let mut granted = stream.capacity();
+    while granted != expected {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            granted < expected,
+            "the listener granted {granted} bytes ahead, more than the declared {expected}"
+        );
+        let polled = timeout(WAIT, std::future::poll_fn(|cx| stream.poll_capacity(cx))).await;
+        let Ok(polled) = polled else {
+            panic!("the listener granted {granted} bytes ahead, short of the declared {expected}");
+        };
+        granted = polled
+            .assured("the stream stays open while the probe reads its grant")
+            .assured("the stream's capacity is readable");
+    }
+}
+
 #[then(expr = "node {string} closes an unfinished gRPC TLS handshake after {string}")]
 async fn grpc_tls_handshake(world: &mut ScenarioWorld, node: String, delay: String) {
     let start = Instant::now();

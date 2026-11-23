@@ -63,6 +63,7 @@ Each public listener enforces its own connection ceiling, independently of place
 | --- | --- | --- |
 | `--listener-max-connections` | 1,024 | Each public TCP listener, including upgraded WebSockets and TLS handshakes |
 | `--listener-header-bytes` | 16 KiB | HTTP/1 request head and chunked trailers |
+| `--listener-max-headers` | 100, or fewer when `--listener-header-bytes` holds fewer header lines | Headers in one HTTP/1 request head or chunked trailer section |
 | `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer, and the largest body copy made on the connection; minimum 8 KiB |
 | `--listener-header-timeout` | 30 s | Complete HTTP/1 request head |
 | `--listener-tls-timeout` | 10 s | HTTPS, console TLS and gRPC TLS handshake |
@@ -75,10 +76,16 @@ Each public listener enforces its own connection ceiling, independently of place
 | `--http-refusal-drain-timeout` | 5 s | Transport drain after a completed HTTP input refusal |
 | `--websocket-message-bytes` | 64 MiB | Ingest endpoint WebSocket message |
 | `--websocket-frame-bytes` | 16 MiB | Ingest endpoint WebSocket frame |
+| `--websocket-write-buffer-bytes` | 128 KiB | Outgoing bytes an endpoint or console WebSocket collects before writing |
 | `--grpc-header-bytes` | 16 KiB | HTTP/2 header list |
 | `--grpc-concurrency` | 128 | Concurrent request handlers per gRPC connection |
 | `--grpc-request-timeout` | 120 s | gRPC handler response deadline; an established streaming response keeps its lifetime |
 | `--grpc-max-streams` | 256 | HTTP/2 streams per gRPC connection |
+| `--grpc-stream-window-bytes` | 1 MiB | HTTP/2 receive window of one gRPC stream |
+| `--grpc-connection-window-bytes` | 1 MiB | HTTP/2 receive window of one gRPC connection |
+| `--grpc-send-buffer-bytes` | 400 KiB | Response bytes one gRPC stream queues before it waits |
+| `--grpc-max-pending-reset-streams` | 20 | Client-reset gRPC streams that may wait unaccepted |
+| `--grpc-max-error-reset-streams` | 1,024 | gRPC streams the listener resets for a client's protocol errors |
 | `--grpc-keepalive-interval` | 30 s | HTTP/2 server ping interval |
 | `--grpc-keepalive-timeout` | 20 s | HTTP/2 ping acknowledgement budget |
 | `--listener-tcp-keepalive-time` | 60 s | Kernel TCP keepalive idle time |
@@ -91,8 +98,40 @@ are positive and must fit their native protocol/admission representation. Deadli
 and representable by the monotonic clock. Kernel keepalive durations are whole seconds from 1
 through 32,767; the probe count is from 1 through 127, matching the native socket-option ranges.
 The HTTP/1 header default preserves the transport's 16 KiB trailer ceiling. Request heads also
-fit the configured read-buffer capacity. The shared HTTP/1 parser refuses a request head with more
-than 100 headers, including a WebSocket upgrade request.
+fit the configured read-buffer capacity.
+
+The shared HTTP/1 parser refuses a request head with more than `--listener-max-headers` headers
+with 431, including a WebSocket upgrade request; a chunked trailer section has the same count. The
+parser reserves one slot per allowed header for every request it reads, so the count is at most
+the header lines `--listener-header-bytes` holds at three bytes each, a one-byte name, its colon and
+a line feed, the shortest line RFC 9112 allows. A larger value refuses startup. The default is 100,
+or that number of lines when it is smaller: a request with more headers already exceeds the byte
+bound, so the default refuses nothing the byte bound admits.
+
+The gRPC listener sets every HTTP/2 limit itself rather than inheriting a library default. Its
+receive windows bound what clients send ahead of the listener's reading: one stream at most
+`--grpc-stream-window-bytes`, one connection across all of its streams at most
+`--grpc-connection-window-bytes`. Both are at most 2,147,483,647 bytes, the largest window HTTP/2
+can advertise, and the connection window is at least 65,535 bytes, the window RFC 9113 gives every
+new connection, which a receiver can only raise. Clients of the gRPC listener therefore hold at
+most `--listener-max-connections` connection windows of input on a node, 1 GiB at the defaults. Each
+stream queues at most `--grpc-send-buffer-bytes` of responses before it waits for its client, at
+most 4,294,967,295 bytes, so one connection queues at most `--grpc-max-streams` times that. These
+bounds are declared rather than charged to the intake pool, and the startup memory check does not
+add them. The windows never adapt to measured bandwidth, which would grow them past their declared
+size. The listener accepts HTTP/2 frames of up to 16 KiB, the frame every HTTP/2 peer must accept;
+the windows, not the frame size, bound what a connection buffers. HTTP/2's rapid-reset protection
+ends a connection with `ENHANCE_YOUR_CALM` when its client resets more than
+`--grpc-max-pending-reset-streams` streams the listener has not accepted yet, or makes the listener
+reset more than `--grpc-max-error-reset-streams` streams for its protocol errors.
+
+An endpoint or console WebSocket collects up to `--websocket-write-buffer-bytes` of outgoing frames
+before writing them to its connection. A peer that stops reading holds at most that buffer, one
+more message and its 14-byte frame header: an endpoint socket's messages are at most
+`--websocket-message-bytes`, a console socket's one session frame. The socket refuses a message
+beyond that, and startup refuses a write buffer whose capacity does not fit the address space.
+Incoming frames are read in fixed 4 KiB chunks into storage that grows only to the frame being
+assembled, which the frame and message limits cap.
 The startup preflight requires the intake pool to hold two body limits plus the declared initial
 read scratch and collection metadata. An explicit inconsistent pair refuses startup before stores
 or listeners open.
@@ -235,7 +274,7 @@ without adding a prerequisite or changing graph acceptance.
 | `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
 | `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
 | `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
-| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection |
+| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection, at least 65,535 bytes |
 | `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
 | `--interconnect-request-timeout` | 10s | Transport request budget and the base of typed RPC deadlines |
 | `--interconnect-progress-timeout` | 5s | Time without transfer progress |
@@ -251,13 +290,34 @@ without adding a prerequisite or changing graph acceptance.
 | `--database-cache-bytes` | 32 MiB | Node database cache |
 | `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
 | `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
+| `--database-max-open-files` | Derived | Table files the node database keeps open, at least 10: 900, or 400 on Windows and 150 on macOS |
 | `--raft-database-cache-bytes` | 32 MiB | Dedicated consensus database cache |
 | `--raft-database-journal-bytes` | 512 MiB | Consensus database journal capacity, at least 64 MiB |
 | `--raft-database-workers` | Derived | Same CPU derivation, independently overridable |
+| `--raft-database-max-open-files` | Derived | Same platform derivation, independently overridable |
 
 Counts, receive windows and deadlines must be positive and fit their engines. HTTP/2 windows
-are at most 2³¹−1 bytes. The options are validated before opening stores or binding listeners.
+are at most 2³¹−1 bytes. The connection receive window is also at least 65,535 bytes, the window
+RFC 9113 gives every new HTTP/2 connection. A receiver can raise a connection's window but never
+lower it, so a smaller value would claim a bound the connection does not have, and the node refuses
+to start with one. The node raises each new connection from 65,535 bytes to the declared window
+with a `WINDOW_UPDATE` frame, which h2, its HTTP/2 implementation, sends once the raise is at least
+half the current window. A declared window of 98,302 bytes or more is therefore advertised as soon
+as the connection opens, and a smaller one is reached as the node reads its first input; either way
+a peer never has more than the declared window unread. The options are validated before opening
+stores or binding listeners.
 Database cache capacities count alongside executor budgets in the startup memory check.
+
+Each database keeps at most its `max-open-files` table files open. When it needs another, it closes
+the one it used least recently, and a later read opens that file again. Every keyspace of both
+databases writes through a fixed 64 MiB memtable, the in-memory buffer that collects new writes. A
+memtable starts empty and grows with each write until it reaches 64 MiB; the engine then seals it,
+writes it to disk as a table in the background and starts an empty one. This size is not a
+setting: the engine records it when it creates a keyspace and reuses the recorded size on every
+later open, so a different value would reach only new databases. The engine sets no total
+memtable cap, and Nervix does not limit the databases at runtime. Memtable memory is therefore
+outside the startup memory check; [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start)
+describes the headroom it needs.
 
 Connection capacity derives from both directions of every pool: twelve connections per declared
 peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
@@ -281,7 +341,11 @@ one tenth. At `4s`, `DESCRIBE CLUSTER` shows `ping-interval=2s ping-timeout=1s
 probe-timeout=400ms`. Installing a revision updates established HTTP/2 connections as well as
 future probes. A policy update adjusts an outstanding ping's deadline while retaining that ping.
 The per-node line derives from its published running revision, so an unapplied commit is not
-presented as installed.
+presented as installed. Each node probes every peer once per
+`--control-plane-health-probe-interval` round and waits at most the probe timeout for each answer,
+while an observation stays fresh for the timeout itself, so the timeout must exceed every admitted
+node's interval plus the probe timeout; [Committed Parameter Changes](#committed-parameter-changes)
+gives the refusals.
 
 Relay reconciliation keeps each retained attempt and outbound correlation for twice the
 `REMOTE_RELAY_TOTAL_TIMEOUT` its delivery captured, each channel watermark for twice the longest one
@@ -367,7 +431,10 @@ topology observer polls a domain's Kafka partition sources every
 `--control-plane-kafka-partition-watch-interval` and its other sources every
 `--partition-topology-poll-interval`. `--control-plane-model-inspection-timeout` bounds the
 inspection of an inferencer's model while its binding is validated. Values and relationships
-are validated before I/O. In particular, the session transfer holds a frame, its string bound fits
+are validated before I/O. The application-health round must also fit the committed
+`NODE_UNAVAILABILITY_TIMEOUT`, which a node checks against its bootstrap seeds or the live
+committed policy before readiness, as [Committed Parameter Changes](#committed-parameter-changes)
+describes. In particular, the session transfer holds a frame, its string bound fits
 the transfer, and its queue memory holds at least one maximum-sized frame on each lane.
 Each lane's depth is `queue_memory_bytes / (2 * frame_bytes)`, giving 16 frames by default.
 The queue budget bounds queued frame bytes; transport buffers, executing requests, clock slots
@@ -405,9 +472,10 @@ may tune that retry without changing the cluster's consensus prerequisite.
 Startup voter observation lasts twenty gossip rounds. Completion probes use one Raft heartbeat,
 authority reassignment retries four fifths of a heartbeat, cordon release keeps four heartbeats,
 and shutdown leader observation uses one tenth of a heartbeat. `--task-grace-period` controls
-cooperative listener and background-task stop grace, two seconds by default and capped by the
-remaining stop deadline. A drain may use the full configured timeout without cutting the
-listener's normal grace to zero.
+cooperative listener and background-task stop grace, two seconds by default. `--shutdown-timeout`
+bounds only the moves of a stopping node's work to other nodes, ten minutes by default, counted
+from the end of its save, which has no limit of its own; [Shutdown And
+Recovery](shutdown.md#the-shutdown-timeout) describes both.
 
 The complete parameter record stays allocation-free and `Copy`. Its validated parameter projection stores
 whole seconds and subsecond nanoseconds in eight bytes; every permitted duration, through
@@ -706,9 +774,9 @@ While the gate is closed:
   that holds a domain paused when the gate closes still completes, and its pause ends in the
   licensing stop's request instead of a resume. A domain another operation holds begins its
   licensing stop once that operation releases it, still forced at the same instant.
-- Planning refuses `START`, a transactional `START` and `RESTORE ... RESUME` with
-  `licensing stopped processing`. Consensus refuses every other change that would make a domain
-  run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
+- `START` and `RESTORE ... RESUME` are refused with `licensing stopped processing`, and consensus
+  checks the gate again in the write that starts a domain. Consensus refuses every other change
+  that would make a domain run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
   while it applied leaves its domains stopped with the licensing cause, and its report shows them
   stopped by licensing.
 - Sessions, `DESCRIBE`, `SHOW`, `BACKUP`, `ALTER`, `UPLOAD RESOURCE`, `CREATE USER` and the
@@ -797,7 +865,10 @@ seconds by default. A compatible leader's heartbeat is shorter than twice the fo
 slowest heartbeat a compatible leader sends stays within a third of the follower's minimum
 election timeout. Gossip derives its failure detector the same way: it assumes ten gossip
 intervals between a peer's heartbeats until it has observed some, and takes no gap longer than
-twenty gossip intervals as a sample, 5 and 10 seconds by default.
+twenty gossip intervals as a sample, 5 and 10 seconds by default. A stopping node keeps gossiping
+until two gossip intervals, 1 second by default, have passed since it advertised that it is
+terminating, so its peers hear the advertisement before it leaves
+([Terminal Teardown](shutdown.md#terminal-teardown)).
 
 The maximum Raft election timeout also bounds the leader lease and a heartbeat's response wait.
 The interval still schedules heartbeats; an answer later than one interval but inside the lease
@@ -833,8 +904,7 @@ must each fit the total admission budget. Change related values in one statement
 combination publishes nothing. The unfold limit is a positive 32-bit record count, independent
 of the maximum declared emitter batch size.
 
-Both domain drain and gate budgets must independently fit every admitted node's local drain and
-shutdown budgets. Parameter transitions capture those capacity claims in their commit fence;
+Both domain drain and gate budgets must independently fit every admitted node's shutdown timeout. Parameter transitions capture those capacity claims in their commit fence;
 a concurrently changed claim requires revalidation. A node joining or restarting with insufficient
 local budgets refuses the selected committed policy before readiness. Departed membership retains
 its claim until `DROP NODE`, so increasing lifecycle policy may require updating that node or
@@ -937,7 +1007,8 @@ It refuses to start at the first check that fails, exiting with status `1` and
    against the CPU claim and the executor's workers, and the consensus append window against the
    largest replication batch. Every memory pool counts once, including independent active state
    reads and retained state-read cache. Their total plus producer and consumer node credit and the
-   configured node and consensus database caches must fit known memory.
+   configured node and consensus database caches must fit known memory. The databases' memtables
+   are not part of this total.
    A failed detector leaves capacity unknown and uses the declared capacity-independent defaults.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each
@@ -975,7 +1046,10 @@ smaller refuses to start with the same refusal and exit status. Provision a larg
 smaller quotas on a new cluster, or change an existing cluster's committed quotas through
 `ALTER CLUSTER SET` before joining it. The measured size of the database volume also enters the
 node's committed claim, so `ALTER CLUSTER SET` cannot raise a quota above it while the node stays
-admitted. A node that passes the preflight logs
+admitted. Against the same policy, after the volume, the node also checks that its drain and
+shutdown budgets hold the domain drain and gate budgets, and that `NODE_UNAVAILABILITY_TIMEOUT`
+exceeds its `--control-plane-health-probe-interval` plus the probe timeout, a tenth of the timeout.
+Either refusal stops the start with the same exit status. A node that passes the preflight logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
 volumes, the restore-staging quota it resolved and the properties it detected.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
@@ -1273,7 +1347,7 @@ describes, defaults included.
 | `--transaction-idle-timeout`, `--transaction-tombstone-retention`, `--transaction-max-statements`, `--transaction-max-source-bytes`, `--transaction-max-open` | cluster parameter | transaction limits |
 | `--command-retry-validity`, `--command-execution-capacity` | cluster parameter | command execution |
 | `--memory-high-watermark`, `--memory-low-watermark`, `--memory-pressure-check-interval`, `--memory-pressure-resume-jitter` | node capability | memory pressure |
-| `--drain-timeout`, `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
+| `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio`, `--otel-trace-export-timeout`, `--otel-trace-export-interval`, `--otel-trace-queue-capacity`, `--otel-trace-export-batch-spans` | node capability | trace export |
 | `--cpu-count`, `--memory-limit`, `--node-detection-timeout` | node capability | capacity |
@@ -1307,8 +1381,10 @@ not alter a graph's stored execution contract. Each flag has an environment twin
 | `--vm-regex-search-cache-bytes` | 2 MiB | positive, addressable lazy-DFA cache per compiled regex |
 | `--vm-dynamic-pattern-cache-capacity` | 64 patterns | positive, per call site and compiled program |
 | `--vm-pattern-sets-per-batch` | 64 sets | positive, per dynamic `contains_any` call and batch |
-| `--wasm-stack-bytes` | 512 KiB | positive, addressable stack per WASM invocation |
+| `--wasm-stack-bytes` | 512 KiB | positive stack a guest's own frames may use in one call; with the fixed 1.5 MiB host allowance beside it, the stack each guest call runs on must be addressable |
 | `--wasm-memory-reservation-bytes` | 4 GiB on 64-bit hosts; 10 MiB on 32-bit hosts | virtual address reservation per guest memory; zero permits relocatable growth |
+| `--wasm-memory-guard-bytes` | 32 MiB on 64-bit hosts; 64 KiB on 32-bit hosts | unmapped guard region on each side of every guest memory; compiled guest code skips the bounds check of an access whose static offset falls inside it |
+| `--wasm-memory-growth-reservation-bytes` | 2 GiB on 64-bit hosts; 1 MiB on 32-bit hosts | extra address space a guest memory reserves to grow into when it is larger than its reservation or moves to grow past it |
 | `--udf-watchdog` | 5 s | positive; each call of a compiled Roto UDF that returns later fails its whole batch |
 | `--connector-retry-multiplier` | 2 | positive multiplier applied between reconnect attempts |
 | `--connector-retry-jitter-percent` | 0 | 0 through 100 percent added to the next multiplied delay, within the declared cap |
@@ -1331,7 +1407,14 @@ values may differ during a rolling restart.
 
 WASM parallel compilation is explicitly disabled: independent module compilations already run
 on bounded Bulk workers, so nested compilation fan-out cannot escape that admission boundary.
-Stack and address reservation do not replace a processor's declared linear-memory or fuel limits.
+Wasmtime runs every guest call on a stack of its own. That call stack is derived, never a flag: it
+holds `--wasm-stack-bytes` for the guest's frames and a fixed 1.5 MiB beside them for the host
+functions the guest calls, the headroom every guest call has had. The defaults keep the 2 MiB call
+stack Wasmtime used before Nervix set it. The guard region sits before each guest memory as well as
+after it: a memory that fits in the reservation takes the reservation and two guards, and one that
+has to move to grow takes its current size, the growth reserve and two guards. Stack, address
+reservation, guard and growth reserve do not replace a processor's declared `MAX FUEL`,
+`MAX MEMORY` or `MAX TABLE ELEMENTS`.
 
 `--udf-watchdog` is checked when a Roto UDF call returns: a call that took longer fails its whole
 batch, and each node judges the calls it runs by its own value. It cannot interrupt native code
@@ -1391,20 +1474,19 @@ store, binds a listener or starts a task:
 - A memory limit and a CPU count, when one is given, are above zero, and so is the node detection
   timeout.
 - The node's tags follow the [tag rules](#tags): at most 64, each key once.
-- The drain timeout does not exceed the shutdown timeout, which bounds every drain step. A drain
-  timeout equal to it lets the drain use the whole deadline; the defaults leave time for terminal
-  teardown after the drain.
 - The memory watermarks are set together or not at all, the low one below the high one, and with
   them the check interval is above zero.
 - The trace sample ratio lies between 0 and 1, and a trace export batch holds no more spans than
   the trace queue.
 - A trace collector endpoint, when one is given, is a URI; the empty text is not.
+- The WASM stack is positive, and with the 1.5 MiB host allowance beside it the stack each guest
+  call runs on is addressable. Two WASM memory guards around the larger of the memory reservation
+  and the growth reserve are addressable too.
 
 A value its option cannot read, such as malformed duration text or a sample ratio outside its
 range, ends the process with status `2` as the command line reports it. A relationship that does
 not hold, or a value outside its own bounds, ends the process with status `1` before it opens a
 store, with a message that names the settings involved and their values, such as
-`drain-timeout (60s) must not exceed shutdown-timeout (50s)` or
 `raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at`.
 The defaults satisfy every relationship, and the assertions that keep them doing so remain beside
 them.
@@ -1468,6 +1550,21 @@ a node whose new claim carries a volume the committed quotas do not fit has its 
 refused, and its startup preflight already refuses it, naming the volume's directory. Each claim
 records the size its run measured at start, so grow a node's volume and restart that node before
 raising a quota above its old size.
+
+`NODE_UNAVAILABILITY_TIMEOUT` must exceed every admitted node's
+`--control-plane-health-probe-interval` plus the probe timeout, a tenth of the timeout. A health
+observation stays fresh for the timeout, and a node observes each peer again at most one interval
+plus one probe timeout after its last observation of it. A shorter timeout leaves every
+observation stale before the next one arrives: stale observations no longer keep a peer available
+through a short gossip lapse, and a failing peer's run of failures restarts with each probe, so it
+is never declared unavailable. A transition to such a timeout is refused before anything commits,
+naming the node and the three durations: `node-unavailability-timeout (1s) must exceed node
+'node-1' control-plane-health-probe-interval (1s) plus probe-timeout (100ms), a tenth of
+node-unavailability-timeout`. A departed node's retained claim does not count. The check shares
+the commit fence with node announcements: a node whose new claim carries an interval the committed
+timeout does not fit has its announcement refused, and the node refuses its bootstrap seeds or the
+live committed policy before readiness with the same refusal, naming itself. Raise the timeout
+before lengthening a node's interval, and shorten the interval before lowering the timeout.
 
 Validation and publication share a commit fence. A concurrent model change or parameter change
 invalidates a captured transition before it applies, and validation runs again against the
@@ -1682,8 +1779,8 @@ error. The registered `node-settings-command-line` Bolero property generates val
 every group, scalar and pre-detection relationships held, and optional capability requests, and
 requires them to read back unchanged without losing omission after rendering as
 options, along with every duration and byte quantity. Public scenarios start a real
-`nervix-server` process with a drain timeout above its shutdown timeout or a Raft heartbeat below
-one millisecond and observe the refusal naming the settings, and restart a node of a one-node and a
+`nervix-server` process with a Raft heartbeat below one millisecond, or another relationship that
+does not hold, and observe the refusal naming the settings, and restart a node of a one-node and a
 three-node cluster with such a setting, through the harness step that names a setting for one
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.

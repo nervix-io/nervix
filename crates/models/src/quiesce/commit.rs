@@ -14,10 +14,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
 use super::{ExecutionStepImpactReport, TransactionOperationNumber, TransactionPreviewIdentity};
-use crate::{
-    ClusterNodeIdentity, DomainClockState, DomainSchedule, DomainStartPoint, Model, RelayName,
-    ResourceName,
-};
+use crate::{DomainSchedule, Model, RelayName, ResourceName};
 
 /// One exact Model transition captured by commit admission.
 #[derive(
@@ -45,16 +42,6 @@ pub struct TransactionEntityGatePlan {
     pub relays: Vec<RelayName>,
 }
 
-/// The exact clock start and authority selected while a transaction commit was admitted.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct TransactionResolvedDomainStart {
-    pub start: DomainStartPoint,
-    pub clock: Option<DomainClockState>,
-    pub authority: Option<ClusterNodeIdentity>,
-}
-
 /// The durable decision for one atomic transaction execution step.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -67,10 +54,6 @@ pub enum TransactionCommitStepKind {
         model_gate: TransactionEntityGatePlan,
         ownership_gate: TransactionEntityGatePlan,
     },
-    StartDomain {
-        resolved: TransactionResolvedDomainStart,
-    },
-    StopDomain,
     CreateResource {
         resource: ResourceName,
         labels: crate::EntityLabels,

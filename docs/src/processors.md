@@ -802,6 +802,7 @@ CREATE WASM PROCESSOR normalize_events
   FILE "processor.wasm"
   MAX FUEL 1000000000
   MAX MEMORY 64MiB
+  MAX TABLE ELEMENTS 4096
   BRANCHED BY by_tenant
   TO normalized_events
     SET tenant = tenant,
@@ -817,9 +818,10 @@ from the one version it stores. `SHOW CREATE WASM PROCESSOR` renders that versio
 `DESCRIBE WASM PROCESSOR` reports it.
 
 Generated guest state is immutable across routes. WASM processors do not declare `FLUSH`; guest
-output and guest-requested timeouts own emission cadence. `MAX FUEL` and `MAX MEMORY` are both
-required, in that order immediately after `FILE`. Fuel bounds one logical guest operation, while
-memory bounds the branch instance's Wasmtime linear memory. See
+output and guest-requested timeouts own emission cadence. `MAX FUEL`, `MAX MEMORY` and
+`MAX TABLE ELEMENTS` are all required, in that order immediately after `FILE`. Fuel bounds one
+logical guest operation, memory bounds the branch instance's Wasmtime linear memory, and table
+elements bound the slots of the branch instance's table. See
 [WASM Processor Guests](wasm-processor-guests.md#execution-limits) for exact accounting and
 failure behavior.
 

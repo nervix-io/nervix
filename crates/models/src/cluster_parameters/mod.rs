@@ -108,9 +108,7 @@ pub enum ClusterParameterError {
          remote-relay-instantiation-wait"
     )]
     AckAdmissionWindow,
-    #[error(
-        "{parameter} ({requested:?}) exceeds node '{node}' drain/shutdown budget ({available:?})"
-    )]
+    #[error("{parameter} ({requested:?}) exceeds node '{node}' shutdown timeout ({available:?})")]
     NodeDeadline {
         parameter: ClusterParameterKey,
         node: crate::ClusterNodeName,
@@ -127,6 +125,23 @@ pub enum ClusterParameterError {
         node: crate::ClusterNodeName,
         requested: u64,
         available: u64,
+    },
+    /// A node probes each peer once per health-probe interval and waits at most the probe timeout
+    /// for each answer, while an observation stays fresh for the unavailability timeout. A
+    /// timeout that does not exceed the interval plus the probe timeout lets every observation go
+    /// stale before that node observes the peer again.
+    #[error(
+        "{timeout_name} ({timeout:?}) must exceed node '{node}' {interval_name} \
+         ({health_probe_interval:?}) plus probe-timeout ({probe_timeout:?}), a tenth of \
+         {timeout_name}",
+        timeout_name = ClusterParameterKey::NodeUnavailabilityTimeout,
+        interval_name = crate::HealthProbeInterval::NAME
+    )]
+    NodeHealthProbeInterval {
+        node: crate::ClusterNodeName,
+        timeout: Duration,
+        health_probe_interval: Duration,
+        probe_timeout: Duration,
     },
     #[error("{parameter} must be greater than zero")]
     NonPositiveDuration { parameter: ClusterParameterKey },
@@ -546,8 +561,8 @@ impl ClusterParameterValues {
         RemoteAckTiming::from_parameters(self).validate()
     }
 
-    /// Validate the local lifecycle budgets and database volumes captured in the same commit fence
-    /// as the policy.
+    /// Validate the local lifecycle budgets, database volumes and health-probe intervals captured
+    /// in the same commit fence as the policy.
     pub fn validate_runtime_capabilities<'a>(
         &self,
         records: impl IntoIterator<Item = &'a crate::NodeCapabilityRecord>,
@@ -556,8 +571,39 @@ impl ClusterParameterValues {
             let node = record.identity.node_id();
             self.validate_runtime_budget(node, record.capabilities.shutdown)?;
             self.validate_resource_volume(node, record.capabilities.database_volume_bytes)?;
+            self.validate_health_probe_interval(
+                node,
+                record.operational.control_plane.health_probe_interval(),
+            )?;
         }
         Ok(())
+    }
+
+    /// Refuse an unavailability timeout that the node named `node` cannot observe a peer within
+    /// when it starts a health round every `health_probe_interval`. The timeout must exceed that
+    /// interval plus the probe timeout derived from it, so an observation is still fresh when the
+    /// node observes the peer again.
+    pub fn validate_health_probe_interval(
+        &self,
+        node: &crate::ClusterNodeName,
+        health_probe_interval: Duration,
+    ) -> Result<(), Report<ClusterParameterError>> {
+        let timeout = self.node_unavailability_timeout();
+        let probe_timeout = ProbeTimeout::default_value(self);
+        // A sum beyond any duration cannot be shorter than the timeout either.
+        if let Some(observation_gap) = health_probe_interval.checked_add(probe_timeout)
+            && timeout > observation_gap
+        {
+            return Ok(());
+        }
+        Err(Report::new(
+            ClusterParameterError::NodeHealthProbeInterval {
+                node: node.clone(),
+                timeout,
+                health_probe_interval,
+                probe_timeout,
+            },
+        ))
     }
 
     /// The first resource byte quota a database volume of `volume_bytes` cannot hold. Every node
@@ -601,13 +647,15 @@ impl ClusterParameterValues {
         }))
     }
 
-    /// Apply the same admission contract before a node publishes its incarnation-bound claim.
+    /// Apply the same admission contract before a node publishes its incarnation-bound claim. A
+    /// stopping node moves its units through holds these parameters bound, within its shutdown
+    /// timeout, so neither may exceed that timeout.
     pub fn validate_runtime_budget(
         &self,
         node: &crate::ClusterNodeName,
         shutdown: crate::ShutdownCapabilities,
     ) -> Result<(), Report<ClusterParameterError>> {
-        let available = shutdown.drain_timeout.min(shutdown.shutdown_timeout);
+        let available = shutdown.shutdown_timeout;
         for (parameter, requested) in [
             (
                 ClusterParameterKey::DomainDrainTimeout,

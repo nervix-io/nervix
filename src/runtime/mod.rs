@@ -295,6 +295,7 @@ mod kafka_offset_state;
 mod kafka_offset_transfer;
 mod kafka_start;
 mod local_drain;
+mod local_save;
 mod lookup_hash_map;
 mod lsm_sequence;
 mod materialized_partition_moves;
@@ -559,6 +560,7 @@ use kafka_offset_state::{
     KafkaOffsetStateOriginator, KafkaOffsetStatePersistence, ReplicatedKafkaOffsetState,
 };
 use local_drain::LocalIntake;
+use local_save::NodeSave;
 use lookup_hash_map::{
     LookupHashMapCall, LookupHashMapCallKey, collect_program_field_refs,
     compile_lookup_hash_map_calls, rewrite_lookup_hash_map_program,
@@ -1053,7 +1055,6 @@ pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;
 pub(crate) use ingestors::IngestorStartError;
-pub(crate) use local_drain::LocalGraphDrainOutcome;
 use message_error_decode::DecodeRejections;
 pub(crate) use message_error_decode::{DecodeRejection, TransportPosition};
 pub use nervix_models::{

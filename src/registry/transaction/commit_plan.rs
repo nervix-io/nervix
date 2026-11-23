@@ -18,7 +18,7 @@ use nervix_models::{
     DomainSchedule, OwnershipMoveImpact, OwnershipStateRecoveryOutcome, OwnershipTransition,
     TransactionCommitPlan, TransactionCommitPlanStep, TransactionCommitStepKind,
     TransactionEntityGatePlan, TransactionModelTransition, TransactionOperationNumber,
-    TransactionPreviewIdentity, TransactionResolvedDomainStart,
+    TransactionPreviewIdentity,
 };
 
 use super::{PlannedTransaction, PlannedTransactionStepKind};
@@ -29,7 +29,6 @@ impl PlannedTransaction {
         &self,
         transaction_id: String,
         ownership_transition_ids: &BTreeMap<TransactionOperationNumber, String>,
-        resolved_starts: &BTreeMap<TransactionOperationNumber, TransactionResolvedDomainStart>,
     ) -> TransactionCommitPlan {
         let steps = self
             .steps
@@ -40,7 +39,6 @@ impl PlannedTransaction {
                     step.impact.operations().first(),
                     step.impact.planned().effects.ownership_moves.as_slice(),
                     ownership_transition_ids,
-                    resolved_starts,
                 ),
             })
             .collect();
@@ -61,7 +59,6 @@ impl PlannedTransactionStepKind {
         operation: TransactionOperationNumber,
         ownership_moves: &[OwnershipMoveImpact],
         ownership_transition_ids: &BTreeMap<TransactionOperationNumber, String>,
-        resolved_starts: &BTreeMap<TransactionOperationNumber, TransactionResolvedDomainStart>,
     ) -> TransactionCommitStepKind {
         let ownership_transition_id = ownership_transition_ids.get(&operation).map(String::as_str);
         match self {
@@ -82,13 +79,6 @@ impl PlannedTransactionStepKind {
                     ownership_gate: plan.ownership_gate.commit_gate_plan(),
                 }
             }
-            Self::StartDomain { .. } => {
-                let resolved = resolved_starts.get(&operation).cloned().verified(
-                    "commit preparation resolves every start step in this same complete plan",
-                );
-                TransactionCommitStepKind::StartDomain { resolved }
-            }
-            Self::StopDomain => TransactionCommitStepKind::StopDomain,
             Self::CreateResource {
                 resource,
                 labels,
@@ -109,9 +99,9 @@ impl PlannedTransactionStepKind {
                 request,
                 schedule,
             } => TransactionCommitStepKind::ResetWasmState {
-                reset: Box::new(reset.clone()),
+                reset: reset.clone(),
                 request: request.clone(),
-                schedule: Box::new(schedule.clone()),
+                schedule: schedule.clone(),
             },
         }
     }

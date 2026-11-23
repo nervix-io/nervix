@@ -188,6 +188,13 @@ Feature: WebSockets connection declarations
         'handshake_buffer_capacity' = '65536'
       };
       """
+    When these Plexus statements fail with "WEBSOCKETS client 'socket' in domain '{{domain}}' cannot use its CONFIG: 'write_buffer_size' must be at most 4294967295"
+      """
+      CREATE WEBSOCKETS CLIENT socket CONFIG {
+        'endpoint' = 'ws://websocket.nervix.test/events',
+        'write_buffer_size' = '4294967296'
+      };
+      """
     When these Plexus statements fail with "WEBSOCKETS client 'socket' in domain '{{domain}}' cannot use its CONFIG: 'endpoint' must not carry user information"
       """
       CREATE WEBSOCKETS CLIENT socket CONFIG {
@@ -256,6 +263,7 @@ Feature: WebSockets connection declarations
       handshake_buffer_capacity: 16 (default)
       max_frame_size: 16777216 (default)
       max_message_size: 67108864 (default)
+      write_buffer_size: 131072 (default)
       """
     And the last command output does not contain
       """

@@ -56,7 +56,9 @@ use super::{
     session_service::{SessionServiceImpl, conflicting_reference, expired_reference},
     statement_routing::is_persistent_statement,
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
-    transaction::{is_queueable_transaction_statement, transaction_statement_label},
+    transaction::{
+        TransactionQueueRefusal, is_queueable_transaction_statement, transaction_statement_label,
+    },
 };
 
 #[cfg(feature = "testing")]
@@ -368,12 +370,8 @@ impl PersistentCommandRequest {
                             PersistentCommandRequestError::MissingTransactionPosition,
                         ));
                     };
-                    if !is_queueable_transaction_statement(statement) {
-                        durable_operations.push(
-                            CommandExecutionTransactionOperation::RefuseUnqueueable {
-                                statement_label: transaction_statement_label(statement).to_owned(),
-                            },
-                        );
+                    if let Some(refusal) = TransactionQueueRefusal::of(statement) {
+                        durable_operations.push(refusal.durable_operation());
                         continue;
                     }
                     durable_operations.push(CommandExecutionTransactionOperation::Queue(Box::new(
@@ -808,6 +806,18 @@ impl SessionServiceImpl {
                 }
             }
             PersistentCommandRequestBody::Statement {
+                source: _,
+                statement: Statement::StartDomain(start),
+            } => {
+                request.domain.as_ref().ok_or_else(|| {
+                    Box::new(command_error("no active domain selected".to_string()))
+                })?;
+                CommandExecutionEffect::StartDomain {
+                    start: start.clone(),
+                    started_at: None,
+                }
+            }
+            PersistentCommandRequestBody::Statement {
                 source,
                 statement: Statement::StopDomain(stop),
             } => {
@@ -1035,6 +1045,9 @@ impl SessionServiceImpl {
                 start_version,
                 ..
             } => Box::pin(self.execute_stop(execution, stop, start_version)).await,
+            CommandExecutionEffect::StartDomain { start, .. } => {
+                Box::pin(self.execute_start(execution, start)).await
+            }
             CommandExecutionEffect::Statement { source, statement } => match *statement {
                 Statement::Backup(backup) => {
                     return Box::pin(self.execute_backup(execution, backup)).await;
@@ -1836,6 +1849,100 @@ mod tests {
                     expected_preview: None
                 },
             ]
+        );
+    }
+
+    /// `START` and `STOP` queued in a transaction keep only their typed refusals, after the
+    /// statements queued before them and before the operations that follow.
+    #[test]
+    fn queued_start_and_stop_keep_only_their_lifecycle_refusals() {
+        let queued = |position: usize, source: &str, statement: Statement| {
+            SessionCommandOperation::Queue(PendingSessionCommand {
+                request_reference: CommandExecutionReference::parse(format!(
+                    "transaction.request.{position}"
+                ))
+                .assured("the reference is valid"),
+                expected_transaction_position: Some(position),
+                source: source.to_owned(),
+                statement: ClientStatement::Server(statement),
+                domain: Some(domain()),
+            })
+        };
+        let resource = Statement::CreateResource(CreateStatement::new(
+            nervix_models::CreateResource {
+                identifier: nervix_models::ResourceName::parse("bundle")
+                    .assured("the resource name is valid"),
+                labels: nervix_models::EntityLabels::default(),
+            },
+            false,
+        ));
+        let request = PersistentCommandRequest::transaction(
+            &[
+                queued(0, "CREATE RESOURCE bundle", resource.clone()),
+                queued(
+                    1,
+                    "START",
+                    Statement::StartDomain(nervix_models::StartDomain {
+                        start: nervix_models::DomainStartPoint::Resume,
+                    }),
+                ),
+                queued(
+                    2,
+                    "STOP",
+                    Statement::StopDomain(nervix_models::StopDomain::default()),
+                ),
+                SessionCommandOperation::Commit {
+                    expected_preview: None,
+                },
+            ],
+            domain(),
+            "BEGIN; CREATE RESOURCE bundle; START; STOP; COMMIT",
+            None,
+            CommandExecutionTransactionTarget::New {
+                id: "fixture".to_owned(),
+                activity: nervix_consensus::TransactionActivity::from_timeout(
+                    Timestamp::from_unix_nanos(1),
+                    Duration::from_secs(30),
+                ),
+            },
+        )
+        .assured("the request preserves the transaction prefix and its refusals");
+        let PersistentCommandRequestBody::Transaction(request) = request.body else {
+            panic!("the request is a transaction")
+        };
+        assert_eq!(
+            request.operations,
+            vec![
+                CommandExecutionTransactionOperation::Queue(Box::new(
+                    nervix_consensus::TransactionStatementRequest {
+                        request_reference: CommandExecutionReference::parse(
+                            "transaction.request.0"
+                        )
+                        .assured("the reference is valid"),
+                        expected_position: 0,
+                        source: "CREATE RESOURCE bundle".to_owned(),
+                        statement: resource,
+                    }
+                )),
+                CommandExecutionTransactionOperation::RefuseDomainLifecycle {
+                    command: nervix_models::DomainLifecycleCommand::Start
+                },
+                CommandExecutionTransactionOperation::RefuseDomainLifecycle {
+                    command: nervix_models::DomainLifecycleCommand::Stop
+                },
+                CommandExecutionTransactionOperation::Commit {
+                    expected_preview: None
+                },
+            ]
+        );
+        let answer = TransactionQueueRefusal::DomainLifecycle {
+            command: nervix_models::DomainLifecycleCommand::Stop,
+        }
+        .answer();
+        assert!(!answer.succeeded());
+        assert_eq!(
+            answer.message,
+            "STOP cannot be queued in a transaction; START and STOP run on their own, after COMMIT"
         );
     }
 

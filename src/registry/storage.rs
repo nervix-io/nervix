@@ -1329,6 +1329,12 @@ struct ModelStorage {
     index: Keyspace,
 }
 
+/// The options a keyspace of this store is created with. The engine records them on creation
+/// and reuses the recorded memtable size on every later open.
+fn keyspace_options() -> KeyspaceCreateOptions {
+    KeyspaceCreateOptions::default().max_memtable_size(nervix_models::KEYSPACE_MEMTABLE_BYTES)
+}
+
 impl ModelStorage {
     /// Typed reads sharing one MVCC view, for inspection that resolves another Model.
     fn get_at<M: UniquelyKindedModel>(
@@ -1359,7 +1365,7 @@ impl ModelStorage {
 
     fn from_database(db: Database) -> Result<Self, Report<RegistryError>> {
         let index = db
-            .keyspace("models", KeyspaceCreateOptions::default)
+            .keyspace("models", keyspace_options)
             .change_context(RegistryError::OpenKeyspace)?;
 
         Ok(Self { db, index })
@@ -1663,7 +1669,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX DURATIONS";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX WASM TBLS";
 #[cfg_attr(
     nervix_lint,
     nervix::constant(

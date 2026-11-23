@@ -50,6 +50,7 @@ Feature: Resource version bindings
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -166,6 +167,7 @@ Feature: Resource version bindings
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -411,6 +413,7 @@ Feature: Resource version bindings
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value

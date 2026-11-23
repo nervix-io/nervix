@@ -23,13 +23,13 @@ Feature: Node settings
       | 1            | 4294967294s 601000000ns | 136years 1month 5days 19h 54m 38s 601ms       |
       | 3            | 4294967294s 601000000ns | 136years 1month 5days 19h 54m 38s 601ms       |
 
-  Scenario Outline: A node given a drain timeout its shutdown timeout cannot hold refuses to start on a cluster of <cluster_size>
+  Scenario Outline: A node given a heartbeat below the millisecond consensus runs timings at refuses to start on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And node "node-<cluster_size>" is stopped
-    And node-<cluster_size> starts with drain-timeout = 5m
+    And node-<cluster_size> starts with raft-heartbeat-interval = 500us
     When node "node-<cluster_size>" attempts to start
-    Then node "node-<cluster_size>" refused to start because "drain-timeout (300s) must not exceed shutdown-timeout (240s)"
-    Given node-<cluster_size> starts with drain-timeout = 1m
+    Then node "node-<cluster_size>" refused to start because "raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at"
+    Given node-<cluster_size> starts with raft-heartbeat-interval = 200ms
     When node "node-<cluster_size>" is started
     Then node "node-<cluster_size>" eventually observes a stable leader
 
@@ -38,13 +38,13 @@ Feature: Node settings
       | 1            |
       | 3            |
 
-  Scenario Outline: A node given a heartbeat below the millisecond consensus runs timings at refuses to start on a cluster of <cluster_size>
+  Scenario Outline: A node given an interconnect connection receive window below the 65,535 bytes HTTP/2 opens every connection with refuses to start on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And node "node-<cluster_size>" is stopped
-    And node-<cluster_size> starts with raft-heartbeat-interval = 500us
+    And node-<cluster_size> starts with interconnect-connection-receive-window = 16KiB
     When node "node-<cluster_size>" attempts to start
-    Then node "node-<cluster_size>" refused to start because "raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at"
-    Given node-<cluster_size> starts with raft-heartbeat-interval = 200ms
+    Then node "node-<cluster_size>" refused to start because "interconnect-connection-receive-window (16KiB) must be from 65535 through 2147483647 bytes"
+    Given node-<cluster_size> starts with interconnect-connection-receive-window = 65535B
     When node "node-<cluster_size>" is started
     Then node "node-<cluster_size>" eventually observes a stable leader
 

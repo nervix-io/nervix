@@ -230,6 +230,7 @@ CREATE WASM PROCESSOR chaos_counter
   FILE 'processors/branch-counter.wat'
   MAX FUEL 100000000
   MAX MEMORY 16MiB
+  MAX TABLE ELEMENTS 0
   BRANCHED BY chaos_state_branch
   TO chaos_counted
     SET event_id = event_id,

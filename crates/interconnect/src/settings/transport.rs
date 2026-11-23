@@ -40,12 +40,11 @@ pub enum TransportSettingsError {
         setting: &'static str,
         value: Duration,
     },
-    #[error(
-        "{setting} ({value}) must be positive and fit HTTP/2's {maximum}-byte flow-control window"
-    )]
+    #[error("{setting} ({value}) must be from {minimum} through {maximum} bytes")]
     Window {
         setting: &'static str,
         value: ByteUnit,
+        minimum: u64,
         maximum: u64,
     },
     #[error(
@@ -179,7 +178,8 @@ impl SettingDefinition for MaxReconnectBackoff {
     }
 }
 
-/// The HTTP/2 receive credit this node advertises.
+/// The HTTP/2 receive credit each stream of a non-bulk connection advertises: what a peer may send
+/// on it before the node reads.
 pub struct StreamReceiveWindow;
 impl SettingDefinition for StreamReceiveWindow {
     type Class = NodeCapabilities;
@@ -192,18 +192,16 @@ impl SettingDefinition for StreamReceiveWindow {
         ByteUnit::Kibibyte(64)
     }
     fn validate(value: &ByteUnit, _: &()) -> Result<(), Report<Self::Error>> {
-        if value.as_u64() == 0 || value.as_u64() > super::MAX_HTTP2_WINDOW_BYTES {
-            return Err(Report::new(TransportSettingsError::Window {
-                setting: Self::NAME,
-                value: *value,
-                maximum: super::MAX_HTTP2_WINDOW_BYTES,
-            }));
-        }
-        Ok(())
+        TransportSettings::validate_window(Self::NAME, *value, 1)
     }
 }
 
-/// The HTTP/2 receive credit this node advertises.
+/// The HTTP/2 receive credit a non-bulk connection advertises across all of its streams: what a
+/// peer may send on the connection before the node reads.
+///
+/// HTTP/2 opens every connection with a window of
+/// [`HTTP2_INITIAL_CONNECTION_WINDOW_BYTES`](super::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES) that a
+/// receiver can only raise, so a smaller credit would bound nothing and is refused.
 pub struct ConnectionReceiveWindow;
 impl SettingDefinition for ConnectionReceiveWindow {
     type Class = NodeCapabilities;
@@ -216,14 +214,11 @@ impl SettingDefinition for ConnectionReceiveWindow {
         ByteUnit::Kibibyte(256)
     }
     fn validate(value: &ByteUnit, _: &()) -> Result<(), Report<Self::Error>> {
-        if value.as_u64() == 0 || value.as_u64() > super::MAX_HTTP2_WINDOW_BYTES {
-            return Err(Report::new(TransportSettingsError::Window {
-                setting: Self::NAME,
-                value: *value,
-                maximum: super::MAX_HTTP2_WINDOW_BYTES,
-            }));
-        }
-        Ok(())
+        TransportSettings::validate_window(
+            Self::NAME,
+            *value,
+            super::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES,
+        )
     }
 }
 
@@ -365,6 +360,25 @@ impl TransportSettings {
             }));
         }
         Ok(())
+    }
+
+    /// Refuses a receive window HTTP/2 cannot advertise, or one below `minimum`, the smallest
+    /// window that bounds what the setting declares.
+    fn validate_window(
+        setting: &'static str,
+        value: ByteUnit,
+        minimum: u64,
+    ) -> Result<(), Report<TransportSettingsError>> {
+        let maximum = super::MAX_HTTP2_WINDOW_BYTES;
+        if (minimum..=maximum).contains(&value.as_u64()) {
+            return Ok(());
+        }
+        Err(Report::new(TransportSettingsError::Window {
+            setting,
+            value,
+            minimum,
+            maximum,
+        }))
     }
 
     fn connection_slots_per_peer() -> usize {
@@ -512,16 +526,11 @@ impl TransportSettings {
         }
     }
 
-    pub fn options(
-        &self,
-        peer_receive: Option<super::PeerReceiveSettings>,
-        drain_timeout: Option<Duration>,
-    ) -> TransportOptions {
+    /// The transport's options. Its drain at shutdown waits for the requests still in flight for
+    /// at most the request timeout, the bound each of those requests already has.
+    pub fn options(&self, peer_receive: Option<super::PeerReceiveSettings>) -> TransportOptions {
         let request_timeout = *self.request_timeout.value();
-        let shutdown_drain_timeout = match drain_timeout {
-            Some(bound) => bound.min(request_timeout),
-            None => request_timeout,
-        };
+        let shutdown_drain_timeout = request_timeout;
         TransportOptions {
             accept_retry_delay: Setting::<crate::AcceptRetryDelay>::resolve(None, &())
                 .assured("the declared accept-retry default is positive and clock-representable"),
@@ -598,7 +607,7 @@ mod tests {
             ..Default::default()
         })
         .assured("ten peers fit every capacity");
-        let options = settings.options(None, None);
+        let options = settings.options(None);
         assert_eq!(options.max_connections, 120);
         assert_eq!(options.request_quota, 20);
         assert_eq!(options.append_request_quota, 20);
@@ -610,7 +619,7 @@ mod tests {
             ..Default::default()
         })
         .assured("a four-request reserve fits the incoming queue");
-        assert_eq!(explicit.options(None, None).append_request_quota, 4);
+        assert_eq!(explicit.options(None).append_request_quota, 4);
         assert_eq!(explicit.values().request_quota, Some(4));
     }
 
@@ -648,6 +657,83 @@ mod tests {
             },
         ] {
             assert!(TransportSettings::resolve(values).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn a_connection_receive_window_starts_at_the_window_http2_opens_every_connection_with() {
+        let minimum = super::super::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES;
+        let maximum = super::super::MAX_HTTP2_WINDOW_BYTES;
+        let window = |bytes| TransportSettingValues {
+            connection_receive_window: Some(ByteUnit::Byte(bytes)),
+            ..Default::default()
+        };
+        for accepted in [
+            minimum,
+            ConnectionReceiveWindow::default_value(&()).as_u64(),
+            maximum,
+        ] {
+            let settings = TransportSettings::resolve(window(accepted)).assured(
+                "a connection window from RFC 9113's initial window through its largest is valid",
+            );
+            assert_eq!(
+                settings.values().connection_receive_window,
+                Some(ByteUnit::Byte(accepted))
+            );
+        }
+        let below = minimum
+            .checked_sub(1)
+            .assured("RFC 9113's initial window is positive");
+        let above = maximum
+            .checked_add(1)
+            .assured("one byte above HTTP/2's largest window fits u64");
+        for refused in [0, 1, below, above] {
+            let error = TransportSettings::resolve(window(refused))
+                .err()
+                .assured("a connection window outside RFC 9113's range is refused");
+            assert_eq!(
+                error.current_context(),
+                &TransportSettingsError::Window {
+                    setting: ConnectionReceiveWindow::NAME,
+                    value: ByteUnit::Byte(refused),
+                    minimum,
+                    maximum,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_stream_receive_window_may_be_any_positive_window_http2_can_advertise() {
+        let maximum = super::super::MAX_HTTP2_WINDOW_BYTES;
+        let window = |bytes| TransportSettingValues {
+            stream_receive_window: Some(ByteUnit::Byte(bytes)),
+            ..Default::default()
+        };
+        for accepted in [1, maximum] {
+            let settings = TransportSettings::resolve(window(accepted))
+                .assured("a positive stream window HTTP/2 can advertise is valid");
+            assert_eq!(
+                settings.values().stream_receive_window,
+                Some(ByteUnit::Byte(accepted))
+            );
+        }
+        let above = maximum
+            .checked_add(1)
+            .assured("one byte above HTTP/2's largest window fits u64");
+        for refused in [0, above] {
+            let error = TransportSettings::resolve(window(refused))
+                .err()
+                .assured("an empty stream window, or one HTTP/2 cannot advertise, is refused");
+            assert_eq!(
+                error.current_context(),
+                &TransportSettingsError::Window {
+                    setting: StreamReceiveWindow::NAME,
+                    value: ByteUnit::Byte(refused),
+                    minimum: 1,
+                    maximum,
+                }
+            );
         }
     }
 }

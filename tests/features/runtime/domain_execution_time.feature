@@ -294,6 +294,7 @@ Feature: Domain execution time
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO generated_events
           SET value = value

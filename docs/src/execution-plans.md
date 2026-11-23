@@ -84,7 +84,10 @@ and values, with one checkpoint owner for each historical instance.
 
 The source digest identifies which schedule produced the installed revision. A planned change
 also carries its predecessor digest, so an incremental application is attempted only when the
-currently installed revision is the predecessor it was planned against. The handoff fingerprint
+currently installed revision is the predecessor it was planned against. Application plans each
+domain's change from the schedule that domain's execution runs ([Installation And
+Publication](#installation-and-publication)), so the two differ only for an execution installed
+outside schedule application. The handoff fingerprint
 has a separate purpose: ownership preparation and activation must agree on the exact committed
 schedule, including its assignments and state generations. Planning preserves its established
 encoding and does not substitute the source digest for it.
@@ -256,11 +259,21 @@ owns compilation lifetime, selected-row execution, and VM failure behavior.
 
 ## Installation And Publication
 
-Application serializes local installations. It plans against the last successfully applied
-schedule, then passes the typed cluster revision, domain lifecycle state, and clock authorities
-to the runtime. The runtime records a cluster revision as applied only after its schedule
-application succeeds. An unsuccessful attempt leaves that revision unapplied and keeps the same
-predecessor for a retry, including after a local WASM reset operation. A node starting after a
+Application serializes local installations. It plans each domain's change against the committed
+schedule that domain's execution runs, then passes the typed cluster revision, domain lifecycle
+state, and clock authorities to the runtime. The runtime applies the revision one domain after
+another and records it as applied only after its schedule application succeeds for every domain.
+An unsuccessful attempt leaves that revision unapplied, including after a local WASM reset
+operation, while a domain the attempt had already brought to the revision runs it. After every
+attempt, successful or not, application reads the source digest of each domain execution the
+runtime holds and records for that domain the committed schedule that produced it: the planned
+revision's schedule, or the one the domain kept. The next attempt, of the same revision or a later
+one, therefore plans every domain from the revision it runs, and a later revision reaches a domain
+a failed attempt moved forward in place, as it reaches every other domain. A domain without an
+execution records nothing and is planned as a domain the node does not run yet. So is a domain
+whose execution runs a revision schedule application did not install, which application reports
+as a warning: its next change replaces its execution
+([Incremental Changes And Rebuilds](#incremental-changes-and-rebuilds)). A node starting after a
 forced ending first establishes its committed-state catch-up fence before installing execution;
 an earlier owner's local state cannot make it act under an obsolete assignment.
 
@@ -379,11 +392,26 @@ contains only typed runtime instructions:
 | Entity labels only | Publish the committed metadata while retaining execution, state, allowances, bindings, connections, buffers and ACK obligations. No pause, force flush, rebuild or relocation is required. |
 | Dynamic | Apply the typed capacity, processor, WASM reset, emitter flush, VHOST TLS or retired partition transition update; bind and publish the desired processor and error plans. A retired transition gates nothing and force-flushes nothing: each local unit the schedule keeps ends its claims in its own task, and each holding unit ends with its placement tasks. |
 | Entity swap | Fence affected input relays, force-flush as required, rebind reassigned placement and selected node tasks, then publish the desired revision and release the gates. A new partition epoch first gives every relay of the branch new boundary services for the new count on the same fan-out. Unaffected nodes and their branch state stay in place. |
-| Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a missing predecessor, and lifecycle changes can require this path. |
+| Rebuild | Stop the preceding domain execution and install the complete desired running or passive revision. Domain-wide changes, a domain this node does not run yet, an execution installed outside schedule application, and lifecycle changes can require this path. |
 
 The schedule classifier retains Model-based change-aspect and quiescence decisions in the
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
 and gate relays. It does not reclassify the new schedule.
+
+The force flush of an entity swap covers the domain's full current execution graph, as engaging any
+entity gate does ([Transaction Quiescence](transaction-quiescence.md)), on every node that applies
+the swap, including a node whose own units the change leaves in place. A failover or forced
+recovery that moves a relay off a node that stopped answering is such a swap: once its gates are
+quiescent, every node that applies it sends what its routes hold, whatever their `FLUSH EACH`
+cadence. When the moved relay is one output of a junction on a node that stays live, a row the
+junction's other route holds therefore leaves when that node applies the recovery, before the
+route's cadence. The flush sends it once, in its own branch, and loses nothing. When the row's
+copy for the moved relay was delivered before its owner stopped answering, a source waiting for
+the row's acknowledgement hears that it completed. A copy that the lost owner still held follows
+failover's at-least-once rule instead ([Planned Ownership Handoffs And
+Failover](control-plane.md#planned-ownership-handoffs-and-failover)). A route's flush is an upper
+bound only ([Plexus Overview](plexus-overview.md#statement-catalog)), so this early delivery is the
+contract, not a loss.
 
 An entity swap that fails on a node never rebuilds the domain there. The swap records each part of
 the running execution it stops, replaces or starts, before the operation that can fail after it.
@@ -412,8 +440,11 @@ replacement only after the deletion.
 The swap then fails. The node keeps the previous revision as the one it applied, records the
 failure and its reason in its [application progress](./command-completion.md#application-progress),
 and reconciliation applies the committed revision again on its retry cadence. When a failed attempt
-had already applied the revision to some domains, those domains run their desired schedule and take
-no change on the next attempt. A processor swap waits until the previous task has handed every
+had already applied the revision to some domains, those domains run their desired schedule, and
+application reports them. Their next change is planned from that schedule: a retry of the same
+revision changes nothing there, and a later revision reaches them in place, by the change between
+the revision they run and the one it installs, without replacing their execution or cutting the
+work it holds. A processor swap waits until the previous task has handed every
 branch over: each branch stops under its own task stop grace, and no limit covers a whole
 handover. A plan is complete even for a narrow change, so a retry uses the same desired revision
 rather than reconstructing one from live tasks.

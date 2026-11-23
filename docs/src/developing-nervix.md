@@ -632,6 +632,7 @@ compares it with the workflows.
 | `loom` | Check | The Loom models and their weakening qualification |
 | `turmoil` | Check | The Turmoil simulation suite and its replay check |
 | `client-conformance` | Check | The [host-binding](client-host-bindings.md#qualification-and-observability) and independent-client probes and every host suite's cluster tier against one- and three-node clusters, gated by the prepared boundary tiers and packaging smoke. Boundary tiers and Python cluster examples also run in ordinary CI. |
+| `licensing-smoke` | Check, through Licensing Smoke | The [production licensing smoke test](licensing-protocol.md#production-smoke-test): one- and three-node clusters activate the smoke-test account against `licensing.nervix.io`. The Licensing Smoke workflow also runs it nightly on `main` |
 | `bolero-random` | Check, through Bolero | Bolero's randomized properties and corpus replay, which a manual run of the Bolero workflow always runs |
 | `extra-doctests` | Check | Capability doctests |
 | `extra-miri` | Check | Miri over the expiry map and standalone relay channel |
@@ -648,8 +649,9 @@ compares it with the workflows.
 | `book` | Docker Build | A published preview of the book, its PDF and the Plexus agent index, with its links commented on the pull request |
 | `no-docker` | Docker Build | Nothing: it stops the image builds and every job that needs an image, which are `benchmark`, `chaos`, `chaos-soak` and the deployment checks. `book` and every Check job still run |
 
-`chaos`, `chaos-soak`, `benchmark` and `book` act only on a pull request from a branch of this
-repository. `just release-evidence` requires the label of every method in its inventory, which is
+`chaos`, `chaos-soak`, `benchmark`, `book` and `licensing-smoke` act only on a pull request from a
+branch of this repository; `licensing-smoke` needs the repository secret
+`NERVIX_LICENSING_SMOKE_KEY`, which GitHub never gives a fork's pull request. `just release-evidence` requires the label of every method in its inventory, which is
 all of these except `benchmark`, `book` and `no-docker`, so a qualifying revision has run every
 step. It also refuses a revision built with `no-docker`, whose images and deployment checks never
 ran.
@@ -1251,8 +1253,8 @@ request without the label still checks the book's structure and its tooling.
 
 ### Credential Storage Release Note
 
-This revision requires the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_*` consensus namespace
-and `ClusterState` encoding 51. A stored state with a different namespace or encoding fails with
+This revision requires the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_*` consensus namespace
+and `ClusterState` encoding 56. A stored state with a different namespace or encoding fails with
 `invalid consensus record storage; recreate the node's stored state` before user records or log
 entries are decoded. Recreate the node's stored state; no credential conversion is performed.
 User backup records require version 3 and contain the complete typed credential and the user's

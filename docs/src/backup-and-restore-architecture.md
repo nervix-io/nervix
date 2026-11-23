@@ -190,7 +190,7 @@ A stopped cut reads what the domain's stop left on disk. That stop completes onl
 deduplicator and window branch it ended has written what it published last, including a branch
 ended at its stop grace whose snapshot task was still writing, and every materialized relay has
 written what it held once the tasks that change it ended, however long that write outlasts their
-stop grace, as [Draining Admitted Work](./shutdown.md#draining-admitted-work) describes. A stopped
+stop grace, as [Saving What The Node Holds](./shutdown.md#saving-what-the-node-holds) describes. A stopped
 cut that begins as soon as `STOP` returns therefore holds the same keyspaces, windows and
 materialized generations a quiesced cut taken just before the stop held.
 
@@ -805,7 +805,7 @@ generation, and only then clears the domain's in-memory state handles; [Generati
 Storage](#generation-storage) describes the sequence.
 
 The installation gate is a replicated record per restored domain, from the step that creates it.
-While it is closed, consensus refuses `START`, direct or transactional, and every replicated
+While it is closed, consensus refuses `START` and every replicated
 domain or schedule change that would make the domain anything but stopped, so the domain cannot run
 on any node until every node published its complete set. It survives failure, lease
 release and node restart. Recording the apply-models step together with the installed authority

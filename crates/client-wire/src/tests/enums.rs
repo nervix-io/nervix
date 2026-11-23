@@ -20,9 +20,9 @@ use crate::{
     domain_clock::ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
     event::{ALL_NOTICE_KINDS, ALL_NOTICE_LEVELS},
     impact::{
-        ALL_ACTIVATION_ACTIONS, ALL_DOMAIN_LIFECYCLE_ACTIONS, ALL_IMPACT_DIAGNOSTIC_KINDS,
-        ALL_IMPACT_EDGE_KINDS, ALL_MODEL_CHANGE_ASPECTS, ALL_REBUILD_REASONS,
-        ALL_RESOURCE_CATALOG_ACTIONS, ALL_STATE_PURGES,
+        ALL_ACTIVATION_ACTIONS, ALL_IMPACT_DIAGNOSTIC_KINDS, ALL_IMPACT_EDGE_KINDS,
+        ALL_MODEL_CHANGE_ASPECTS, ALL_REBUILD_REASONS, ALL_RESOURCE_CATALOG_ACTIONS,
+        ALL_STATE_PURGES,
     },
     producer::{
         ALL_OUTCOME_UNCERTAINTIES, ALL_PROCESSING_FAILURES, ALL_PRODUCER_ADMISSIONS,
@@ -122,10 +122,6 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
     assert_exact_mapping(
         ALL_RESOURCE_CATALOG_ACTIONS,
         wire::ResourceCatalogAction::ENUM_VALUES,
-    );
-    assert_exact_mapping(
-        ALL_DOMAIN_LIFECYCLE_ACTIONS,
-        wire::DomainLifecycleAction::ENUM_VALUES,
     );
     assert_exact_mapping(ALL_ACTIVATION_ACTIONS, wire::ActivationAction::ENUM_VALUES);
     assert_exact_mapping(ALL_REBUILD_REASONS, wire::RebuildReason::ENUM_VALUES);
@@ -258,10 +254,6 @@ fn every_undeclared_enum_byte_is_refused() {
     assert_undeclared_refused::<nervix_models::ResourceCatalogAction, _>(
         wire::ResourceCatalogAction::ENUM_MAX,
         wire::ResourceCatalogAction,
-    );
-    assert_undeclared_refused::<nervix_models::DomainLifecycleAction, _>(
-        wire::DomainLifecycleAction::ENUM_MAX,
-        wire::DomainLifecycleAction,
     );
     assert_undeclared_refused::<nervix_models::ActivationAction, _>(
         wire::ActivationAction::ENUM_MAX,

@@ -96,13 +96,13 @@ const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
 const KEYSPACE_LOGS: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_logs";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_logs";
 const KEYSPACE_META: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_meta";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_meta";
 const KEYSPACE_STATE_MACHINE: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_state";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_state";
 const KEYSPACE_SNAPSHOT: &str =
-    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_snapshots";
+    "raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_snapshots";
 const KEY_CLUSTER_IDENTITY: &[u8] = b"K";
 const KEY_LICENSING: &[u8] = b"L";
 
@@ -230,10 +230,16 @@ const KEYSPACE_NAMES: [&str; 4] = [
     KEYSPACE_SNAPSHOT,
 ];
 
+/// The options a keyspace of this store is created with. The engine records them on creation
+/// and reuses the recorded memtable size on every later open.
+fn keyspace_options() -> KeyspaceCreateOptions {
+    KeyspaceCreateOptions::default().max_memtable_size(nervix_models::KEYSPACE_MEMTABLE_BYTES)
+}
+
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    ClusterState = 51,
+    ClusterState = 56,
 }
 
 #[derive(Debug)]
@@ -1527,16 +1533,16 @@ impl FjallStore {
                         }
                     }
                     let logs = db
-                        .keyspace(KEYSPACE_LOGS, KeyspaceCreateOptions::default)
+                        .keyspace(KEYSPACE_LOGS, keyspace_options)
                         .map_err(io::Error::other)?;
                     let meta = db
-                        .keyspace(KEYSPACE_META, KeyspaceCreateOptions::default)
+                        .keyspace(KEYSPACE_META, keyspace_options)
                         .map_err(io::Error::other)?;
                     let sm = db
-                        .keyspace(KEYSPACE_STATE_MACHINE, KeyspaceCreateOptions::default)
+                        .keyspace(KEYSPACE_STATE_MACHINE, keyspace_options)
                         .map_err(io::Error::other)?;
                     let snapshot = db
-                        .keyspace(KEYSPACE_SNAPSHOT, KeyspaceCreateOptions::default)
+                        .keyspace(KEYSPACE_SNAPSHOT, keyspace_options)
                         .map_err(io::Error::other)?;
                     let installing = read_key::<u64>(&snapshot, KEY_INSTALLING)?;
                     // An install that was cut short has already cleared the state-machine

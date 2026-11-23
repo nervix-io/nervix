@@ -2,12 +2,12 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** Judging a stopped domain's committed schedule against its node rules when a START
-//!   is committed, moving each unit whose stored node a rule does not admit through the planned
+//! - **Owns.** Judging a stopped domain's committed schedule against its node rules before its
+//!   START commits, moving each unit whose stored node a rule does not admit through the planned
 //!   ownership handoff, and holding the START while some unit has no node its rules admit.
 //! - **Depends on.** The registry's node rule judgement and scheduler, the schedule planning
 //!   snapshot, the planned ownership handoff and the consensus schedule publication.
-//! - **Must not know.** How a transaction plans or commits its steps, or how a client renders the
+//! - **Must not know.** How the START resolves or commits its start, or how a client renders the
 //!   wait.
 
 #![cfg_attr(
@@ -22,10 +22,8 @@ use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_consensus::{DomainPlanningInputs, ReplicatedTransaction};
-use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, DomainStatus, NodeUnitRef, Statement,
-};
+use nervix_consensus::DomainPlanningInputs;
+use nervix_models::{ClusterNodeName, DomainName, DomainSchedule, DomainStatus, NodeUnitRef};
 use nervix_primitives::time::sleep;
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -82,23 +80,15 @@ enum StartPlacement {
 }
 
 impl SessionServiceImpl {
-    /// Before `transaction`, which starts its stopped domain, prepares its commit: moves every
-    /// unit whose stored node a node rule does not admit to one that does, carrying its state
-    /// through the planned ownership handoff, and holds the START, with the domain's mutation
-    /// lease, while some unit has no node its rules admit. A domain that is not stopped, or that no
-    /// node rule constrains, is left to the transaction as it is.
+    /// Before the START of the stopped `domain` commits: moves every unit whose stored node a node
+    /// rule does not admit to one that does, carrying its state through the planned ownership
+    /// handoff, and holds the START, with the domain's mutation lease, while some unit has no node
+    /// its rules admit. A domain that is not stopped, or that no node rule constrains, is left to
+    /// the START as it is.
     pub(in crate::application) async fn place_units_for_start(
         &self,
-        transaction: &ReplicatedTransaction,
+        domain: &DomainName,
     ) -> error_stack::Result<(), StartPlacementError> {
-        let starts = transaction
-            .statements
-            .iter()
-            .any(|queued| matches!(queued.statement, Statement::StartDomain(_)));
-        if !starts {
-            return Ok(());
-        }
-        let domain = &transaction.domain;
         let mut announced_wait = false;
         let mut announced_deferral = false;
         loop {
@@ -290,6 +280,15 @@ impl SessionServiceImpl {
             Ok(handoff) => handoff,
             Err(error) => return Ok(StartPlacementMove::Deferred(error.change_context(moving()))),
         };
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_start_placement_if_armed(
+                self.inner.consensus.local_node_id(),
+                domain,
+                crate::fault_injection::StartPlacementBoundary::Moving,
+            )
+            .await;
         let validated = match self.validate_domain_planning_inputs(inputs).await {
             Ok(()) => planning.validate_eligibility(self).await,
             Err(error) => Err(error),
@@ -301,6 +300,15 @@ impl SessionServiceImpl {
             }
             return Ok(StartPlacementMove::Deferred(error.change_context(moving())));
         }
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_start_placement_if_armed(
+                self.inner.consensus.local_node_id(),
+                domain,
+                crate::fault_injection::StartPlacementBoundary::Publishing,
+            )
+            .await;
         let lease = self.inner.consensus.current_domain_mutation(domain).await;
         if let Err(error) = self
             .inner
@@ -420,36 +428,6 @@ fn start_placement_schedule(
         group.primary_node = primary;
     }
     planned
-}
-
-impl SessionServiceImpl {
-    /// Refuses a START that follows a model change in the same transaction when the schedule
-    /// that change leaves breaks a node rule: its units cannot be moved before the transaction's
-    /// own change commits, so the START would run them where a rule forbids, or wait for a node
-    /// the transaction itself withholds.
-    pub(in crate::application) async fn refuse_start_breaking_node_rules(
-        &self,
-        domain: &DomainName,
-        graph: &ActiveGraph,
-        schedule: &DomainSchedule,
-    ) -> error_stack::Result<(), crate::registry::RegistryError> {
-        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
-        let planning = self
-            .capture_domain_schedule_planning_snapshot(&inputs)
-            .await;
-        let candidates = planning.cluster_nodes().iter().cloned().collect();
-        let judgement = graph.judge_node_rules(
-            domain,
-            schedule,
-            planning.records(),
-            &candidates,
-            ScheduleActivity::Stopped,
-        )?;
-        match judgement.new_breach(domain, &crate::registry::NodeRuleBreaches::default()) {
-            Some(refusal) => Err(refusal),
-            None => Ok(()),
-        }
-    }
 }
 
 #[cfg(test)]

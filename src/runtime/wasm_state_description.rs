@@ -1080,6 +1080,7 @@ mod tests {
                 max_fuel: NonZeroU64::new(1 << 50).assured("a literal fuel limit is nonzero"),
                 max_memory_bytes: NonZeroU64::new(64 << 20)
                     .assured("a literal memory limit is nonzero"),
+                max_table_elements: 4_096,
             },
             init: WasmBranchInit {
                 domain_name: "events".to_string(),

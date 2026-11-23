@@ -2448,6 +2448,7 @@ mod catch_all_kind_tests {
             limits: WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
                 max_memory_bytes: nonzero!(67_108_864u64),
+                max_table_elements: 4_096,
             },
             global_error_policy: GeneralErrorPolicy::Log,
             rejected_state_policy: Default::default(),
@@ -2479,6 +2480,7 @@ mod catch_all_kind_tests {
             limits: WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
                 max_memory_bytes: nonzero!(67_108_864u64),
+                max_table_elements: 4_096,
             },
             global_error_policy: GeneralErrorPolicy::Log,
             rejected_state_policy: Default::default(),
@@ -2488,6 +2490,14 @@ mod catch_all_kind_tests {
         };
         let mut tightened = base.clone();
         tightened.limits.max_fuel = nonzero!(500_000u64);
+        let mut fewer_table_elements = base.clone();
+        fewer_table_elements.limits.max_table_elements = 1;
+        assert_single_aspect(
+            Model::WasmProcessor(base.clone()),
+            Model::WasmProcessor(fewer_table_elements),
+            ModelChangeAspect::WasmLimits,
+            QuiesceLevel::EntityPause,
+        );
         assert_single_aspect(
             Model::WasmProcessor(base),
             Model::WasmProcessor(tightened),

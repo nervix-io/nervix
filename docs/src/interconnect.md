@@ -358,7 +358,8 @@ recovery preparation, confirmation, activation, or reconciliation answers with a
 text is its complete failure chain rather than only the outermost failure, so the coordinator
 reports, for example, a destination WASM guest's classified restore failure with its stage, branch,
 module, and saved state revision. A destination whose own process incarnation has advertised that
-it is terminating refuses a planned-handoff preparation before it validates the request, with
+it is terminating refuses a planned-handoff preparation, and the destination confirmation of a move
+it prepared before it began terminating, before it validates the request, with
 `destination node '<node_id>' is terminating`: the coordinator plans from its gossip view, which can
 still list a stopping peer as eligible, while the destination's own advertisement is authoritative.
 Discard is exact and idempotent over the coordination
@@ -426,13 +427,15 @@ the node holds no report for that stop because it restarted or never ran the dom
 
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
-the sender, carries its remaining drain budget, and moves its scheduled work through planned
+the sender, carries what remains of its shutdown timeout, and moves its scheduled work through planned
 ownership handoffs, and release, which clears the cordon that drain set. The leader acts for
 the node the authenticated connection belongs
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
-and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
-with the leader's account of the action for the stopping node's log, or not the leader, which leaves
-the sender to ask the leader it observes next. A node that does not lead when the request arrives
+and uncordon only itself, and no user credential takes part. The answer is completed; unmoved, with
+the typed reason the units the drain left did not move (nowhere to move, when no other node could
+take any of them, or could have moved); or failed. Each carries the leader's account of the action
+for the stopping node's log. The answer can also be not the leader, which leaves the sender to ask
+the leader it observes next; a leader that is itself turning off answers so too. A node that does not lead when the request arrives
 changes nothing. A leader that loses leadership before completing a drain also answers not the
 leader, logs its interrupted report, and preserves any moves already committed. The next leader
 plans the remaining moves from the current schedule, within the sender's remaining budget. A
@@ -440,8 +443,9 @@ leader that loses its leadership while it writes a release also answers not the 
 clearing a cordon again through the next leader is harmless. The leader runs the action in a service
 task of its own,
 so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
-abandons the request first. For a drain that deadline is what remains of the sender's drain
-timeout; the leader also uses the budget carried by the drain action to bound each unit's gate,
+abandons the request first. Each request waits at most the commands pool's transfer deadline, and the
+sender asks again of the leader it observes next when a request goes unanswered; what remains of the
+sender's shutdown timeout bounds every drain request it sends. The leader also uses the budget carried by the drain action to bound each unit's gate,
 state preparation, and activation waits, leaving a window for later units and the sender's in-place
 drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
@@ -516,8 +520,10 @@ the same fingerprint as every other consensus and prerequisite shape.
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
 It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
-record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
-transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
+record retains, the typed `LicensingStop` refusal of a change that would run a domain, the start of
+a domain included, and the `stopped` admission refusal state. It fences the domain start a `START`
+command commits on its own, with the start revision its execution records, and transaction commit
+plans and step effects that carry no lifecycle step.
 
 The fingerprint also covers the `DURATION` type: the Models that declare it or write a duration
 literal, and the duration values branch keys, relay payloads, materialized records and other
@@ -539,8 +545,11 @@ The current fingerprint includes the conditional orphaned model-pause recovery c
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 It also covers the node record announcement: the `consensus.announce_node_record` request and the
 Raft command that commit a node's capacity claim, detected properties and tags as one record.
-That claim carries the size of the volume holding the node's database directory, and a parameter
-conflict can carry the typed refusal of a resource quota above an admitted node's volume.
+That claim carries the size of the volume holding the node's database directory and the open-file
+limit of each of the node's databases, and a parameter conflict can carry the typed refusal of a
+resource quota above an admitted node's volume or of a node-unavailability timeout that an admitted
+node's health-probe interval does not fit. Its listener bounds carry the gRPC listener's HTTP/2
+windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup. The fingerprint also covers
 the opening of a client consumer stream with the largest delivery chunk its serving node announces.
@@ -568,13 +577,15 @@ descriptors, so checkpoint identity and inspection operations advance as one wir
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the `parametrizer`
-Model kind, an inferencer's required `WORKING MEMORY` policy, the typed `payload` expression scope,
+Model kind, an inferencer's required `WORKING MEMORY` policy, a WASM processor's required
+`MAX TABLE ELEMENTS`, the typed `payload` expression scope,
 typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and
 consensus commands with their exact request and independent binding records, the engine and
-connector host capabilities in each node's incarnation-bound claim, the ordered `RATE LIMIT`
+connector host capabilities in each node's incarnation-bound claim (the WASM memory guard and growth
+reserve among them), the ordered `RATE LIMIT`
 clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
 rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
 carries for a unit whose ingestor writes `RATE LIMIT`. The fingerprint also includes the
@@ -2452,10 +2463,12 @@ and outbound connections through a Chitchat liveness loss while application heal
 observation of it from the node-unavailability interval, as described below. A different
 incarnation or advertised endpoint must establish a new target.
 
-Each health round has at most one probe in flight for each peer and at most 32 probes across the
-node. A probe has a one-second total deadline. Results are published as they complete, so a silent
-peer occupies only its own concurrency slot. The next regular round begins roughly one second after
-the previous round finishes. Gossip updates remain pending while those bounded probes finish and
+Each health round has at most one probe in flight for each peer and at most
+`interconnect-max-peers` probes across the node, 64 by default. A probe's total deadline is the
+probe timeout, a tenth of the node-unavailability interval: one second at the default ten seconds.
+Results are published as they complete, so a silent peer occupies only its own concurrency slot.
+The next regular round begins one `--control-plane-health-probe-interval` after the previous round
+finishes, one second by default. Gossip updates remain pending while those bounded probes finish and
 start the next round immediately afterward. They never cancel an in-flight round: repeated gossip
 updates must not prevent an unreachable peer's deadline from becoming a failed observation.
 
@@ -2482,7 +2495,11 @@ resets that run. Consensus membership continues to use the cluster topology esta
 
 The node-unavailability interval is installed live from the committed cluster parameters. A changed
 interval wakes retained health waiters, which recompute their next monotonic transition using the
-installed value. Republishing an unchanged interval does not wake those waiters.
+installed value. Republishing an unchanged interval does not wake those waiters. A node observes
+each peer again at most one health-probe interval plus one probe timeout after its last
+observation, so the node-unavailability interval must exceed both together on every admitted node.
+[Node Settings](node-settings.md#committed-parameter-changes) describes how a commit, a node
+announcement and a node start refuse a value that does not.
 
 Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
 listing live only while its latest application observation is younger than the node-unavailability
@@ -2640,19 +2657,19 @@ An outbound connection set up from the replaced credentials checks the published
 is established: one that checks after the publication is refused, and one that checked before it is
 held by a slot the retirement then ends, so replaced credentials never outlive their replacement.
 
-Application shutdown has three ordered phases. A server process issues the stop request that
-starts them when it receives its first `SIGINT` or `SIGTERM`, and one shutdown deadline measured
-from that request bounds all three. The stop request first marks the local process incarnation as
+Application shutdown has four ordered phases. A server process issues the stop request that
+starts them when it receives its first `SIGINT` or `SIGTERM`, and the shutdown timeout bounds the
+moves of the node's units, counted from the end of its save. The stop request first marks the local process incarnation as
 terminating and then closes admission on its public gRPC, connector, observability, and console
 listeners, closing the client connections they had accepted; a gRPC connection closes once its
 calls have ended, its sessions after delivering their endings, and is cut if it is still open two
 seconds later. Its interconnect listener and
-registered handlers remain available on that live node throughout the drain-support phase. They
+registered handlers remain available on that live node throughout the save and the moves. They
 continue carrying queued and active relay payloads, admission and record acknowledgements,
 runtime-state replication and checkpoints, ownership-handoff coordination, domain-clock progress,
-and the schedule revisions that activate committed ownership. Drain support first moves scheduled
-work to a live replacement node when one exists and then completes the work the node already
-admitted in place, so these consumers remain available until the node's own graphs are quiescent.
+and the schedule revisions that activate committed ownership. The save brings the work the node
+already admitted to rest and writes its final checkpoints, and the moves hand the node's units to a
+live replacement node when one exists, so these consumers remain available until both have ended.
 
 The relay payload lane retains its transport admission guard for every queued or active payload.
 Sender-side runtime drain accounting retains the tracked root until admission and every requested
@@ -2661,18 +2678,17 @@ handoff does not complete until its replication acknowledgement and committed ac
 observed. These owners keep admitted work visible while the supporting interconnect consumers are
 still running.
 
-Only after drain support completes or reports abandonment does terminal teardown call transport
-shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation waiters,
+Only once the moves have ended does terminal teardown call transport shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation waiters,
 and retires every pool connection the node opened: each stops leasing and closes once its leased
 streams return. Connections that peers opened to the node close at once, together with the handlers
 still serving their streams, so a peer's request the node has not answered fails instead of
-completing. Whatever remains after ten seconds is then closed. Connection setup, including the name
-resolution it performs, and incomplete TLS handshakes remain inside this bound. A repeated `SIGINT`
-or `SIGTERM`, or the shutdown deadline passing, ends the process without running the rest of its
-shutdown, so its peers observe its connections ending exactly as they do when the process crashes.
+completing. Whatever remains after the transport's request timeout is then closed. Connection
+setup, including the name resolution it performs, and incomplete TLS handshakes remain inside this
+bound. A repeated `SIGINT` or `SIGTERM` ends the process without running the rest of its shutdown,
+so its peers observe its connections ending exactly as they do when the process crashes.
 
-See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the deadline and exit
-statuses, and what each ending preserves.
+See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the shutdown timeout
+and exit statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 

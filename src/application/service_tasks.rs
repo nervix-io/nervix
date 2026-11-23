@@ -1,11 +1,17 @@
-//! The work that sessions, requests and commands start on this node, and how shutdown ends it.
+//! The work that sessions, requests, commands and cluster coordination start on this node, and how
+//! a stopping node stops taking part in it.
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Tracking every service task, waiting for them during terminal teardown, and
-//!   cancelling the ones still running when the shutdown deadline passes.
-//! - **Depends on.** Tokio task tracking and cancellation, and the shutdown deadline.
+//! - **Owns.** Tracking every service task, ending all of them at once when the node begins
+//!   turning off, and the wait for them to end during terminal teardown.
+//! - **Depends on.** Tokio task tracking and cancellation.
 //! - **Must not know.** What any service task does.
+//!
+//! A node that is turning off takes part in no service work: neither a commit, command or restore
+//! a client started, nor the coordination it runs for the cluster. Each task ends at its next
+//! await, and what it left undone is completed by the recovery that completes the work of a node
+//! that stopped: after a restart, or by the leader that follows.
 
 #![cfg_attr(
     nervix_lint,
@@ -16,15 +22,13 @@ use nervix_primitives::{
     sync::{Arc, CancellationToken},
     task::{JoinHandle, TaskTracker},
 };
-use tracing::warn;
-
-use super::shutdown::{BeforeDeadline, ShutdownDeadline, ShutdownPhaseOutcome};
+use tracing::info;
 
 /// The tracker and the cancellation every service task shares.
 struct ServiceTasksInner {
     tracker: TaskTracker,
-    /// Cancelled only when the shutdown deadline passes while service tasks are still running.
-    deadline_cancellation: CancellationToken,
+    /// Cancelled once, when the node begins turning off.
+    participation: CancellationToken,
 }
 
 /// A cloneable handle over the tasks this node's services spawn.
@@ -38,49 +42,42 @@ impl Default for ServiceTasks {
         Self {
             inner: Arc::new(ServiceTasksInner {
                 tracker: TaskTracker::new(),
-                deadline_cancellation: CancellationToken::new(),
+                participation: CancellationToken::new(),
             }),
         }
     }
 }
 
 impl ServiceTasks {
-    /// Spawns `task`. Its handle resolves to `None` when shutdown cancelled the task at the
-    /// deadline before it finished.
+    /// Spawns `task`. Its handle resolves to `None` when the node began turning off before the task
+    /// finished, including when it had already begun before the task was spawned.
     pub(in crate::application) fn spawn<F>(&self, task: F) -> JoinHandle<Option<F::Output>>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let cancellation = self.inner.deadline_cancellation.clone();
+        let cancellation = self.inner.participation.clone();
         self.inner
             .tracker
             .spawn(cancellation.run_until_cancelled_owned(task))
     }
 
-    /// Waits for every service task until the shutdown deadline, then cancels the ones still
-    /// running and waits for them to end.
-    ///
-    /// A cancelled task ends at its next await, so the second wait lasts only as long as that
-    /// cancellation takes to reach each task.
-    pub(in crate::application) async fn shut_down(
-        &self,
-        deadline: ShutdownDeadline,
-    ) -> ShutdownPhaseOutcome {
+    /// Stops this node taking part in service work: every service task ends at its next await, and
+    /// a task spawned from now on ends before it starts.
+    pub(in crate::application) fn stop(&self) {
+        let running = self.inner.tracker.len();
         self.inner.tracker.close();
-        let finished = deadline.bound(self.inner.tracker.wait()).await;
-        match finished {
-            BeforeDeadline::Finished(()) => ShutdownPhaseOutcome::Completed,
-            BeforeDeadline::Expired => {
-                warn!(
-                    tasks = self.inner.tracker.len(),
-                    "shutdown deadline expired; cancelling the service tasks still running"
-                );
-                self.inner.deadline_cancellation.cancel();
-                self.inner.tracker.wait().await;
-                ShutdownPhaseOutcome::Forced
-            }
-        }
+        self.inner.participation.cancel();
+        info!(
+            tasks = running,
+            "this node is turning off and stopped taking part in service work"
+        );
+    }
+
+    /// Waits for every service task to end once [`Self::stop`] ended them. A cancelled task ends at
+    /// its next await, so the wait lasts only as long as that takes to reach each task.
+    pub(in crate::application) async fn wait_stopped(&self) {
+        self.inner.tracker.wait().await;
     }
 }
 
@@ -91,49 +88,56 @@ mod tests {
     use nervix_primitives::time::Instant;
 
     use super::*;
-    use crate::application::ShutdownCoordinator;
 
-    fn deadline_after(timeout: Duration) -> ShutdownDeadline {
-        let coordinator = ShutdownCoordinator::new(
-            timeout,
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
-        );
-        coordinator.request_stop();
-        coordinator
-            .request()
-            .expect("the stop request above was accepted")
-            .deadline()
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_service_task_that_finished_keeps_its_output_when_the_node_stops() {
+        let tasks = ServiceTasks::default();
+        let task = tasks.spawn(async { 7 });
+        let finished = task.await.expect("the task must not panic");
+
+        tasks.stop();
+        tasks.wait_stopped().await;
+
+        assert_eq!(finished, Some(7));
     }
 
     #[nervix_primitives::test(start_paused = true)]
-    async fn service_tasks_that_finish_before_the_deadline_complete_their_shutdown() {
+    async fn a_node_that_turns_off_ends_every_running_service_task_at_once() {
         let tasks = ServiceTasks::default();
-        let deadline = deadline_after(Duration::from_secs(5));
-        let task = tasks.spawn(async {
-            nervix_primitives::time::sleep(Duration::from_secs(1)).await;
+        let running = tasks.spawn(async {
+            nervix_primitives::time::sleep(Duration::from_secs(60)).await;
             7
         });
+        let started = Instant::now();
 
-        let outcome = tasks.shut_down(deadline).await;
+        tasks.stop();
+        tasks.wait_stopped().await;
 
-        assert_eq!(outcome, ShutdownPhaseOutcome::Completed);
-        assert_eq!(task.await.expect("the task must not panic"), Some(7));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(
+            running
+                .await
+                .expect("a cancelled service task does not panic"),
+            None
+        );
     }
 
     #[nervix_primitives::test(start_paused = true)]
-    async fn a_service_task_still_running_at_the_deadline_is_cancelled_and_joined() {
+    async fn a_service_task_spawned_after_the_node_began_turning_off_never_runs() {
         let tasks = ServiceTasks::default();
-        let deadline = deadline_after(Duration::from_secs(5));
-        let task = tasks.spawn(std::future::pending::<()>());
-        let started = Instant::now();
+        tasks.stop();
+        let ran = Arc::new(nervix_primitives::sync::atomic::AtomicBool::new(false));
+        let witness = ran.clone();
 
-        let outcome = tasks.shut_down(deadline).await;
+        let late = tasks.spawn(async move {
+            witness.store(true, nervix_primitives::sync::atomic::Ordering::SeqCst);
+        });
 
-        assert_eq!(outcome, ShutdownPhaseOutcome::Forced);
-        assert_eq!(started.elapsed(), Duration::from_secs(5));
         assert_eq!(
-            task.await.expect("a cancelled service task does not panic"),
+            late.await.expect("a cancelled service task does not panic"),
             None
         );
+        assert!(!ran.load(nervix_primitives::sync::atomic::Ordering::SeqCst));
+        tasks.wait_stopped().await;
     }
 }

@@ -358,7 +358,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX DURATIONS` archive signature identifies the current Model layout, including
+The registry's `NERVIX WASM TBLS` archive signature identifies the current Model layout, including
 the `parametrizer` kind text of the declared entity that defines a parametrization, that union, a
 placement's colocation or node rule with its `FOR` members or domain-wide scope and its
 `REQUIRE NODES`, `PREFER NODES` or `ANY NODE` policy and selector, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
@@ -372,8 +372,8 @@ emitter writes beside its publishing mode, its retained-publication flag and MQT
 mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` or a `PATTERN`,
 that header state, inferencer state bindings with their initial expressions, an inferencer's
 required working memory, the typed `payload` expression scope, an emitter's `INSTANCES`
-declaration, and the `DURATION` type with the duration literals expressions, subscription
-bindings and branch selections hold.
+declaration, the `DURATION` type with the duration literals expressions, subscription
+bindings and branch selections hold, and a WASM processor's required `MAX TABLE ELEMENTS`.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
@@ -384,16 +384,18 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_` keyspaces and `ClusterState`
-metadata encoding 51 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_` keyspaces and `ClusterState`
+metadata encoding 56 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
-inferencer working memory, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, the database volume size each node record's capacity claim carries, interconnect capabilities
-that carry no relay watermark count, and the partition
+inferencer working memory, each WASM processor's `MAX TABLE ELEMENTS`, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, each node's WASM memory guard and growth reserve, the database volume size each node record's capacity claim carries, interconnect capabilities
+that carry no relay watermark count, listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits,
+the HTTP/1 header count and the WebSocket write buffer, and the partition
 count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
-its domain from the transaction. The runtime state store's
+its domain from the transaction, a `START` command's execution with the revision of the start it committed and a durable
+transaction request's refusal of a queued `START` or `STOP`. The runtime state store's
 `inherited-partition-origin-checkpoint-index` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Inherited schedules also retain configuration-fenced source sets, common grouping and suspended
@@ -1281,7 +1283,7 @@ domains capture stored checkpoints. An empty generation still has its descriptor
 zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
-authority once its state generation is admitted. Neither state permits `START`, direct or transactional. Completion of the
+authority once its state generation is admitted. Neither state permits `START`. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at

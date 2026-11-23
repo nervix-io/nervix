@@ -112,10 +112,12 @@ Feature: Accepted work waits for internal worker room
       | 1            |
       | 3            |
 
+  # The input waits for a place behind an extension worker, which is work still in motion, so the
+  # node's save waits for it, without a limit of its own, instead of cutting it. Only freeing the
+  # worker lets the save end, and the input is then saved or delivered rather than lost.
   @accepted_worker_shutdown
-  Scenario Outline: Shutdown ends accepted input waiting behind an extension worker that never returns
+  Scenario Outline: A node's save waits for accepted input queued behind a busy extension worker and ends once the worker frees
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "2s"
     And shutdown timeout is configured as "20s"
     And schema change drain timeout is configured as "2s"
     And node-1 starts with vm-inline-row-limit = 0
@@ -153,10 +155,17 @@ Feature: Accepted work waits for internal worker room
     When accepted-work CPU class "extension" is full on every node
     And processor "junction" "transform" first polls its paused input
     And processor "junction" "transform" resumes its paused input
-    When all nodes are gracefully stopped
-    Then the last cluster operation completes within "30s"
-    And every node reports that its last shutdown finished before its deadline
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "junction" "transform" is saved as placeholder "transform_owner"
+    When every node begins stopping
+    Then node "{{transform_owner}}" is still saving or moving its units after "2s"
     When accepted-work CPU classes are released on every node
+    And all nodes are gracefully stopped
+    Then the last cluster operation completes within "30s"
+    And every node reports that its last shutdown did not disrupt the cluster
 
     Examples:
       | cluster_size |

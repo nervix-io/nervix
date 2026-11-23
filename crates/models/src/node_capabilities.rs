@@ -39,6 +39,8 @@ pub struct EngineCapabilities {
     pub vm_pattern_sets_per_batch: NonZeroU64,
     pub wasm_stack_bytes: NonZeroU64,
     pub wasm_memory_reservation_bytes: u64,
+    pub wasm_memory_guard_bytes: u64,
+    pub wasm_memory_growth_reservation_bytes: u64,
     pub wasm_parallel_compilation: bool,
     /// How long one call of a compiled Roto UDF may run on this node before its batch fails.
     pub udf_watchdog: Duration,
@@ -320,6 +322,5 @@ impl crate::SettingDefinition for MaxPeers {
 )]
 pub struct ShutdownCapabilities {
     pub shutdown_timeout: Duration,
-    pub drain_timeout: Duration,
     pub task_grace_period: Duration,
 }

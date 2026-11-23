@@ -430,17 +430,8 @@ impl<'bytes> GeneratedSettings<'bytes> {
 
     fn shutdown(&mut self) -> ShutdownSettings {
         let shutdown_timeout = self.duration();
-        // A drain this long is far longer than any node takes, and never longer than the
-        // shutdown.
-        let longest_drain = u64::try_from(shutdown_timeout.as_nanos()).unwrap_or(u64::MAX);
-        let drain_timeout = Duration::from_nanos(self.entropy.boundary_biased(0..=longest_drain));
         let task_grace_period = self.duration();
-        ShutdownSettings::resolve(
-            Some(shutdown_timeout),
-            Some(drain_timeout),
-            Some(task_grace_period),
-        )
-        .assured("the drain never exceeds the shutdown")
+        ShutdownSettings::resolve(Some(shutdown_timeout), Some(task_grace_period))
     }
 
     fn cluster_duration(&mut self) -> Duration {
@@ -497,9 +488,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 stream_receive_window: Some(ByteUnit::Byte(
                     self.entropy.between(1..=(1 << 31) - 1),
                 )),
-                connection_receive_window: Some(ByteUnit::Byte(
-                    self.entropy.between(1..=(1 << 31) - 1),
-                )),
+                connection_receive_window: Some(ByteUnit::Byte(self.entropy.boundary_biased(
+                    nervix_interconnect::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES
+                        ..=nervix_interconnect::MAX_HTTP2_WINDOW_BYTES,
+                ))),
                 connection_setup_timeout: Some(self.infrastructure_duration()),
                 request_timeout: Some(self.infrastructure_duration()),
                 progress_timeout: Some(self.infrastructure_duration()),
@@ -543,8 +535,18 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
+            max_open_files: if self.entropy.flag() {
+                Some(
+                    std::num::NonZeroU64::new(self.entropy.boundary_biased(10..=1 << 20))
+                        .assured("generated open-file limits are at least ten"),
+                )
+            } else {
+                None
+            },
         })
-        .assured("the generated cache, journal and worker inputs satisfy database bounds")
+        .assured(
+            "the generated cache, journal, worker and open-file inputs satisfy database bounds",
+        )
     }
 
     fn consensus_operations(&mut self) -> nervix_consensus::RaftOperationSettings {
@@ -582,6 +584,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
             ),
             header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            // The fewest header lines the smallest generated head holds.
+            max_headers: Some(
+                u32::try_from(self.entropy.between(1..=2730)).verified("bounded header count"),
+            ),
             buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             header_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             tls_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
@@ -594,6 +600,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             http_refusal_drain_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             websocket_message_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             websocket_frame_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            websocket_write_buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(1..=67108864))),
             grpc_header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             grpc_concurrency: Some(
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
@@ -601,6 +608,22 @@ impl<'bytes> GeneratedSettings<'bytes> {
             grpc_request_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             grpc_max_streams: Some(
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            // Every window HTTP/2 can advertise; a connection's starts at RFC 9113's 65,535.
+            grpc_stream_window_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(1..=2_147_483_647),
+            )),
+            grpc_connection_window_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(65_535..=2_147_483_647),
+            )),
+            grpc_send_buffer_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(1..=u64::from(u32::MAX)),
+            )),
+            grpc_max_pending_reset_streams: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded reset count"),
+            ),
+            grpc_max_error_reset_streams: Some(
+                u32::try_from(self.entropy.between(1..=65536)).verified("bounded reset count"),
             ),
             grpc_keepalive_interval: Some(Duration::from_secs(self.entropy.between(1..=120))),
             grpc_keepalive_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
@@ -719,11 +742,16 @@ impl<'bytes> GeneratedSettings<'bytes> {
             ),
         })
         .assured("generated positive cache sizes validate");
-        runtime.wasm_engine = nervix_wasm::WasmEngineSettings::resolve(
-            Some(self.entropy.boundary_biased(1..=8_388_608)),
-            Some(self.entropy.boundary_biased(0..=8_589_934_592)),
-        )
-        .assured("bounded engine sizes fit this native host");
+        runtime.wasm_engine =
+            nervix_wasm::WasmEngineSettings::resolve(nervix_wasm::WasmEngineSettingOverrides {
+                stack_bytes: Some(self.entropy.boundary_biased(1..=8_388_608)),
+                memory_reservation_bytes: Some(self.entropy.boundary_biased(0..=8_589_934_592)),
+                memory_guard_bytes: Some(self.entropy.boundary_biased(0..=67_108_864)),
+                memory_growth_reservation_bytes: Some(
+                    self.entropy.boundary_biased(0..=8_589_934_592),
+                ),
+            })
+            .assured("bounded engine sizes fit this native host");
         runtime.udf = nervix_roto::UdfSettings::resolve(Some(self.cluster_duration()))
             .assured("a generated positive watchdog validates");
         runtime.connector_host = crate::runtime::ConnectorHostSettings::resolve(

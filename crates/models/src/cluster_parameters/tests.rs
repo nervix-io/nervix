@@ -343,23 +343,17 @@ fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
     values
         .validate_runtime_budget(&node, crate::ShutdownSettings::default().capabilities())
         .assured("default lifecycle policy fits");
-    for (drain_timeout, shutdown_timeout) in [
-        (Duration::from_secs(29), Duration::from_secs(50)),
-        (Duration::from_secs(50), Duration::from_secs(29)),
-    ] {
-        assert!(
-            values
-                .validate_runtime_budget(
-                    &node,
-                    crate::ShutdownCapabilities {
-                        drain_timeout,
-                        shutdown_timeout,
-                        task_grace_period: Duration::from_secs(2),
-                    }
-                )
-                .is_err()
-        );
-    }
+    assert!(
+        values
+            .validate_runtime_budget(
+                &node,
+                crate::ShutdownCapabilities {
+                    shutdown_timeout: Duration::from_secs(29),
+                    task_grace_period: Duration::from_secs(2),
+                }
+            )
+            .is_err()
+    );
     let updates =
         ClusterParameterUpdates::try_from(vec![ClusterParameterChange::EntityGateDeadline(
             Duration::from_secs(40),
@@ -372,8 +366,7 @@ fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
         .validate_runtime_budget(
             &node,
             crate::ShutdownCapabilities {
-                drain_timeout: Duration::from_secs(45),
-                shutdown_timeout: Duration::from_secs(50),
+                shutdown_timeout: Duration::from_secs(40),
                 task_grace_period: Duration::from_secs(2),
             },
         )
@@ -439,6 +432,98 @@ fn resource_quotas_fit_each_node_database_volume_independently() {
     lowered
         .validate_resource_volume(&node, 2 * GIB)
         .assured("both lowered quotas fit a 2 GiB volume");
+}
+
+#[test]
+fn the_unavailability_timeout_exceeds_each_node_health_probe_round() {
+    let node = crate::ClusterNodeName::parse("node-2").assured("fixture name");
+    let values = ClusterParameterValues::default();
+    assert_eq!(
+        values.node_unavailability_timeout(),
+        Duration::from_secs(10)
+    );
+    assert_eq!(ProbeTimeout::default_value(&values), Duration::from_secs(1));
+
+    values
+        .validate_health_probe_interval(&node, crate::HealthProbeInterval::DEFAULT)
+        .assured("default one-second rounds fit the default ten-second timeout");
+    values
+        .validate_health_probe_interval(&node, Duration::from_secs(9) - Duration::from_nanos(1))
+        .assured("a round that ends one nanosecond before the timeout fits");
+
+    let refused = values
+        .validate_health_probe_interval(&node, Duration::from_secs(9))
+        .err()
+        .assured("a round exactly as long as the timeout leaves no fresh observation");
+    assert_eq!(
+        refused.current_context(),
+        &ClusterParameterError::NodeHealthProbeInterval {
+            node: node.clone(),
+            timeout: Duration::from_secs(10),
+            health_probe_interval: Duration::from_secs(9),
+            probe_timeout: Duration::from_secs(1),
+        }
+    );
+    assert_eq!(
+        refused.current_context().to_string(),
+        "node-unavailability-timeout (10s) must exceed node 'node-2' \
+         control-plane-health-probe-interval (9s) plus probe-timeout (1s), a tenth of \
+         node-unavailability-timeout"
+    );
+    assert!(
+        values
+            .validate_health_probe_interval(&node, Duration::MAX)
+            .is_err(),
+        "an interval whose round overflows a duration cannot fit any timeout"
+    );
+
+    let updates =
+        ClusterParameterUpdates::try_from(vec![ClusterParameterChange::NodeUnavailabilityTimeout(
+            Duration::from_secs(1),
+        )])
+        .assured("one assignment");
+    let lowered = values
+        .changed(&updates)
+        .assured("one second is a valid timeout on its own");
+    let refused = lowered
+        .validate_health_probe_interval(&node, crate::HealthProbeInterval::DEFAULT)
+        .err()
+        .assured("a one-second timeout cannot hold a one-second round and its probe");
+    assert_eq!(
+        refused.current_context(),
+        &ClusterParameterError::NodeHealthProbeInterval {
+            node: node.clone(),
+            timeout: Duration::from_secs(1),
+            health_probe_interval: crate::HealthProbeInterval::DEFAULT,
+            probe_timeout: Duration::from_millis(100),
+        }
+    );
+    lowered
+        .validate_health_probe_interval(&node, Duration::from_millis(899))
+        .assured("899ms rounds and a 100ms probe end inside one second");
+
+    let updates =
+        ClusterParameterUpdates::try_from(vec![ClusterParameterChange::NodeUnavailabilityTimeout(
+            Duration::from_nanos(5),
+        )])
+        .assured("one assignment");
+    let shortest = values
+        .changed(&updates)
+        .assured("five nanoseconds is a positive timeout");
+    assert_eq!(
+        ProbeTimeout::default_value(&shortest),
+        Duration::from_nanos(1),
+        "the probe timeout keeps its one-nanosecond floor"
+    );
+    shortest
+        .validate_health_probe_interval(&node, Duration::from_nanos(3))
+        .assured("five nanoseconds exceed three plus the one-nanosecond probe");
+    assert!(
+        shortest
+            .validate_health_probe_interval(&node, Duration::from_nanos(4))
+            .is_err(),
+        "the check adds the floored probe timeout, not a zero tenth"
+    );
 }
 
 #[test]

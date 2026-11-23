@@ -543,7 +543,7 @@ generation as committed. Successful replies build no failure context.
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Client ingestor endpoint | Whether a submitted batch is a canonical Arrow IPC stream of the input schema (`ClientBatchError`), whether the node had capacity to validate it, and how its acknowledgement root resolved | Answer the batch as not admitted with its defect or a temporary refusal, or with its terminal outcome, and end a producer with the reason its attachment ended. |
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
-| Runtime installation | A committed revision this node cannot plan or apply, a domain execution it cannot build or change (`RuntimeError::BuildDomainExecution` above the `ExecutionBuildError` step that failed), and ingestors that do not start once their revision is prepared | Keep the previously applied schedule as the predecessor for a retry, and report the whole chain with the failed command, the domain's instantiation error and the runtime event. |
+| Runtime installation | A committed revision this node cannot plan or apply, a domain execution it cannot build or change (`RuntimeError::BuildDomainExecution` above the `ExecutionBuildError` step that failed), and ingestors that do not start once their revision is prepared | Plan the retry of each domain from the schedule its execution runs, and report the whole chain with the failed command, the domain's instantiation error and the runtime event. |
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, models that bind no restored version, and archived branch keys that are not keys of the branching their restored entity declares | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model, or the archive section, entry, entity, branch and field of the key. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
@@ -1804,9 +1804,9 @@ wire definition, a relay missing its branch or carrying an invalid branch TTL, a
 missing its VHOST or signaling protocol. The report identifies the owning relay, codec, or
 endpoint and the missing reference. The control plane builds activation, resources, entrypoints,
 emitters, processors, message-error routes, placement and the ownership fingerprint as one typed
-revision before runtime installation. A planning failure leaves the previously applied schedule as
-the predecessor for a retry; runtime installation adds domain context and never selects a fallback
-configuration.
+revision before runtime installation. A planning failure installs nothing, so each domain keeps the
+schedule its execution runs as the predecessor for a retry; runtime installation adds domain
+context and never selects a fallback configuration.
 
 The background runtime-installation supervisor logs a failed application's complete typed report and
 retries on the admission loop's half-second cadence, or sooner when the committed schedule or domain
@@ -1896,7 +1896,7 @@ answer or apply keep their own reports directly beneath the domain context, beca
 name what failed.
 
 Each admitted runtime revision is applied by the session service. A committed revision that cannot
-be planned against the one applied before it is `RuntimeError::PlanScheduleRevision`, with the
+be planned against the schedule each domain runs is `RuntimeError::PlanScheduleRevision`, with the
 decision layer's report beneath. A revision this node cannot apply fails as
 `RuntimeError::ApplyRevision`, naming the revision, above the runtime's report, and an ingestor of a
 running domain that does not start once the revision is prepared fails as
@@ -2084,8 +2084,7 @@ twelve of it do not fit the milliseconds consensus counts an election timeout in
 `RaftTimingError` beneath `AppError::InvalidRaftTimings`. A gossip interval or a clock-skew
 tolerance below one millisecond, or a gossip interval twenty of which do not fit a duration, is a
 `MembershipSettingsError` beneath `AppError::InvalidMembershipSettings`, and a memory limit of zero
-a `CapacitySettingsError` beneath `AppError::InvalidCapacitySettings`. A drain timeout above the
-shutdown timeout is a `ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A
+a `CapacitySettingsError` beneath `AppError::InvalidCapacitySettings`. A
 setting that a test names for a node but that the server's command line does not read keeps clap's
 error beneath `AppError::ReadSettings`.
 
@@ -2199,7 +2198,7 @@ What each failure gets:
 | --- | --- |
 | An expression of any clause (`SET`, `INHERIT`, route `WHERE`, `FILTER WHERE`, `FROM ... WHERE`, `INVOKE`, `VALUES`, an envelope or ordering-group expression, an HTTP request field, a window aggregate argument, a `RATE LIMIT` measure) | `evaluation` |
 | A payload its codec refuses (a [decode rejection](#decode-rejections)), a row its codec cannot encode, a batch container the codec cannot write | `codec` |
-| A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL` or `MAX MEMORY` | `limit` |
+| A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL`, `MAX MEMORY` or `MAX TABLE ELEMENTS` | `limit` |
 | A required field left unset, a value a connector or an admission check refuses, an invalid HTTP request field | `validation` |
 | A destination that refuses a record, a model that refuses a row, a guest's declared message error, an emitter publish that fails for good | `refused` |
 | Emitter work cut at a stop or shutdown deadline, and an ingested payload whose domain is not running or whose branch Nervix closed before it was routed | `interrupted` |
@@ -2639,8 +2638,12 @@ source inventories, foreign partition ownership and repeated metric identities b
 target state; a failed preparation cannot publish a partial layout.
 
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
-its only subject is the authenticated sender: completed or failed, each with the leader's report for
-the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
+its only subject is the authenticated sender: completed, unmoved with the typed reason the units it
+left did not move, or failed, each with the leader's report for the sender's log, or not the leader,
+which sends the sender to the leader it observes next. The unmoved reason is gathered from typed
+contexts unit by unit; a destination's terminating refusal reaches the leader as the typed
+`OwnershipHandoffFailure::DestinationTerminating` wire outcome, which the leader's preparation keeps
+beneath its gate failure rather than formatting into its reason. A node
 that receives the request without leading changes nothing. An unconfirmed leader lease also
 answers not the leader, but its interrupted-drain log names the term and says the same leader may
 still lead. The stopping node waits 25 ms and observes the leader again, so it can retry that same
@@ -3453,9 +3456,9 @@ counts include unreachable active chunks as well as unpublished staging.
 Staging or publication failure leaves the durable start gate in place, including a failure after the
 complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory.
-Transaction planning reports a blocked `START` as `TransactionPlanningError::RestoreInstallation`,
-naming the domain and restore execution before lifecycle admission. The client receives a definitive
-failure.
+`START` reports a blocked start as `DomainStartError::RestoreInstallation`, naming the domain and
+restore execution before it places the domain's units, and consensus refuses the start itself with
+`ConsensusConflict::RestoreInstallation`. The client receives a definitive failure.
 
 No restore diagnostic includes password hashes or resource bytes. When a state section's entity is
 absent from the restored schedule or its schema fingerprint differs, installation skips that section
@@ -4167,12 +4170,11 @@ committed member, and a returning member does not consume another quota slot.
 
 While the [stop gate](node-settings.md#cluster-licensing) is closed, every refusal carries the typed
 `LicensingStopReason`, which renders `ephemeral activation expired at <instant>`. Admission refuses
-all usage with refusal state `stopped`. Planning refuses a direct `START` before lifecycle
-admission, a transactional `START` as `TransactionPlanningError::LicensingStop` naming the domain,
-and `RESTORE ... RESUME` as `RestoreRefusal::LicensingStop`, each with
-`licensing stopped processing` and its reason. The client receives a definitive failure. Consensus
-refuses a change that would run a domain with `ConsensusConflict::LicensingStop`, and a
-transaction's `START` step with `TransactionMutationError::LicensingStop`; neither changes state.
+all usage with refusal state `stopped`. `START` refuses as `DomainStartError::LicensingStop` naming
+the domain before it places the domain's units, and `RESTORE ... RESUME` as
+`RestoreRefusal::LicensingStop`, each with `licensing stopped processing` and its reason. The client
+receives a definitive failure. Consensus refuses a change that would run a domain, the start of a
+domain included, with `ConsensusConflict::LicensingStop`, and changes no state.
 Model-pause recovery that the gate refuses keeps the command's paused-domain refusal. An `ALTER` or
 a backup whose resume the gate refuses is not failed by it: the operation ends its pause with the
 licensing stop under its own mutation lease, and only a failure of that stop is reported, as

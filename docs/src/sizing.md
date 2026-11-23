@@ -141,7 +141,18 @@ credits another 1/16, so a node's budgets come to a little over half of its memo
 
 These are ceilings that admission charges work against, not memory allocated at startup. Graph
 state, engines and thread stacks need memory beside them; the 8 MiB `--runtime-thread-stack-size`
-of each runtime thread, for example, is not part of any pool.
+of each runtime thread, for example, is not part of any pool. Neither are the public listeners'
+transport buffers, which their [listener bounds](node-settings.md#listener-bounds) cap instead:
+gRPC clients hold at most `--listener-max-connections` times `--grpc-connection-window-bytes` of
+input on a node, 1 GiB at the defaults. Nor are the databases' memtables, the buffers that collect
+new writes before they reach disk. Each of the 15 keyspaces, 11 in the node database and 4 in the
+consensus database, fills one up to 64 MiB, and a keyspace whose writes outpace its disk writes
+keeps up to four full ones waiting before its writers pause. Nervix does not limit them, so a
+write-heavy node leaves headroom for them beside its checked total. Nor is a WASM guest's memory.
+It takes address space, `--wasm-memory-reservation-bytes` for a memory that fits in it, or its
+current size and `--wasm-memory-growth-reservation-bytes` for one that has to move to grow, with
+`--wasm-memory-guard-bytes` of unmapped guard on each side, and what it commits stays within its
+processor's `MAX MEMORY` ([WASM Processor Guests](wasm-processor-guests.md)).
 
 ## What A Node Needs To Start
 
@@ -214,22 +225,35 @@ precision. The tables give the other bounds.
 | `REPLICA_COUNT` | `0` | 0 to 4,294,967,295 | How many nodes besides its owner hold a replica of each piece of runtime state |
 | `STATE_SNAPSHOT_INTERVAL` | `30s` | | How often the owner of runtime state publishes a snapshot of it to its replicas |
 
+`NODE_UNAVAILABILITY_TIMEOUT` must exceed every admitted node's
+`--control-plane-health-probe-interval`, 1 second by default, plus the probe timeout, a tenth of
+the timeout. A node observes each peer again at most one interval plus one probe timeout after its
+last observation, and an observation stays fresh only for the timeout. A shorter timeout leaves
+every observation stale before the next one arrives, so the cluster stops detecting members that
+fail. `ALTER CLUSTER SET` refuses such a timeout before anything commits, naming the first
+admitted node, in name order, whose interval does not fit:
+
+```text
+node-unavailability-timeout (1s) must exceed node 'node-1' control-plane-health-probe-interval (1s) plus probe-timeout (100ms), a tenth of node-unavailability-timeout
+```
+
 ### Domain Lifecycle And Coordination
 
 | Parameter | Default | Bounds | What the cluster promises |
 | --- | --- | --- | --- |
-| `DOMAIN_DRAIN_TIMEOUT` | `30s` | Within every admitted node's drain budget | How long a domain drain waits for the domain's admitted work |
-| `ENTITY_GATE_DEADLINE` | `30s` | Within every admitted node's drain budget | How long a coordinated entity gate may take to engage and drain |
+| `DOMAIN_DRAIN_TIMEOUT` | `30s` | Within every admitted node's shutdown timeout | How long a domain drain waits for the domain's admitted work |
+| `ENTITY_GATE_DEADLINE` | `30s` | Within every admitted node's shutdown timeout | How long a coordinated entity gate may take to engage and drain |
 | `DOMAIN_DRAIN_POLL_INTERVAL` | `50ms` | | How often a domain drain observes the work it waits for |
 | `ENTITY_GATE_POLL_INTERVAL` | `25ms` | | How often an entity gate observes the drain it waits for |
 | `OWNERSHIP_HANDOFF_POLL_INTERVAL` | `250ms` | | How often planned ownership handoffs are reconciled |
 | `FORCED_RECOVERY_BUDGET` | `5s` | | How long a forced ownership recovery gives its destination to prepare |
 | `RUNTIME_READINESS_PROPAGATION_BOUND` | `30s` | | How long a live node has to report an applied revision ready; a completion barrier waits at most the node-unavailability timeout plus this bound |
 
-A node's drain budget is the smaller of its `--drain-timeout` and `--shutdown-timeout`. A change
-that raises `DOMAIN_DRAIN_TIMEOUT` or `ENTITY_GATE_DEADLINE` above any admitted node's budget is
-refused, naming the node, such as `domain-drain-timeout (45s) exceeds node 'node-2' drain/shutdown
-budget (30s)`. A departed member keeps its claim until `DROP NODE` removes it, so it counts too.
+A stopping node moves its units through holds these two parameters bound, within its
+`--shutdown-timeout`. A change that raises `DOMAIN_DRAIN_TIMEOUT` or `ENTITY_GATE_DEADLINE` above
+any admitted node's shutdown timeout is refused, naming the node, such as
+`domain-drain-timeout (45s) exceeds node 'node-2' shutdown timeout (30s)`. A departed member keeps
+its claim until `DROP NODE` removes it, so it counts too.
 
 ### Remote Acknowledgements
 
@@ -383,12 +407,15 @@ current shape. [Rolling Changes](node-settings.md#rolling-changes) owns these gu
 
 A restarting or joining node also holds itself to the committed parameters before it reports ready,
 and stops with status `1` when its database volume cannot hold `RESOURCE_MAX_ARCHIVE_BYTES` or
-`RESOURCE_MAX_EXTRACTED_BYTES`, or when its drain budget is shorter than `DOMAIN_DRAIN_TIMEOUT` or
-`ENTITY_GATE_DEADLINE`. Order a change that crosses the two classes accordingly. To raise
-`DOMAIN_DRAIN_TIMEOUT`, first roll every node to a drain budget that holds the new value, then
-commit it; to give a node a shorter drain budget, lower the parameter first. In the same way, lower
-the resource quotas before a node restarts on a smaller volume, and grow every volume and restart
-its node before raising them.
+`RESOURCE_MAX_EXTRACTED_BYTES`, when its shutdown timeout is shorter than `DOMAIN_DRAIN_TIMEOUT` or
+`ENTITY_GATE_DEADLINE`, or when its `--control-plane-health-probe-interval` plus a tenth of
+`NODE_UNAVAILABILITY_TIMEOUT` is not shorter than that timeout. Order a change that crosses the two
+classes accordingly. To raise `DOMAIN_DRAIN_TIMEOUT`, first roll every node to a shutdown timeout
+that holds the new value, then commit it; to give a node a shorter shutdown timeout, lower the
+parameter first. In the same way, lower the resource quotas before a node restarts on a smaller
+volume, and grow every volume and restart its node before raising them. Raise
+`NODE_UNAVAILABILITY_TIMEOUT` before rolling a node to a longer health-probe interval, and shorten
+the intervals before lowering the timeout.
 
 ## Reading DESCRIBE CLUSTER During A Roll
 
@@ -416,7 +443,7 @@ node=node-3 cluster parameters running=not installed
 | Line | What it tells you |
 | --- | --- |
 | `timing drift: node-3` | The nodes whose Raft heartbeat, gossip interval or clock-skew tolerance differs from the leader's; `none` when none does, or `unknown, no leader record is published` |
-| `capabilities: committed node-3#1763747012882043911 cpu-count=8 memory-bytes=8589934592 database-volume-bytes=107374182400` | The claim committed for the node's current run: its CPU count, memory and database volume, followed on the same line by its receive bounds, engine, connector host and runtime capabilities, its shutdown timeouts, listener bounds and operational capabilities. The lines after it give its interconnect, membership, DNS, database and consensus capacities |
+| `capabilities: committed node-3#1763747012882043911 cpu-count=8 memory-bytes=8589934592 database-volume-bytes=107374182400` | The claim committed for the node's current run: its CPU count, memory and database volume, followed on the same line by its receive bounds, engine, connector host and runtime capabilities, its shutdown timeout and task grace period, listener bounds and operational capabilities. The lines after it give its interconnect, membership, DNS, database and consensus capacities |
 | `capabilities: awaiting this incarnation; retained node-3#1763746870315562047` | The node has restarted and its new claim has not committed yet; the retained claim is its previous run's |
 | `capabilities: awaiting committed claim` | The node has no committed claim at all, as when it joins for the first time |
 | `raft-heartbeat-interval: 400ms, the leader's 250ms` | One prerequisite line per prerequisite, a timing that differs from the leader's marked with both values; `prerequisites: not published` when the node publishes none |

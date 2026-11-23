@@ -146,12 +146,14 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    mixed `CREATE`, supported model `ALTER`, and `DROP`. Each statement is preflighted against the
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
-   maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, other read-only statements,
-   subscriptions, domain clock attachment, uploads, backups, restores, and node administration
-   remain outside the transaction.
+   maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, `START`, `STOP`, other
+   read-only statements, subscriptions, domain clock attachment, uploads, backups, restores, and
+   node administration remain outside the transaction.
    `DESCRIBE TRANSACTION;` and `SHOW TRANSACTIONS;` run on their own beside an open transaction;
    they read impact or status without becoming content or shifting operation numbers.
-5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
+5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended,
+   each on its own after `COMMIT`: queuing either inside a transaction is refused, and the open
+   transaction keeps its other statements. A
    paced `START` establishes one replicated clock generation that joining nodes install before
    execution. One committed authority revision identifies the producing node incarnation; owner
    changes preserve the mapping, `STOP` revokes the authority, and automatic ALTER quiescing keeps
@@ -674,8 +676,9 @@ current connection, retry and deadline limits.
   for cumulative totals and inspection-sampled wall rates, and the generated connector capability
   reference for each entity's declared events.
 - Every custom WASM guest is built for the current ABI, accepts
-  `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
-  declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
+  `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer,
+  defines at most one linear memory and one table, and declares positive `MAX FUEL`, then
+  `MAX MEMORY`, then `MAX TABLE ELEMENTS` covering its linked table, immediately after `FILE`. Its
   Rust `nervix-wasm-sdk` `Processor` callbacks return `error_stack::Result<_, GuestError>`;
   follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,
