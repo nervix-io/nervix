@@ -164,15 +164,17 @@ async fn read_for(
             for fixture in &fixtures {
                 captured.push(fixture.branch.clone());
             }
-            let retain = |wanted: &page::WantedBranches| {
-                let mut retained = Vec::new();
-                for fixture in &fixtures {
-                    let key = fixture.branch.key.as_ref().map(BranchKey::fingerprint);
-                    if wanted.contains(&key) {
-                        retained.push(fixture.clone());
+            // The page asks for its branches in the fixtures' canonical order, so one forward
+            // pass over them serves every request.
+            let mut publications = fixtures.iter();
+            let retain = |branch: &CapturedBranch| -> ReadResult<Option<RetainedBranch>> {
+                let key = branch.key.as_ref().map(BranchKey::fingerprint);
+                for fixture in publications.by_ref() {
+                    if fixture.branch.key.as_ref().map(BranchKey::fingerprint) == key {
+                        return Ok(Some(fixture.clone()));
                     }
                 }
-                Ok(retained)
+                Ok(None)
             };
             page::build(
                 page::CapturedBranches {
@@ -361,7 +363,6 @@ async fn single_tensor_pages_keep_complete_counts_and_refuse_a_foreign_branch_po
     assert!(page.runs.is_empty());
 }
 
-
 /// The values of every wide fixture tensor: 256 KiB of F32.
 const WIDE_ELEMENTS: usize = 64 * 1024;
 
@@ -459,7 +460,10 @@ async fn wide_branch(
 }
 
 /// Eight wide branches in the canonical order a capture sorts them in, each with its fill.
-async fn wide_branches(executor: &Executor, plan: &InferencerStatePlan) -> Vec<(RetainedBranch, f32)> {
+async fn wide_branches(
+    executor: &Executor,
+    plan: &InferencerStatePlan,
+) -> Vec<(RetainedBranch, f32)> {
     let mut branches = Vec::new();
     for index in 0_u8..8 {
         let fill = f32::from(index);
@@ -483,7 +487,8 @@ fn hold_all_but(executor: &Executor, room: u64) -> Reservation {
     executor
         .try_reserve(
             MemoryClass::Bulk,
-            free.checked_sub(room).assured("the fixture leaves the pool more than its room"),
+            free.checked_sub(room)
+                .assured("the fixture leaves the pool more than its room"),
         )
         .assured("the free pool admits the hold")
 }
@@ -532,7 +537,10 @@ async fn an_inferencer_page_beyond_the_bulk_class_ends_where_it_runs_out_and_the
         let page = read(&executor, &branches, &plan, after, 1024, TRANSFER_BOUND)
             .await
             .assured("a page the bulk class cannot hold whole ends early instead of being refused");
-        assert_eq!(page.counts.rows, 8, "every page reports the complete counts");
+        assert_eq!(
+            page.counts.rows, 8,
+            "every page reports the complete counts"
+        );
         let returned = returned_fills(&page);
         assert!(!returned.is_empty(), "every page returns at least one row");
         fills.extend(returned);
@@ -543,7 +551,10 @@ async fn an_inferencer_page_beyond_the_bulk_class_ends_where_it_runs_out_and_the
         after = Some((page.last_branch, page.offset));
     }
     assert!(pages > 1, "the room left holds no page of every row");
-    assert_eq!(fills, expected, "the pages return every tensor once, in order");
+    assert_eq!(
+        fills, expected,
+        "the pages return every tensor once, in order"
+    );
     drop(held);
 }
 
@@ -574,9 +585,17 @@ async fn an_inferencer_page_another_node_reads_sets_aside_its_reply_and_ends_soo
     else {
         panic!("a reply to another node sets memory aside");
     };
-    let mut remote = read_for(&executor, &branches, &plan, None, 1024, TRANSFER_BOUND, reply)
-        .await
-        .assured("the owner answers another node with a first page");
+    let mut remote = read_for(
+        &executor,
+        &branches,
+        &plan,
+        None,
+        1024,
+        TRANSFER_BOUND,
+        reply,
+    )
+    .await
+    .assured("the owner answers another node with a first page");
     let remote_rows = returned_fills(&remote).len();
     assert!(remote_rows > 0, "the first page returns at least one row");
     assert!(

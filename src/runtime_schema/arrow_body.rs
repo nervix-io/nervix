@@ -247,13 +247,39 @@ impl RuntimeRecordBatch {
         let reservation = executor
             .try_reserve(MemoryClass::Bulk, bytes.max(1))
             .change_context(ArrowBodyError::Admission)?;
+        let (projection, encoded) = reservation
+            .split(projection_bytes)
+            .change_context(ArrowBodyError::Admission)?;
+        let (body, _projection) = Self::encode_arrow_snapshot_projection_within(
+            executor, admission, projection, encoded, project,
+        )
+        .await?;
+        Ok(body)
+    }
+
+    /// Projects and encodes one Arrow snapshot section as
+    /// [`Self::encode_arrow_snapshot_projection`] does, on memory its caller already holds:
+    /// `projection` for the projected columns while they exist, which comes back with the section,
+    /// and `encoded` for the section's bytes, which the section keeps.
+    pub(crate) async fn encode_arrow_snapshot_projection_within<E: error_stack::Context>(
+        executor: &Executor,
+        admission: QueueAdmission,
+        projection: Reservation,
+        encoded: Reservation,
+        project: impl FnOnce() -> error_stack::Result<Self, E> + Send + 'static,
+    ) -> Result<(ChargedBytes, Reservation), Report<ArrowBodyError>> {
+        let limit = executor.limits().snapshot_section_bytes.as_u64();
+        let projection_bytes = projection.bytes();
+        let charge = projection
+            .merge(encoded)
+            .change_context(ArrowBodyError::Admission)?;
         executor
             .run_cpu_with(
                 CpuClass::Bulk,
                 admission,
-                reservation,
+                charge,
                 move |charge, cancellation| {
-                    let (_projection_charge, encoded_charge) = charge
+                    let (projection, encoded) = charge
                         .split(projection_bytes)
                         .change_context(ArrowBodyError::Admission)?;
                     cancellation
@@ -263,7 +289,8 @@ impl RuntimeRecordBatch {
                     cancellation
                         .check()
                         .change_context(ArrowBodyError::Cancelled)?;
-                    encode_admitted_body(batch.batch, encoded_charge, limit)
+                    let body = encode_admitted_body(batch.batch, encoded, limit)?;
+                    Ok((body, projection))
                 },
             )
             .await
@@ -358,6 +385,34 @@ impl RuntimeRecordBatch {
         .await
     }
 
+    /// The bulk memory decoding one Arrow snapshot section of `encoded` bytes takes under
+    /// `executor`'s bounds: what [`Self::decode_arrow_snapshot_section`] charges for it.
+    pub(crate) fn snapshot_section_decode_charge(executor: &Executor, encoded: u64) -> u64 {
+        decode_charge(encoded, snapshot_section_decoded_limit(executor))
+    }
+
+    /// Decode one Arrow section of a sealed runtime snapshot as
+    /// [`Self::decode_arrow_snapshot_section`] does, into `charge`, bulk memory its caller already
+    /// holds for it ([`Self::snapshot_section_decode_charge`]), instead of reserving it. The charge
+    /// comes back with the batch, so the decoded columns stay charged for as long as the caller
+    /// keeps them.
+    pub(crate) async fn decode_arrow_snapshot_section_within(
+        executor: &Executor,
+        admission: QueueAdmission,
+        expected_schema: StdArc<ArrowSchema>,
+        body: ChargedBytes,
+        charge: Reservation,
+    ) -> Result<(Self, Reservation), Report<ArrowBodyError>> {
+        let contract = BodyContract {
+            schema: Some(expected_schema),
+            decoded_limit: executor.limits().snapshot_section_bytes.as_u64(),
+            max_sections: NonZeroUsize::MIN,
+            carriage: ArrowBodyCarriage::SnapshotSection,
+            admission,
+        };
+        decode_body_within(executor, body, contract, charge).await
+    }
+
     /// Rebuild one batch from the sections an IPC stream carried. An empty stream still declares a
     /// schema, so it becomes an empty batch of that shape rather than an error.
     fn from_decoded_sections(
@@ -436,11 +491,33 @@ impl CompiledSchema {
     }
 }
 
-async fn decode_body(
+/// The memory decoding a body of `encoded` bytes takes, within `decoded_limit`: the data the
+/// decoder will produce and the scratch its conversion overlaps with, both charged before it
+/// allocates either. Uncompressed Arrow decodes to about the size it was encoded at, so one encoded
+/// size covers the decoded columns and a second covers the overlap. The charge scales with this
+/// body rather than with the largest one the class would accept: a kilobyte of relay traffic must
+/// not hold the whole scratch allowance.
+fn decode_charge(encoded: u64, decoded_limit: u64) -> u64 {
+    let charge = encoded.checked_mul(2).unwrap_or(decoded_limit);
+    charge.min(decoded_limit)
+}
+
+/// The decoded bound of one Arrow snapshot section under `executor`'s bounds.
+fn snapshot_section_decoded_limit(executor: &Executor) -> u64 {
+    executor
+        .limits()
+        .snapshot_section_bytes
+        .as_u64()
+        .min(ArrowBodyCarriage::SnapshotSection.decoded_limit(executor))
+}
+
+/// Refuses a body longer than its carriage carries, before anything is decoded; otherwise its
+/// encoded length.
+fn encoded_length(
     executor: &Executor,
-    body: ChargedBytes,
-    contract: BodyContract,
-) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
+    body: &ChargedBytes,
+    contract: &BodyContract,
+) -> Result<u64, Report<ArrowBodyError>> {
     let encoded_limit = contract.carriage.encoded_limit(executor);
     let encoded: u64 = body.len().arch_into();
     // The encoded length is known before anything is decoded, so an oversized body is refused here
@@ -451,18 +528,19 @@ async fn decode_body(
             limit: encoded_limit,
         }));
     }
+    Ok(encoded)
+}
+
+async fn decode_body(
+    executor: &Executor,
+    body: ChargedBytes,
+    contract: BodyContract,
+) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
+    let encoded = encoded_length(executor, &body, &contract)?;
     let decoded_limit = contract
         .decoded_limit
         .min(contract.carriage.decoded_limit(executor));
-    // Charge the data the decoder will produce and the scratch its conversion overlaps with, both
-    // before it allocates either. Uncompressed Arrow decodes to about the size it was encoded at,
-    // so one encoded size covers the decoded columns and a second covers the overlap. The charge
-    // scales with this body rather than with the largest one the class would accept: a kilobyte of
-    // relay traffic must not hold the whole scratch allowance.
-    let charge = encoded
-        .checked_mul(2)
-        .unwrap_or(decoded_limit)
-        .min(decoded_limit);
+    let charge = decode_charge(encoded, decoded_limit);
     // A snapshot's input already occupies this bulk pool. Waiting for scratch while retaining
     // that input can leave concurrent readers holding all the room each needs to finish.
     let reservation = match contract.carriage {
@@ -476,12 +554,28 @@ async fn decode_body(
         }
     }
     .change_context(ArrowBodyError::Admission)?;
+    let (batch, _charge) = decode_body_within(executor, body, contract, reservation).await?;
+    Ok(batch)
+}
+
+/// Decodes `body` under `contract` on `charge`, memory already held for it, and gives that charge
+/// back with the batch.
+async fn decode_body_within(
+    executor: &Executor,
+    body: ChargedBytes,
+    contract: BodyContract,
+    charge: Reservation,
+) -> Result<(RuntimeRecordBatch, Reservation), Report<ArrowBodyError>> {
+    encoded_length(executor, &body, &contract)?;
+    let decoded_limit = contract
+        .decoded_limit
+        .min(contract.carriage.decoded_limit(executor));
     let decoded = executor
         .run_cpu_with(
             contract.carriage.cpu_class(),
             contract.admission,
-            reservation,
-            move |_charge, cancellation| {
+            charge,
+            move |charge, cancellation| {
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
@@ -533,7 +627,8 @@ async fn decode_body(
                     }
                     batches.push(batch);
                 }
-                RuntimeRecordBatch::from_decoded_sections(schema, batches)
+                let batch = RuntimeRecordBatch::from_decoded_sections(schema, batches)?;
+                Ok((batch, charge))
             },
         )
         .await;

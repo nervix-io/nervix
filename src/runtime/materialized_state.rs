@@ -384,7 +384,22 @@ impl MaterializedRelayStateRead {
             .serialize_with(|binding| self.capture_generation(binding.fence()))
     }
 
-    /// Capture the shared row views an operator inspects under memory admission.
+    /// How many records this state holds now: the row views capturing it copies.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "operator inspection counts the row views it is about to admit"
+        )
+    )]
+    pub(super) fn inspection_records(&self) -> usize {
+        self.state.entries.load().len()
+    }
+
+    /// Capture the shared row views an operator inspects into `charge`, memory the inspection
+    /// admitted for [`Self::inspection_records`] of them, and give that charge back with them.
+    /// Records added since they were counted take their room from the bulk pool at once, or the
+    /// capture is refused.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -394,7 +409,7 @@ impl MaterializedRelayStateRead {
     )]
     pub(super) fn capture_for_inspection(
         &self,
-        executor: &Executor,
+        charge: Reservation,
     ) -> Result<(MaterializedGeneration, Reservation), Report<MaterializedSnapshotError>> {
         self.state.assignment.serialize_with(|binding| {
             let records = self.state.entries.load().len();
@@ -406,8 +421,9 @@ impl MaterializedRelayStateRead {
             let bytes = u64::try_from(bytes).map_err(|_| {
                 Report::new(MaterializedSnapshotError::MetadataAddressability { records })
             })?;
-            let charge = executor
-                .try_reserve(MemoryClass::Bulk, bytes.max(1))
+            let mut charge = charge;
+            charge
+                .grow_to(bytes.max(1))
                 .change_context(MaterializedSnapshotError::Admission)?;
             Ok((self.capture_generation(binding.fence()), charge))
         })

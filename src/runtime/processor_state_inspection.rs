@@ -608,13 +608,46 @@ pub(crate) enum PageReply {
 }
 
 impl PageReply {
-    /// The reply to another node under `executor`'s bounds: the largest descriptor a bulk page
-    /// stream carries and each body's framing.
+    /// The eight-byte little-endian length that frames a page stream's descriptor.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a page stream frames its descriptor with an eight-byte little-endian length"
+        )
+    )]
+    pub(crate) const DESCRIPTOR_LENGTH_BYTES: u64 = 8;
+
+    /// The charge of the job that computes one body's digest: the least a bounded job carries.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a bounded executor job carries a charge of at least one byte"
+        )
+    )]
+    pub(crate) const DIGEST_JOB_BYTES: u64 = 1;
+
+    /// The reply to another node under `executor`'s bounds: what its descriptor takes and each
+    /// body's framing.
     pub(crate) fn remote(executor: &nervix_execution::Executor) -> Self {
         Self::Remote {
-            descriptor: nervix_interconnect::PoolClass::Bulk.payload_limit(executor),
+            descriptor: Self::descriptor_share(executor),
             framing: Self::body_framing(executor),
         }
+    }
+
+    /// What a page another node reads sets aside ahead for its descriptor under `executor`'s
+    /// bounds: the largest descriptor a bulk page stream carries, the length that frames it, and
+    /// the job that computes each body's digest, one body at a time.
+    pub(crate) fn descriptor_share(executor: &nervix_execution::Executor) -> u64 {
+        let descriptor = nervix_interconnect::PoolClass::Bulk.payload_limit(executor);
+        let framed = descriptor
+            .checked_add(Self::DESCRIPTOR_LENGTH_BYTES)
+            .assured("the bulk payload bound leaves room for its length");
+        framed
+            .checked_add(Self::DIGEST_JOB_BYTES)
+            .assured("the bulk payload bound leaves room for its digest job")
     }
 
     /// The most one Arrow body's framing, its schema, record batch header and buffer padding, adds

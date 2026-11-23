@@ -37,8 +37,8 @@ use crate::{
     application::{AppError, command_result::CommandResult, session_service::SessionServiceImpl},
     client_row::{ArrowRowBatch, write_runtime_value},
     runtime::{
-        MaterializedGenerationRecord, MaterializedInspectionPage, MaterializedStateCapture,
-        StatePageReadError,
+        MaterializedGenerationRecord, MaterializedInspectionPage, MaterializedPageReply,
+        MaterializedStateCapture, StatePageReadError,
         state_inspection_exchange::{receive_materialized_page, stream_materialized_page},
     },
     state_inspection_cursor::StateInspectionCursor,
@@ -551,13 +551,21 @@ impl SessionServiceImpl {
             let (descriptor, page) = match filter {
                 Some(filter) => {
                     let capture = self
-                        .native_materialized_capture(request.clone(), true, Some(filter))
+                        .native_materialized_capture(
+                            request.clone(),
+                            true,
+                            Some(filter),
+                            MaterializedPageReply::Local,
+                        )
                         .await?;
                     (capture.descriptor, capture.state.page)
                 }
                 None => {
-                    self.native_materialized_inspection_page(request.clone())
-                        .await?
+                    self.native_materialized_inspection_page(
+                        request.clone(),
+                        MaterializedPageReply::Local,
+                    )
+                    .await?
                 }
             };
             return Ok((descriptor, InspectionUnitRows::Local(page)));
@@ -568,6 +576,9 @@ impl SessionServiceImpl {
             .state_inspection_settings()
             .read_timeout
             .value();
+        let read_deadline = nervix_primitives::time::Instant::now()
+            .checked_add(deadline)
+            .assured("the inspection read deadline is a bounded setting");
         let stream = match match filter {
             Some(filter) => {
                 self.inner
@@ -612,6 +623,7 @@ impl SessionServiceImpl {
             stream,
             &schema,
             request,
+            read_deadline,
         )
         .await
         {
@@ -632,11 +644,12 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn native_materialized_inspection_page(
         &self,
         request: ReadMaterializedStatePage,
+        reply: MaterializedPageReply,
     ) -> Result<
         (MaterializedStatePageDescriptor, MaterializedInspectionPage),
         StateInspectionRejection,
     > {
-        self.native_materialized_capture(request, false, None)
+        self.native_materialized_capture(request, false, None, reply)
             .await
             .map(|capture| (capture.descriptor, capture.state.page))
     }
@@ -646,6 +659,7 @@ impl SessionServiceImpl {
         request: ReadMaterializedStatePage,
         catalog: bool,
         filter: Option<nervix_interconnect::MaterializedPartitionFilter>,
+        reply: MaterializedPageReply,
     ) -> Result<NativeMaterializedCapture, StateInspectionRejection> {
         let local = ClusterNodeIdentity::new(
             self.inner.consensus.local_node_id().clone(),
@@ -697,6 +711,7 @@ impl SessionServiceImpl {
                     },
                     catalog_requested: catalog,
                     filter,
+                    reply,
                 },
             )
             .await
@@ -705,7 +720,9 @@ impl SessionServiceImpl {
             Err(error) => {
                 let reason = match error.current_context() {
                     StatePageReadError::Position => StateInspectionRejection::StaleContinuation,
-                    StatePageReadError::RowTooLarge => StateInspectionRejection::ReplyTooLarge,
+                    StatePageReadError::RowTooLarge | StatePageReadError::CaptureTooLarge => {
+                        StateInspectionRejection::ReplyTooLarge
+                    }
                     _ => StateInspectionRejection::NotReady,
                 };
                 return Err(inspection_refusal(error, reason));
@@ -777,7 +794,7 @@ impl SessionServiceImpl {
         request: nervix_interconnect::ReadMaterializedKeyCatalog,
     ) -> nervix_interconnect::MaterializedKeyCatalogResponse {
         let result = self
-            .native_materialized_capture(request.read, true, None)
+            .native_materialized_capture(request.read, true, None, MaterializedPageReply::Local)
             .await
             .map(|capture| capture.state.catalog);
         nervix_interconnect::MaterializedKeyCatalogResponse { result }
@@ -815,13 +832,20 @@ impl SessionServiceImpl {
             .read_timeout
             .value();
         let executor = self.inner.runtime.inspection_executor();
+        // The page travels to another node, so selecting its rows sets their reply aside.
+        let reply = MaterializedPageReply::Remote {
+            descriptor: crate::runtime::PageReply::descriptor_share(executor),
+        };
         match timeout(deadline, async {
             let result = match filter {
                 Some(filter) => self
-                    .native_materialized_capture(request, true, Some(filter))
+                    .native_materialized_capture(request, true, Some(filter), reply)
                     .await
                     .map(|capture| (capture.descriptor, capture.state.page)),
-                None => self.native_materialized_inspection_page(request).await,
+                None => {
+                    self.native_materialized_inspection_page(request, reply)
+                        .await
+                }
             };
             stream_materialized_page(executor, result, max_bytes).await
         })

@@ -40,7 +40,7 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{
     AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, QueueAdmission,
-    StorageClass,
+    Reservation, StorageClass,
 };
 use nervix_models::RemoteRuntimeRecordMetadata;
 use nervix_primitives::sync::{Arc, StdArc};
@@ -260,17 +260,25 @@ impl SealedSnapshotHeader {
         rows: RestoredRows,
         relay_budget: u64,
     ) -> Result<MaterializedRecordLayout, Report<MaterializedSnapshotError>> {
-        if (self.records == 0) != (self.groups == 0) || u64::from(self.groups) > self.records {
+        MaterializedRecordLayout::of(self.records, self.groups, rows, relay_budget)
+    }
+}
+
+impl MaterializedRecordLayout {
+    /// The row views and uniqueness table `records` records in `groups` groups take, refused when
+    /// the counts contradict each other or the views pass `rows`' own ceiling.
+    fn of(
+        records: u64,
+        groups: u32,
+        rows: RestoredRows,
+        relay_budget: u64,
+    ) -> Result<Self, Report<MaterializedSnapshotError>> {
+        if (records == 0) != (groups == 0) || u64::from(groups) > records {
             return Err(MaterializedSnapshotError::decoding(
                 "invalid materialized group count",
             ));
         }
-        let records = usize::try_from(self.records)
-            .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-        let groups = usize::try_from(self.groups)
-            .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-        let metadata_bytes = self
-            .records
+        let metadata_bytes = records
             .checked_mul(
                 u64::try_from(
                     std::mem::size_of::<RestoredMaterializedRecord>()
@@ -283,12 +291,119 @@ impl SealedSnapshotHeader {
         if rows.exceeds_ceiling(metadata_bytes, relay_budget) {
             return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
         }
-        Ok(MaterializedRecordLayout {
+        let records = usize::try_from(records)
+            .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
+        let groups = usize::try_from(groups)
+            .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
+        Ok(Self {
             records,
             groups,
             metadata_bytes,
         })
     }
+}
+
+/// The row-view metadata one group's identity section of `identities` bytes adds to an opened
+/// container's charge: eight bytes for each byte of the section, which bounds the branch keys and
+/// watermarks it decodes into.
+fn identity_metadata_bytes(identities: u64) -> Result<u64, Report<MaterializedSnapshotError>> {
+    identities
+        .checked_mul(8)
+        .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))
+}
+
+/// What one group's decoded Arrow columns keep while the opened container lives, for a column
+/// section of `columns` bytes: twice the section, within the section bound `section_limit`, and
+/// at least one byte.
+fn retained_column_bytes(
+    columns: u64,
+    section_limit: u64,
+) -> Result<u64, Report<MaterializedSnapshotError>> {
+    let retained = columns
+        .checked_mul(2)
+        .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
+    Ok(retained.min(section_limit).max(1))
+}
+
+/// The shape of a sealed container that a reader admits memory for before it holds any of the
+/// container: how many records it carries, and the exact length of each group's sections, in
+/// container order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::runtime) struct SealedContainerLayout {
+    pub(in crate::runtime) records: u64,
+    pub(in crate::runtime) groups: Vec<SealedGroupLayout>,
+}
+
+/// The exact lengths of one group's record identity section and its Arrow column section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) struct SealedGroupLayout {
+    pub(in crate::runtime) identities: u64,
+    pub(in crate::runtime) columns: u64,
+}
+
+impl SealedContainerLayout {
+    /// What opening a relay container of this layout takes on `executor`: the most the opening
+    /// holds at once, step by step in the order it opens the container. The opened snapshot keeps
+    /// its row views and uniqueness table, each group's decoded identities and each group's decoded
+    /// columns, while decoding the header, each group's identities and each group's columns, and
+    /// checking the restored branches, each borrows memory for that step alone and gives it back
+    /// before the next. A layout whose sections pass their bounds, or whose row views pass the
+    /// relay's budget, is refused as opening the container would refuse it.
+    pub(in crate::runtime) fn relay_opening_need(
+        &self,
+        executor: &Executor,
+    ) -> Result<u64, Report<MaterializedSnapshotError>> {
+        let too_large = || Report::new(MaterializedSnapshotError::MetadataTooLarge);
+        let limits = executor.limits();
+        let header_limit = limits.snapshot_header_bytes.as_u64();
+        let identity_limit = limits.snapshot_record_bytes.as_u64();
+        let section_limit = limits.snapshot_section_bytes.as_u64();
+        let relay_budget = executor.memory(MemoryClass::Relay).capacity_bytes;
+        let rows = RestoredRows::Relay;
+        let groups = u32::try_from(self.groups.len()).map_err(|_| too_large())?;
+        let layout = MaterializedRecordLayout::of(self.records, groups, rows, relay_budget)?;
+        // Decoding the header borrows its bound before anything is kept.
+        let mut peak = header_limit;
+        let mut metadata = layout.metadata_bytes.max(1);
+        let mut kept = metadata;
+        for group in &self.groups {
+            if group.identities > identity_limit {
+                return Err(Report::new(MaterializedSnapshotError::RecordTooLarge {
+                    size: group.identities,
+                    limit: identity_limit,
+                }));
+            }
+            if group.columns > section_limit {
+                return Err(Report::new(MaterializedSnapshotError::SectionTooLarge {
+                    size: group.columns,
+                    limit: section_limit,
+                }));
+            }
+            let identities = identity_metadata_bytes(group.identities)?;
+            metadata = metadata.checked_add(identities).ok_or_else(too_large)?;
+            if rows.exceeds_ceiling(metadata, relay_budget) {
+                return Err(too_large());
+            }
+            kept = kept.checked_add(identities).ok_or_else(too_large)?;
+            // Decoding the group's identities borrows the identity bound.
+            peak = peak.max(kept.checked_add(identity_limit).ok_or_else(too_large)?);
+            kept = kept
+                .checked_add(retained_column_bytes(group.columns, section_limit)?)
+                .ok_or_else(too_large)?;
+            // Decoding the group's columns borrows the Arrow decoder's charge for them.
+            let decoding =
+                RuntimeRecordBatch::snapshot_section_decode_charge(executor, group.columns);
+            peak = peak.max(kept.checked_add(decoding).ok_or_else(too_large)?);
+        }
+        // Checking the restored branches borrows one byte for its job.
+        Ok(peak.max(kept.checked_add(1).ok_or_else(too_large)?))
+    }
+}
+
+/// A resident container and its layout.
+pub(in crate::runtime) struct ResidentContainer {
+    pub(in crate::runtime) bytes: ChargedBytes,
+    pub(in crate::runtime) layout: SealedContainerLayout,
 }
 
 /// The scalar identity of the records one Arrow section carries, in that section's row order.
@@ -585,33 +700,74 @@ impl MaterializedGeneration {
         })
     }
 
-    /// The bounded resident container a window checkpoint nests inside its own admitted payload.
-    /// Materialized relay persistence and transfer call `seal`, which retains a file instead.
+    /// The bounded resident container a window checkpoint nests inside its own admitted payload,
+    /// or an inspection page carries, with the layout it was written in. Materialized relay
+    /// persistence and transfer call `seal`, which retains a file instead.
     pub(in crate::runtime) async fn encode_resident_container(
         &self,
         executor: &Executor,
-    ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
+    ) -> Result<ResidentContainer, Report<MaterializedSnapshotError>> {
+        self.encode_resident_container_with(executor, &mut EncodingCharges::Pools)
+            .await
+    }
+
+    /// Encodes these records' resident container as [`Self::encode_resident_container`] does,
+    /// every step drawing on `memory`, which the page another node reads set aside for its
+    /// container as it selected these records: what [`ResidentEncodingPlan`] names for them. A
+    /// section that came out larger than the plan's bound for it tops its container up from the
+    /// bulk pool at once, or the encoding is refused.
+    pub(in crate::runtime) async fn encode_resident_container_within(
+        &self,
+        executor: &Executor,
+        memory: Reservation,
+    ) -> Result<ResidentContainer, Report<MaterializedSnapshotError>> {
+        let mut charges = EncodingCharges::SetAside(Some(memory));
+        self.encode_resident_container_with(executor, &mut charges)
+            .await
+    }
+
+    async fn encode_resident_container_with(
+        &self,
+        executor: &Executor,
+        charges: &mut EncodingCharges,
+    ) -> Result<ResidentContainer, Report<MaterializedSnapshotError>> {
         let groups = self.groups(executor);
         let mut sections = Vec::new();
+        let mut group_layouts = Vec::with_capacity(groups.len());
         for group in &groups {
             nervix_primitives::task::consume_budget().await;
-            sections.push(self.seal_identities(executor, group).await?);
-            sections.push(self.seal_columns(executor, group).await?);
+            let identities = self.seal_identities_with(executor, group, charges).await?;
+            let columns = self.seal_columns_with(executor, group, charges).await?;
+            group_layouts.push(SealedGroupLayout {
+                identities: identities.bytes.len().arch_into(),
+                columns: columns.bytes.len().arch_into(),
+            });
+            sections.push(identities);
+            sections.push(columns);
         }
         let groups = u32::try_from(groups.len())
             .map_err(|_| MaterializedSnapshotError::encoding("too many snapshot groups"))?;
-        encode_resident_container(
+        let records: u64 = self.records.len().arch_into();
+        let bytes = encode_resident_container(
             executor,
             SealedSnapshotHeader {
                 revision: self.revision,
                 fence: self.fence,
                 branch_generation: self.branch_generation,
-                records: self.records.len().arch_into(),
+                records,
                 groups,
             },
             sections,
+            charges,
         )
-        .await
+        .await?;
+        Ok(ResidentContainer {
+            bytes,
+            layout: SealedContainerLayout {
+                records,
+                groups: group_layouts,
+            },
+        })
     }
 
     /// Split the records into groups that each fit one Arrow section and one identity record.
@@ -645,44 +801,11 @@ impl MaterializedGeneration {
     ) -> Vec<Range<usize>> {
         let mut groups = Vec::new();
         let mut start = 0;
-        let mut columns = 0_u64;
-        let mut identities = 0_u64;
+        let mut fill = GroupFill::new(identity_limit, section_limit);
         for (index, record) in self.records.iter().enumerate() {
-            let record_columns = record.row.one_row_batch().estimated_bytes();
-            let record_identity = estimated_identity_bytes(record.branch.as_ref());
-            // A total that does not fit a u64 is past every limit there is, so it closes the
-            // group exactly as an ordinary overrun does.
-            let next = match (
-                columns.checked_add(record_columns),
-                identities.checked_add(record_identity),
-            ) {
-                (Some(next_columns), Some(next_identities)) => {
-                    Some((next_columns, next_identities))
-                }
-                _ => None,
-            };
-            let overruns = match next {
-                Some((next_columns, next_identities)) => {
-                    next_columns > section_limit || next_identities > identity_limit
-                }
-                None => true,
-            };
-            if index > start && overruns {
+            if fill.add(record) {
                 groups.push(start..index);
                 start = index;
-                columns = record_columns;
-                identities = record_identity;
-                continue;
-            }
-            match next {
-                Some((next_columns, next_identities)) => {
-                    columns = next_columns;
-                    identities = next_identities;
-                }
-                None => {
-                    columns = section_limit;
-                    identities = identity_limit;
-                }
             }
         }
         if start < self.records.len() {
@@ -695,6 +818,16 @@ impl MaterializedGeneration {
         &self,
         executor: &Executor,
         group: &Range<usize>,
+    ) -> Result<SealedSection, Report<MaterializedSnapshotError>> {
+        self.seal_identities_with(executor, group, &mut EncodingCharges::Pools)
+            .await
+    }
+
+    async fn seal_identities_with(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+        charges: &mut EncodingCharges,
     ) -> Result<SealedSection, Report<MaterializedSnapshotError>> {
         let limit = executor.limits().snapshot_record_bytes.as_u64();
         let estimate = self.records[group.clone()]
@@ -711,20 +844,20 @@ impl MaterializedGeneration {
         }
         // Remote identities, the aligned serialization, and the bounded output overlap in one
         // job. Admit all three before converting a branch key or allocating their vectors.
-        let bytes = limit
-            .checked_mul(3)
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let reservation = executor
-            .try_reserve(MemoryClass::Bulk, bytes.max(1))
-            .change_context(MaterializedSnapshotError::Admission)?;
+        let job = charges.take(executor, identity_job_bytes(limit)?)?;
         let records = Arc::clone(&self.records);
         let group = group.clone();
-        let bytes = executor
+        let (bytes, scratch) = executor
             .run_cpu_with(
                 CpuClass::Bulk,
                 nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
+                job,
                 move |charge, cancellation| {
+                    // The output takes one bound of the job, and the rest covers the identities
+                    // and their serialization while they exist.
+                    let (output, scratch) = charge
+                        .split(limit)
+                        .change_context(MaterializedSnapshotError::Admission)?;
                     let mut identities = Vec::with_capacity(group.len());
                     for record in &records[group] {
                         cancellation
@@ -746,15 +879,16 @@ impl MaterializedGeneration {
                             limit,
                         }));
                     }
-                    let mut buffer = BudgetedBuffer::with_limit(charge, limit);
+                    let mut buffer = BudgetedBuffer::with_limit(output, limit);
                     buffer
                         .write_all(&encoded)
                         .map_err(MaterializedSnapshotError::encoding)?;
-                    Ok(ChargedBytes::from_buffer(buffer))
+                    Ok((ChargedBytes::from_buffer(buffer), scratch))
                 },
             )
             .await
             .change_context(MaterializedSnapshotError::Execution)??;
+        charges.give_back(scratch)?;
         Ok(SealedSection {
             kind: SealedSectionKind::RecordIdentities,
             bytes,
@@ -765,6 +899,16 @@ impl MaterializedGeneration {
         &self,
         executor: &Executor,
         group: &Range<usize>,
+    ) -> Result<SealedSection, Report<MaterializedSnapshotError>> {
+        self.seal_columns_with(executor, group, &mut EncodingCharges::Pools)
+            .await
+    }
+
+    async fn seal_columns_with(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+        charges: &mut EncodingCharges,
     ) -> Result<SealedSection, Report<MaterializedSnapshotError>> {
         let payload = self.records[group.clone()]
             .iter()
@@ -779,55 +923,426 @@ impl MaterializedGeneration {
                 limit,
             }));
         }
-        let row_bytes = u64::try_from(group.len())
-            .map_err(|_| Report::new(MaterializedSnapshotError::Admission))?
-            .checked_mul(256)
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let schema_bytes = u64::try_from(self.schema.fields().len())
-            .map_err(|_| Report::new(MaterializedSnapshotError::Admission))?
-            .checked_mul(256)
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let projection_bytes = payload
-            .checked_mul(2)
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let projection_bytes = projection_bytes
-            .checked_add(row_bytes)
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let projection_bytes = projection_bytes
-            .checked_add(schema_bytes)
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
-        let encoded_estimate = payload
-            .checked_add(64 * 1024)
-            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+        let rows = u64::try_from(group.len())
+            .map_err(|_| Report::new(MaterializedSnapshotError::Admission))?;
+        let fields = u64::try_from(self.schema.fields().len())
+            .map_err(|_| Report::new(MaterializedSnapshotError::Admission))?;
+        let charge = ColumnCharge::of(payload, rows, fields)?;
         let schema = StdArc::clone(&self.schema);
         let records = Arc::clone(&self.records);
         let group = group.clone();
-        let bytes = RuntimeRecordBatch::encode_arrow_snapshot_projection(
-            executor,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            projection_bytes,
-            encoded_estimate,
-            move || {
+        let bytes = charges
+            .encode_columns(executor, charge, move || {
                 RuntimeRecordBatch::from_rows(
                     schema,
                     records[group].iter().map(|record| &record.row),
                 )
-            },
-        )
-        .await
-        .map_err(|error| {
+            })
+            .await?;
+        Ok(SealedSection {
+            kind: SealedSectionKind::RecordColumns,
+            bytes,
+        })
+    }
+}
+
+/// Fills groups of records that each fit one Arrow section and one identity record, by each
+/// record's measured payload and estimated identity bytes, so one enormous record occupies a
+/// group of its own instead of pushing a section past its limit.
+#[derive(Debug, Clone, Copy)]
+struct GroupFill {
+    identity_limit: u64,
+    section_limit: u64,
+    /// The open group's column bytes and identity bytes.
+    columns: u64,
+    identities: u64,
+    /// Whether a group is open.
+    open: bool,
+}
+
+impl GroupFill {
+    fn new(identity_limit: u64, section_limit: u64) -> Self {
+        Self {
+            identity_limit,
+            section_limit,
+            columns: 0,
+            identities: 0,
+            open: false,
+        }
+    }
+
+    /// Adds `record` and whether it closes the open group and starts the next one.
+    fn add(&mut self, record: &MaterializedGenerationRecord) -> bool {
+        let record_columns = record.row.one_row_batch().estimated_bytes();
+        let record_identity = estimated_identity_bytes(record.branch.as_ref());
+        // A total that does not fit a u64 is past every limit there is, so it closes the group
+        // exactly as an ordinary overrun does.
+        let next = match (
+            self.columns.checked_add(record_columns),
+            self.identities.checked_add(record_identity),
+        ) {
+            (Some(next_columns), Some(next_identities)) => Some((next_columns, next_identities)),
+            _ => None,
+        };
+        let overruns = match next {
+            Some((next_columns, next_identities)) => {
+                next_columns > self.section_limit || next_identities > self.identity_limit
+            }
+            None => true,
+        };
+        if self.open && overruns {
+            self.columns = record_columns;
+            self.identities = record_identity;
+            return true;
+        }
+        self.open = true;
+        match next {
+            Some((next_columns, next_identities)) => {
+                self.columns = next_columns;
+                self.identities = next_identities;
+            }
+            None => {
+                self.columns = self.section_limit;
+                self.identities = self.identity_limit;
+            }
+        }
+        false
+    }
+}
+
+/// The job that seals one group's identities: the remote identities, their aligned serialization
+/// and the bounded output overlap in it, each within the identity record bound `limit`.
+fn identity_job_bytes(limit: u64) -> Result<u64, Report<MaterializedSnapshotError>> {
+    limit
+        .checked_mul(3)
+        .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))
+}
+
+/// What sealing one group's columns charges: the projection of its rows while it exists, and the
+/// section it is encoded into from the start.
+#[derive(Debug, Clone, Copy)]
+struct ColumnCharge {
+    projection: u64,
+    encoded: u64,
+}
+
+impl ColumnCharge {
+    /// The charge for a group of `rows` rows whose columns measure `payload` bytes, in a schema of
+    /// `fields` fields: the projection takes twice the payload, as its builders grow, and room for
+    /// each row's and each field's offsets and validity; the section starts at the payload and the
+    /// IPC stream's framing.
+    fn of(payload: u64, rows: u64, fields: u64) -> Result<Self, Report<MaterializedSnapshotError>> {
+        let too_large = || Report::new(MaterializedSnapshotError::Admission);
+        let row_bytes = rows.checked_mul(256).ok_or_else(too_large)?;
+        let schema_bytes = fields.checked_mul(256).ok_or_else(too_large)?;
+        let projection = payload
+            .checked_mul(2)
+            .ok_or_else(too_large)?
+            .checked_add(row_bytes)
+            .ok_or_else(too_large)?
+            .checked_add(schema_bytes)
+            .ok_or_else(too_large)?;
+        let encoded = payload.checked_add(64 * 1024).ok_or_else(too_large)?;
+        Ok(Self {
+            projection,
+            encoded,
+        })
+    }
+}
+
+/// Where encoding a resident container takes the memory each of its steps spends.
+enum EncodingCharges {
+    /// Each step takes its memory from the bulk pool as it reaches it.
+    Pools,
+    /// Every step draws on memory a page set aside for its container as it selected the records:
+    /// what is left of it, absent only once a step failed.
+    SetAside(Option<Reservation>),
+}
+
+impl EncodingCharges {
+    /// Takes `bytes` for one step: from the bulk pool at once, or from what the page set aside.
+    fn take(
+        &mut self,
+        executor: &Executor,
+        bytes: u64,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Pools => executor
+                .try_reserve(MemoryClass::Bulk, bytes.max(1))
+                .change_context(MaterializedSnapshotError::Admission),
+            Self::SetAside(memory) => {
+                let left = memory
+                    .take()
+                    .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+                let (taken, rest) = left
+                    .split(bytes)
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                *memory = Some(rest);
+                Ok(taken)
+            }
+        }
+    }
+
+    /// Gives back what a step only borrowed: to the pool, or to what the page set aside.
+    fn give_back(&mut self, charge: Reservation) -> Result<(), Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Pools => {
+                drop(charge);
+                Ok(())
+            }
+            Self::SetAside(memory) => {
+                let left = memory
+                    .take()
+                    .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+                let merged = left
+                    .merge(charge)
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                *memory = Some(merged);
+                Ok(())
+            }
+        }
+    }
+
+    /// Encodes one group's columns, projected by `project`, under `charge`.
+    async fn encode_columns<E: error_stack::Context>(
+        &mut self,
+        executor: &Executor,
+        charge: ColumnCharge,
+        project: impl FnOnce() -> error_stack::Result<RuntimeRecordBatch, E> + Send + 'static,
+    ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
+        let unwritable = |error| {
             MaterializedSnapshotError::arrow(
                 error,
                 MaterializedSnapshotError::Encode {
                     reason: "the Arrow section could not be written".to_string(),
                 },
             )
-        })?;
-        Ok(SealedSection {
-            kind: SealedSectionKind::RecordColumns,
-            bytes,
+        };
+        if let Self::Pools = self {
+            return RuntimeRecordBatch::encode_arrow_snapshot_projection(
+                executor,
+                nervix_execution::QueueAdmission::WaitForPlace,
+                charge.projection,
+                charge.encoded,
+                project,
+            )
+            .await
+            .map_err(unwritable);
+        }
+        let limit = executor.limits().snapshot_section_bytes.as_u64();
+        let projection = self.take(executor, charge.projection)?;
+        let encoded = self.take(executor, charge.encoded.min(limit))?;
+        let (body, projection) = RuntimeRecordBatch::encode_arrow_snapshot_projection_within(
+            executor,
+            nervix_execution::QueueAdmission::WaitForPlace,
+            projection,
+            encoded,
+            project,
+        )
+        .await
+        .map_err(unwritable)?;
+        self.give_back(projection)?;
+        Ok(body)
+    }
+
+    /// The container header's encoding, within the header bound `limit`. From the pool it waits
+    /// for room.
+    async fn header(
+        &mut self,
+        executor: &Executor,
+        limit: u64,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Pools => executor
+                .reserve(MemoryClass::Bulk, limit)
+                .await
+                .change_context(MaterializedSnapshotError::Admission),
+            Self::SetAside(_) => self.take(executor, limit),
+        }
+    }
+
+    /// The container of `length` bytes. From what the page set aside, a container whose sections
+    /// came out larger than the plan bounded them tops up from the bulk pool at once.
+    fn container(
+        &mut self,
+        executor: &Executor,
+        length: u64,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        let Self::SetAside(memory) = self else {
+            return self.take(executor, length);
+        };
+        let left = memory
+            .take()
+            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+        let Some(lacking) = length.checked_sub(left.bytes()) else {
+            let (taken, rest) = left
+                .split(length)
+                .change_context(MaterializedSnapshotError::Admission)?;
+            *memory = Some(rest);
+            return Ok(taken);
+        };
+        let more = executor
+            .try_reserve(MemoryClass::Bulk, lacking)
+            .change_context(MaterializedSnapshotError::Admission)?;
+        left.merge(more)
+            .change_context(MaterializedSnapshotError::Admission)
+    }
+}
+
+/// What encoding the resident container of the records added so far takes, for a page that sets
+/// that memory aside as it selects the records: the most the encoding holds at once, step by step
+/// in the order [`MaterializedGeneration::encode_resident_container_within`] takes it. Each group
+/// borrows its identity job and its column projection for their steps alone, keeps at most an
+/// identity record bound and its column section's starting charge for the sections it writes, then
+/// the header keeps at most its bound and the container takes its sections and frames at most.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::runtime) struct ResidentEncodingPlan {
+    fill: GroupFill,
+    fields: u64,
+    identity_limit: u64,
+    section_limit: u64,
+    header_limit: u64,
+    /// What the closed groups' sections keep, at most.
+    kept: u64,
+    /// The most the closed groups' steps held at once.
+    peak: u64,
+    /// The closed groups' framed sections in the container, at most.
+    framed: u64,
+    /// The open group's column payload and rows.
+    payload: u64,
+    rows: u64,
+}
+
+impl ResidentEncodingPlan {
+    /// The plan of an empty container of `schema`'s records under `executor`'s bounds.
+    pub(in crate::runtime) fn new(executor: &Executor, schema: &ArrowSchema) -> Self {
+        let limits = executor.limits();
+        Self {
+            fill: GroupFill::new(
+                limits.snapshot_record_bytes.as_u64(),
+                limits.snapshot_section_bytes.as_u64(),
+            ),
+            fields: schema.fields().len().arch_into(),
+            identity_limit: limits.snapshot_record_bytes.as_u64(),
+            section_limit: limits.snapshot_section_bytes.as_u64(),
+            header_limit: limits.snapshot_header_bytes.as_u64(),
+            kept: 0,
+            peak: 0,
+            framed: 0,
+            payload: 0,
+            rows: 0,
+        }
+    }
+
+    /// The plan with `record` added as the container's next record. A record whose columns alone
+    /// pass the section bound can never be sealed and is refused.
+    pub(in crate::runtime) fn with(
+        &self,
+        record: &MaterializedGenerationRecord,
+    ) -> Result<Self, Report<MaterializedSnapshotError>> {
+        let too_large = || Report::new(MaterializedSnapshotError::Admission);
+        let identity = estimated_identity_bytes(record.branch.as_ref());
+        if identity > self.identity_limit {
+            return Err(Report::new(MaterializedSnapshotError::RecordTooLarge {
+                size: identity,
+                limit: self.identity_limit,
+            }));
+        }
+        let columns = record.row.one_row_batch().estimated_bytes();
+        if columns > self.section_limit {
+            return Err(Report::new(MaterializedSnapshotError::SectionTooLarge {
+                size: columns,
+                limit: self.section_limit,
+            }));
+        }
+        let mut next = *self;
+        if next.fill.add(record) {
+            next.close()?;
+        }
+        next.payload = next.payload.checked_add(columns).ok_or_else(too_large)?;
+        next.rows = next.rows.checked_add(1).ok_or_else(too_large)?;
+        Ok(next)
+    }
+
+    /// Closes the open group into what the closed groups take.
+    fn close(&mut self) -> Result<(), Report<MaterializedSnapshotError>> {
+        let steps = self.open_steps(self.kept)?;
+        self.kept = steps.kept;
+        self.peak = self.peak.max(steps.peak);
+        self.framed = self
+            .framed
+            .checked_add(steps.framed)
+            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+        self.payload = 0;
+        self.rows = 0;
+        Ok(())
+    }
+
+    /// The open group's steps after `kept` bytes of earlier sections: the most they hold at once,
+    /// what is kept after them, and the group's framed sections in the container.
+    fn open_steps(&self, kept: u64) -> Result<GroupSteps, Report<MaterializedSnapshotError>> {
+        let too_large = || Report::new(MaterializedSnapshotError::Admission);
+        let charge = ColumnCharge::of(self.payload, self.rows, self.fields)?;
+        let encoded = charge.encoded.min(self.section_limit);
+        let identities = kept
+            .checked_add(identity_job_bytes(self.identity_limit)?)
+            .ok_or_else(too_large)?;
+        let kept = kept
+            .checked_add(self.identity_limit)
+            .ok_or_else(too_large)?;
+        let columns = kept
+            .checked_add(charge.projection)
+            .ok_or_else(too_large)?
+            .checked_add(encoded)
+            .ok_or_else(too_large)?;
+        let kept = kept.checked_add(encoded).ok_or_else(too_large)?;
+        let section_frames: u64 = SECTION_FRAME_BYTES.arch_into();
+        let framed = section_frames
+            .checked_mul(2)
+            .ok_or_else(too_large)?
+            .checked_add(self.identity_limit)
+            .ok_or_else(too_large)?
+            .checked_add(encoded)
+            .ok_or_else(too_large)?;
+        Ok(GroupSteps {
+            peak: identities.max(columns),
+            kept,
+            framed,
         })
     }
+
+    /// What encoding the container of every record added so far takes.
+    pub(in crate::runtime) fn need(&self) -> Result<u64, Report<MaterializedSnapshotError>> {
+        let too_large = || Report::new(MaterializedSnapshotError::Admission);
+        let mut peak = self.peak;
+        let mut kept = self.kept;
+        let mut framed = self.framed;
+        if self.rows > 0 {
+            let steps = self.open_steps(kept)?;
+            peak = peak.max(steps.peak);
+            kept = steps.kept;
+            framed = framed.checked_add(steps.framed).ok_or_else(too_large)?;
+        }
+        // The header's encoding keeps at most its bound.
+        peak = peak.max(kept.checked_add(self.header_limit).ok_or_else(too_large)?);
+        kept = kept.checked_add(self.header_limit).ok_or_else(too_large)?;
+        // The container holds the frame, the header and every framed section at once.
+        let container_frame: u64 = CONTAINER_FRAME_BYTES.arch_into();
+        let container = container_frame
+            .checked_add(self.header_limit)
+            .ok_or_else(too_large)?
+            .checked_add(framed)
+            .ok_or_else(too_large)?;
+        Ok(peak.max(kept.checked_add(container).ok_or_else(too_large)?))
+    }
+}
+
+/// What one group's encoding steps hold: the most at once, what is kept after them, and the
+/// group's framed sections in the container.
+struct GroupSteps {
+    peak: u64,
+    kept: u64,
+    framed: u64,
 }
 
 /// One sealed container staged group by group on quota-owned disk.
@@ -1179,20 +1694,48 @@ impl RestoredMaterializedSnapshot {
         schema: &StdArc<ArrowSchema>,
         source: SealedSource<'_>,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
-        // A relay's sealed state is opened for a transfer, a replication stream or a stored read,
-        // none of which answers a caller that waits on it, so a full bulk queue holds it back.
-        let snapshot = Self::open(
+        Self::open_relay_with(executor, schema, source, &mut OpeningCharges::Pools).await
+    }
+
+    /// Opens a relay container a reader received into memory it admitted before receiving it, as
+    /// [`Self::open_relay`] opens one: `memory` holds what
+    /// [`SealedContainerLayout::relay_opening_need`] names for `layout`, and every step of the
+    /// opening draws on it instead of on the node's pools, so none of them fails or waits for
+    /// memory. The container must have exactly the declared layout. The opened snapshot keeps the
+    /// share its rows hold; the rest goes back to the pool once the container is open.
+    pub(in crate::runtime) async fn open_relay_within(
+        executor: &Executor,
+        schema: &StdArc<ArrowSchema>,
+        sealed: ChargedBytes,
+        layout: SealedContainerLayout,
+        memory: Reservation,
+    ) -> Result<Self, Report<MaterializedSnapshotError>> {
+        let mut charges = OpeningCharges::Admitted(AdmittedOpening {
+            layout,
+            memory: Some(memory),
+        });
+        Self::open_relay_with(executor, schema, SealedSource::memory(sealed), &mut charges).await
+    }
+
+    async fn open_relay_with(
+        executor: &Executor,
+        schema: &StdArc<ArrowSchema>,
+        source: SealedSource<'_>,
+        charges: &mut OpeningCharges,
+    ) -> Result<Self, Report<MaterializedSnapshotError>> {
+        // A relay's sealed state is opened for a transfer, a replication stream, a stored read or
+        // an inspection page another node already read, none of which is refused for a full bulk
+        // queue, so the queue holds it back.
+        let snapshot = Self::open_with(
             executor,
             QueueAdmission::WaitForPlace,
             schema,
             source,
             RestoredRows::Relay,
+            charges,
         )
         .await?;
-        let charge = executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(MaterializedSnapshotError::Admission)?;
+        let charge = charges.job(executor).await?;
         executor
             .run_cpu_with(CpuClass::Bulk, nervix_execution::QueueAdmission::WaitForPlace, charge, move |_charge, cancellation| {
                 #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
@@ -1234,32 +1777,58 @@ impl RestoredMaterializedSnapshot {
         source: SealedSource<'_>,
         rows: RestoredRows,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
+        Self::open_with(
+            executor,
+            admission,
+            schema,
+            source,
+            rows,
+            &mut OpeningCharges::Pools,
+        )
+        .await
+    }
+
+    /// Opens a sealed snapshot as [`Self::open`] does, each step taking its memory from `charges`.
+    async fn open_with(
+        executor: &Executor,
+        admission: QueueAdmission,
+        schema: &StdArc<ArrowSchema>,
+        source: SealedSource<'_>,
+        rows: RestoredRows,
+        charges: &mut OpeningCharges,
+    ) -> Result<Self, Report<MaterializedSnapshotError>> {
         let mut cursor = source;
-        let header = cursor.take_header(executor, admission).await?;
+        let header_limit = executor.limits().snapshot_header_bytes.as_u64();
+        let header = cursor.take_header(executor).await?;
+        let header = charges
+            .decode_rkyv::<SealedSnapshotHeader>(executor, admission, header, header_limit)
+            .await?;
+        charges.check_header(&header)?;
         let identity_limit = executor.limits().snapshot_record_bytes.as_u64();
         let section_limit = executor.limits().snapshot_section_bytes.as_u64();
         let layout =
             header.metadata_layout(rows, executor.memory(MemoryClass::Relay).capacity_bytes)?;
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
-        let mut metadata_charge = executor
-            .reserve(MemoryClass::StateRead, layout.metadata_bytes.max(1))
-            .await
-            .change_context(MaterializedSnapshotError::Admission)?;
+        let mut metadata_charge = charges
+            .metadata(executor, layout.metadata_bytes.max(1))
+            .await?;
         let mut records = Vec::with_capacity(layout.records);
         let mut column_charges = Vec::with_capacity(layout.groups);
-        for _ in 0..header.groups {
+        for group in 0..layout.groups {
             nervix_primitives::task::consume_budget().await;
             let identities = cursor
                 .take_section(SealedSectionKind::RecordIdentities, identity_limit)
                 .await?;
-            let identity_bytes = u64::try_from(identities.len())
-                .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?
-                .checked_mul(8)
-                .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
+            let identities_length: u64 = identities.len().arch_into();
+            charges.check_section(
+                group,
+                SealedSectionKind::RecordIdentities,
+                identities_length,
+            )?;
             let identity_bytes = metadata_charge
                 .bytes()
-                .checked_add(identity_bytes)
+                .checked_add(identity_metadata_bytes(identities_length)?)
                 .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
             if rows.exceeds_ceiling(
                 identity_bytes,
@@ -1267,48 +1836,27 @@ impl RestoredMaterializedSnapshot {
             ) {
                 return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
             }
-            metadata_charge
-                .grow_to(identity_bytes)
-                .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?;
-            let identities = decode_rkyv::<SealedRecordIdentities>(
-                executor,
-                admission,
-                identities,
-                identity_limit,
-            )
-            .await?;
+            metadata_charge = charges.grow(metadata_charge, identity_bytes)?;
+            let identities = charges
+                .decode_rkyv::<SealedRecordIdentities>(
+                    executor,
+                    admission,
+                    identities,
+                    identity_limit,
+                )
+                .await?;
             let columns = cursor
                 .take_section(SealedSectionKind::RecordColumns, section_limit)
                 .await?;
+            let columns_length: u64 = columns.len().arch_into();
+            charges.check_section(group, SealedSectionKind::RecordColumns, columns_length)?;
             // Decoded carrier columns remain retained until installation consumes this snapshot.
             // Charge that cumulative materialization separately from one section's bulk scratch.
-            // Refuse when full: waiting while retaining preceding groups cannot free this charge.
-            let retained_bytes = u64::try_from(columns.len())
-                .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?
-                .checked_mul(2)
-                .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?
-                .min(section_limit)
-                .max(1);
-            column_charges.push(
-                executor
-                    .try_reserve(MemoryClass::StateRead, retained_bytes)
-                    .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?,
-            );
-            let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
-                executor,
-                admission,
-                StdArc::clone(schema),
-                columns,
-            )
-            .await
-            .map_err(|error| {
-                MaterializedSnapshotError::arrow(
-                    error,
-                    MaterializedSnapshotError::Decode {
-                        reason: "the Arrow section could not be read".to_string(),
-                    },
-                )
-            })?;
+            let retained_bytes = retained_column_bytes(columns_length, section_limit)?;
+            column_charges.push(charges.columns(executor, retained_bytes)?);
+            let batch = charges
+                .decode_columns(executor, admission, StdArc::clone(schema), columns)
+                .await?;
             let batch = Arc::new(batch);
             if identities.identities.len() != batch.batch().num_rows() {
                 return Err(Report::new(MaterializedSnapshotError::LengthMismatch {
@@ -1389,12 +1937,12 @@ pub(in crate::runtime) enum SealedSource<'a> {
 }
 
 impl<'a> SealedSource<'a> {
-    /// Validate and admit the container header before reading any row metadata or columns.
+    /// Validate the container's frame and take its bounded header before reading any row metadata
+    /// or columns.
     async fn take_header(
         &mut self,
         executor: &Executor,
-        admission: QueueAdmission,
-    ) -> Result<SealedSnapshotHeader, Report<MaterializedSnapshotError>> {
+    ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
         let magic = self
             .take(SEALED_SNAPSHOT_MAGIC.len().arch_into(), "magic")
             .await?;
@@ -1410,8 +1958,7 @@ impl<'a> SealedSource<'a> {
                 limit: header_limit,
             }));
         }
-        let header = self.take(header_bytes, "header").await?;
-        decode_rkyv::<SealedSnapshotHeader>(executor, admission, header, header_limit).await
+        self.take(header_bytes, "header").await
     }
 
     fn finish(&self) -> Result<(), Report<MaterializedSnapshotError>> {
@@ -1610,9 +2157,11 @@ async fn encode_resident_container(
     executor: &Executor,
     header: SealedSnapshotHeader,
     sections: Vec<SealedSection>,
+    charges: &mut EncodingCharges,
 ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
     let header_limit = executor.limits().snapshot_header_bytes.as_u64();
-    let header = encode_rkyv(executor, header, header_limit).await?;
+    let header_charge = charges.header(executor, header_limit).await?;
+    let header = encode_rkyv_within(executor, header, header_limit, header_charge).await?;
     let unaddressable =
         || MaterializedSnapshotError::encoding("the sealed snapshot exceeds an addressable size");
     let header_length = u32::try_from(header.len()).map_err(|_| unaddressable())?;
@@ -1631,9 +2180,7 @@ async fn encode_resident_container(
         };
         length = next;
     }
-    let reservation = executor
-        .try_reserve(MemoryClass::Bulk, length)
-        .change_context(MaterializedSnapshotError::Admission)?;
+    let reservation = charges.container(executor, length)?;
     let bytes = executor
         .run_cpu_with(
             CpuClass::Bulk,
@@ -1678,10 +2225,13 @@ async fn encode_resident_container(
     Ok(bytes)
 }
 
-async fn encode_rkyv<T>(
+/// Encodes `value` as one bounded rkyv record of at most `limit` bytes on `charge`, memory its
+/// caller already holds for the encoding; the encoded bytes keep their share of it.
+async fn encode_rkyv_within<T>(
     executor: &Executor,
     value: T,
     limit: u64,
+    charge: Reservation,
 ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>>
 where
     T: for<'a> RkyvSerialize<
@@ -1693,15 +2243,11 @@ where
         > + Send
         + 'static,
 {
-    let reservation = executor
-        .reserve(MemoryClass::Bulk, limit)
-        .await
-        .change_context(MaterializedSnapshotError::Admission)?;
     executor
         .run_cpu_with(
             CpuClass::Bulk,
             nervix_execution::QueueAdmission::WaitForPlace,
-            reservation,
+            charge,
             move |charge, cancellation| {
                 cancellation
                     .check()
@@ -1742,20 +2288,265 @@ where
     let reservation = executor
         .try_reserve(MemoryClass::Bulk, limit)
         .change_context(MaterializedSnapshotError::Admission)?;
+    let (value, _charge) = decode_rkyv_within(executor, admission, bytes, reservation).await?;
+    Ok(value)
+}
+
+/// Decodes `bytes` as [`decode_rkyv`] does, on `charge`, memory its caller already holds for the
+/// decoding, and gives that charge back with the value.
+async fn decode_rkyv_within<T>(
+    executor: &Executor,
+    admission: QueueAdmission,
+    bytes: ChargedBytes,
+    charge: Reservation,
+) -> Result<(T, Reservation), Report<MaterializedSnapshotError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
     executor
         .run_cpu_with(
             CpuClass::Bulk,
             admission,
-            reservation,
-            move |_charge, cancellation| {
+            charge,
+            move |charge, cancellation| {
                 cancellation
                     .check()
                     .change_context(MaterializedSnapshotError::Execution)?;
-                decode_aligned_rkyv(bytes.as_ref())
+                let value = decode_aligned_rkyv(bytes.as_ref())?;
+                Ok((value, charge))
             },
         )
         .await
         .change_context(MaterializedSnapshotError::Execution)?
+}
+
+/// Where opening a sealed container takes the memory each of its steps spends.
+enum OpeningCharges {
+    /// Each step takes its memory from the node's pools as it reaches it.
+    Pools,
+    /// Every step draws on memory a reader admitted for the container's declared layout before
+    /// receiving it.
+    Admitted(AdmittedOpening),
+}
+
+/// Memory a reader admitted for opening a container of `layout`, and that layout.
+struct AdmittedOpening {
+    layout: SealedContainerLayout,
+    /// What is left of the admitted memory; absent only once a step failed.
+    memory: Option<Reservation>,
+}
+
+impl AdmittedOpening {
+    /// Takes `bytes` of what is left. The layout's need covers every step, so opening a container
+    /// that matches its layout never runs short.
+    fn take(&mut self, bytes: u64) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        let left = self
+            .memory
+            .take()
+            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+        let (taken, rest) = left
+            .split(bytes)
+            .change_context(MaterializedSnapshotError::Admission)?;
+        self.memory = Some(rest);
+        Ok(taken)
+    }
+
+    /// Gives back what a step only borrowed.
+    fn give_back(&mut self, charge: Reservation) -> Result<(), Report<MaterializedSnapshotError>> {
+        let left = self
+            .memory
+            .take()
+            .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
+        let merged = left
+            .merge(charge)
+            .change_context(MaterializedSnapshotError::Admission)?;
+        self.memory = Some(merged);
+        Ok(())
+    }
+
+    /// A container that differs from the layout its memory was admitted for.
+    fn differs() -> Report<MaterializedSnapshotError> {
+        MaterializedSnapshotError::decoding("the container differs from its declared layout")
+    }
+}
+
+impl OpeningCharges {
+    /// Checks the header against the declared layout: the same records in as many groups.
+    fn check_header(
+        &self,
+        header: &SealedSnapshotHeader,
+    ) -> Result<(), Report<MaterializedSnapshotError>> {
+        let Self::Admitted(opening) = self else {
+            return Ok(());
+        };
+        let groups: u64 = opening.layout.groups.len().arch_into();
+        if header.records != opening.layout.records || u64::from(header.groups) != groups {
+            return Err(AdmittedOpening::differs());
+        }
+        Ok(())
+    }
+
+    /// Checks the section of `kind` and `length` bytes in group `group` against the declared
+    /// layout.
+    fn check_section(
+        &self,
+        group: usize,
+        kind: SealedSectionKind,
+        length: u64,
+    ) -> Result<(), Report<MaterializedSnapshotError>> {
+        let Self::Admitted(opening) = self else {
+            return Ok(());
+        };
+        let Some(declared) = opening.layout.groups.get(group) else {
+            return Err(AdmittedOpening::differs());
+        };
+        let expected = match kind {
+            SealedSectionKind::RecordIdentities => declared.identities,
+            SealedSectionKind::RecordColumns => declared.columns,
+        };
+        if length != expected {
+            return Err(AdmittedOpening::differs());
+        }
+        Ok(())
+    }
+
+    /// Decodes one bounded rkyv section of at most `limit` bytes, charging `limit` while it
+    /// decodes.
+    async fn decode_rkyv<T>(
+        &mut self,
+        executor: &Executor,
+        admission: QueueAdmission,
+        bytes: ChargedBytes,
+        limit: u64,
+    ) -> Result<T, Report<MaterializedSnapshotError>>
+    where
+        T: Archive + Send + 'static,
+        T::Archived: for<'a> rkyv::bytecheck::CheckBytes<
+                rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>,
+            > + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+    {
+        match self {
+            Self::Pools => decode_rkyv(executor, admission, bytes, limit).await,
+            Self::Admitted(opening) => {
+                let charge = opening.take(limit)?;
+                let (value, charge) =
+                    decode_rkyv_within(executor, admission, bytes, charge).await?;
+                opening.give_back(charge)?;
+                Ok(value)
+            }
+        }
+    }
+
+    /// The charge for `bytes` of row views and uniqueness table, which the opened snapshot keeps.
+    async fn metadata(
+        &mut self,
+        executor: &Executor,
+        bytes: u64,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Pools => executor
+                .reserve(MemoryClass::StateRead, bytes)
+                .await
+                .change_context(MaterializedSnapshotError::Admission),
+            Self::Admitted(opening) => opening.take(bytes),
+        }
+    }
+
+    /// Grows the row-view charge `charge` to `bytes`. From the pools the growth is refused when
+    /// the state-read class has no room now.
+    fn grow(
+        &mut self,
+        charge: Reservation,
+        bytes: u64,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Pools => {
+                let mut charge = charge;
+                charge
+                    .grow_to(bytes)
+                    .change_context(MaterializedSnapshotError::Admission)?;
+                Ok(charge)
+            }
+            Self::Admitted(opening) => {
+                let Some(more) = bytes.checked_sub(charge.bytes()) else {
+                    return Ok(charge);
+                };
+                let extra = opening.take(more)?;
+                charge
+                    .merge(extra)
+                    .change_context(MaterializedSnapshotError::Admission)
+            }
+        }
+    }
+
+    /// The charge for `bytes` of one group's decoded columns, which the opened snapshot keeps.
+    /// From the pools it is refused when the state-read class has no room now: waiting while the
+    /// earlier groups are retained cannot free it.
+    fn columns(
+        &mut self,
+        executor: &Executor,
+        bytes: u64,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Pools => executor
+                .try_reserve(MemoryClass::StateRead, bytes)
+                .change_context(MaterializedSnapshotError::Admission),
+            Self::Admitted(opening) => opening.take(bytes),
+        }
+    }
+
+    /// Decodes one group's Arrow column section against `schema`.
+    async fn decode_columns(
+        &mut self,
+        executor: &Executor,
+        admission: QueueAdmission,
+        schema: StdArc<ArrowSchema>,
+        columns: ChargedBytes,
+    ) -> Result<RuntimeRecordBatch, Report<MaterializedSnapshotError>> {
+        let unreadable = |error| {
+            MaterializedSnapshotError::arrow(
+                error,
+                MaterializedSnapshotError::Decode {
+                    reason: "the Arrow section could not be read".to_string(),
+                },
+            )
+        };
+        match self {
+            Self::Pools => RuntimeRecordBatch::decode_arrow_snapshot_section(
+                executor, admission, schema, columns,
+            )
+            .await
+            .map_err(unreadable),
+            Self::Admitted(opening) => {
+                let encoded: u64 = columns.len().arch_into();
+                let wanted = RuntimeRecordBatch::snapshot_section_decode_charge(executor, encoded);
+                let charge = opening.take(wanted)?;
+                let (batch, charge) = RuntimeRecordBatch::decode_arrow_snapshot_section_within(
+                    executor, admission, schema, columns, charge,
+                )
+                .await
+                .map_err(unreadable)?;
+                opening.give_back(charge)?;
+                Ok(batch)
+            }
+        }
+    }
+
+    /// The memory the check of the restored branches takes while its job runs.
+    async fn job(
+        &mut self,
+        executor: &Executor,
+    ) -> Result<Reservation, Report<MaterializedSnapshotError>> {
+        match self {
+            Self::Pools => executor
+                .reserve(MemoryClass::Bulk, 1)
+                .await
+                .change_context(MaterializedSnapshotError::Admission),
+            Self::Admitted(opening) => opening.take(1),
+        }
+    }
 }
 
 /// Read an archived value out of a container.
@@ -1841,7 +2632,11 @@ mod tests {
             records: 0,
             groups: 0,
         };
-        let input = encode_rkyv(&executor, expected.clone(), limit)
+        let charge = executor
+            .reserve(MemoryClass::Bulk, limit)
+            .await
+            .assured("an idle pool admits the header's encoding");
+        let input = encode_rkyv_within(&executor, expected.clone(), limit, charge)
             .await
             .assured("the current snapshot header encodes");
         let input_bytes: u64 = input.len().arch_into();
@@ -1880,7 +2675,11 @@ mod tests {
         );
         drop(occupied);
 
-        let input = encode_rkyv(&executor, expected.clone(), limit)
+        let charge = executor
+            .reserve(MemoryClass::Bulk, limit)
+            .await
+            .assured("an idle pool admits the header's encoding");
+        let input = encode_rkyv_within(&executor, expected.clone(), limit, charge)
             .await
             .assured("the current snapshot header encodes after contention ends");
         let decoded = decode_rkyv::<SealedSnapshotHeader>(
@@ -2757,5 +3556,106 @@ mod tests {
         }
 
         assert!(writer.finish([0; 32]).await.is_err());
+    }
+
+    /// Memory a reader admitted for a relay container's layout opens it on its own: exactly the
+    /// need the layout names suffices while every other byte of the bulk and state-read pools is
+    /// taken, one byte less runs short, and the opened snapshot keeps only its rows' share.
+    #[nervix_primitives::test]
+    async fn a_relay_container_opens_within_exactly_the_need_its_layout_names() {
+        let executor = narrow_executor();
+        let records = (0..3)
+            .map(|index| MaterializedGenerationRecord {
+                branch: Some(tenant_branch(&format!("tenant-{index}"))),
+                row: test_runtime_row([
+                    ("index".to_string(), RuntimeValue::I64(test_index(index))),
+                    (
+                        "payload".to_string(),
+                        RuntimeValue::String("p".repeat(4096)),
+                    ),
+                ]),
+            })
+            .collect::<Vec<_>>();
+        let schema = records[0].row.arrow_schema();
+        let generation = MaterializedGeneration::new(7, 3, 5, schema.clone(), records);
+        let container = generation
+            .encode_resident_container(&executor)
+            .await
+            .assured("a bounded generation encodes");
+        let need = container
+            .layout
+            .relay_opening_need(&executor)
+            .assured("the layout is within the node's bounds");
+
+        let short = executor
+            .try_reserve(MemoryClass::Bulk, need - 1)
+            .assured("an idle pool admits the short opening");
+        let error = RestoredMaterializedSnapshot::open_relay_within(
+            &executor,
+            &schema,
+            container.bytes.clone(),
+            container.layout.clone(),
+            short,
+        )
+        .await
+        .expect_err("one byte less than the need runs short at the opening's peak");
+        assert!(
+            matches!(
+                error.current_context(),
+                MaterializedSnapshotError::Admission
+            ),
+            "{error:?}"
+        );
+
+        let memory = executor
+            .try_reserve(MemoryClass::Bulk, need)
+            .assured("an idle pool admits the opening");
+        let container_bytes: u64 = container.bytes.len().arch_into();
+        let bulk = executor.memory(MemoryClass::Bulk);
+        let bulk_left = bulk.capacity_bytes - bulk.reserved_bytes;
+        let held_bulk = executor
+            .try_reserve(MemoryClass::Bulk, bulk_left)
+            .assured("the rest of the bulk pool is free");
+        let state_read = executor.memory(MemoryClass::StateRead).capacity_bytes;
+        let held_state_read = executor
+            .try_reserve(MemoryClass::StateRead, state_read)
+            .assured("the state-read pool is free");
+        let restored = nervix_primitives::time::timeout(
+            std::time::Duration::from_secs(30),
+            RestoredMaterializedSnapshot::open_relay_within(
+                &executor,
+                &schema,
+                container.bytes,
+                container.layout,
+                memory,
+            ),
+        )
+        .await
+        .assured("opening never waits on the pools")
+        .assured("the container opens within its need");
+        assert_eq!(restored.records.len(), 3);
+        for (index, record) in restored.records.iter().enumerate() {
+            assert_eq!(
+                record.branch,
+                Some(tenant_branch(&format!("tenant-{index}")))
+            );
+            assert_eq!(
+                record.row.value_at(0).assured("the index loads"),
+                Some(RuntimeValue::I64(test_index(index)))
+            );
+        }
+        let kept = executor.memory(MemoryClass::Bulk).reserved_bytes - held_bulk.bytes();
+        assert!(
+            kept > 0 && kept < need,
+            "the snapshot keeps its rows' share of the {need} admitted bytes and the received \
+             {container_bytes}-byte container went back, found {kept}"
+        );
+        drop(restored);
+        assert_eq!(
+            executor.memory(MemoryClass::Bulk).reserved_bytes,
+            held_bulk.bytes(),
+            "closing the snapshot gives back everything it kept"
+        );
+        drop(held_state_read);
     }
 }

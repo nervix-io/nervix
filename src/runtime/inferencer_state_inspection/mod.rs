@@ -19,7 +19,7 @@
     nervix::input(plans, reason = "reads installed inference state plans only")
 )]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use arrow_array::builder::{Float32Builder, ListBuilder, StringBuilder, UInt64Builder};
 use error_stack::{Report, ResultExt as _};

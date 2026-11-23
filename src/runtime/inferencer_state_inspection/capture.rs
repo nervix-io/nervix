@@ -142,39 +142,26 @@ impl Runtime {
                     catalog,
                 };
                 // The second pass reads again, with its publication, each branch the page returns
-                // tensors from, once the page has charged for retaining it.
-                let retain = |wanted: &page::WantedBranches| {
-                    let mut retained = Vec::with_capacity(wanted.len());
-                    runtime
+                // tensors from, once the page has charged for retaining it, through the route its
+                // placement names.
+                let retain = |branch: &CapturedBranch| -> ReadResult<Option<RetainedBranch>> {
+                    let placement = RuntimeStatePlacement {
+                        branch_key: branch.key.clone(),
+                        ..expected.clone()
+                    };
+                    let Some(state) = runtime
                         .inner
                         .state_replication_routing
-                        .visit_inferencers(|state| {
-                            cancellation
-                                .check()
-                                .change_context(ProcessorStatePageError::Admission)?;
-                            let Some(state) = state else {
-                                return Ok(());
-                            };
-                            let placement = &state.placement;
-                            if !inspected(placement, &expected, unit, selection.branch) {
-                                return Ok(());
-                            }
-                            let key = placement.branch_key.as_ref().map(BranchKey::fingerprint);
-                            if !wanted.contains(&key) {
-                                return Ok(());
-                            }
-                            let generation = state.generations.load();
-                            if generation.value.is_none() {
-                                return Ok(());
-                            }
-                            retained.push(RetainedBranch::retain(
-                                state,
-                                generation,
-                                &owners.replicas,
-                            )?);
-                            Ok(())
-                        })?;
-                    Ok(retained)
+                        .inferencer(&placement)
+                    else {
+                        return Ok(None);
+                    };
+                    let generation = state.generations.load();
+                    if generation.value.is_none() {
+                        return Ok(None);
+                    }
+                    let retained = RetainedBranch::retain(&state, generation, &owners.replicas)?;
+                    Ok(Some(retained))
                 };
                 page::build(captured, retain, plan, after, bounds, memory, cancellation)
             })

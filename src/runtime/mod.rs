@@ -568,7 +568,8 @@ pub(crate) use materialized_snapshot::{
     materialized_container_header, materialized_identity_section,
 };
 use materialized_snapshot::{
-    RestoredMaterializedSnapshot, SealedSource, empty_sealed_container, inspect_sealed_container,
+    RestoredMaterializedSnapshot, SealedContainerLayout, SealedGroupLayout, SealedSource,
+    empty_sealed_container, inspect_sealed_container,
 };
 use materialized_state::{
     MaterializedRelaySnapshotInstaller, MaterializedRelayStateAssignment,
@@ -1076,7 +1077,7 @@ pub use runtime_settings::{RestoreStagingMaxBytes, RuntimeSettings, StateSnapsho
 use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_inspection_read::{
     MaterializedInspectionPage, MaterializedPageBounds, MaterializedPageQuery,
-    MaterializedStateCapture, StatePageReadError,
+    MaterializedPageReply, MaterializedStateCapture, StatePageReadError,
 };
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};

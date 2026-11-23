@@ -1664,11 +1664,12 @@ mod runtime_error_event_properties;
 
 mod state_inspection;
 pub use state_inspection::{
-    MaterializedKeyCatalogResponse, MaterializedPartitionFilter, MaterializedStatePageDescriptor,
-    MaterializedStatePageReply, MaterializedStatePageTransfer, ProcessorStatePageDescriptor,
-    ProcessorStatePageReply, ProcessorStateRunTransfer, ProcessorStateSectionTransfer,
-    ReadMaterializedKeyCatalog, ReadMaterializedStatePage, ReadPartitionedMaterializedStatePage,
-    ReadProcessorStatePage, StatePageBody,
+    MaterializedKeyCatalogResponse, MaterializedPartitionFilter, MaterializedStatePageBody,
+    MaterializedStatePageDescriptor, MaterializedStatePageGroup, MaterializedStatePageReply,
+    MaterializedStatePageTransfer, ProcessorStatePageDescriptor, ProcessorStatePageReply,
+    ProcessorStateRunTransfer, ProcessorStateSectionTransfer, ReadMaterializedKeyCatalog,
+    ReadMaterializedStatePage, ReadPartitionedMaterializedStatePage, ReadProcessorStatePage,
+    StatePageBody,
 };
 
 mod wasm_state_inspection;

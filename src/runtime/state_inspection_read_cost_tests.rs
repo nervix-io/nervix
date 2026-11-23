@@ -150,6 +150,7 @@ async fn measure() {
         bounds: MaterializedPageBounds { rows, bytes },
         catalog_requested: false,
         filter: None,
+        reply: crate::runtime::MaterializedPageReply::Local,
     };
 
     // A page the reader holds keeps the generation it captured however far the owner moves on.

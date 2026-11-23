@@ -2792,13 +2792,30 @@ subquota. It names domain, relay, execution unit, committed control revision, sc
 resolved branch selector, optional branch/offset position, row/byte limits and exact owner process.
 The handler verifies the current control cut, schema, unit owner and target incarnation before
 capturing shared Arrow views. Selection and row/byte bounds run on the bounded Bulk executor before
-transport; source metadata and stored-column lifetimes retain their memory admission.
+transport; source metadata and stored-column lifetimes retain their memory admission. The owner
+admits what capturing and selecting the page takes before it captures anything, and sets aside, as
+it selects each row, what encoding the row into the page's container adds, so the page ends where
+its bulk memory cannot hold the next row and its container, digest, descriptor and length are
+encoded from memory it already holds.
 
 The stream has an eight-byte little-endian descriptor length, a bounded typed rkyv descriptor and
 an optional native Arrow snapshot container. A zero-row/count-only page has no body. A body declares
-its exact byte count and SHA-256 digest. The receiver bounds all buffering, verifies the digest
-before decoding, and checks schema, fence, generation/revision, row count, returned offset and last
-branch against the descriptor. A typed refusal carries no body. Chunks share charged backing bytes
+its exact byte count and SHA-256 digest, how many records its container carries, and the exact
+length of each group's record identity and Arrow column sections. The receiver takes its memory one
+step ahead of what spends it, as it does for a processor page: it reads the descriptor's length,
+admits what the descriptor's bytes and decoded value take, and, once the descriptor is decoded and
+checked, admits the container's exact length and what opening a relay container of the declared
+layout takes, before it reads any of the container. Opening takes the most it holds at once, step
+by step in its own order: the row views, uniqueness table and decoded identities and columns it
+keeps, and what decoding the header, each group's identities and each group's columns borrows for
+that step alone. Each admission holds nothing charged while it waits for room until the read
+deadline; a page the receiver's whole bulk class could never hold is refused at once as
+`reply_too_large`, and one that finds no room before the deadline as `deadline`. The stream copies
+the container straight into the admitted memory, and verifying the digest, which precedes any
+decoding, and opening the container draw only on it. A container that differs from its declared
+layout is refused. The receiver checks schema, fence, generation/revision, row count, returned
+offset and last branch against the descriptor, and the opened rows keep their share of the
+admitted memory until they are presented. A typed refusal carries no body. Chunks share charged backing bytes
 and obey the ordinary Bulk chunk bound. No operator payload crosses the interconnect as Row frames
 or row maps; the coordinator uses the shared Arrow-to-Row writer at the session reporting boundary.
 
@@ -2882,7 +2899,16 @@ its committed processor layout: reorderer `pending`; correlator `left` and `righ
 section per declared state entry. Tensor indices address the declared order directly and are
 checked before body access. The existing section, descriptor and reply-byte bounds govern every
 kind. Window and inferencer metadata runs count toward section
-bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The receiver bounds all buffering, verifies every digest before decoding,
+bodies and bytes, while only retained-row runs advance the row offset or consume its limit. The
+receiver takes its memory one step ahead of what spends it. It reads the descriptor's length and
+admits what the descriptor's bytes and decoded value take. Once the descriptor is decoded and
+checked, it admits everything the bodies take on its node, each body's exact length and its
+decoder's charge, before it reads any body. Each admission holds nothing charged while it waits for
+room until the read deadline; a page the receiver's whole bulk class could never hold is refused at
+once as `reply_too_large`, and one that finds no room before the deadline as `deadline`. Receiving
+and decoding then draw only on that memory: the stream copies its bytes straight into it in exact
+lengths, taking no charge per chunk, and the decoded rows keep it until they are presented.
+The receiver bounds all buffering, verifies every digest before decoding,
 checks each section's payload fields against its own committed schema, decodes each body with
 exactly its section's declared field list, requires every body to hold at least one row and a
 section's bodies to hold exactly its returned rows, and checks the run rows, the returned offset and

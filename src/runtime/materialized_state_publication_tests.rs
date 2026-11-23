@@ -870,8 +870,18 @@ fn inspection_and_backup_capture_share_carriers_within_the_resolved_metadata_bud
             .assured("each branch is new");
     }
     let read = ReplicatedMaterializedRelayState::read(&state);
+    // Inspection admits the row views it counted before it captures them.
+    let views = executor
+        .try_reserve(
+            nervix_execution::MemoryClass::Bulk,
+            u64::try_from(
+                read.inspection_records() * std::mem::size_of::<MaterializedGenerationRecord>(),
+            )
+            .assured("a bounded fixture's views fit u64"),
+        )
+        .assured("the bulk budget admits the counted row views");
     let captured = read
-        .capture_for_inspection(&executor)
+        .capture_for_inspection(views)
         .assured("inspection admits row views independently of backup grouping metadata");
     let generation = &captured.0;
     assert_eq!(generation.records().len(), count);

@@ -74,9 +74,14 @@ impl CapturedMaterializedCheckpoint {
         let mut source = self.source;
         // A checkpoint is read here for a backup, a request whose caller is answered at once, so
         // a full bulk queue refuses the read as the reader's own decoding does.
-        let header = source
-            .take_header(executor, QueueAdmission::RefuseWhenFull)
-            .await?;
+        let header = source.take_header(executor).await?;
+        let header = decode_rkyv::<SealedSnapshotHeader>(
+            executor,
+            QueueAdmission::RefuseWhenFull,
+            header,
+            executor.limits().snapshot_header_bytes.as_u64(),
+        )
+        .await?;
         let _layout = header.metadata_layout(
             super::RestoredRows::Relay,
             executor.memory(MemoryClass::Relay).capacity_bytes,

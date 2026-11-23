@@ -742,6 +742,26 @@ async fn every_node_reads_every_row(world: &mut ScenarioWorld, kind: String, nam
     }
 }
 
+/// Holds every byte of bulk memory but `room` on the node that owns the one unit of the processor
+/// the last read inspected, so that node's pages end where its memory runs out while every node
+/// that reads them keeps the room it takes to receive them.
+#[when(expr = "bulk memory on the owner of the last read processor keeps only {string} bytes free")]
+async fn owner_keeps_only_bytes_free(world: &mut ScenarioWorld, room: String) {
+    let room = expand_placeholders(world, &room)
+        .parse::<u64>()
+        .assured("the scenario names the free bulk memory in bytes");
+    let StateInspectionResult::Page(page) = &last_state(world).result else {
+        panic!("the last read answered a page");
+    };
+    let [unit] = page.units.as_slice() else {
+        panic!("the inspected processor runs one unit");
+    };
+    let owner = unit.owner.clone();
+    world
+        .fault_injection
+        .hold_bulk_memory_leaving_room_on(&owner, room);
+}
+
 #[when(expr = "client {string} saves a one row page of {word} {string} state")]
 async fn save_page(world: &mut ScenarioWorld, client: String, kind: String, name: String) {
     let statement = format!(

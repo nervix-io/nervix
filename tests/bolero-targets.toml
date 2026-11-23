@@ -4935,10 +4935,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/state_inspection__tests__bolero_materialized_inspection_page_messages_round_trip/corpus"
-domain_version = 18
+domain_version = 19
 features = []
 id = "interconnect-state-inspection"
-invariant = "Every field of the bounded native owner-page request and typed descriptor or refusal survives the production admitted rkyv codec unchanged, including selectors, positions, source identity, complete counts, body digest and bounds."
+invariant = "Every field of the bounded native owner-page request and typed descriptor or refusal survives the production admitted rkyv codec unchanged, including selectors, positions, source identity, complete counts, body digest, the container's record count and every group's section lengths in order, and bounds."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-interconnect"

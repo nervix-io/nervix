@@ -562,7 +562,11 @@ const TRANSFER_BOUND: u64 = 64 * 1024 * 1024;
 
 /// One batch of `rows` rows whose sequences, and order keys, continue at `first`, each with a note
 /// of `width` bytes after its sequence.
-fn wide_batch(first: u64, rows: u64, width: usize) -> (RelayRecordBatch, Arc<Vec<ReordererRowOrder>>) {
+fn wide_batch(
+    first: u64,
+    rows: u64,
+    width: usize,
+) -> (RelayRecordBatch, Arc<Vec<ReordererRowOrder>>) {
     let schema = test_schema(&[
         ("sequence", ParseAsType::U64),
         ("note", ParseAsType::String),

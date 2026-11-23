@@ -4047,8 +4047,18 @@ memory-ordering or delivery guarantee.
 
 Operator inspection uses the published unit routing index and the existing materialized assignment
 barrier to capture shared row views. It adds no lock ordering, async synchronization or per-record
-publication work. Metadata allocation is admitted before capture/growth, and selection, hashing and
-native encoding run on the bounded Bulk executor with cancellation checks. A Runtime-owned selected
+publication work. The capture counts the unit's records first, holding nothing, then admits ahead,
+waiting for room within the read deadline, everything capturing and selecting them takes: the
+views it copies, its states' identities, the largest state's own capture, the selected views, the
+requested key catalog and, for a page another node reads, the reply's descriptor and stream
+framing. A capture the whole bulk class could never hold is refused at once as too large, and
+records added after the count take their room from the pool at once or leave the page not ready.
+A page another node reads also sets aside, for every row it selects, what encoding that row into
+its container adds, by the container encoder's own charges; it ends with its continuation and
+complete counts where the bulk memory cannot hold the next row, and is not ready when it cannot
+hold the first. Its owner encodes the container, the digest, the descriptor and its length only
+from that memory. Selection, hashing and native encoding run on the bounded Bulk executor with
+cancellation checks. A Runtime-owned selected
 atomic assigns each constructed state an inspection lifetime; that identity is combined with process
 incarnation and captured source/row metadata to fence continuations across retirement and recreation.
 The owner read deadline includes page encoding, and the frontend bounds the complete operation.

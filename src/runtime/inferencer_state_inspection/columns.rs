@@ -75,12 +75,8 @@ impl Headers {
         let counters = std::mem::size_of::<u64>()
             .checked_mul(6)
             .assured("six counters are tiny");
-        let bytes = texts
-            .checked_add(offsets)
-            .assured("a header row is tiny");
-        let bytes = bytes
-            .checked_add(counters)
-            .assured("a header row is tiny");
+        let bytes = texts.checked_add(offsets).assured("a header row is tiny");
+        let bytes = bytes.checked_add(counters).assured("a header row is tiny");
         u64::try_from(bytes).assured("a header row's size fits u64")
     }
 

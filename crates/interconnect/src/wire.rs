@@ -563,6 +563,24 @@ where
     decode_rkyv_charged(executor, cpu, admission, bytes, decoded_charge).await
 }
 
+/// Validate and deserialize one bounded rkyv payload as [`decode_rkyv_with`] does, from `bytes`,
+/// whose charge the caller holds, into `decoded_charge`, memory the caller already holds for the
+/// decoded value, instead of reserving it.
+pub(crate) async fn decode_rkyv_within<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    admission: QueueAdmission,
+    bytes: ChargedBytes,
+    decoded_charge: Reservation,
+) -> Result<Decoded<T>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    decode_rkyv_charged(executor, cpu, admission, bytes, decoded_charge).await
+}
+
 /// Validate and deserialize one bounded rkyv payload as [`decode_rkyv`] does, but charge the
 /// decoded value only to room `class` has free now. A class without room is reported rather than
 /// waited for, so a request whose answer is that the class is full never waits on that class.

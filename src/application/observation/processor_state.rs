@@ -947,6 +947,9 @@ impl SessionServiceImpl {
             .state_inspection_settings()
             .read_timeout
             .value();
+        let read_deadline = nervix_primitives::time::Instant::now()
+            .checked_add(deadline)
+            .assured("the inspection read deadline is a bounded setting");
         let target = request.target.clone();
         let stream = match self
             .inner
@@ -973,6 +976,7 @@ impl SessionServiceImpl {
             stream,
             &request,
             &payload,
+            read_deadline,
         )
         .await
         {
@@ -1015,7 +1019,7 @@ impl SessionServiceImpl {
             descriptor: received.descriptor,
             runs,
             sections,
-            memory: None,
+            memory: received.memory,
         })
     }
 
@@ -1312,6 +1316,9 @@ impl SessionServiceImpl {
             .state_inspection_settings()
             .read_timeout
             .value();
+        let read_deadline = nervix_primitives::time::Instant::now()
+            .checked_add(deadline)
+            .assured("the inspection read deadline is a bounded setting");
         let stream = self
             .inner
             .interconnect
@@ -1325,6 +1332,7 @@ impl SessionServiceImpl {
             stream,
             &request,
             &[],
+            read_deadline,
         )
         .await
         .map_err(|error| inspection_refusal(error, StateInspectionRejection::OwnerUnavailable))??;

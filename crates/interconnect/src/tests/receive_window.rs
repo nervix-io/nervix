@@ -86,6 +86,111 @@ async fn a_bulk_response_respects_a_smaller_receiver_chunk_before_membership_pub
     pair.transport_b.shutdown().await;
 }
 
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct ExactReadStream;
+
+impl InterconnectStreamRequest for ExactReadStream {
+    const NAME: &'static str = "test_exact_read_stream";
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Request;
+}
+
+/// A reader that admitted the memory a bulk response's bytes take reads them in exact lengths
+/// straight into that memory. A length that ends inside a chunk leaves the rest of it for the next
+/// read, a check for the end that finds more bytes leaves them unread, and the stream takes no bulk
+/// memory of its own: the reader never waits for memory while it holds what it admitted.
+#[nervix_primitives::test]
+async fn a_bulk_response_reads_in_exact_lengths_into_memory_its_reader_admitted() {
+    let receive = PeerReceiveSettings::resolve(
+        None,
+        None,
+        Some(ByteUnit::Kibibyte(8)),
+        None,
+        &nervix_execution::OperationLimits::default(),
+    )
+    .assured("positive chunk bound");
+    let pair = connected_transports_with_options(TransportOptions {
+        peer_receive: Some(receive),
+        ..TransportOptions::default()
+    })
+    .await;
+    let sent = (0..40 * 1024)
+        .map(|index| u8::try_from(index % 251).assured("a remainder of 251 fits a byte"))
+        .collect::<Vec<_>>();
+    let executor = pair.executor_b.clone();
+    let body = sent.clone();
+    pair.transport_b
+        .register_stream_handler::<ExactReadStream, _, _>(move |_, _| {
+            let executor = executor.clone();
+            let body = body.clone();
+            async move {
+                let length = u64::try_from(body.len()).assured("a fixture body fits u64");
+                let chunks = futures_util::stream::once(async move {
+                    executor
+                        .charge_owned(MemoryClass::Bulk, body)
+                        .await
+                        .map_err(StreamHandlerError::with_cause)
+                });
+                Ok(StreamingResponse::new(length, chunks))
+            }
+        })
+        .assured("bulk handler registers once");
+    let mut response = pair
+        .transport_a
+        .request_stream(&pair.node_b, ExactReadStream)
+        .await
+        .assured("bootstrap stream opens without a committed claim");
+    let reader = pair.transport_a.inner.executor().clone();
+    let reserved = || reader.snapshot().bulk_memory.reserved_bytes;
+    let before = reserved();
+    // Lengths that end inside a chunk, at a chunk's end and across several chunks.
+    let lengths = [
+        3_usize,
+        8 * 1024 - 3,
+        10 * 1024 + 7,
+        40 * 1024 - 18 * 1024 - 7,
+    ];
+    let mut buffers = Vec::new();
+    let mut admitted = 0_u64;
+    for (index, length) in lengths.into_iter().enumerate() {
+        let bytes = u64::try_from(length).assured("a fixture length fits u64");
+        let charge = reader
+            .try_reserve(MemoryClass::Bulk, bytes)
+            .assured("the reader's idle pool admits each read");
+        admitted += bytes;
+        let mut buffer = nervix_execution::BudgetedBuffer::with_limit(charge, bytes);
+        if index == 2 {
+            assert!(
+                !response.ends().await.assured("the stream answers"),
+                "a stream with bytes left does not end where its reader is"
+            );
+        }
+        response
+            .read_into(&mut buffer, length)
+            .await
+            .assured("each exact read is served from the stream");
+        assert_eq!(
+            reserved(),
+            before + admitted,
+            "the stream takes no bulk memory of its own beside what its reader admitted"
+        );
+        buffers.push(nervix_execution::ChargedBytes::from_buffer(buffer));
+    }
+    assert!(
+        response.ends().await.assured("the stream answers"),
+        "the stream ends where its reader is"
+    );
+    let mut read = Vec::new();
+    for buffer in &buffers {
+        read.extend_from_slice(buffer);
+    }
+    assert_eq!(read, sent, "the reads return every byte once, in order");
+    drop(buffers);
+    drop(response);
+    pair.transport_a.shutdown().await;
+    pair.transport_b.shutdown().await;
+}
+
 /// A replica fetching a guest save, or a node fetching a resource archive, reads a bulk response
 /// that a loaded node otherwise moves one receive window per round trip. The sender therefore
 /// has to be able to put a whole bulk receive window on the wire while the reader has taken

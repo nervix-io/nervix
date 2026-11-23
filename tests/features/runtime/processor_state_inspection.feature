@@ -477,10 +477,10 @@ Feature: Bounded typed reorderer and correlator state inspection
     Then within "30s" a client of every node sees reorderer "held" hold 6 rows
     # Each held row carries its 1 MiB message, and gathering its columns takes its bytes. A page
     # read through another node also sets the row's bytes aside for the body that carries it. With
-    # 5 MiB left on every node, the owner's reads of its own state return four rows a page and every
-    # other node's reads two, each page ending where the next row no longer fits, and the rest
-    # follow on the next pages.
-    When bulk memory on every node keeps only "5242880" bytes free
+    # 5 MiB left on the reorderer's owner, its reads of its own state return four rows a page and
+    # every other node's reads two, each page ending where the next row no longer fits, and the rest
+    # follow on the next pages. Every other node keeps the room it takes to receive those pages.
+    When bulk memory on the owner of the last read processor keeps only "5242880" bytes free
     Then a client of every node reads reorderer "held" state at the default limit in more than one page with unchanged complete counts
     When bulk memory on every node is released
     Then within "30s" every node reserves only the bulk memory the scenario holds

@@ -382,6 +382,19 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   data](#planned-operations-cost-backpressure-never-data)). `task::spawn_cpu` belongs to the
   executor's worker pools, `spawn_blocking` to its storage workers, and `block_in_place` to no file
   by default.
+- **Memory admission.** Work takes the memory it needs one step ahead of spending it, at an
+  admission that holds nothing: that admission may wait for room, bounded by the caller's deadline,
+  or be refused, and a size the class could never hold is refused at once
+  (`AdmissionError::ExceedsBudget`) rather than waited for. Every later step draws on what was
+  admitted and never fails for memory. Work that already holds memory never waits for more: what it
+  strictly needs it admitted ahead, anything beyond that is optional, taken at once or gone without
+  (a page ends early, with its continuation), and work that learns its size only from what it
+  receives, such as a descriptor naming its bodies, gives back what it holds before it admits the
+  rest. Sizes come from what the work actually carries, such as a length received before its bytes,
+  and from the charge rule of the owner that spends them, never from a guessed factor or cap; a
+  derived size keeps its invariant executable, as related constants do ([Panics and
+  recovery](#panics-and-recovery)), and work without an exact size proceeds in bounded units under
+  backpressure.
 - **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
   thread through `thread::{spawn, Builder, scope, spawn_detached}` or `unmodeled::thread::Builder`,
   lists exactly those items in `crates/primitives/blocking-permissions.toml` with its owner, why it

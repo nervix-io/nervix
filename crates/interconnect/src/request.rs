@@ -251,6 +251,18 @@ pub trait RkyvMessage: Archive + Sized + Send + 'static {
         charge: Reservation,
     ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
 
+    /// Validate and deserialize as [`Self::decode_rkyv_with`] does, from `payload`, bytes whose
+    /// charge the caller holds, into `decoded`, memory of the class the caller already holds for
+    /// the decoded value: as many bytes as the payload, the charge [`Self::decode_rkyv_with`]
+    /// takes for it. Neither is reserved here, so the decoding cannot be refused for memory.
+    fn decode_rkyv_within(
+        executor: Executor,
+        class: PoolClass,
+        admission: QueueAdmission,
+        payload: ChargedBytes,
+        decoded: Reservation,
+    ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
+
     fn decode_rkyv(
         executor: Executor,
         class: PoolClass,
@@ -314,6 +326,18 @@ where
         )
         .await
         .map(wire::EncodedPayload::into_parts)
+    }
+
+    async fn decode_rkyv_within(
+        executor: Executor,
+        class: PoolClass,
+        admission: QueueAdmission,
+        payload: ChargedBytes,
+        decoded: Reservation,
+    ) -> Result<(Self, Reservation), Report<TransportError>> {
+        wire::decode_rkyv_within::<Self>(&executor, class.cpu_class(), admission, payload, decoded)
+            .await
+            .map(wire::Decoded::into_parts)
     }
 
     async fn decode_rkyv_with(

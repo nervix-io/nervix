@@ -13,9 +13,6 @@ pub(super) struct CapturedBranches {
     pub(super) catalog: nervix_models::StateInspectionKeyCatalog,
 }
 
-/// The branches a page returns tensors from, by key.
-pub(super) type WantedBranches = BTreeSet<Option<BranchKeyFingerprint>>;
-
 struct Page {
     memory: Reservation,
     start: u64,
@@ -40,10 +37,12 @@ struct Page {
 /// One page of the selected branches' tensors. It counts every branch in `captured` and admits
 /// tensor rows, past those a resumed page skips, while its bounds and the bulk memory left can hold
 /// each; every row after its first is optional. `retain` then reads again, with its publication,
-/// each branch whose tensors the page returns, and the page copies them from those publications.
+/// each branch whose tensors the page returns, in order, or `None` for one whose publication went
+/// away, and the page copies the branch's tensors from that publication before it retains the
+/// next.
 pub(super) fn build(
     captured: CapturedBranches,
-    retain: impl FnOnce(&WantedBranches) -> ReadResult<Vec<RetainedBranch>>,
+    retain: impl FnMut(&CapturedBranch) -> ReadResult<Option<RetainedBranch>>,
     plan: &InferencerStatePlan,
     after: Option<(Option<BranchKeyFingerprint>, u64)>,
     bounds: ProcessorStatePageBounds,
@@ -58,14 +57,7 @@ pub(super) fn build(
         page.count(branch, plan, cancellation)?;
     }
     page.check_position(after)?;
-    let wanted = page.wanted(&captured.branches);
-    // A page that returns no tensor, such as a read of the counts alone, retains nothing.
-    let retained = if wanted.is_empty() {
-        Vec::new()
-    } else {
-        retain(&wanted)?
-    };
-    page.finish(captured, retained, plan, cancellation)
+    page.finish(captured, retain, plan, cancellation)
 }
 
 impl Page {
@@ -218,7 +210,9 @@ impl Page {
         let body = match (self.reply, first) {
             (PageReply::Local, _) => 0,
             (PageReply::Remote { .. }, false) => bytes,
-            (PageReply::Remote { .. }, true) => checked_add(bytes, columns::Headers::row_bytes(branch))?,
+            (PageReply::Remote { .. }, true) => {
+                checked_add(bytes, columns::Headers::row_bytes(branch))?
+            }
         };
         let charge = checked_add(checked_add(working, retained)?, body)?;
         let target = checked_add(self.memory.bytes(), charge)?;
@@ -251,34 +245,18 @@ impl Page {
         Ok(())
     }
 
-    /// The keys of the branches the page returns tensors from.
-    fn wanted(&self, branches: &[CapturedBranch]) -> WantedBranches {
-        let mut wanted = WantedBranches::new();
-        for (branch, planned) in branches.iter().zip(&self.planned) {
-            if !planned.is_empty() {
-                wanted.insert(branch.key.as_ref().map(BranchKey::fingerprint));
-            }
-        }
-        wanted
-    }
-
     /// The page, in the branches' order: every branch's identity in its fingerprint and, for each
     /// branch it returns tensors from, those tensors and the branch's header, copied from the
-    /// publication `retained` holds for it. A branch whose publication went away since it was
+    /// publication `retain` reads again for it. A branch whose publication went away since it was
     /// counted ends the page before it.
     fn finish(
         self,
         captured: CapturedBranches,
-        retained: Vec<RetainedBranch>,
+        mut retain: impl FnMut(&CapturedBranch) -> ReadResult<Option<RetainedBranch>>,
         plan: &InferencerStatePlan,
         cancellation: &Cancellation,
     ) -> ReadResult<ProcessorStatePage> {
         let CapturedBranches { branches, catalog } = captured;
-        let mut publications = BTreeMap::new();
-        for publication in retained {
-            let key = publication.branch.key.as_ref().map(BranchKey::fingerprint);
-            publications.insert(key, publication);
-        }
         let mut digest = nervix_crypto::digest::Sha256::new();
         digest.update(b"nervix/state-inspection/inference-publications");
         let mut generation = 0_u64;
@@ -302,13 +280,13 @@ impl Page {
             let fingerprint = branch.key.as_ref().map(BranchKey::fingerprint);
             let mut publication = None;
             if !planned.is_empty() && !ended {
-                match publications.get(&fingerprint) {
+                match retain(branch)? {
                     Some(retained) => publication = Some(retained),
                     None => ended = true,
                 }
             }
             // A branch the page returns tensors from is named by the cut it copies them from.
-            let identity = match publication {
+            let identity = match &publication {
                 Some(retained) => &retained.branch,
                 None => branch,
             };
@@ -330,16 +308,20 @@ impl Page {
                     .check()
                     .change_context(ProcessorStatePageError::Admission)?;
                 tensors[index].append(retained.value()?, &plan.bindings[index], cancellation)?;
-                let section = u32::try_from(index).change_context(ProcessorStatePageError::Columns)?;
-                extend_runs(&mut runs, ProcessorStateSection::Tensor(section), &branch.key);
+                let section =
+                    u32::try_from(index).change_context(ProcessorStatePageError::Columns)?;
+                extend_runs(
+                    &mut runs,
+                    ProcessorStateSection::Tensor(section),
+                    &branch.key,
+                );
                 filled = checked_add(filled, 1)?;
             }
-            headers.append(retained, plan.bytes_per_branch)?;
+            headers.append(&retained, plan.bytes_per_branch)?;
             extend_runs(&mut metadata, ProcessorStateSection::Header, &branch.key);
             last = fingerprint;
         }
-        // The tensors are copied, so the page retains no publication any more.
-        drop(publications);
+        // Every returned branch's tensors are copied, so the page retains no publication any more.
         let (publications_charge, memory) = self
             .memory
             .split(self.retained)

@@ -101,7 +101,26 @@ pub struct MaterializedStatePageDescriptor {
 #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 pub struct MaterializedStatePageTransfer {
     pub page: MaterializedStatePageDescriptor,
-    pub body: Option<StatePageBody>,
+    pub body: Option<MaterializedStatePageBody>,
+}
+
+/// The native snapshot container a materialized page stream carries after its descriptor: its
+/// identity, and the layout its reader admits memory for before it reads any of the container.
+#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct MaterializedStatePageBody {
+    pub identity: StatePageBody,
+    /// How many records the container carries.
+    pub records: u64,
+    /// The exact lengths of each group's sections, in container order.
+    pub groups: Vec<MaterializedStatePageGroup>,
+}
+
+/// The exact lengths of one group's two sections in a materialized page's container: its record
+/// identities, then its Arrow columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Archive, Serialize, Deserialize)]
+pub struct MaterializedStatePageGroup {
+    pub identities: u64,
+    pub columns: u64,
 }
 
 /// The identity of one native Arrow body a page stream carries after its descriptor: its exact
@@ -487,9 +506,23 @@ mod tests {
                             last_branch: Some(branch),
                             more: remaining != 0,
                         },
-                        body: (returned != 0).then(|| StatePageBody {
-                            bytes: request.max_bytes,
-                            digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
+                        body: (returned != 0).then(|| {
+                            let identity = StatePageBody {
+                                bytes: request.max_bytes,
+                                digest: std::array::from_fn(|_| arbitrary.entropy().byte()),
+                            };
+                            let mut groups = Vec::new();
+                            for _ in 0..=arbitrary.entropy().byte() % 4 {
+                                groups.push(MaterializedStatePageGroup {
+                                    identities: arbitrary.positive_u64().get(),
+                                    columns: arbitrary.positive_u64().get(),
+                                });
+                            }
+                            MaterializedStatePageBody {
+                                identity,
+                                records: returned,
+                                groups,
+                            }
                         }),
                     })
                 };
