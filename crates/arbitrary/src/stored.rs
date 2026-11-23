@@ -240,13 +240,8 @@ impl Arbitrary<'_> {
         };
         let interconnect = nervix_models::InterconnectCapabilities {
             reconnect_jitter_permille,
-            max_peers: positive(),
-            max_connections: positive(),
             concurrent_handshakes: positive(),
             incoming_queue_capacity: positive(),
-            request_quota: positive(),
-            completion_quota: positive(),
-            health_probes: positive(),
             stream_window_bytes: u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
                 .verified("the generated value fits u32"),
             connection_window_bytes: u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))

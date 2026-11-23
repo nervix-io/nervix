@@ -1,7 +1,8 @@
 //! Outbound peer target registration and exact retirement.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Endpoint selection, topology admission and retirement of target-owned pool slots.
+//! - **Owns.** Endpoint selection, the target of every peer the transport dials, and retirement of
+//!   target-owned pool slots.
 //! - **Depends on.** The transport owner, vocabulary identities and primitive publications.
 //! - **Must not know.** Runtime graphs, scheduling or connector behavior.
 
@@ -12,8 +13,6 @@
         reason = "owns the engines and infrastructure boundary declared above"
     )
 )]
-
-use nervix_recovery::Reported as _;
 
 use super::*;
 use crate::Transport;
@@ -69,36 +68,32 @@ impl TransportState {
     pub(crate) fn local_receive_bounds(&self) -> nervix_models::PeerReceiveBounds {
         self.peer_receive.bounds()
     }
+    /// Makes `endpoints` the peers this node dials: every one of them, however many there are,
+    /// because every member must reach every other member.
     pub(crate) fn replace_outbound_targets(
         &self,
         endpoints: &BTreeMap<ClusterNodeName, NodeEndpoint>,
     ) {
-        let accepted = endpoints
-            .iter()
-            .take(self.options.max_peers)
-            .map(|(node, endpoint)| (node.clone(), endpoint.clone()))
-            .collect::<BTreeMap<_, _>>();
-
         // Retire in node order, not map order, so the cancellations a replacement causes happen in
         // the same sequence in every process.
         let removed = self
             .targets
             .load()
             .iter()
-            .filter(|entry| accepted.get(entry.0) != Some(&entry.1.endpoint))
+            .filter(|entry| endpoints.get(entry.0) != Some(&entry.1.endpoint))
             .map(|entry| entry.0.clone())
             .collect::<BTreeSet<_>>();
         for node in removed {
             self.remove_target(&node);
         }
 
-        for (node, endpoint) in accepted {
-            if let Ok(outbound) = self
-                .install_outbound_target(node, endpoint, OutboundDial::Advertised)
-                .inspect_err(|error| Err::<(), _>(error).reported("replace outbound peer target"))
-            {
-                self.ensure_preconnected_slots(&outbound);
-            }
+        for (node, endpoint) in endpoints {
+            let outbound = self.install_outbound_target(
+                node.clone(),
+                endpoint.clone(),
+                OutboundDial::Advertised,
+            );
+            self.ensure_preconnected_slots(&outbound);
         }
     }
 
@@ -106,10 +101,9 @@ impl TransportState {
         &self,
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
-    ) -> Result<(), Report<TransportError>> {
-        let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised)?;
+    ) {
+        let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised);
         self.ensure_preconnected_slots(&outbound);
-        Ok(())
     }
 
     /// Install the address a bootstrap exchange authenticated as `node_id`. An endpoint the node
@@ -119,13 +113,13 @@ impl TransportState {
         &self,
         node_id: ClusterNodeName,
         target: PeerTarget,
-    ) -> Result<Arc<OutboundTarget>, Report<TransportError>> {
+    ) -> Arc<OutboundTarget> {
         let endpoint = target.endpoint();
         let current = self.targets.load().get(&node_id).cloned();
         if let Some(current) = current
             && current.endpoint == endpoint
         {
-            return Ok(current);
+            return current;
         }
         self.install_outbound_target(node_id, endpoint, OutboundDial::Authenticated(target.addr))
     }
@@ -139,18 +133,15 @@ impl TransportState {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
         dial: OutboundDial,
-    ) -> Result<Arc<OutboundTarget>, Report<TransportError>> {
+    ) -> Arc<OutboundTarget> {
         loop {
             let current = self.targets.load_full();
             let registered = current.get(&node_id);
-            if registered.is_none() && current.len() >= self.options.max_peers {
-                return Err(Report::new(TransportError::PoolExhausted));
-            }
             let outbound = if let Some(registered) = registered
                 && registered.endpoint == endpoint
             {
                 if registered.dial == dial {
-                    return Ok(registered.clone());
+                    return registered.clone();
                 }
                 Arc::new(registered.with_dial(dial))
             } else {
@@ -164,7 +155,7 @@ impl TransportState {
             let observed = self.targets.compare_and_swap(&current, StdArc::new(next));
             if StdArc::ptr_eq(&current, &observed) {
                 self.connection_changed.notify_waiters();
-                return Ok(outbound);
+                return outbound;
             }
         }
     }
@@ -222,3 +213,7 @@ impl TransportState {
 #[cfg(test)]
 #[path = "target_order_tests.rs"]
 mod target_order_tests;
+
+#[cfg(test)]
+#[path = "target_table_tests.rs"]
+mod target_table_tests;

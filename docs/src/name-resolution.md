@@ -760,8 +760,8 @@ The node's declared DNS policy selects cache capacity, positive and negative TTL
 DNS address families, negative-answer trust and the client-hook budget. Their server options,
 validation and restart procedure are listed in
 [Node Settings](node-settings.md#transport-resolver-and-database-capacities).
-Concurrent DNS lookups derive from the declared interconnect peer count, 64 by default; waiting
-for a lookup slot still spends the caller's existing operation budget. Hook adapters, including
+`--dns-concurrent-lookups` bounds the DNS lookups in flight at once, 64 by default; waiting for a
+lookup slot still spends the caller's existing operation budget. Hook adapters, including
 Redis, read the budget from their supplied resolver. Literal addresses and hosts-file answers
 retain their resolution order independently of the DNS query-family selection.
 

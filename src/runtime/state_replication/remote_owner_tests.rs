@@ -47,9 +47,7 @@ async fn remote_owner(
         .load_full()
         .expect("joining the loopback cluster attaches its dispatcher");
     let transport = &dispatcher.interconnect;
-    transport
-        .register_outbound_target(node.clone(), NodeEndpoint::from(transport.local_addr()))
-        .expect("the loopback owner's target fits its peer quota");
+    transport.register_outbound_target(node.clone(), NodeEndpoint::from(transport.local_addr()));
     transport
         .register_handler::<StateSyncRequest, _, _>(move |_context, _request| async move {
             sleep(answer_delay).await;

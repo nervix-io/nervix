@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Deadlines, reserved request quotas, handler dispatch, response validation, and
+//! - **Owns.** Deadlines, request admission, handler dispatch, response validation, and
 //!   membership cancellation for typed internal requests.
 //! - **Depends on.** The authenticated HTTP/2 transport and rkyv payload vocabulary.
 //! - **Must not know.** The runtime meaning of a request or response.
@@ -21,7 +21,7 @@ use ahash::HashMap;
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, QueueAdmission, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity, DomainClockAuthorityRevision,
@@ -29,7 +29,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
-    sync::{Arc, Notify, OwnedSemaphorePermit, Semaphore, StdArc},
+    sync::{Arc, Notify, StdArc},
     time::{Instant, timeout},
 };
 use rkyv::{
@@ -39,7 +39,7 @@ use rkyv::{
     ser::{allocator::ArenaHandle, writer::IoWriter},
     util::AlignedVec,
 };
-use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
+use strum::{AsRefStr, EnumCount, EnumIter};
 use thiserror::Error;
 
 use super::{
@@ -1037,6 +1037,11 @@ impl HandlerTable {
     }
 }
 
+mod admissions;
+
+pub(crate) use admissions::RequestAdmission;
+use admissions::RequestAdmissions;
+
 pub(crate) struct RequestState {
     /// Registration publishes a complete replacement table, so dispatch reads it without a lock.
     handlers: ArcSwap<HandlerTable>,
@@ -1044,93 +1049,13 @@ pub(crate) struct RequestState {
     /// target counts as live so bootstrap discovery can reach its peers.
     live_nodes: ArcSwapOption<BTreeSet<ClusterNodeName>>,
     membership_changed: Notify,
-    outbound: RequestQuotas,
-    inbound: RequestQuotas,
+    /// The admission of the requests this node sends.
+    outbound: Arc<RequestAdmissions>,
+    /// The admission of the requests this node serves.
+    inbound: Arc<RequestAdmissions>,
     /// The same observations the transport records connection and relay events into, so a node
     /// reports one view of what its pools carried.
     observations: Arc<TransportObservations>,
-}
-
-pub(crate) struct RequestAdmission {
-    _permit: OwnedSemaphorePermit,
-}
-
-struct RequestQuotas {
-    shared: StdArc<Semaphore>,
-    append: StdArc<Semaphore>,
-    resource: StdArc<Semaphore>,
-    snapshot: StdArc<Semaphore>,
-    discovery: StdArc<Semaphore>,
-    liveness: StdArc<Semaphore>,
-    progress: StdArc<Semaphore>,
-    admission: StdArc<Semaphore>,
-    cancellation: StdArc<Semaphore>,
-    terminal: StdArc<Semaphore>,
-    /// What each subquota was built with, so the requests in flight can be read back out of the
-    /// permits the subquota is currently holding.
-    capacities: [usize; RequestSubquota::COUNT],
-}
-
-impl RequestQuotas {
-    fn new(options: &crate::TransportOptions) -> Self {
-        let capacity = options.incoming_queue_capacity;
-        // Each reserve is independent; a full general queue never consumes liveness or completion.
-        let standard = options.request_quota.min(capacity).max(1);
-        let append = options.append_request_quota.min(capacity).max(1);
-        let completion = options.completion_request_quota.min(capacity).max(1);
-        let liveness = options.max_concurrent_health_probes;
-        Self {
-            shared: StdArc::new(Semaphore::new(capacity)),
-            append: StdArc::new(Semaphore::new(append)),
-            resource: StdArc::new(Semaphore::new(standard)),
-            snapshot: StdArc::new(Semaphore::new(standard)),
-            discovery: StdArc::new(Semaphore::new(standard)),
-            liveness: StdArc::new(Semaphore::new(liveness)),
-            progress: StdArc::new(Semaphore::new(standard)),
-            admission: StdArc::new(Semaphore::new(standard)),
-            cancellation: StdArc::new(Semaphore::new(completion)),
-            terminal: StdArc::new(Semaphore::new(completion)),
-            capacities: [
-                capacity, append, standard, standard, standard, liveness, standard, standard,
-                completion, completion,
-            ],
-        }
-    }
-
-    fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
-        match subquota {
-            RequestSubquota::Shared => &self.shared,
-            RequestSubquota::Append => &self.append,
-            RequestSubquota::Resource => &self.resource,
-            RequestSubquota::Snapshot => &self.snapshot,
-            RequestSubquota::Discovery => &self.discovery,
-            RequestSubquota::Liveness => &self.liveness,
-            RequestSubquota::Progress => &self.progress,
-            RequestSubquota::Admission => &self.admission,
-            RequestSubquota::Cancellation => &self.cancellation,
-            RequestSubquota::Terminal => &self.terminal,
-        }
-    }
-
-    fn try_admit(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        let permit = StdArc::clone(self.for_subquota(subquota))
-            .try_acquire_owned()
-            .ok()?;
-        Some(RequestAdmission { _permit: permit })
-    }
-
-    /// Requests admitted into each subquota and not yet resolved.
-    fn in_flight(&self) -> [usize; RequestSubquota::COUNT] {
-        let mut pending = [0_usize; RequestSubquota::COUNT];
-        for subquota in RequestSubquota::iter() {
-            let capacity = self.capacities[subquota.index()];
-            let available = self.for_subquota(subquota).available_permits();
-            pending[subquota.index()] = capacity.checked_sub(available).verified(
-                "subquota permits are only taken and returned by the requests this node admitted",
-            );
-        }
-        pending
-    }
 }
 
 fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> bool {
@@ -1156,14 +1081,14 @@ impl RequestState {
             handlers: ArcSwap::from_pointee(HandlerTable::default()),
             live_nodes: ArcSwapOption::empty(),
             membership_changed: Notify::new(),
-            outbound: RequestQuotas::new(options),
-            inbound: RequestQuotas::new(options),
+            outbound: Arc::new(RequestAdmissions::new(options)),
+            inbound: Arc::new(RequestAdmissions::new(options)),
             observations,
         }
     }
 
     pub(crate) fn try_admit_outbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        let admitted = self.outbound.try_admit(subquota);
+        let admitted = RequestAdmissions::try_admit(&self.outbound, subquota);
         if admitted.is_none() {
             self.observations
                 .quota_failure(ConnectionDirection::Outbound, subquota);
@@ -1172,7 +1097,7 @@ impl RequestState {
     }
 
     fn try_admit_inbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        let admitted = self.inbound.try_admit(subquota);
+        let admitted = RequestAdmissions::try_admit(&self.inbound, subquota);
         if admitted.is_none() {
             self.observations
                 .quota_failure(ConnectionDirection::Inbound, subquota);
@@ -2343,6 +2268,8 @@ mod shuttle_checks;
 
 #[cfg(test)]
 mod tests {
+    use meticulous::OptionExt as _;
+
     use super::*;
 
     #[test]
@@ -2706,42 +2633,48 @@ mod tests {
     }
 
     #[test]
-    fn configured_append_capacity_refuses_excess_without_consuming_other_reserves() {
-        let settings = crate::TransportSettings::resolve(crate::TransportSettingValues {
-            max_peers: Some(16),
-            request_quota: Some(4),
-            ..Default::default()
-        })
-        .assured("a four-request quota fits node admission");
-        let options = settings.options(None, None);
-        let quotas = RequestQuotas::new(&options);
-        let held: Vec<_> = (0..4)
-            .map(|_| {
-                quotas
-                    .try_admit(RequestSubquota::Append)
-                    .assured("declared append room")
-            })
-            .collect();
-        assert!(quotas.try_admit(RequestSubquota::Append).is_none());
-        assert!(quotas.try_admit(RequestSubquota::Liveness).is_some());
-        assert!(quotas.try_admit(RequestSubquota::Cancellation).is_some());
-        assert!(quotas.try_admit(RequestSubquota::Shared).is_some());
-        drop(held);
-        assert!(quotas.try_admit(RequestSubquota::Append).is_some());
-    }
-
-    #[test]
-    fn liveness_quota_supports_the_node_health_probe_limit() {
+    fn a_reserved_kind_has_no_count_of_its_own_and_the_shared_queue_keeps_its_places() {
         let options = crate::TransportOptions {
-            incoming_queue_capacity: 1,
+            incoming_queue_capacity: 2,
             ..Default::default()
         };
-        let quotas = RequestQuotas::new(&options);
+        let admissions = Arc::new(RequestAdmissions::new(&options));
+        let appends: Vec<_> = (0..200)
+            .map(|_| {
+                RequestAdmissions::try_admit(&admissions, RequestSubquota::Append)
+                    .assured("a reserved kind has no count of its own that could refuse it")
+            })
+            .collect();
+        let shared: Vec<_> = (0..2)
+            .map(|_| {
+                RequestAdmissions::try_admit(&admissions, RequestSubquota::Shared)
+                    .assured("the incoming queue has two places")
+            })
+            .collect();
+        assert!(
+            RequestAdmissions::try_admit(&admissions, RequestSubquota::Shared).is_none(),
+            "a request without a reserved kind is refused while every place of the queue is held"
+        );
+        assert!(
+            RequestAdmissions::try_admit(&admissions, RequestSubquota::Liveness).is_some(),
+            "a full incoming queue never refuses a reserved kind"
+        );
 
+        let in_flight = admissions.in_flight();
+        assert_eq!(in_flight[RequestSubquota::Append.index()], 200);
+        assert_eq!(in_flight[RequestSubquota::Shared.index()], 2);
         assert_eq!(
-            quotas.liveness.available_permits(),
-            options.max_concurrent_health_probes,
-            "health capacity must not shrink with the general incoming request queue"
+            in_flight[RequestSubquota::Liveness.index()],
+            0,
+            "the liveness admission resolved when it was dropped"
+        );
+
+        drop(appends);
+        drop(shared);
+        assert_eq!(admissions.in_flight(), [0; RequestSubquota::COUNT]);
+        assert!(
+            RequestAdmissions::try_admit(&admissions, RequestSubquota::Shared).is_some(),
+            "a resolved request gives its place back"
         );
     }
 

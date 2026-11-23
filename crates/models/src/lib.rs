@@ -337,9 +337,8 @@ pub use names::{
 pub use nervix_licensing_vocabulary::ActivationKind;
 pub use node_capabilities::{
     ConnectorHostCapabilities, ConsensusCapabilities, DnsAddressFamilies, DnsCapabilities,
-    EngineCapabilities, InterconnectCapabilities, InvalidPeerCapacity, MaxPeers,
-    MembershipCapabilities, NodeCapabilities, NodeCapabilityRecord, PeerReceiveBounds,
-    ShutdownCapabilities,
+    EngineCapabilities, InterconnectCapabilities, MembershipCapabilities, NodeCapabilities,
+    NodeCapabilityRecord, PeerReceiveBounds, ShutdownCapabilities,
 };
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,

@@ -859,8 +859,6 @@ struct GossipExchange {
 enum GossipExchangeRefusal {
     #[error("a gossip message of {size} bytes exceeds the {limit}-byte bound")]
     Oversized { size: u64, limit: u64 },
-    #[error("the answering node could not register the sending node as an outbound peer")]
-    PeerRegistration,
     #[error("the answering node's gossip receiver has shut down")]
     ReceiverClosed,
 }
@@ -1049,18 +1047,9 @@ impl InterconnectGossipTransport {
     ) -> Result<(), GossipExchangeRefusal> {
         request.check_size()?;
         let target = PeerTarget::new(request.from, context.peer_advertised_host().to_string());
-        let registration = self
-            .inner
+        self.inner
             .interconnect
             .register_outbound_target(context.peer_node_id().clone(), target.endpoint());
-        if let Err(error) = registration {
-            debug!(
-                peer = %context.peer_node_id(),
-                error = %format_args!("{error:#}"),
-                "refused a gossip exchange from a peer that could not be registered"
-            );
-            return Err(GossipExchangeRefusal::PeerRegistration);
-        }
         self.inner.routes.insert(
             request.from,
             GossipRoute {
@@ -1093,21 +1082,16 @@ impl InterconnectGossipTransport {
                 continue;
             }
             let target = PeerTarget::new(id.gossip_advertise_addr, endpoint.host().to_string());
-            if self
-                .inner
+            self.inner
                 .interconnect
-                .register_outbound_target(node_id.clone(), endpoint)
-                .inspect_err(|error| Err::<(), _>(error).reported("refresh gossip peer route"))
-                .is_ok()
-            {
-                self.inner.routes.insert(
-                    id.gossip_advertise_addr,
-                    GossipRoute {
-                        peer: GossipRoutePeer::Authenticated(node_id),
-                        target,
-                    },
-                );
-            }
+                .register_outbound_target(node_id.clone(), endpoint);
+            self.inner.routes.insert(
+                id.gossip_advertise_addr,
+                GossipRoute {
+                    peer: GossipRoutePeer::Authenticated(node_id),
+                    target,
+                },
+            );
         }
     }
 
@@ -1192,8 +1176,7 @@ impl InterconnectGossipTransport {
                 // configured seeds, so restore the authenticated route before trying the probe.
                 self.inner
                     .interconnect
-                    .register_outbound_target(node_id.clone(), route.target.endpoint())
-                    .map_err(|error| anyhow::Error::new(GossipExchangeFailure::Transport(error)))?;
+                    .register_outbound_target(node_id.clone(), route.target.endpoint());
                 node_id
             }
             GossipRoutePeer::Expected(expectation) => {

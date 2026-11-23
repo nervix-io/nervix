@@ -47,7 +47,7 @@ const SETTINGS_HEADINGS: [&str; 21] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 254] = [
+const SETTING_NAMES: [&str; 253] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -116,11 +116,10 @@ const SETTING_NAMES: [&str; 254] = [
     "dns-hook-lookup-budget",
     "dns-address-family-policy",
     "dns-trust-negative-answers",
+    "dns-concurrent-lookups",
     "interconnect-reconnect-jitter-permille",
-    "interconnect-max-peers",
     "interconnect-concurrent-handshakes",
     "interconnect-incoming-queue-capacity",
-    "interconnect-request-quota",
     "interconnect-stream-receive-window",
     "interconnect-connection-receive-window",
     "interconnect-connection-setup-timeout",
@@ -561,8 +560,7 @@ fn help_lists_each_settings_area_under_its_own_heading() {
 fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() {
     let settings = NodeSettings::default()
         .with_overrides(&[
-            override_of("interconnect-max-peers", "16"),
-            override_of("interconnect-request-quota", "4"),
+            override_of("dns-concurrent-lookups", "16"),
             override_of("interconnect-request-timeout", "20s"),
             override_of("database-workers", "2"),
             override_of("dns-address-family-policy", "ipv4"),
@@ -572,19 +570,12 @@ fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() 
         .assured("consistent local infrastructure bounds");
     let rendered = settings.with_overrides(&[]).assured("settings read back");
     assert_eq!(rendered, settings);
-    assert_eq!(settings.interconnect.request_quota(), 4);
     assert_eq!(*settings.dns.concurrent_lookups.value(), 16);
     assert_eq!(*settings.node_database.workers.value(), Some(2));
     assert_eq!(*settings.consensus_database.workers.value(), None);
-    assert_eq!(
-        NodeSettings::default().interconnect.values().request_quota,
-        None
-    );
 
     for (name, value) in [
-        ("interconnect-max-peers", "0"),
-        ("interconnect-request-quota", "0"),
-        ("interconnect-request-quota", "1025"),
+        ("dns-concurrent-lookups", "0"),
         ("interconnect-request-timeout", "0s"),
         ("interconnect-stream-receive-window", "2GiB"),
         ("interconnect-reconnect-jitter-permille", "1001"),

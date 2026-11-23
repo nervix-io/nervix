@@ -118,7 +118,7 @@ const MANAGEMENT_TOTAL_STREAMS: usize = PoolClass::Management.stream_slots_per_c
                   for discovery"
     )
 )]
-const MANAGEMENT_DISCOVERY_STREAMS: usize = 4;
+pub(crate) const MANAGEMENT_DISCOVERY_STREAMS: usize = 4;
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -154,7 +154,7 @@ const MANAGEMENT_ADMISSION_STREAMS: usize = 4;
                   for relay cancellation"
     )
 )]
-const MANAGEMENT_CANCELLATION_STREAMS: usize = 4;
+pub(crate) const MANAGEMENT_CANCELLATION_STREAMS: usize = 4;
 #[cfg_attr(
     nervix_lint,
     nervix::constant(

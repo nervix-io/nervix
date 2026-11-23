@@ -225,10 +225,8 @@ without adding a prerequisite or changing graph acceptance.
 
 | Server option | Default | Meaning |
 | --- | --- | --- |
-| `--interconnect-max-peers` | 64 | Other node identities this transport can retain |
 | `--interconnect-concurrent-handshakes` | 32 | Concurrent transport handshakes |
 | `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
-| `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
 | `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
 | `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection |
 | `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
@@ -243,6 +241,7 @@ without adding a prerequisite or changing graph acceptance.
 | `--dns-hook-lookup-budget` | 30s | Lookup budget for client libraries without an operation deadline |
 | `--dns-address-family-policy` | `dual-stack` | DNS queries: `dual-stack`, `ipv4` or `ipv6` |
 | `--dns-trust-negative-answers` | `true` | Trust a name server's negative response without asking the next server |
+| `--dns-concurrent-lookups` | 64 | DNS lookups in flight at once; a lookup waits for a slot within its caller's budget |
 | `--database-cache-bytes` | 32 MiB | Node database cache |
 | `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
 | `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
@@ -254,16 +253,23 @@ Counts, receive windows and deadlines must be positive and fit their engines. HT
 are at most 2³¹−1 bytes. The options are validated before opening stores or binding listeners.
 Database cache capacities count alongside executor budgets in the startup memory check.
 
-Connection capacity derives from both directions of every pool: twelve connections per declared
-peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
-`interconnect-max-peers`. Completion reserves are at least one and otherwise one per sixteen peers,
-bounded by the incoming queue.
+A node keeps every peer it is given. Every member must reach every other member for consensus,
+health and relay delivery, so a node keeps a dial target, its connections and a relay owner for
+every peer, however many there are; the cluster's size is bounded by the licensing node quota, where
+the license sets one, and by the operator. Connections follow the peers: each peer gets the fixed
+[pool layout](interconnect.md#listener-and-peer-topology) of six connections in each direction, the five
+preconnected connections and the on-demand bulk connection, and at most
+`interconnect-concurrent-handshakes` connections are in setup at once. One health round probes
+every peer together.
 
-With the default 64 peers, the ordinary and append request reserves are 128 each and health-probe
-fan-out is 64. An append stream retains its admission throughout its lifetime, so the derived
-reserve holds an append stream and its replacement for every declared peer. Each traffic reserve is
-independent; a full general queue cannot consume health or cancellation capacity. An explicit lower
-request quota is reported as configured, and a refusal is a typed capacity outcome.
+Requests follow the peers the same way. A request waits for a stream slot of its kind on its peer's
+connection until its own deadline, and its bytes are charged to its traffic class's memory as their
+size becomes known. The [stream slot layout](interconnect.md#traffic-and-resource-isolation) is
+fixed per connection, so a node's request capacity grows with every peer it has, without a
+derivation. An append stream keeps its slot for its whole lifetime, and the replication connection
+reserves a second slot for its replacement. Health checks, cancellations and terminal outcomes have
+slots of their own, so ordinary traffic cannot take their streams. Requests without a reserved kind
+also share `interconnect-incoming-queue-capacity`, and a refusal there is a typed capacity outcome.
 
 Typed RPCs derive their deadlines from the request budget: control one tenth, coordination one
 fifth, setup one half, ordinary requests one, snapshot operations three, checkpoint transfers six,
@@ -1247,8 +1253,8 @@ describes, defaults included.
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--raft-append-batch-entries` and the other [consensus capacities](#consensus-capacities) | node capability | consensus operations |
 | `--database-cache-bytes`, `--database-journal-bytes`, `--database-workers`, `--raft-database-cache-bytes`, `--raft-database-journal-bytes`, `--raft-database-workers` | node capability | node and consensus databases |
-| `--dns-cache-entries`, `--dns-positive-max-ttl`, `--dns-negative-max-ttl`, `--dns-hook-lookup-budget`, `--dns-address-family-policy`, `--dns-trust-negative-answers` | node capability | name resolution |
-| `--interconnect-max-peers` and the other [transport capacities](#transport-resolver-and-database-capacities) | node capability | interconnect transport |
+| `--dns-cache-entries`, `--dns-positive-max-ttl`, `--dns-negative-max-ttl`, `--dns-hook-lookup-budget`, `--dns-address-family-policy`, `--dns-trust-negative-answers`, `--dns-concurrent-lookups` | node capability | name resolution |
+| `--interconnect-concurrent-handshakes` and the other [transport capacities](#transport-resolver-and-database-capacities) | node capability | interconnect transport |
 | `--interconnect-relay-batch-bytes`, `--interconnect-relay-decoded-bytes`, `--interconnect-bulk-chunk-bytes`, `--interconnect-bulk-receive-window` | node capability | peer receive bounds |
 | `--listener-*`, `--http-body-bytes`, `--http-body-copy-bytes`, `--http-body-timeout`, `--http-refusal-drain-timeout`, `--websocket-message-bytes`, `--websocket-frame-bytes`, `--grpc-header-bytes`, `--grpc-concurrency`, `--grpc-request-timeout`, `--grpc-max-streams`, `--grpc-keepalive-interval`, `--grpc-keepalive-timeout` | node capability | [listener bounds](#listener-bounds) |
 | `--vm-*`, `--wasm-stack-bytes`, `--wasm-memory-reservation-bytes`, `--udf-watchdog`, `--connector-retry-multiplier`, `--connector-retry-jitter-percent`, `--kafka-domain-assignment-retry`, `--partition-topology-poll-interval`, `--syslog-intake-queue-capacity`, `--syslog-read-chunk-bytes`, `--mqtt-read-ahead-headroom` | node capability | [engine and connector host](#engine-and-connector-host-capabilities) |

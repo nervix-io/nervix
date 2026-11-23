@@ -1,20 +1,18 @@
 Feature: Declared infrastructure settings
   Infrastructure capacity belongs to each node. Liveness follows the committed cluster policy,
-  and reserved append admission lets the leader retain a stream to every follower.
+  and every follower's replication connection reserves a stream for the leader's appends.
 
   Scenario: A ten-member cluster retains append capacity for every follower
     Given a 10 node nervix cluster is started
     When 16 domains named "infrastructure_append" are created on the leader node
     Then within "120s" every node has applied 16 domains named "infrastructure_append"
-    And node "node-1" eventually describes node "node-10" with "interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
+    And node "node-1" eventually describes node "node-10" with "interconnect: handshakes=32 queue=1024 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
 
-  Scenario Outline: A configured request quota is visible on a cluster of <cluster_size>
-    Given node-1 starts with interconnect-max-peers = 16
-    And node-1 starts with interconnect-request-quota = 4
-    And node-1 starts with interconnect-request-timeout = 20s
+  Scenario Outline: A configured request timeout is visible on a cluster of <cluster_size>
+    Given node-1 starts with interconnect-request-timeout = 20s
     And node-1 starts with partition-topology-poll-interval = 250ms
     And a <cluster_size> node nervix cluster is started
-    Then node "node-<cluster_size>" eventually describes node "node-1" with "interconnect: max-peers=16 request-quota=4 health-probes=16 max-connections=192 handshakes=32 queue=1024 completion=1 stream-window=65536 connection-window=262144 setup=5s request=20s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
+    Then node "node-<cluster_size>" eventually describes node "node-1" with "interconnect: handshakes=32 queue=1024 stream-window=65536 connection-window=262144 setup=5s request=20s progress=5s backoff=200ms max-backoff=5s jitter-permille=0"
     And the last command output contains
       """
       partition-topology-poll-interval=250ms
@@ -105,10 +103,11 @@ Feature: Declared infrastructure settings
     And node-1 starts with dns-cache-entries = 16
     And node-1 starts with dns-positive-max-ttl = 2s
     And node-1 starts with dns-negative-max-ttl = 1s
+    And node-1 starts with dns-concurrent-lookups = 8
     And a <cluster_size> node nervix cluster is started
     Then node "node-<cluster_size>" eventually describes node "node-1" with "database: cache-bytes=1048576 journal-bytes=67108864 workers=1"
     And node "node-<cluster_size>" eventually describes node "node-1" with "raft database: cache-bytes=2097152 journal-bytes=67108864 workers=1"
-    And node "node-<cluster_size>" eventually describes node "node-1" with "dns: cache-entries=16 positive-max-ttl=2s negative-max-ttl=1s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=64"
+    And node "node-<cluster_size>" eventually describes node "node-1" with "dns: cache-entries=16 positive-max-ttl=2s negative-max-ttl=1s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=8"
     When 2 domains named "configured_stores" are created on the leader node
     Then within "60s" every node has applied 2 domains named "configured_stores"
 

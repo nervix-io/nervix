@@ -56,13 +56,10 @@ impl InterconnectRequest for AnswerProbe {
 /// Two bound transports with the first dialing the second.
 async fn connected_with_options(options: TransportOptions) -> ConnectedTransports {
     let transports = bound_transports_with_options(options).await;
-    transports
-        .transport_a
-        .register_outbound_target(
-            transports.node_b.clone(),
-            NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
-        )
-        .expect("authenticated test target should register");
+    transports.transport_a.register_outbound_target(
+        transports.node_b.clone(),
+        NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
+    );
     transports
 }
 
@@ -732,12 +729,10 @@ impl MismatchedTransports {
 
     /// Start every preconnected connection the dialing node keeps to the accepting node.
     fn dial(&self) {
-        self.dialing
-            .register_outbound_target(
-                self.accepting_node.clone(),
-                NodeEndpoint::new("localhost", self.accepting.local_addr().port()),
-            )
-            .expect("authenticated test target should register");
+        self.dialing.register_outbound_target(
+            self.accepting_node.clone(),
+            NodeEndpoint::new("localhost", self.accepting.local_addr().port()),
+        );
     }
 
     /// The refusal the dialing node reads once the accepting node has refused its hello.
