@@ -5,7 +5,8 @@
 //! - **Owns.** Building an HTTP client from a client's entries: the node DNS resolver, the
 //!   request deadline its `timeout_ms` sets, the shared TLS trust and client identity, the
 //!   one proxy the client declares and the credentials it carries, refusing every redirect so the
-//!   connector that sends decides what a redirect means, and never reading a proxy from the
+//!   connector that sends decides what a redirect means, sending no request again after a refusal
+//!   so the connector's retry policy is the only retry, and never reading a proxy from the
 //!   environment.
 //! - **Depends on.** The client configuration's entries, the shared rustls configuration owner,
 //!   `nervix-dns`, URLs, Base64 and percent decoding, and `reqwest`.
@@ -152,6 +153,12 @@ impl<'a> HttpClientConfig<'a> {
     /// identifies itself with the client's TLS files, and sends through the declared proxy alone:
     /// a proxy named by the environment is never read. It follows no redirect: a `3xx` answer is
     /// the response, and a connector that follows redirects sends the next request itself.
+    ///
+    /// It sends each request once. A request the server refuses, whatever the protocol says about
+    /// sending it again, fails, and the connector's retry policy decides about the next attempt.
+    /// The connection pool beneath still writes a request on a fresh connection when the reused
+    /// connection it chose closed before any of the request was written; that request never
+    /// reached the server, and Reqwest offers no way to turn the pool's choice off.
     pub fn build(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
         let mut builder = self
             .builder()?
@@ -180,7 +187,12 @@ impl<'a> HttpClientConfig<'a> {
     }
 
     fn builder(&self) -> Result<reqwest::ClientBuilder, Report<HttpClientConfigError>> {
-        let mut builder = HttpClient::builder().dns_resolver(self.dns.clone());
+        // Reqwest's default policy sends a request again after an HTTP/2 refusal, `REFUSED_STREAM`
+        // or a graceful `GOAWAY`, on a schedule the connector never sees. The refusal is the
+        // attempt's failure instead, which the connector's own retry policy paces.
+        let mut builder = HttpClient::builder()
+            .dns_resolver(self.dns.clone())
+            .retry(reqwest::retry::never());
         let timeout = ConfiguredDeadline::timeout(self.entries)
             .change_context(HttpClientConfigError::InvalidTimeout { label: self.label })?;
         if let Some(timeout) = timeout {
@@ -203,9 +215,10 @@ impl<'a> HttpClientConfig<'a> {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_dns::{DnsConfiguration, DnsConfigurationError};
     use nervix_models::ClientConfigEntry;
-    use nervix_primitives::net::TcpListener;
+    use nervix_primitives::{net::TcpListener, sync::StdArc};
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
     use super::*;
@@ -401,6 +414,130 @@ mod tests {
             ));
             assert!(!format!("{refusal:?}").contains(invalid), "{refusal:?}");
         }
+        Ok(())
+    }
+
+    /// A certificate authority, written to a file for a client's `tls_ca_file`, and the TLS
+    /// configuration of an endpoint whose certificate it issued for `127.0.0.1`. The endpoint offers
+    /// HTTP/2 alone, so a client that connects speaks HTTP/2.
+    struct Http2Endpoint {
+        _files: tempfile::TempDir,
+        ca: std::path::PathBuf,
+        tls: StdArc<rustls::ServerConfig>,
+    }
+
+    impl Http2Endpoint {
+        fn issue() -> Self {
+            let authority_key = rcgen::KeyPair::generate().assured("rcgen generates keys");
+            let mut authority = rcgen::CertificateParams::new(Vec::<String>::new())
+                .assured("an authority needs no name");
+            authority.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            let authority = authority
+                .self_signed(&authority_key)
+                .assured("an authority signs itself");
+            let server_key = rcgen::KeyPair::generate().assured("rcgen generates keys");
+            let server = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()])
+                .assured("a loopback address is a valid subject name")
+                .signed_by(&server_key, &authority, &authority_key)
+                .assured("the authority issues the server certificate");
+            let files = tempfile::tempdir().assured("the test host has a temporary directory");
+            let ca = files.path().join("ca.pem");
+            std::fs::write(&ca, authority.pem()).assured("the temporary directory is writable");
+            let chain = vec![server.der().clone()];
+            let key = rustls_pki_types::PrivateKeyDer::Pkcs8(
+                rustls_pki_types::PrivatePkcs8KeyDer::from(server_key.serialize_der()),
+            );
+            nervix_crypto::tls::install_default_provider();
+            let mut tls = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(chain, key)
+                .assured("the issued chain matches its key");
+            tls.alpn_protocols = vec![b"h2".to_vec()];
+            Self {
+                _files: files,
+                ca,
+                tls: StdArc::new(tls),
+            }
+        }
+    }
+
+    /// Serves one HTTPS connection over HTTP/2: refuses its first stream with `REFUSED_STREAM`,
+    /// the refusal RFC 9113 section 8.7 lets a client send again because the endpoint processed
+    /// nothing, answers every later stream with `204 No Content`, and returns how many streams the
+    /// client opened once it closes the connection.
+    async fn refuse_the_first_stream(
+        listener: TcpListener,
+        tls: StdArc<rustls::ServerConfig>,
+    ) -> usize {
+        let (stream, _) = listener.accept().await.assured("the client connects");
+        let stream = tokio_rustls::TlsAcceptor::from(tls)
+            .accept(stream)
+            .await
+            .assured("the client completes TLS");
+        let mut connection = h2::server::handshake(stream)
+            .await
+            .assured("the client speaks HTTP/2");
+        let mut streams = 0_usize;
+        while let Some(accepted) = connection.accept().await {
+            nervix_primitives::task::consume_budget().await;
+            let Ok((_request, mut respond)) = accepted else {
+                break;
+            };
+            streams = streams
+                .checked_add(1)
+                .assured("one connection opens far fewer streams than usize counts");
+            if streams == 1 {
+                respond.send_reset(h2::Reason::REFUSED_STREAM);
+                continue;
+            }
+            let answer = http::Response::builder()
+                .status(http::StatusCode::NO_CONTENT)
+                .body(())
+                .assured("a status alone is a valid response head");
+            respond
+                .send_response(answer, true)
+                .assured("the client waits for the answer to the stream it opened");
+        }
+        streams
+    }
+
+    #[nervix_primitives::test]
+    async fn a_built_client_hands_a_refused_http2_stream_to_its_caller_without_sending_it_again()
+    -> Result<(), Report<DnsConfigurationError>> {
+        let dns = DnsResolver::load(
+            DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await?;
+        let endpoint = Http2Endpoint::issue();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("a loopback listener binds");
+        let address = listener.local_addr().assured("the listener has an address");
+        let server =
+            nervix_primitives::task::spawn(refuse_the_first_stream(listener, endpoint.tls.clone()));
+        let entries = [
+            entry("timeout_ms", "5000"),
+            entry("tls_ca_file", &endpoint.ca.to_string_lossy()),
+        ];
+        let client = HttpClientConfig::new(&entries, "HTTP", &dns, &Default::default())
+            .build()
+            .assured("a client that trusts the endpoint's authority builds");
+
+        let outcome = client.get(format!("https://{address}/events")).send().await;
+        let refused = outcome.is_err();
+        let described = format!("{outcome:?}");
+        drop(outcome);
+        drop(client);
+        let streams = server
+            .await
+            .assured("the endpoint served its one connection");
+
+        assert!(
+            refused,
+            "the refused request is its caller's to send again: {described}"
+        );
+        assert_eq!(streams, 1, "the client sends a refused request once");
         Ok(())
     }
 
