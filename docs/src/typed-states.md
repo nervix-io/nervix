@@ -208,7 +208,8 @@ semantic value, name, one default, optional derivation and validation against ty
 typed validation report on failure, and provides no mutable access around that boundary.
 `Prerequisites`, `ClusterParameters` and `NodeCapabilities` classify the fields; omitting the
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
-carriers, defaults, change procedures and source ratchet.
+carriers, defaults, change procedures and the compiler rule that refuses numeric policy outside
+them.
 
 `NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
 `PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`,
@@ -383,16 +384,18 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_` keyspaces and `ClusterState`
-metadata encoding 51 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_` keyspaces and `ClusterState`
+metadata encoding 54 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
 inferencer working memory, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, the database volume size each node record's capacity claim carries, interconnect capabilities
-that carry no relay watermark count, and the partition
+that carry no relay watermark count, listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits,
+the HTTP/1 header count and the WebSocket write buffer, and the partition
 count of every resolved
 parametrizer in the committed schedule, the partition epoch the schedule records for each
 parametrizer whose count changed, and the statements a transaction keeps, including per-entity
 `ALTER INGESTOR` and `ALTER EMITTER` operations, `SHOW INFERENCER ... STATE` and a `RESET WASM PROCESSOR ... STATE` that takes
-its domain from the transaction. The runtime state store's
+its domain from the transaction, a `START` command's execution with the revision of the start it committed and a durable
+transaction request's refusal of a queued `START` or `STOP`. The runtime state store's
 `inherited-partition-origin-checkpoint-index` format identifies the checkpoints it keeps, including the
 unsigned 64-bit instance identity and the unit every branch-aggregated metric series carries.
 Inherited schedules also retain configuration-fenced source sets, common grouping and suspended
@@ -1288,7 +1291,7 @@ domains capture stored checkpoints. An empty generation still has its descriptor
 zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
-authority once its state generation is admitted. Neither state permits `START`, direct or transactional. Completion of the
+authority once its state generation is admitted. Neither state permits `START`. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at

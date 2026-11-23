@@ -170,10 +170,12 @@ traffic does not delay readiness; its connection is opened when needed. The two 
 allow unrelated relay channels to make progress independently while preserving ordering within each
 logical channel.
 
-The built-in topology limit is 64 peers. A node admits at most 768 incoming and outgoing
-connections in total and performs at most 32 connection handshakes concurrently. Those limits cover
-the six possible connections in each direction for every peer: five preconnected connections plus
-the on-demand bulk connection.
+A node retains at most `--interconnect-max-peers` other node identities, 64 by default. It admits
+twelve incoming and outgoing connections per declared peer, 768 by default, which covers the six
+possible connections in each direction for every peer: five preconnected connections plus the
+on-demand bulk connection. It performs at most `--interconnect-concurrent-handshakes` connection
+handshakes concurrently, 32 by default. [Node Settings](node-settings.md) owns these options and
+their derivations.
 
 ## Peer Name Resolution
 
@@ -514,8 +516,10 @@ the same fingerprint as every other consensus and prerequisite shape.
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
 It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
-record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
-transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
+record retains, the typed `LicensingStop` refusal of a change that would run a domain, the start of
+a domain included, and the `stopped` admission refusal state. It fences the domain start a `START`
+command commits on its own, with the start revision its execution records, and transaction commit
+plans and step effects that carry no lifecycle step.
 
 The fingerprint also covers the `DURATION` type: the Models that declare it or write a duration
 literal, and the duration values branch keys, relay payloads, materialized records and other
@@ -536,8 +540,11 @@ The current fingerprint includes the conditional orphaned model-pause recovery c
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 It also covers the node record announcement: the `consensus.announce_node_record` request and the
 Raft command that commit a node's capacity claim, detected properties and tags as one record.
-That claim carries the size of the volume holding the node's database directory, and a parameter
-conflict can carry the typed refusal of a resource quota above an admitted node's volume.
+That claim carries the size of the volume holding the node's database directory and the open-file
+limit of each of the node's databases, and a parameter conflict can carry the typed refusal of a
+resource quota above an admitted node's volume or of a node-unavailability timeout that an admitted
+node's health-probe interval does not fit. Its listener bounds carry the gRPC listener's HTTP/2
+windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup. The fingerprint also covers
 the opening of a client consumer stream with the largest delivery chunk its serving node announces.
@@ -632,16 +639,19 @@ reported as `ArrowBodyError::Decode`.
 
 The primary payload limits are:
 
-| Payload | Maximum size |
-| --- | ---: |
-| Management event | 64 KiB |
-| Command | 1 MiB |
-| Replication batch | 2 MiB |
-| Encoded relay batch | 32 MiB |
-| Decoded relay batch | 32 MiB |
-| Relay decode scratch space | 16 MiB |
-| Bulk transfer chunk | 64 KiB |
-| Snapshot section | 8 MiB |
+| Payload | Default | Set by |
+| --- | ---: | --- |
+| Management event | 64 KiB | fixed; every member must bring the same bound to join |
+| Command | 1 MiB | fixed |
+| Replication batch | 2 MiB | fixed |
+| Encoded relay batch | 32 MiB | `--execution-relay-encoded-bytes`, one sixth of the relay pool at most 32 MiB; a receiver announces `--interconnect-relay-batch-bytes`, which defaults to it |
+| Decoded relay batch | 32 MiB | `--execution-relay-decoded-bytes`, one sixth of the relay pool at most 32 MiB; a receiver announces `--interconnect-relay-decoded-bytes`, which defaults to it |
+| Relay decode scratch space | 16 MiB | `--execution-relay-scratch-bytes`, one twelfth of the relay pool at most 16 MiB |
+| Bulk transfer chunk | 64 KiB | `--execution-bulk-chunk-bytes`, one 512th of the bulk pool at most 64 KiB; a receiver announces `--interconnect-bulk-chunk-bytes`, which defaults to it |
+| Snapshot section | 8 MiB | fixed |
+
+A sender uses each receiver's announced bound from its committed capabilities, so nodes with
+different values interoperate, as [Node Settings](node-settings.md) describes.
 
 A receiver also holds an Arrow body to its own framing before it decodes it. The body is one
 canonical IPC stream: every message opens with the continuation marker, and the end-of-stream
@@ -653,8 +663,10 @@ undecodable, a body whose schema declares a field type Nervix does not carry, a 
 among them, or whose record batch is compressed or at odds with that schema. It opens every Arrow section of a
 sealed snapshot, a checkpoint or a backup archive.
 
-HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
-connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A
+HTTP/2 flow control adds another bound. Each non-bulk stream begins with the
+`--interconnect-stream-receive-window` receive window, 64 KiB by default, each non-bulk connection
+with the `--interconnect-connection-receive-window`, 256 KiB by default, and request headers are
+limited to 16 KiB. A
 receiver releases more HTTP/2 credit only as it accepts and accounts for more data. Large streamed
 objects can therefore cross the cluster without either endpoint holding the whole object in memory.
 
@@ -700,21 +712,22 @@ replication slots. The bulk pool reserves two slots for resources, one for snaps
 other bulk work, which backup section fetches use. Commands and relay bodies use the shared capacity
 of their dedicated pools.
 
-With the standard node capacity, typed requests also have independent node-wide admission quotas,
-applied separately to incoming and outgoing work across all peers and connections:
+Typed requests also have independent node-wide admission quotas, applied separately to incoming
+and outgoing work across all peers and connections. They derive from `--interconnect-max-peers` and
+`--interconnect-incoming-queue-capacity`; with the default 64 peers and 1,024 queued requests:
 
-| Request use | Standard admissions per direction |
-| --- | ---: |
-| Shared | 1,024 |
-| Consensus append | 8 |
-| Resource transfer | 8 |
-| Snapshot transfer | 8 |
-| Discovery | 8 |
-| Application liveness | 32 |
-| Domain-clock progress | 8 |
-| Runtime and relay admission | 8 |
-| Relay cancellation | 4 |
-| Relay terminal outcomes | 4 |
+| Request use | Default admissions per direction | Derivation |
+| --- | ---: | --- |
+| Shared | 1,024 | `--interconnect-incoming-queue-capacity` |
+| Consensus append | 128 | `--interconnect-request-quota`, as an independent reserve of the same size |
+| Resource transfer | 128 | `--interconnect-request-quota`: two per declared peer, bounded by the incoming queue |
+| Snapshot transfer | 128 | `--interconnect-request-quota` |
+| Discovery | 128 | `--interconnect-request-quota` |
+| Application liveness | 64 | one per declared peer |
+| Domain-clock progress | 128 | `--interconnect-request-quota` |
+| Runtime and relay admission | 128 | `--interconnect-request-quota` |
+| Relay cancellation | 4 | one per sixteen declared peers, at least one |
+| Relay terminal outcomes | 4 | one per sixteen declared peers, at least one |
 
 These reservations mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
@@ -1111,11 +1124,13 @@ ingestor or persist an acknowledgement. Admission progress carries no parked sta
 
 Before admission the receiver reports nothing about a delivery's records: their acknowledgement
 watches start only once it has admitted them. Until then the sending node holds the records on their
-ingestors' behalf, so it reports them alive to their ingestors itself, every 100 milliseconds the
-delivery is still under way, whether it waits for the relay's dispatch gate, its channel, the
-storage of its records, a grant or the receiver's admission. This applies to a delivery to the
-relay's owner and to one from the owner to a consumer on another node. A delivery admitted within
-its first 100 milliseconds reports nothing. An ingestor's `ACK TIMEOUT` therefore measures how long its
+ingestors' behalf, so it reports them alive to their ingestors itself, every committed
+`REMOTE_ACK_ALIVE_INTERVAL` (100 milliseconds by default) the delivery is still under way, whether it
+waits for the relay's dispatch gate, its channel, the storage of its records, a grant or the
+receiver's admission. This applies to a delivery to the relay's owner and to one from the owner to a
+consumer on another node. A delivery admitted within its first interval reports nothing. A delivery
+reads the interval once it waits and keeps it until it ends, as the receiver keeps the interval the
+delivery carries, so a committed change reaches the next delivery. An ingestor's `ACK TIMEOUT` therefore measures how long its
 records make no progress, not how long their delivery takes to reach the next node. A record still
 on its way when that timeout would have passed is not read again and emitted twice. The bounds
 above still end a delivery: five seconds without progress, or five minutes from storing its records
@@ -1160,7 +1175,10 @@ The timing examples below use the default remote ACK policy. Each delivery captu
 alive, dispatch, silence, sweep, total-admission and instantiation bounds together; a live update
 does not change retained deliveries. Delivery-position capacity is a local node capability.
 [Node Settings](node-settings.md#data-plane-runtime-policy-and-capacity) owns the options and
-validation. Local emitter and message-error progress beats retain their separate 100ms cadence.
+validation. Local progress beats, such as an emitter's and a message-error route's, follow the
+committed alive interval as well: each reads it when its held work waits, so a committed change
+reaches its next keepalive without a rebuild, as
+[Data-Plane Concurrency](data-plane-concurrency.md) describes.
 
 A receiver reports every record acknowledgement it holds to the node that registered it. While the
 downstream work the acknowledgement stands for continues, it sends a report 100 milliseconds after
@@ -1229,7 +1247,7 @@ Record storage and receiver ACK watches are charged to the relay memory budget. 
 admitted batch multiplexes its row watches, with a fixed charge of 1 KiB per row plus 4 KiB for the
 task; a wide frame therefore does not allocate one task per acknowledgement. Pending rows report
 progress every 100 milliseconds, below the registrar's fifteen-second silence bound even when two
-reports each exhaust their dispatch deadline. The same cadence keeps local emitter and
+reports each exhaust their dispatch deadline. The same committed interval keeps local emitter and
 message-error acknowledgements alive while a connector request is pending, giving a one-second
 ingestor `ACK TIMEOUT` multiple chances to observe progress. Record storage waits for room before the
 delivery's body is encoded, as [Held Deliveries](#held-deliveries) describes; refusing it is typed
@@ -1563,7 +1581,10 @@ state can change while its incarnation stays live. Application readiness travels
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and
 incarnations but does not replace application health checks. Gossip payloads remain below the
-management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
+management-event bound, so discovery cannot allocate an arbitrary wire message: both peers hold an
+exchange's payload to 60 KiB, and a node refuses to start when its management-event bound cannot
+carry the largest exchange, its typed request fields and envelope included, encoded as a send
+encodes it. A node that cannot
 take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
 bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
 shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination. One
@@ -1571,6 +1592,19 @@ worker per destination drives its interconnect requests in order, under the one-
 deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
 to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
 retries. Closing the transport cancels queued work and exchanges in flight.
+
+Incoming exchanges take one bounded queue between the interconnect handler and Chitchat, which
+reads it as its socket. The node capability `--gossip-receive-queue-capacity` sets how many
+datagrams it holds, 1,024 by default. Each holds at most the 60 KiB gossip bound, so the queue
+retains at most its capacity times that bound. A full queue holds an exchange's answer until
+Chitchat takes a datagram; an exchange that waits beyond its request deadline fails at its sender,
+and the next gossip round retries.
+
+A key a node deletes from its gossip state, such as a withdrawn subscription interest, admission
+verdicts or licensing connectivity, stays a tombstone for the node capability
+`--gossip-tombstone-grace-period`, 60 s by default, so peers learn of the deletion before Chitchat
+collects it. A peer whose view of that node is older than its last collected tombstone receives the
+node's whole published state again, in place of the deltas it missed.
 
 Each node's Chitchat live set is its own failure-detector estimate. An isolated peer can remain
 listed live until its missing heartbeats are observed, even after its links stop carrying requests;
@@ -1585,7 +1619,10 @@ or became a new incarnation produces an event: the task logs it at `info` with t
 incarnation, and offers it to the sessions attached to the node as a `Membership` notice, such as
 `node 'node-3' left` or `node 'node-3' restarted (incarnation 1793845627114630656)`. A value that
 only changes published keys, such as subscription interest, offers nothing. The node's own run is
-its first member, so it never reports itself joining.
+its first member, so it never reports itself joining. The task offers each event on a bus whose
+one subscriber, the relay of session notices, republishes it as exactly one notice, so the bus
+holds as many events as the session notice backlog, `--session-notice-capacity`, and has no option
+of its own. A relay that falls further behind logs how many events it skipped at `warn`.
 
 Chitchat continues to select known dead peers for exchanges during its 24-hour dead-node retention
 period. When application health has retired one of those peers from the outbound pool, a gossip
@@ -2409,10 +2446,12 @@ and outbound connections through a Chitchat liveness loss while application heal
 observation of it from the node-unavailability interval, as described below. A different
 incarnation or advertised endpoint must establish a new target.
 
-Each health round has at most one probe in flight for each peer and at most 32 probes across the
-node. A probe has a one-second total deadline. Results are published as they complete, so a silent
-peer occupies only its own concurrency slot. The next regular round begins roughly one second after
-the previous round finishes. Gossip updates remain pending while those bounded probes finish and
+Each health round has at most one probe in flight for each peer and at most
+`interconnect-max-peers` probes across the node, 64 by default. A probe's total deadline is the
+probe timeout, a tenth of the node-unavailability interval: one second at the default ten seconds.
+Results are published as they complete, so a silent peer occupies only its own concurrency slot.
+The next regular round begins one `--control-plane-health-probe-interval` after the previous round
+finishes, one second by default. Gossip updates remain pending while those bounded probes finish and
 start the next round immediately afterward. They never cancel an in-flight round: repeated gossip
 updates must not prevent an unreachable peer's deadline from becoming a failed observation.
 
@@ -2439,7 +2478,11 @@ resets that run. Consensus membership continues to use the cluster topology esta
 
 The node-unavailability interval is installed live from the committed cluster parameters. A changed
 interval wakes retained health waiters, which recompute their next monotonic transition using the
-installed value. Republishing an unchanged interval does not wake those waiters.
+installed value. Republishing an unchanged interval does not wake those waiters. A node observes
+each peer again at most one health-probe interval plus one probe timeout after its last
+observation, so the node-unavailability interval must exceed both together on every admitted node.
+[Node Settings](node-settings.md#committed-parameter-changes) describes how a commit, a node
+announcement and a node start refuse a value that does not.
 
 Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
 listing live only while its latest application observation is younger than the node-unavailability

@@ -45,18 +45,6 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       """
       START;
       """
-    Given client "transaction" is connected to the leader node
-    When client "transaction" selects domain "{{domain}}"
-    And client "transaction" fails to execute these Plexus commands
-      """
-      BEGIN;
-      START;
-      COMMIT;
-      """
-    Then the last command error contains
-      """
-      licensing stopped processing
-      """
     When these Plexus commands fail with "(stopped)"
       """
       CREATE UNPACED DOMAIN {{domain}}_after_expiry;

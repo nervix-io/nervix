@@ -47,14 +47,14 @@ use tokio_tungstenite::{
     tungstenite::{
         Message,
         handshake::derive_accept_key,
-        protocol::{CloseFrame, Role, frame::coding::CloseCode},
+        protocol::{CloseFrame, Role, WebSocketConfig, frame::coding::CloseCode},
     },
 };
 use tracing::warn;
 
 use super::{
-    node_initialization::NodeInitialization, public_listener::PublicListener,
-    service_tasks::ServiceTasks, tls::HttpsListenerCertificates,
+    listener_settings::ListenerSettings, node_initialization::NodeInitialization,
+    public_listener::PublicListener, service_tasks::ServiceTasks, tls::HttpsListenerCertificates,
 };
 use crate::runtime::{
     EndpointDispatchOutcome, EndpointFramePause, EndpointPayload, EndpointRequestOutcome,
@@ -153,6 +153,28 @@ fn header_contains_token(value: &hyper::header::HeaderValue, expected: &str) -> 
     })
 }
 
+/// The WebSocket configuration of an endpoint session: incoming frames and messages within their
+/// declared bounds, and writes that collect up to the declared write buffer and hold at most one
+/// more message of the declared message size.
+fn endpoint_websocket_config(settings: &ListenerSettings) -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(
+            usize::try_from(settings.websocket_message_bytes().as_u64())
+                .assured("WebSocket size-setting validation checks usize representation"),
+        ),
+        max_frame_size: Some(
+            usize::try_from(settings.websocket_frame_bytes().as_u64())
+                .assured("WebSocket size-setting validation checks usize representation"),
+        ),
+        write_buffer_size: usize::try_from(settings.websocket_write_buffer_bytes().as_u64())
+            .assured("WebSocket size-setting validation checks usize representation"),
+        max_write_buffer_size: settings.endpoint_websocket_write_capacity(),
+        // RFC 6455 section 5.1: a server closes the connection on an unmasked client frame.
+        accept_unmasked_frames: false,
+        ..WebSocketConfig::default()
+    }
+}
+
 pub(in crate::application) fn is_websocket_upgrade_request(
     request: &HyperRequest<HyperIncoming>,
 ) -> bool {
@@ -245,17 +267,7 @@ impl EndpointWebsocketConnection {
             }
         };
         let io = TokioIo::new(upgraded);
-        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
-            max_message_size: Some(
-                usize::try_from(settings.websocket_message_bytes().as_u64())
-                    .assured("WebSocket size-setting validation checks usize representation"),
-            ),
-            max_frame_size: Some(
-                usize::try_from(settings.websocket_frame_bytes().as_u64())
-                    .assured("WebSocket size-setting validation checks usize representation"),
-            ),
-            ..Default::default()
-        };
+        let config = endpoint_websocket_config(&settings);
         let mut websocket = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
         let mut websocket = WebsocketSessionSocket::new(&mut websocket);
 
@@ -859,6 +871,25 @@ pub(in crate::application) async fn serve_https(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::listener_settings::ListenerOverrides;
+
+    #[test]
+    fn an_endpoint_websocket_writes_within_its_declared_buffer_and_message_bound() {
+        let settings = ListenerSettings::resolve(ListenerOverrides {
+            websocket_write_buffer_bytes: Some(ubyte::ByteUnit::Kibibyte(32)),
+            websocket_message_bytes: Some(ubyte::ByteUnit::Kibibyte(512)),
+            websocket_frame_bytes: Some(ubyte::ByteUnit::Kibibyte(256)),
+            ..Default::default()
+        })
+        .assured("the declared WebSocket bounds are valid");
+        let config = endpoint_websocket_config(&settings);
+        assert_eq!(config.write_buffer_size, 32 * 1024);
+        // The write buffer, one more message of the declared size and its 14-byte frame header.
+        assert_eq!(config.max_write_buffer_size, 32 * 1024 + 512 * 1024 + 14);
+        assert_eq!(config.max_message_size, Some(512 * 1024));
+        assert_eq!(config.max_frame_size, Some(256 * 1024));
+        assert!(!config.accept_unmasked_frames);
+    }
 
     /// HTTP ENDPOINT and WEBSOCKETS ENDPOINT ingestors declare repeats by name with lowercase
     /// names: a request's fields are visited under their lowercase names, every value of a

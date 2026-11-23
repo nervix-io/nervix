@@ -102,7 +102,7 @@ pub use request::{
     DomainClockAttachRequest, HandlerRegistrationError, HttpsListenerInstallation,
     HttpsListenerInstallationRequest, HttpsListenerInstallationResponse, InterconnectDuplexRequest,
     InterconnectRequest, InterconnectStreamRequest, RemoteRequestFailure, RequestContext,
-    RequestError, RequestSubquota, RuntimeApplicationFailure, StreamHandlerError,
+    RequestError, RequestFitError, RequestSubquota, RuntimeApplicationFailure, StreamHandlerError,
     StreamingResponse,
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
@@ -116,9 +116,10 @@ pub use runtime_state::{
 };
 pub use settings::{
     BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, ConcurrentHandshakes,
-    ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline, IncomingQueueCapacity,
-    InterconnectLiveness, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
-    PeerReceiveSettingsError, PingInterval, PingTimeout, ProbeTimeout, ProgressTimeout,
+    ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline,
+    HTTP2_INITIAL_CONNECTION_WINDOW_BYTES, IncomingQueueCapacity, InterconnectLiveness,
+    MAX_HTTP2_WINDOW_BYTES, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides,
+    PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout, ProgressTimeout,
     ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
     RelayDecodedBytes, RequestDeadline, RequestQuota, RequestTimeout, StreamReceiveWindow,
     TransportSettingValues, TransportSettings, TransportSettingsError,
@@ -207,7 +208,7 @@ impl TransportOptions {
     pub(crate) fn relay_progress_send_timeout(&self, captured: Duration) -> Duration {
         (self.request_timeout / 10)
             .min(self.progress_timeout)
-            .max(Duration::from_nanos(1))
+            .max(settings::SHORTEST_POSITIVE_DURATION)
             .min(captured)
     }
 
@@ -224,7 +225,7 @@ impl TransportOptions {
             .verified("at most one thousand thousandths fit the original delay");
         base.checked_sub(reduction)
             .verified("a jitter fraction of at most one thousand cannot exceed its base")
-            .max(Duration::from_nanos(1))
+            .max(settings::SHORTEST_POSITIVE_DURATION)
     }
 
     pub(crate) fn validate(&self) -> Result<(), Report<TransportError>> {

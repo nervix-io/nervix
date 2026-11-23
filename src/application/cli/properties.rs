@@ -361,12 +361,21 @@ impl<'bytes> GeneratedSettings<'bytes> {
     }
 
     fn membership(&mut self) -> MembershipSettings {
+        let gossip_receive_queue_capacity = std::num::NonZeroUsize::new(
+            usize::try_from(self.entropy.boundary_biased(1..=65_536))
+                .assured("a bounded gossip queue fits usize"),
+        );
         MembershipSettings::resolve(MembershipValues {
             node_unavailability_timeout: Some(self.cluster_duration()),
             gossip_interval: Some(self.timing_from(1)),
             clock_skew_tolerance: Some(self.timing_from(1)),
+            gossip_receive_queue_capacity,
+            gossip_tombstone_grace_period: Some(self.cluster_duration()),
         })
-        .assured("each membership timing is at least a millisecond and bounded")
+        .assured(
+            "each membership timing is at least a millisecond and bounded, the gossip queue is \
+             positive within the channel bound and the tombstone grace is a positive u32 seconds",
+        )
     }
 
     fn raft_retention(&mut self) -> RaftRetentionSettings {
@@ -488,9 +497,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 stream_receive_window: Some(ByteUnit::Byte(
                     self.entropy.between(1..=(1 << 31) - 1),
                 )),
-                connection_receive_window: Some(ByteUnit::Byte(
-                    self.entropy.between(1..=(1 << 31) - 1),
-                )),
+                connection_receive_window: Some(ByteUnit::Byte(self.entropy.boundary_biased(
+                    nervix_interconnect::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES
+                        ..=nervix_interconnect::MAX_HTTP2_WINDOW_BYTES,
+                ))),
                 connection_setup_timeout: Some(self.infrastructure_duration()),
                 request_timeout: Some(self.infrastructure_duration()),
                 progress_timeout: Some(self.infrastructure_duration()),
@@ -534,8 +544,18 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
+            max_open_files: if self.entropy.flag() {
+                Some(
+                    std::num::NonZeroU64::new(self.entropy.boundary_biased(10..=1 << 20))
+                        .assured("generated open-file limits are at least ten"),
+                )
+            } else {
+                None
+            },
         })
-        .assured("the generated cache, journal and worker inputs satisfy database bounds")
+        .assured(
+            "the generated cache, journal, worker and open-file inputs satisfy database bounds",
+        )
     }
 
     fn consensus_operations(&mut self) -> nervix_consensus::RaftOperationSettings {
@@ -573,6 +593,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
             ),
             header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            // The fewest header lines the smallest generated head holds.
+            max_headers: Some(
+                u32::try_from(self.entropy.between(1..=2730)).verified("bounded header count"),
+            ),
             buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             header_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             tls_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
@@ -585,6 +609,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             http_refusal_drain_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             websocket_message_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             websocket_frame_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            websocket_write_buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(1..=67108864))),
             grpc_header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             grpc_concurrency: Some(
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
@@ -592,6 +617,22 @@ impl<'bytes> GeneratedSettings<'bytes> {
             grpc_request_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             grpc_max_streams: Some(
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            // Every window HTTP/2 can advertise; a connection's starts at RFC 9113's 65,535.
+            grpc_stream_window_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(1..=2_147_483_647),
+            )),
+            grpc_connection_window_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(65_535..=2_147_483_647),
+            )),
+            grpc_send_buffer_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(1..=u64::from(u32::MAX)),
+            )),
+            grpc_max_pending_reset_streams: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded reset count"),
+            ),
+            grpc_max_error_reset_streams: Some(
+                u32::try_from(self.entropy.between(1..=65536)).verified("bounded reset count"),
             ),
             grpc_keepalive_interval: Some(Duration::from_secs(self.entropy.between(1..=120))),
             grpc_keepalive_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
@@ -715,6 +756,8 @@ impl<'bytes> GeneratedSettings<'bytes> {
             Some(self.entropy.boundary_biased(0..=8_589_934_592)),
         )
         .assured("bounded engine sizes fit this native host");
+        runtime.udf = nervix_roto::UdfSettings::resolve(Some(self.cluster_duration()))
+            .assured("a generated positive watchdog validates");
         runtime.connector_host = crate::runtime::ConnectorHostSettings::resolve(
             crate::runtime::ConnectorHostSettingOverrides {
                 retry_multiplier: std::num::NonZeroU32::new(
@@ -732,6 +775,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                         .assured("bounded queue fits usize"),
                 ),
                 syslog_read_chunk_bytes: Some(self.entropy.boundary_biased(1..=65_536)),
+                mqtt_read_ahead_headroom: std::num::NonZeroUsize::new(
+                    usize::try_from(self.entropy.boundary_biased(1..=65_536))
+                        .assured("a bounded headroom fits usize"),
+                ),
             },
         )
         .assured("generated connector host bounds validate");
@@ -797,6 +844,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 remote_relay_instantiation_wait: Some(ack_unit * 5),
                 tls_cipher_suites: Some(tls_cipher_suites),
                 tls_key_exchange_groups: Some(tls_key_exchange_groups),
+                udf_compile_budget: Some(self.cluster_duration()),
                 ..Default::default()
             },
             raft,

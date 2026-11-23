@@ -3,12 +3,67 @@ use error_stack::Report;
 use nervix_wasm_protocol::SavedStateRejection;
 use thiserror::Error;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM guest ABI's fallible exports return 0 on success"
+    )
+)]
 pub(crate) const SUCCESS: i32 = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Guest SDK chapter numbers a negative or invalid size -1 among the \
+                  SDK's failure codes, which stay apart from the ABI's reserved -7, -8 and -9"
+    )
+)]
 pub(crate) const ERR_INVALID_SIZE: i32 = -1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Guest SDK chapter numbers a pointer and size range outside guest \
+                  memory -2 among the SDK's failure codes"
+    )
+)]
 pub(crate) const ERR_OUT_OF_BOUNDS: i32 = -2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Guest SDK chapter numbers a call before nervix_init -3 among the SDK's \
+                  failure codes"
+    )
+)]
 pub(crate) const ERR_NOT_INITIALIZED: i32 = -3;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Guest SDK chapter numbers an Arrow IPC decode or encode error -4 among \
+                  the SDK's failure codes"
+    )
+)]
 pub(crate) const ERR_ARROW_IPC: i32 = -4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Guest SDK chapter numbers a batch envelope decode or encode error -5 \
+                  among the SDK's failure codes"
+    )
+)]
 pub(crate) const ERR_ENVELOPE: i32 = -5;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Guest SDK chapter numbers a guest latched into error state, whose \
+                  reason is on the global-error channel, -6 among the SDK's failure codes"
+    )
+)]
 pub(crate) const ERR_ERROR_STATE: i32 = -6;
 
 /// Semantic guest failure mapped onto the negative Nervix WASM ABI codes.

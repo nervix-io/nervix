@@ -3,7 +3,8 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** Coverage of the preflight's refusals: a memory-pressure watermark above the memory
-//!   limit, a directory the node cannot create or write, and a quota its volume cannot hold.
+//!   limit, a directory the node cannot create or write, a quota its volume cannot hold, and a
+//!   selected unavailability timeout its health probes cannot fit.
 //! - **Depends on.** The preflight, the settings groups it checks and temporary directories.
 //! - **Must not know.** What the node runs once it has started.
 
@@ -12,7 +13,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use error_stack::Report;
 use meticulous::ResultExt as _;
@@ -287,4 +288,86 @@ async fn the_complete_startup_total_includes_client_node_windows_and_database_ca
     // The total includes the independent 128 MiB Intake pool as well as the existing pools.
     assert_eq!(*budgets, ByteUnit::Mebibyte(1390));
     assert!(!scratch.path().join("db").exists());
+}
+
+#[nervix_primitives::test]
+async fn the_selected_policy_must_leave_this_node_time_for_its_health_probes() {
+    let scratch = scratch();
+    let settings = NodeSettings::default();
+    let db_path = scratch.path().join("db");
+    let detection = supplied_properties();
+    let checked = Preflight {
+        settings: &settings,
+        db_path: &db_path,
+        temp_dir: scratch.path(),
+        dns: &DnsConfiguration::system(),
+        cpu_detection: crate::capacity::CpuDetection::Pending,
+        detection: &detection,
+    }
+    .run()
+    .await
+    .assured("a node with default settings on a scratch directory passes its preflight");
+    let node = nervix_models::ClusterNodeName::parse("node-3").assured("fixture name");
+    // Quotas as large as the measured volume fit it on any host, so only the health rounds decide.
+    let volume = ByteUnit::Byte(checked.capabilities.database_volume_bytes);
+    let parameters = NodeSettings {
+        resources: ResourceSettings::resolve(Some(volume), Some(volume), None)
+            .assured("the resource bounds declare no validation"),
+        ..NodeSettings::default()
+    }
+    .bootstrap_parameters()
+    .assured("the bootstrap values have valid scalar bounds");
+    super::validate_selected_policy(
+        &parameters,
+        &node,
+        &checked.capabilities,
+        &settings.operational,
+        &db_path,
+    )
+    .assured("default one-second rounds fit the default ten-second timeout");
+
+    let nine_second_rounds = nervix_models::NodeOperationalCapabilities {
+        control_plane: nervix_models::ControlPlaneCapabilities::resolve(
+            nervix_models::ControlPlaneCapabilityValues {
+                health_probe_interval: Some(Duration::from_secs(9)),
+                ..Default::default()
+            },
+        )
+        .assured("nine seconds is a positive interval within the setting's bound"),
+        ..settings.operational
+    };
+    let Err(refused) = super::validate_selected_policy(
+        &parameters,
+        &node,
+        &checked.capabilities,
+        &nine_second_rounds,
+        &db_path,
+    ) else {
+        panic!("nine-second rounds and a one-second probe fill the ten-second timeout");
+    };
+    let PreflightError::HealthProbeInterval = refused.current_context() else {
+        panic!("a timeout the probes cannot fit must refuse as one: {refused:?}");
+    };
+    assert_eq!(
+        refused.downcast_ref::<nervix_models::ClusterParameterError>(),
+        Some(
+            &nervix_models::ClusterParameterError::NodeHealthProbeInterval {
+                node,
+                timeout: Duration::from_secs(10),
+                health_probe_interval: Duration::from_secs(9),
+                probe_timeout: Duration::from_secs(1),
+            }
+        ),
+        "the refusal keeps the node and all three durations beneath its context"
+    );
+    let rendered = format!("{refused:#}");
+    assert!(
+        rendered.contains(
+            "the committed node-unavailability timeout does not fit this node’s health probes"
+        ) && rendered.contains(
+            "node-unavailability-timeout (10s) must exceed node 'node-3' \
+             control-plane-health-probe-interval (9s) plus probe-timeout (1s)"
+        ),
+        "the startup refusal renders its context above the cause: {rendered}"
+    );
 }

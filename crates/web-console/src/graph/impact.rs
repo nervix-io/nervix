@@ -24,27 +24,67 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{
     ActivationAction, AffectedTopology, ClusterNodeName, ConcreteBranchCoverage,
-    ConfigurationTransition, DomainLifecycleAction, DomainName, ExecutionStepImpactReport,
-    ImpactAttribution, ImpactEdgeKind, ImpactEffects, ImpactTopology, ModelKind, NodeRef,
-    OperationImpactReport, ParametrizerName, PauseRequirement, QuiescenceOutcome, RebuildReason,
-    RequestedResourceVersion, ResourceCatalogAction, ResourceName, StatePurge,
-    TransactionImpactReport, TransactionOperationNumber, TransactionOperationRange,
+    ConfigurationTransition, DomainName, ExecutionStepImpactReport, ImpactAttribution,
+    ImpactEdgeKind, ImpactEffects, ImpactTopology, ModelKind, NodeRef, OperationImpactReport,
+    ParametrizerName, PauseRequirement, QuiescenceOutcome, RebuildReason, RequestedResourceVersion,
+    ResourceCatalogAction, ResourceName, StatePurge, TransactionImpactReport,
+    TransactionOperationNumber, TransactionOperationRange,
 };
 
 use crate::graph::{
     GraphSearch,
-    layout::{GroupRegion, Layout, LayoutEdge, LayoutEdgeKind, LayoutItem, Rect, RoutedEdge},
+    layout::{
+        CANVAS_PADDING, GroupRegion, Layout, LayoutEdge, LayoutEdgeKind, LayoutItem, Rect,
+        RoutedEdge,
+    },
     viewport::GraphBounds,
 };
 
 /// Every item of an impact graph is drawn at one size, so its shape says nothing about how much
 /// happens to it. The card is taller than a live-graph card to hold a strip of role marks.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the impact graph's designed card width, the one width every item is drawn at so \
+                  its shape says nothing about how much happens to it"
+    )
+)]
 pub const IMPACT_ITEM_WIDTH: i32 = 192;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the impact graph's designed card height, taller than a live-graph card to hold \
+                  a strip of role marks"
+    )
+)]
 pub const IMPACT_ITEM_HEIGHT: i32 = 76;
 /// How far the whole-domain outline stands off the drawing. The band between the two holds the
 /// outline's label, above everything the outline encloses.
-const DOMAIN_OUTLINE_INSET: i32 = 24;
+///
+/// The outline sits halfway into the canvas padding the layout keeps around the drawing, so it
+/// stands as far off the drawing as off the canvas edge, and the label is centred in that band.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the domain outline sits halfway into the layout's canvas padding, so the band \
+                  between the outline and the drawing is as deep as the inset and holds its label"
+    )
+)]
+const DOMAIN_OUTLINE_INSET: i32 = CANVAS_PADDING / 2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the impact graph's designed domain label height, which fits the band between \
+                  the domain outline and the drawing"
+    )
+)]
 const DOMAIN_LABEL_HEIGHT: i32 = 18;
+// The label is centred in the band between the outline and the drawing, which it must fit.
+const _: () = assert!(DOMAIN_LABEL_HEIGHT <= DOMAIN_OUTLINE_INSET);
 
 /// Whether a drawing shows what a report planned or what actually happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +392,6 @@ pub struct DomainOutline {
 #[derive(Debug, Clone, Default)]
 pub struct DomainImpact {
     pub pauses: Vec<DomainPause>,
-    pub lifecycle: BTreeMap<DomainLifecycleAction, Contributors>,
     /// Execution nodes whose buffered work is flushed although the affected graph does not hold
     /// them: a flush that precedes a pause reaches every execution node of the domain.
     pub flushed_elsewhere: BTreeMap<NodeRef, Contributors>,
@@ -584,13 +623,6 @@ impl Projection {
                 role,
                 &Contributors::of(&moved.attribution),
             );
-        }
-        for lifecycle in &effects.lifecycle {
-            self.domain
-                .lifecycle
-                .entry(lifecycle.action)
-                .or_default()
-                .add(&Contributors::of(&lifecycle.attribution));
         }
         for activation in &effects.activations {
             let role = ImpactRole::Activation {

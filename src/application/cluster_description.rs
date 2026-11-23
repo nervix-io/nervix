@@ -383,7 +383,8 @@ pub(super) fn property_lines(properties: &NodeProperties) -> Vec<String> {
 fn infrastructure_lines(record: &NodeCapabilityRecord) -> Vec<String> {
     let claim = record.capabilities;
     let dns = claim.dns;
-    let mut lines = vec![format!(
+    let mut lines = vec![membership_line(record)];
+    lines.push(format!(
         "  dns: cache-entries={} positive-max-ttl={} negative-max-ttl={} hook-budget={} \
          families={} trust-negative={} concurrent-lookups={}",
         dns.cache_entries,
@@ -393,14 +394,14 @@ fn infrastructure_lines(record: &NodeCapabilityRecord) -> Vec<String> {
         dns.address_families,
         dns.trust_negative_answers,
         dns.concurrent_lookups
-    )];
+    ));
     for (name, database) in [
         ("database", claim.node_database),
         ("raft database", claim.consensus_database),
     ] {
         lines.push(format!(
-            "  {name}: cache-bytes={} journal-bytes={} workers={}",
-            database.cache_bytes, database.journal_bytes, database.workers
+            "  {name}: cache-bytes={} journal-bytes={} workers={} max-open-files={}",
+            database.cache_bytes, database.journal_bytes, database.workers, database.max_open_files
         ));
     }
     let consensus = claim.consensus;
@@ -563,7 +564,7 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
 
 fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
     format!(
-        "{}={} {}={} {}={} {}={} {}={} {}={} wasm-parallel-compilation={}",
+        "{}={} {}={} {}={} {}={} {}={} {}={} wasm-parallel-compilation={} {}={}",
         nervix_vm::VmInlineRowLimit::NAME,
         values.vm_inline_row_limit,
         nervix_vm::VmRegexSearchCacheBytes::NAME,
@@ -577,12 +578,14 @@ fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
         nervix_wasm::WasmMemoryReservationBytes::NAME,
         values.wasm_memory_reservation_bytes,
         values.wasm_parallel_compilation,
+        nervix_roto::UdfWatchdog::NAME,
+        timing_text(values.udf_watchdog),
     )
 }
 
 fn connector_host_capability_line(values: nervix_models::ConnectorHostCapabilities) -> String {
     format!(
-        "{}={} {}={} {}={} {}={} {}={} {}={}",
+        "{}={} {}={} {}={} {}={} {}={} {}={} {}={}",
         nervix_connector::ConnectorRetryMultiplier::NAME,
         values.retry_multiplier,
         nervix_connector::ConnectorRetryJitterPercent::NAME,
@@ -595,6 +598,20 @@ fn connector_host_capability_line(values: nervix_models::ConnectorHostCapabiliti
         values.syslog_intake_queue_capacity,
         nervix_connector_syslog::SyslogReadChunkBytes::NAME,
         values.syslog_read_chunk_bytes,
+        nervix_connector_mqtt::MqttReadAheadHeadroom::NAME,
+        values.mqtt_read_ahead_headroom,
+    )
+}
+
+/// The gossip bounds of one claim, each named by its definition.
+fn membership_line(record: &NodeCapabilityRecord) -> String {
+    let membership = record.capabilities.membership;
+    format!(
+        "  membership: {}={} {}={}",
+        crate::cluster::GossipReceiveQueueCapacity::NAME,
+        membership.gossip_receive_queue_capacity,
+        crate::cluster::GossipTombstoneGracePeriod::NAME,
+        timing_text(membership.gossip_tombstone_grace_period),
     )
 }
 
@@ -784,6 +801,11 @@ mod tests {
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    membership: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_membership_capabilities(),
                     listeners: crate::application::listener_settings::ListenerSettings::default()
                         .bounds(),
                     cpu_count: None,
@@ -818,6 +840,22 @@ mod tests {
         ));
         assert!(lines.contains(&"node: node-4 (departed)".to_string()));
         assert!(lines.contains(&capability_line(&departed)));
+        assert!(lines.contains(&membership_line(&first)));
+        assert!(lines.contains(&membership_line(&departed)));
+        let mut configured = first.clone();
+        configured.capabilities.membership = nervix_models::MembershipCapabilities {
+            gossip_receive_queue_capacity: std::num::NonZeroU64::new(512).expect("positive"),
+            gossip_tombstone_grace_period: Duration::from_secs(90),
+        };
+        assert_eq!(
+            membership_line(&configured),
+            "  membership: gossip-receive-queue-capacity=512 gossip-tombstone-grace-period=1m 30s"
+        );
+        configured
+            .capabilities
+            .connector_host
+            .mqtt_read_ahead_headroom = std::num::NonZeroU64::new(32).expect("positive");
+        assert!(capability_line(&configured).contains(" mqtt-read-ahead-headroom=32 "));
         let effective = first
             .capabilities
             .receive
@@ -889,6 +927,11 @@ mod tests {
                     nervix_arbitrary::Domain::Vocabulary,
                 )
                 .node_connector_host_capabilities(),
+                membership: nervix_arbitrary::Arbitrary::new(
+                    &[],
+                    nervix_arbitrary::Domain::Vocabulary,
+                )
+                .node_membership_capabilities(),
                 listeners: crate::application::listener_settings::ListenerSettings::default()
                     .bounds(),
                 cpu_count: NonZeroU64::new(4),

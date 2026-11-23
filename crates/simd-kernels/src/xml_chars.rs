@@ -35,6 +35,14 @@ use crate::{
 
 /// The bytes validated and classified together before the pass moves on: a whole number of blocks
 /// that stays in the first-level cache while both checks read it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the SIMD Kernels chapter validates and classifies XML character data in 4 KiB \
+                  spans, whole 64-byte blocks that stay in the first-level cache"
+    )
+)]
 const SPAN: usize = 64 * WORD_LANES;
 
 const _: () = assert!(SPAN.is_multiple_of(WORD_LANES), "a span holds whole blocks");

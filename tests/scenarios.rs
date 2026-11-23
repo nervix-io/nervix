@@ -17158,10 +17158,16 @@ async fn when_emitter_connector_stalls_after_resolving(
         .stall_emitter_connector_after_resolving_on_all_nodes(&emitter, resolved);
 }
 
+/// How often an ingestor in fault mode rechecks whether it may run again, which its
+/// `DESCRIBE INGESTOR` reports as the reconnect backoff.
+const INGESTOR_FAULT_RECHECK: Duration = Duration::from_millis(250);
+
 #[when(expr = "ingestor {string} enters fault mode")]
 async fn when_ingestor_enters_fault_mode(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = expand_placeholders(world, &ingestor);
-    world.cluster().fail_ingestor_on_all_nodes(&ingestor);
+    world
+        .cluster()
+        .fail_ingestor_on_all_nodes(&ingestor, INGESTOR_FAULT_RECHECK);
 }
 
 #[when(expr = "ingestor {string} leaves fault mode")]
@@ -39467,7 +39473,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_tls_cost) and (not \
-             @client_conformance_toolchain) and (not @deadlock_diagnostics)"
+             @client_conformance_toolchain) and (not @deadlock_diagnostics) and (not \
+             @production_licensing)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );

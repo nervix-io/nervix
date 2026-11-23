@@ -144,6 +144,7 @@ impl Runtime {
                 interconnect_request_timeout,
                 connector_host: settings.connector_host,
                 vm_settings: settings.vm,
+                udf_settings: settings.udf,
                 inspection_instances: AtomicU64::new(0),
                 inspection_settings: settings.inspection,
                 dns,

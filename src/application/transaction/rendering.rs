@@ -243,10 +243,6 @@ fn transaction_operation_text(operation: &TransactionOperation) -> String {
         | TransactionOperation::DropConfiguration { node, .. } => {
             format!("{action} {}", node_text(node))
         }
-        TransactionOperation::StartDomain { domain }
-        | TransactionOperation::StopDomain { domain } => {
-            format!("{action} domain={}", domain.as_str())
-        }
         TransactionOperation::CreateResource { resource, .. }
         | TransactionOperation::EditResourceLabels { resource, .. } => {
             format!("{action} resource={}", resource.as_str())
@@ -276,7 +272,6 @@ fn reason_text(reason: &OperationImpactReason) -> String {
         OperationImpactReason::Configuration { node, aspect } => {
             format!("{kind} {} aspect={}", node_text(node), aspect.as_ref())
         }
-        OperationImpactReason::DomainStart | OperationImpactReason::DomainStop => kind.to_string(),
         OperationImpactReason::ResourceCatalog { resource } => {
             format!("{kind} resource={}", resource.as_str())
         }
@@ -322,14 +317,6 @@ fn effect_lines(effects: &ImpactEffects) -> Vec<String> {
             moved.source,
             moved.destination,
             attribution_text(&moved.attribution)
-        ));
-    }
-    for lifecycle in &effects.lifecycle {
-        lines.push(format!(
-            "lifecycle {} domain={} {}",
-            lifecycle.action.as_ref(),
-            lifecycle.domain.as_str(),
-            attribution_text(&lifecycle.attribution)
         ));
     }
     for activation in &effects.activations {

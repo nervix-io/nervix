@@ -75,7 +75,7 @@ JSON in an archive. [Archive Format](./backup-and-restore.md#archive-format) lis
 record.
 
 The manifest records the source cluster's configured `cluster_id` and permanent `cluster_uid` for
-display. The UID is a version-4 UUID in manifest record version `4`. The archive carries no cluster
+display. The UID is a version-4 UUID in manifest record version `5`. The archive carries no cluster
 private key, identity record or licensing state. A restore is a clone: it retains the target's own
 identity, including when the source cluster still runs. Recovery of a licensed installation
 requires an administrative transfer to the rebuilt cluster. Consensus snapshots preserve identity
@@ -111,7 +111,7 @@ selection, adoption and seed release. Restore retains the pending cut, so a dela
 resume it after the lifecycle advances. Count redistribution prepares the newest canonical
 generation and each actual owner's progress on every target primary and replica.
 
-The current archive uses format major `8` and manifest record version `4`. Its domain record is
+The current archive uses format major `9` and manifest record version `5`. Its domain record is
 version `3` and carries the domain pace, lifecycle, and labels. Named placement rules are
 canonical Models in the model document. Each unit-bearing record owns an eight-byte primitive
 rank with four-byte alignment. Rank zero is `Single`, ranks one through `2^32` select the full
@@ -133,7 +133,7 @@ A reader verifies an archive as a stream, without seeking:
 
 1. The first header must be the regular `manifest.rkyv` entry within the 64 MiB record limit;
    anything else is refused before the manifest is read.
-2. The manifest must hold archive format major version `8`, valid domain names, no duplicate path,
+2. The manifest must hold archive format major version `9`, valid domain names, no duplicate path,
    and a known record kind for every record section.
 3. Every following entry must be the next section the manifest names, with that exact length,
    within its content kind's bound, and with that digest once its bytes are drained. A missing,
@@ -787,7 +787,7 @@ generation, and only then clears the domain's in-memory state handles; [Generati
 Storage](#generation-storage) describes the sequence.
 
 The installation gate is a replicated record per restored domain, from the step that creates it.
-While it is closed, consensus refuses `START`, direct or transactional, and every replicated
+While it is closed, consensus refuses `START` and every replicated
 domain or schedule change that would make the domain anything but stopped, so the domain cannot run
 on any node until every node published its complete set. It survives failure, lease
 release and node restart. Recording the apply-models step together with the installed authority

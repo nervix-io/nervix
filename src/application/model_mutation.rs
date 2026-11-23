@@ -52,10 +52,7 @@ use super::{
         transaction_planning_error_message,
     },
 };
-use crate::{
-    registry::{EntityGatePlan, RegistryError, RegistryMutation, ScheduleDelta},
-    runtime::RuntimeError,
-};
+use crate::registry::{EntityGatePlan, RegistryError, RegistryMutation, ScheduleDelta};
 
 struct TransactionModelDecision {
     planned: crate::registry::PlannedMutations,
@@ -1138,10 +1135,28 @@ impl SessionServiceImpl {
                         .unwrap_or_else(|| format!("{error:#}")),
                 );
             }
-            let prepared_udfs = match Box::pin(self.prepare_planned_domain_udfs(&planned)).await {
-                Ok(prepared) => prepared,
-                Err(error) => return command_error(format!("{error:#}")),
+            // The UDFs compile under the parameter record the batch was planned against.
+            let planning_inputs = match (&transaction_step, &direct_plan) {
+                (Some(step), _) => Some(&step.inputs),
+                (None, Some(plan)) => Some(&plan.inputs),
+                (None, None) => captured_inputs.as_ref(),
             };
+            let Some(planning_parameters) =
+                planning_inputs.and_then(DomainPlanningInputs::parameters)
+            else {
+                let error = Report::new(
+                    crate::registry::TransactionPlanningError::ClusterParametersUnseeded,
+                );
+                return command_error(transaction_planning_error_message(&error));
+            };
+            let planning_parameters = planning_parameters.values;
+            let prepared_udfs =
+                match Box::pin(self.prepare_planned_domain_udfs(&planned, &planning_parameters))
+                    .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) => return command_error(format!("{error:#}")),
+                };
             let base_classified_level = if let DomainStatus::Running = domain_state.status {
                 planned.quiesce().level()
             } else {
@@ -1673,11 +1688,7 @@ impl SessionServiceImpl {
                             }
                             if let Some(error) = activation_error {
                                 if transaction_application_failure.is_none()
-                                    && matches!(
-                                        error.current_context(),
-                                        RuntimeError::RuntimeRevisionPreparation { .. }
-                                            | RuntimeError::RuntimeRevisionReadiness { .. }
-                                    )
+                                    && error.current_context().waits_for_readiness()
                                 {
                                     transaction_application_deferred = true;
                                 } else if transaction_application_failure.is_none() {

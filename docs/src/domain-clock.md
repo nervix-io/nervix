@@ -9,9 +9,9 @@ and connectors receive time from that capability instead of choosing a clock the
 
 This chapter describes the internal architecture. See [Domains And Time](./domains-and-time.md)
 for the Plexus surface and operator-facing behavior.
-Explicit transactional `START` and `STOP` establish or revoke generations at ordered step
-boundaries; [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) owns how
-those lifecycle steps affect later planned scopes and the retained impact report.
+`START` and `STOP` establish and revoke generations as lifecycle commands of their own; they never
+run inside a transaction, so no transaction step begins or ends a generation. [Domains And
+Time](./domains-and-time.md#start-and-stop) owns the commands.
 
 The central rule is that a paced clock is a committed mapping, not a stream of ticks. Each node
 projects its own current UTC observation through the same mapping. Tick progress records which
@@ -88,11 +88,13 @@ Default restoration leaves the domain stopped with no installed mapping; a subse
 establishes a new generation by the procedure below. See
 [Backup And Restore](backup-and-restore.md#what-a-restore-recreates).
 
-A direct or transactional `START` reaches the same replicated lifecycle transition. A transaction
-resolves the concrete start, paced mapping, and initial authority while its complete commit plan is
-admitted, then persists that decision with the frozen step. Restart and leadership recovery execute
-that stored decision against its captured control-plane inputs instead of sampling a new anchor or
-selecting a different authority.
+`START` resolves the concrete start, paced mapping, and initial authority immediately before it
+commits them, in the one consensus command that starts the domain; that command records its
+revision in the `START` command's execution. A leader that resumes an applying `START` after a
+restart or a leadership change either finds that revision, and then only waits for the started
+domain, or finds none and resolves afresh. No decision is durable before it is applied, so recovery
+never applies an anchor or authority another leader sampled, and a committed start is never
+sampled again.
 
 1. The command handler reads the current domain and samples UTC once for the physical anchor.
 2. It resolves the requested start into a concrete logical origin and rate. `START AT NOW` becomes
@@ -490,9 +492,10 @@ new session answers the attach while the previous session still holds the attach
 leader redirect, the attachment moves without an interruption: a clock that stays paced in the
 same generation keeps its newest tick, so the clock a caller reads is never older than a tick event
 it has already taken, and a tick of the new session is reported only when it is newer. A
-restoration the new session refuses is reported and sent again on that session after one second, a
-wait that doubles with each refusal up to thirty seconds, for as long as the client follows the
-clock and the session stays open; each new session starts again from one second. A restoration
+restoration the new session refuses is reported and sent again on that session after the client's
+`restoration_backoff`, one second by default, a wait that doubles with each refusal up to its
+`restoration_max_backoff`, thirty seconds by default, for as long as the client follows the clock
+and the session stays open; each new session starts again from the first wait. A restoration
 left unanswered past the client's request timeout ends that session instead, like any request
 that outlives the timeout, and the next session attaches the clock again; a caller already waiting
 for the next clock event is woken and opens that session. A restoration refused as not found ends
@@ -774,7 +777,8 @@ wins. HTTP request deadlines and `Retry-After` therefore stay physical, flush ca
 domain clock, and no check establishes progress by waiting.
 
 An emitter's partial buffer and connector-staged acknowledged work keep their ingestor alive on a
-100-millisecond physical beat, even when another input is waiting for materialized state. New input
+physical beat of the committed `REMOTE_ACK_ALIVE_INTERVAL`, 100 milliseconds by default, which each
+beat reads as it is armed, even when another input is waiting for materialized state. New input
 does not postpone it, an active retry owns its existing beat, and no beat remains after all held work
 is released. This liveness deadline neither advances logical flush cadence nor confirms delivery.
 

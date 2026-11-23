@@ -99,7 +99,9 @@ A `Membership` notice describes the serving node's observation of a join, leave 
 change. A command's application progress is internal node-to-node traffic; its client-visible
 completion is the correlated command outcome under
 [Commands And Execution Identity](#commands-and-execution-identity). Notice delivery has its own
-bounded, gap-reporting stream and supplies no command outcome.
+bounded, gap-reporting stream and supplies no command outcome. The native client bounds that stream
+with its `notice-capacity` and `notice-bytes` capabilities; see
+[Connection Capabilities](client-tools-cli.md#connection-capabilities).
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
 the download of a backup's archive; see [Backup Downloads](#backup-downloads), and a restore with its
@@ -554,7 +556,9 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   as `SubscriptionEnded` with `RelayRemoved` would, and when it refuses it as `RelayChanged`, as
   `RelayChanged` would; S-4 then holds for it. When the session refuses the reopening for any other
   reason, the client MUST report the refusal with its typed cause and SHOULD send it again on that
-  session after a wait that grows with each refusal, rather than at a fixed rate. A reopening left
+  session after a wait that grows with each refusal, rather than at a fixed rate; the native
+  client's wait starts at its `restoration-backoff` and doubles up to its
+  `restoration-max-backoff`. A reopening left
   unanswered past the request timeout ends that session. Its reader MUST be woken even when the
   transport remains connected, and MUST open the next session to restore the desired subscription;
   the unanswered request is not a server refusal to retry on the ended session. A client MUST
@@ -565,8 +569,9 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
 - **S-8.** A client MUST bound what it retains for subscriptions, per subscription and in total, and
   SHOULD let one subscription retain at least one frame of the frame limit. Local configurable
   limits MUST validate positive capacities and every derived record/byte product before opening
-  the transport. The native client uses its typed capabilities for subscription retention and
-  upload/restore queues; see [Connection Capabilities](client-tools-cli.md#connection-capabilities).
+  the transport. The native client uses its typed capabilities for subscription and notice
+  retention, its request, upload and restore queues and its restoration waits; see
+  [Connection Capabilities](client-tools-cli.md#connection-capabilities).
 - **S-9.** A client that stops reading a `BLOCKING` subscription holds back the relay it reads. A
   client that cannot keep up SHOULD use `DROPPING` delivery.
 
@@ -883,7 +888,8 @@ remain the schema the ingestor declares; a payload field cannot replace the auth
   size and BLAKE3 digest of the archive; then the archive as `RestoreChunk` frames in order, each
   non-empty and within one frame, adding up to exactly the declared size; then the client
   half-closes the stream, or on a console WebSocket keeps the connection open for the reply (T-3a).
-  The Rust client and the web console send 256 KiB chunks.
+  The Rust client and the web console send 256 KiB chunks, or half a session frame when that is
+  smaller.
 - **W-2.** A client MUST create one execution reference per logical restore, following E-1 to E-4,
   and MUST keep the reference, the statement, and the archive's bytes until the restore's outcome is
   known. Every attempt MUST send all three unchanged, and the digest MUST be computed over exactly
@@ -1276,7 +1282,7 @@ beside the probes and the representation properties.
 | E-1 to E-5 | In `client_wire_failures.feature`: `A command lost after durable admission is recovered by its request identity`, `A reclaimed command identity stays expired after a durable restart`, `A race across leaders recovers a typed execution reference conflict`, `A command identity outside its retry window starts no effect`, `A full command history refuses new identities and keeps every retained result`, `Concurrent exact BEGIN retries join one durable execution`, and `Reusing a durable transaction identity with different content fails semantically`; `A native command recovers its own execution after a foreign command reply on <cluster_size> nodes` in `client_wire_failures.feature` and `The CLI recovers its own execution after a foreign command reply on <cluster_size> nodes` in `cli_session.feature`; `Web console refuses a command outcome that names another execution and recovers its own` in `plexus_repl.feature`; `a_foreign_command_reply_interrupts_every_waiter_and_leaves_its_own_reference_uncertain` in `nervix-client-core`; `a_repl_command_answered_with_another_execution_is_repeated_under_its_own_reference` and `a_visual_create_answered_with_another_execution_keeps_waiting_for_its_own_outcome` in the console |
 | E-6 to E-8, D-4 | `Leadership lost after durable admission leaves an unknown outcome that a retry recovers` and `A leader that cannot confirm its lease during <phase> reports that, not a move` in `session_protocol.feature`; `Web console recovers an uncertain command on its existing session` in `plexus_repl.feature`; `an_unknown_outcome_is_recovered_with_the_same_execution_reference`, `replies_ask_for_the_routing_their_disposition_needs`, `an_unknown_command_waits_before_repeating_on_its_open_connection` and `an_uncertain_command_deadline_names_its_last_server_answer` in `nervix-client-core` |
 | D-1 to D-5 | `A redirect names no endpoint for a leader that discovery cannot reach` in `session_protocol.feature`; `The Rust client reconnects through its original seed after the leader stops` in `client_wire_failures.feature`; `a_command_redirect_keeps_its_execution_reference`, `a_command_waits_for_an_election_and_is_sent_again_with_its_reference`, `a_closed_session_recovers_through_a_configured_seed`, and `a_reconnected_session_restores_subscriptions_before_it_attaches_its_transaction` |
-| X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, and the three exact transaction batch retries, including `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it`; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
+| X-1 to X-3 | In `client_wire_failures.feature`: `A command missing from a committed transaction cannot report aggregate success`, `Replaying a BEGIN whose response was lost returns the original transaction`, `Replaying an accepted <append_kind> append does not preflight or append it again`, `Replaying a START sent to a transaction refuses it again and appends nothing on <cluster_size> nodes`, and the three exact transaction batch retries, including `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it`; `lost_begin_append_and_commit_replies_retry_the_exact_request` and `concurrent_commands_capture_transaction_position_in_send_order` |
 | X-4, X-5 | `A commit fenced to a preview the transaction outgrew is refused and stays open` in `plexus_transactions.feature`; `An obsolete failed COMMIT attempt reports the commit another coordinator finished` in `explicit_commit_recovery.feature`; `a_commit_fences_against_the_basis_its_own_transaction_reported`, `a_refused_commit_does_not_adopt_an_unreviewed_basis`, and `an_older_inspection_cannot_replace_a_newer_queue_preview` |
 | X-6 | `A session whose leader lost its binding re-attaches instead of failing`, `Attaching from a second session takes over an open transaction`, `A resumed commit that reaches the leader after its transaction finished reports the commit`, `A session that re-attaches a transaction which finished meanwhile begins a new one`, and `A session begins another transaction after the one it held loses its tombstone` in `plexus_transactions.feature`; `Web console recovers a reverted command's own outcome after its reply is lost` and `Web console resolves a Create command held when its transaction finishes during reconnect` in `plexus_repl.feature`; `a_detached_transaction_is_attached_again_before_the_command_is_retried` and `a_session_releases_a_transaction_after_its_finished_record_is_reclaimed` |
 | X-7, X-8 | `A clean session close reverts its open transaction` and `An orphaned transaction expires and retains its outcome` in `plexus_transactions.feature`; `A stalled commit cannot block expiry, another domain, or tombstone cleanup` in `client_wire_failures.feature`; `Physical inactivity while every node is stopped expires an open transaction` in `client_wire_process_restart.feature` |

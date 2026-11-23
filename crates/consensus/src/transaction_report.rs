@@ -35,12 +35,68 @@ use crate::{
     records::Records,
 };
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored transaction impact report headers sit under this record-family tag byte \
+                  in the persisted consensus state keyspace"
+    )
+)]
 const REPORT_HEADER_TAG: u8 = b'h';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored operation impact reports sit under this record-family tag byte in the \
+                  persisted consensus state keyspace"
+    )
+)]
 const REPORT_OPERATION_TAG: u8 = b'i';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored execution step impact reports sit under this record-family tag byte in \
+                  the persisted consensus state keyspace"
+    )
+)]
 const REPORT_STEP_TAG: u8 = b'j';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the stored impact report revision index sits under this record-family tag byte \
+                  in the persisted consensus state keyspace"
+    )
+)]
 const REPORT_REVISION_INDEX_TAG: u8 = b'y';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored impact topology headers sit under this record-family tag byte in the \
+                  persisted consensus state keyspace"
+    )
+)]
 const TOPOLOGY_HEADER_TAG: u8 = b'k';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored impact topology nodes sit under this record-family tag byte in the \
+                  persisted consensus state keyspace"
+    )
+)]
 const TOPOLOGY_NODE_TAG: u8 = b'l';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored impact topology edges sit under this record-family tag byte in the \
+                  persisted consensus state keyspace"
+    )
+)]
 const TOPOLOGY_EDGE_TAG: u8 = b'q';
 
 #[derive(
@@ -1014,10 +1070,14 @@ fn test_report_with_completeness(
             },
             ..ImpactEffects::default()
         };
+        // The test commit plan creates one resource per operation, named by its index.
+        let resource = nervix_models::ResourceName::parse(&format!("resource_{index}"))
+            .assured("the bounded test index produces an identifier-shaped resource");
         operations.push(OperationImpactReport {
             number,
-            operation: TransactionOperation::StartDomain {
+            operation: TransactionOperation::CreateResource {
                 domain: domain.clone(),
+                resource,
             },
             execution_step: range,
             completeness: ImpactReportCompleteness::Complete,

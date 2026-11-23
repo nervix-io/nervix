@@ -3,18 +3,18 @@
 //! Layer: edges.
 //! - **Owns.** The token a host triggers from any thread, its optional deadline, and bounding a
 //!   blocking call by both.
-//! - **Depends on.** Selected cancellation, monotonic instant and timer primitives.
+//! - **Depends on.** Selected cancellation, monotonic instant and timer primitives, and the Rust
+//!   client's longest deadline.
 //! - **Must not know.** What the bounded call does, or what cancelling it means for admitted
 //!   work; the session decides that.
 
 use std::{future::Future, time::Duration};
 
+// The longest deadline a token accepts is the longest deadline the Rust client accepts, one day.
+use nervix_client_core::capabilities::LONGEST_DEADLINE as MAX_DEADLINE;
 use nervix_primitives::{sync::CancellationToken, time::Instant};
 
 use crate::failure::Failure;
-
-/// The longest deadline a token accepts: one day, the longest deadline the client accepts.
-const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A cancellation token, with the deadline it expires at when it has one.
 #[derive(Debug, Default)]

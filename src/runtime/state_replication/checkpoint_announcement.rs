@@ -23,6 +23,7 @@
 use std::future::Future;
 
 use super::*;
+use crate::runtime::entity_gate::SHORTEST_WAIT;
 
 /// Announcement tasks retain their exact state until they finish or terminal teardown cancels
 /// them. Closing the owner also interrupts a pending dispatch or retry wait.
@@ -140,8 +141,7 @@ impl Runtime {
                     );
                 }
             }
-            sleep((self.inner.state_replication_poll_interval / 10).max(Duration::from_nanos(1)))
-                .await;
+            sleep((self.inner.state_replication_poll_interval / 10).max(SHORTEST_WAIT)).await;
         }
     }
 

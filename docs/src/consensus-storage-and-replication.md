@@ -144,11 +144,15 @@ passing the turn; cancellation while waiting retains neither a turn nor a memory
 
 Vote and committed-marker reads and writes, the check for stored Raft state and the store's idle
 barrier are management work. Each reserves four management events from the Management class,
-256 KiB with the fixed 64 KiB event, and takes no turn. The check for stored Raft state reads the
-log only on a node without a vote. Raft saves a vote before it appends any entry other than the
-single-node membership entry that initialization appends first, so the log of a node without a
-vote holds at most that one small entry. A node refuses to start with a Management budget smaller
-than this working set, so no reservation of these operations can exceed its whole class
+256 KiB with the fixed 64 KiB event, and takes no turn. A durable write charges at most half of that
+reservation, two events, to the records and keys it writes, which holds a record as large as a whole
+management event while its encoding buffer doubles; the votes and log positions it writes are far
+smaller. The other half is retained for Fjall's journal encoding and moving batch descriptors, as in
+the Commands working set. The check for stored Raft state reads the log only on a node without a
+vote. Raft saves a vote before it appends any entry other than the single-node membership entry that
+initialization appends first, so the log of a node without a vote holds at most that one small
+entry. A node refuses to start with a Management budget smaller than this working set, so no
+reservation of these operations can exceed its whole class
 ([Node Settings](node-settings.md#execution-capabilities)).
 
 A crash after a log write and before application does not lose an acknowledged command. If the
@@ -552,19 +556,29 @@ conflicts. The operation checks lease authority, the restore start gate and all 
 committing transactions before resuming a pause in one applied revision. It changes only domain
 status, keeping the start version, start mode, clock, schedule and incremental storage unchanged.
 
+The archived command shapes also include the start of a domain, which only a `START` command
+execution proposes. Under that execution's exact mutation lease, one applied revision checks the
+restore start gate, the licensing stop gate and the domain planning inputs the start was placed
+against, refuses a domain that is not stopped, marks the domain running at its next start version
+with the resolved start point, paced mapping and clock authority, and records its own applied
+revision in the execution's `START` effect. A repeated proposal for an execution that already
+recorded its start applies nothing, so a resumed execution never starts the domain twice. A
+planning-input conflict is a typed refusal the execution answers by placing and proposing again.
+Transaction commit plans and step effects hold no lifecycle step.
+
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
-group and payload unfold policy. Their durations use validated, lossless seconds and nanoseconds
-projections so ordinary Raft records keep their inline footprint bound. Admitted node capabilities
-carry runtime capacities, local shutdown budgets, listener bounds and the size of the volume that
-holds the node's database directory.
+group, payload unfold policy and UDF compile budget. Their durations use validated, lossless seconds
+and nanoseconds projections so ordinary Raft records keep their inline footprint bound. Admitted node
+capabilities carry runtime capacities, the UDF watchdog among the engine capabilities, local shutdown
+budgets, listener bounds and the size of the volume that holds the node's database directory.
 This namespace also includes durable cluster identity rotation and activation release operations.
 It identifies the current Model and stored transaction statement layouts, including
 `DESCRIBE INFERENCER`, `SHOW WASM PROCESSOR ... STATE`, `SHOW INFERENCER ... STATE`,
@@ -591,10 +605,10 @@ construction where it stands, including the typed `payload` expression scope and
 `RESET WASM PROCESSOR ... STATE` that names its processor and scope and takes its domain from
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 committed node records under record-family tag `C`, each with the revision that committed it, its
-incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
-host, runtime, shutdown, operational (trace export included) and listener capacities, its detected properties and its tags. The boxed node record
+incarnation-bound capacity claim, including transport, DNS, database (each database's open-file limit included), consensus, engine, connector
+host, membership, runtime, shutdown, operational (trace export included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 50. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 54. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
@@ -742,28 +756,29 @@ safe: [Node Settings](node-settings.md) gives the class of each argument, and th
 prerequisite that every two nodes keep within a factor of two of each other, so that one rolling
 change moves it by less than that. The snapshot and retention bounds are node capabilities.
 
-Replication batch and memory limits are fixed by the current server execution policy; the server
-does not expose flags for them:
+Replication batch and memory limits, with the node capability that sets each one where it has one;
+[Node Settings](node-settings.md#consensus-capacities) and [Sizing A Node](sizing.md) give their
+validation and derivations, and the rest are fixed by the encoded operation and storage layouts:
 
-| Limit | Current value |
-| --- | --- |
-| Replication batch target | 1 MiB or 256 entries; whole commands are never split |
-| Encoded replication operation | 2 MiB |
-| Leader window per follower | 16 batches and a 16 MiB target byte budget |
-| Follower decoded resident window | 4 batches per live append stream |
-| Commands memory budget | 24 MiB per node |
-| Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
-| Vote or metadata storage | 256 KiB working reservation from the Management class |
-| Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them |
-| Append stream setup / progress idle bound | 5 seconds / 5 seconds |
-| Snapshot section / transport chunk | 8 MiB / 64 KiB |
-| Complete snapshot transfer | 30 seconds |
+| Limit | Default | Set by |
+| --- | --- | --- |
+| Replication batch target | 1 MiB or 256 entries; whole commands are never split | `--raft-append-batch-entries` for the entry count; the byte target is fixed |
+| Encoded replication operation | 2 MiB | fixed |
+| Leader window per follower | 16 batches and a 16 MiB target byte budget | `--raft-outstanding-append-batches` and `--raft-outstanding-append-bytes` |
+| Follower decoded resident window | 4 batches per live append stream | `--execution-resident-replication-batches` |
+| Commands memory budget | 1/32 of the node's memory, at least 24 MiB | `--execution-commands-memory-bytes` |
+| Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation | fixed |
+| Vote or metadata storage | 256 KiB working reservation from the Management class | fixed: four 64 KiB management events, which `--execution-management-memory-bytes` must hold |
+| Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them | fixed |
+| Append stream setup / progress idle bound | 5 seconds / 5 seconds | half of `--interconnect-request-timeout` / `--raft-append-idle-bound` |
+| Snapshot section / transport chunk | 8 MiB / 64 KiB | fixed |
+| Complete snapshot transfer | 30 seconds | `--raft-snapshot-transfer-timeout` |
 
 The heartbeat sets the whole timing policy: lowering it shortens the election timeouts with it, and
 raising it lengthens them. Change it across a cluster by less than a factor of two per rolling
 restart; a node outside that bound of a live peer is refused as it joins. Raising the heartbeat
-interval does not allow slower append storage because append liveness is progress-based and fixed
-at five seconds.
+interval does not allow slower append storage because append liveness is progress-based and set
+by `--raft-append-idle-bound`, five seconds by default.
 
 Snapshot and covered-log settings trade storage and catch-up method. Smaller thresholds build and
 transfer snapshots more often; smaller covered suffixes make a lagging follower switch to a snapshot
@@ -863,9 +878,9 @@ whose `ephemeral_expires_at` committed licensing time has reached. It reads the 
 not the decision's verification view, so edited bytes cannot lift it. `ReleaseLicense` refuses an
 expired activation through the same predicate, evaluated at the licensing time the release
 establishes. While it is closed, apply
-refuses `StartDomain`, `ResumeDomain`, a model-pause recovery that would resume a domain, a
-`PutDomain` that writes a running or paused record, and a transaction's `START` step with the typed
-`LicensingStop` conflict, and admits no new domain record. A restore's final step under the gate
+refuses `StartDomain`, `ResumeDomain`, a model-pause recovery that would resume a domain, and a
+`PutDomain` that writes a running or paused record with the typed `LicensingStop` conflict, and
+admits no new domain record. A restore's final step under the gate
 leaves its domains stopped with the licensing cause instead of running. `StopDomain` carries the
 cause of the stop, an operator's or licensing's, and the domain record retains it until the next
 start clears it, so every node renders the cause after restart or snapshot installation.
@@ -936,7 +951,11 @@ snapshot/replay and restore validate metadata under the policy captured with tha
 [Node Settings](node-settings.md#consensus-capacities) lists the local consensus capacity and
 pacing options. The composition root supplies them to storage, the append network factory,
 retention and membership operations. The node and dedicated consensus database each receive
-explicit cache, journal and worker options through their existing bounded storage-executor job.
+explicit cache, journal, worker and open-file options through their existing bounded
+storage-executor job. Every keyspace of both databases opens with a fixed 64 MiB memtable, which
+the engine records when it creates the keyspace and reuses on every later open. The engine sets no
+total memtable cap and Nervix does not limit either database at runtime, so memtable memory stays
+outside the startup memory check.
 Automatic journal persistence, full synchronization of every acknowledged Raft append, storage
 ordering, independent databases and orderly shutdown remain unchanged.
 

@@ -22,7 +22,9 @@ fn options() -> TransportOptions {
         max_peers: Some(16),
         request_quota: Some(4),
         stream_receive_window: Some(ubyte::ByteUnit::Kibibyte(4)),
-        connection_receive_window: Some(ubyte::ByteUnit::Kibibyte(16)),
+        connection_receive_window: Some(ubyte::ByteUnit::Byte(
+            nervix_interconnect::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES,
+        )),
         request_timeout: Some(Duration::from_secs(2)),
         ..Default::default()
     })
@@ -87,7 +89,7 @@ fn declared_windows_and_rpc_deadlines_survive_latency_loss_and_repair() {
                         let payload = vec![7u8; 128 * 1024];
                         let response = client.request(&peer, WindowProbe { payload: payload.clone() }).await.assured("h2 replenishes the peer's smaller windows");
                         assert_eq!(response, payload);
-                        trace.record("client", "128 KiB crossed 4 KiB stream and 16 KiB connection windows");
+                        trace.record("client", "128 KiB crossed 4 KiB stream and 65,535-byte connection windows");
                         turmoil::hold("client", "server");
                         let started = nervix_primitives::time::Instant::now();
                         let failed = client.request(&peer, WindowProbe { payload: vec![9] }).await.err().assured("held traffic reaches its configured deadline");

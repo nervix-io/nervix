@@ -9,7 +9,7 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ActivationKind, DomainStartPoint, DomainStatus, DomainStopCause, LicensingStopReason, Timestamp,
+    ActivationKind, DomainStatus, DomainStopCause, LicensingStopReason, Timestamp,
 };
 
 use super::{verification_tests::SignedFixture, *};
@@ -226,16 +226,21 @@ fn a_closed_gate_refuses_every_change_that_runs_a_domain_and_records_its_stops()
     };
     let refused = ConsensusResponse::Conflict(ConsensusConflict::LicensingStop { reason });
 
-    let start = crate::tests::commit_start_step(&mut state, "idle")
-        .expect_err("a closed gate refuses the step of a START");
-    let crate::TransactionMutationError::LicensingStop {
-        reason: start_reason,
-        ..
-    } = start.current_context()
-    else {
-        panic!("the START step is refused by the licensing stop, not {start:?}");
-    };
-    assert_eq!(*start_reason, reason);
+    assert_eq!(
+        crate::tests::start_through_command(&mut state, "idle", 1),
+        refused,
+        "a closed gate refuses the start of a START"
+    );
+    // The refused START answers, which releases the domain's lease.
+    crate::tests::finish_start_command(&mut state, 1, crate::CommandExecutionDisposition::Failed);
+    assert_eq!(
+        state
+            .domains
+            .get(&domain("idle"))
+            .verified("created above")
+            .status,
+        DomainStatus::Stopped
+    );
     let resume = ConsensusCommand::ResumeDomain {
         domain_id: domain("paused"),
         mutation: None,
@@ -411,8 +416,11 @@ fn only_a_new_activation_after_the_expiry_lifts_the_gate_and_starts_stay_explici
         tenant.stop_cause(),
         Some(DomainStopCause::Licensing(reason))
     );
-    crate::tests::commit_start_step(&mut state, "tenant")
-        .assured("the lifted gate admits the step of an explicit START");
+    assert_eq!(
+        crate::tests::start_through_command(&mut state, "tenant", 1),
+        ConsensusResponse::Applied,
+        "the lifted gate admits the start of an explicit START"
+    );
     let tenant = state
         .domains
         .get(&domain("tenant"))
@@ -457,87 +465,32 @@ fn a_closed_gate_refuses_a_pause_recovery_that_would_resume_the_domain() {
 }
 
 #[test]
-fn a_closed_gate_refuses_a_transaction_start_step_planned_before_it_closed() {
+fn a_closed_gate_refuses_a_start_placed_before_it_closed() {
     let mut state = ephemeral_state();
     assert_eq!(
         put(&mut state, "tenant", DomainStatus::Stopped),
         ConsensusResponse::Applied
     );
-    let owner = nervix_models::UserName::parse("operator")
-        .assured("the fixture owner is an identifier-shaped literal");
-    let activity = crate::TransactionActivity::from_timeout(
-        Timestamp::from_unix_nanos(1),
-        std::time::Duration::from_secs(60),
-    );
-    let mut transaction = crate::ReplicatedTransaction::open(
-        "tx".to_owned(),
-        domain("tenant"),
-        owner.clone(),
-        activity,
-    );
-    transaction
-        .queue(
-            &owner,
-            &domain("tenant"),
-            activity,
-            1,
-            crate::TransactionStatement::test_admitted(crate::TransactionStatementRequest {
-                request_reference: nervix_models::CommandExecutionReference::parse("start.0")
-                    .assured("the fixture reference is a valid request reference"),
-                expected_position: 0,
-                source: "START".to_owned(),
-                statement: nervix_models::Statement::StartDomain(nervix_models::StartDomain {
-                    start: DomainStartPoint::Resume,
-                }),
-            }),
-            crate::TransactionQueueLimits {
-                max_statements: 1,
-                max_source_bytes: 1024,
-            },
-        )
-        .assured("an open transaction of its owner queues one statement within its limits");
-    // Planning admitted the START while the gate was open; the gate closes before its step commits.
-    let effect = crate::TransactionStepEffect::StartDomain {
-        inputs: Box::new(state.domain_planning_inputs(&domain("tenant"))),
-        start: DomainStartPoint::Resume,
-        clock: None,
-        authority: None,
-    };
+    crate::tests::admit_start_command(&mut state, "tenant", 1);
+    // The START checked and placed while the gate was open; the gate closes before its commit.
+    let inputs = Box::new(state.domain_planning_inputs(&domain("tenant")));
     let reason = pass_expiry(&mut state);
-    let result = crate::TransactionStepResult {
-        impact: crate::transaction::test_commit_plan("tx", 1).steps[0]
-            .impact
-            .clone(),
-        result: crate::TransactionCommandResult {
-            success: true,
-            message: "started".to_owned(),
-            diagnostics: Vec::new(),
-            already_existed: false,
-            admission: None,
-        },
-    };
-    let refused = crate::validate_transaction_step_effect(
-        &state,
-        &transaction,
-        0,
-        1,
-        &result,
-        &effect,
-        Some(&crate::TransactionOutcome::Committed),
-    )
-    .expect_err("a closed gate refuses the START step");
-    let crate::TransactionMutationError::LicensingStop {
-        id,
-        reason: refused_reason,
-    } = refused.current_context()
-    else {
-        panic!("the START step is refused by the licensing stop, not {refused:?}");
-    };
-    assert_eq!(id, "tx");
-    assert_eq!(*refused_reason, reason);
+    assert_eq!(
+        crate::tests::propose_start(&mut state, 1, inputs),
+        ConsensusResponse::Conflict(ConsensusConflict::LicensingStop { reason }),
+        "a closed gate refuses the start in the revision that would have started the domain"
+    );
     let tenant = state
         .domains
         .get(&domain("tenant"))
         .verified("created above");
     assert_eq!(tenant.status, DomainStatus::Stopped);
+    let reference =
+        nervix_models::CommandExecutionReference::parse("018bcfe5-6800-7000-8000-000000000001")
+            .assured("the fixture reference is the START command admitted above");
+    let execution = state
+        .command_executions
+        .get(&reference)
+        .verified("the START command was admitted above");
+    assert_eq!(execution.domain_start_revision(), None);
 }

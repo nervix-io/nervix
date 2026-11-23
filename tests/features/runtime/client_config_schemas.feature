@@ -77,7 +77,8 @@ Feature: Declared connector client configuration
         'idle_timeout_ms' = '1000',
         'max_frame_size' = '4096',
         'max_message_size' = '8192',
-        'ping_interval_ms' = '100'
+        'ping_interval_ms' = '100',
+        'write_buffer_size' = '{{ 0 }}'
       };
       SHOW CREATE CLIENT checked;
       """
