@@ -2651,7 +2651,7 @@ mod tests {
         observer.stop_all().await;
         nervix_primitives::time::timeout(Duration::from_secs(30), async {
             let runtime = &service.inner.runtime;
-            runtime.shutdown(runtime.domain_drain_timeout()).await;
+            runtime.shutdown().await;
             consensus.shutdown().await;
         })
         .await

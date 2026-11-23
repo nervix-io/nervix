@@ -128,7 +128,7 @@ Feature: Stateful inferencer state follows its branches across owners
   @stateful_inferencer_handoff @inferencer_handoff_capture @deloxide_stress_restore
   Scenario: A drained owner hands both inferencer branch sums to its successor
     Given graceful shutdown drain is enabled
-    And drain timeout is configured as "30s"
+    And shutdown timeout is configured as "30s"
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -209,7 +209,7 @@ Feature: Stateful inferencer state follows its branches across owners
       key={"tenant":"beta"} | "score":[3300.0]
       """
     When node "node-2" is gracefully stopped
-    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    Then the last shutdown of node "node-2" reports its moves "Moved"
     When these Plexus commands are executed on the active session
       """
       SHOW CLUSTER STATUS;

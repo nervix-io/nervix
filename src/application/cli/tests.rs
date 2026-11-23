@@ -16,7 +16,6 @@ use ubyte::ByteUnit;
 
 use super::*;
 use crate::application::{
-    ShutdownSettingsError,
     cli_values::{HumanBytes, HumanDuration},
     test_fixtures::test_args,
 };
@@ -48,7 +47,7 @@ const SETTINGS_HEADINGS: [&str; 22] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 271] = [
+const SETTING_NAMES: [&str; 270] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -161,7 +160,6 @@ const SETTING_NAMES: [&str; 271] = [
     "memory-low-watermark",
     "memory-pressure-check-interval",
     "memory-pressure-resume-jitter",
-    "drain-timeout",
     "shutdown-timeout",
     "task-grace-period",
     "resource-max-archive-bytes",
@@ -706,25 +704,6 @@ fn a_setting_the_command_line_does_not_know_is_refused() {
 }
 
 #[test]
-fn a_drain_timeout_above_the_shutdown_timeout_refuses_the_node() {
-    let refused = Application::try_from(test_args(&["--drain-timeout", "1m"]))
-        .err()
-        .assured("a one-minute drain does not fit a fifty-second shutdown");
-
-    assert!(matches!(
-        refused.current_context(),
-        AppError::InvalidShutdownTimeouts
-    ));
-    assert_eq!(
-        refused.downcast_ref::<ShutdownSettingsError>(),
-        Some(&ShutdownSettingsError::DrainExceedsShutdown {
-            drain_timeout: Duration::from_secs(60),
-            shutdown_timeout: Duration::from_secs(50),
-        })
-    );
-}
-
-#[test]
 fn a_heartbeat_below_one_millisecond_refuses_the_node() {
     let refused = Application::try_from(test_args(&["--raft-heartbeat-interval", "500us"]))
         .err()
@@ -886,13 +865,13 @@ fn a_zero_gossip_queue_or_mqtt_headroom_cannot_be_read() {
 #[test]
 fn a_named_setting_that_breaks_a_relationship_is_refused_like_an_option() {
     let refused = NodeSettings::default()
-        .with_overrides(&[override_of("drain-timeout", "2m")])
+        .with_overrides(&[override_of("raft-heartbeat-interval", "500us")])
         .err()
-        .assured("a two-minute drain does not fit a fifty-second shutdown");
+        .assured("half a millisecond truncates to no consensus milliseconds");
 
     assert!(matches!(
         refused.current_context(),
-        AppError::InvalidShutdownTimeouts
+        AppError::InvalidRaftTimings
     ));
 }
 

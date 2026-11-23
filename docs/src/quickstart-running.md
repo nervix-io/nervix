@@ -69,11 +69,11 @@ terminate. Work still in progress is lost exactly as it is when the process cras
 always ends the process that way.
 
 The server registers both signals before it starts anything else. A signal that arrives while the
-node is still starting takes effect as soon as startup completes, while its shutdown deadline runs
-from the moment the signal arrived. A node that cannot register the signals refuses to start.
+node is still starting takes effect as soon as startup completes. A node that cannot register the
+signals refuses to start.
 
-[Shutdown And Recovery](shutdown.md) describes the phases, what the node drains before it exits,
-what each ending preserves, and how to read a shutdown that did not finish.
+[Shutdown And Recovery](shutdown.md) describes the phases, what the node saves and moves before it
+exits, what each ending preserves, and how to read a shutdown that did not finish.
 
 ## Connect A Client
 

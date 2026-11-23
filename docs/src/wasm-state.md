@@ -721,12 +721,12 @@ PROCESSOR` never presents a reset of the previous binding as a reset of the new 
 
 ## Shutdown And Restart
 
-A shutdown drain waits for the acknowledgements a WASM branch holds, as it waits for any outstanding
-acknowledgement, and the checkpoint deadline bounds that wait. Runtime teardown gives each processor
+A node's save at shutdown waits for a WASM branch's callback until its checkpoint reaches its
+boundary, as work in motion, and the checkpoint deadline bounds that wait. Runtime teardown gives each processor
 task one fifteenth of the domain drain budget to stop, and gives each branch task the same grace
 inside that; both are two seconds at the 30-second default. A branch task never outlives its processor task: one still in its checkpoint is ended with it,
 its unreleased acknowledgements are negatively acknowledged, and a restart finds whatever that
-checkpoint had already written. See [Draining Admitted Work](./shutdown.md#draining-admitted-work).
+checkpoint had already written. See [Saving What The Node Holds](./shutdown.md#saving-what-the-node-holds).
 
 A restarted node reopens each branch at the newest checkpoint on its own storage under the identity
 the committed schedule publishes, which covers every input its acknowledgements released. A reset

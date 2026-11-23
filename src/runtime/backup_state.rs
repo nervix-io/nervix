@@ -1718,7 +1718,7 @@ mod tests {
             stopped.branch_states[0].state,
             CapturedBranchStateKind::StoredWindow(_)
         ));
-        runtime.shutdown(runtime.domain_drain_timeout()).await;
+        runtime.shutdown().await;
     }
 
     #[nervix_primitives::test]

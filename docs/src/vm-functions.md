@@ -1481,8 +1481,8 @@ How each ending treats the window:
 | A task aborted after its shutdown grace period | Loses the changes made after its last publication. |
 
 Snapshot transfer between nodes follows the bulk transfer rules of the [Cluster
-Interconnect](./interconnect.md#membership-consensus-and-bulk-transfer). Drain and forced flush at
-shutdown follow [Shutdown And Recovery](./shutdown.md#draining-admitted-work).
+Interconnect](./interconnect.md#membership-consensus-and-bulk-transfer). The save and its forced
+flush at shutdown follow [Shutdown And Recovery](./shutdown.md#saving-what-the-node-holds).
 
 A result that does not fit its type fails the window when it emits:
 

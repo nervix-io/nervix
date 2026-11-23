@@ -20,23 +20,23 @@ use nervix_server::application::{ShutdownCoordinator, ShutdownOutcome, ShutdownP
 
 use super::node_liveness::NodeTaskTerminalOutcome;
 
-/// How a stopping node's own shutdown deadline stood when the harness read it.
+/// How a stopping node's own shutdown timeout stood when the harness read it. The timeout bounds
+/// only the node's moves, which begin once its save has ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProductShutdownDeadline {
-    /// No stop request has reached the node, so it has no deadline yet.
-    NotRequested,
-    /// The node's deadline is still this far ahead.
+    /// The node's moves have not begun, so its shutdown timeout is not counting yet.
+    NotStarted,
+    /// The node's moves must end within this much more time.
     Ahead(Duration),
-    /// The node's deadline has passed. A server process is ended there by its deadline
-    /// supervision; an in-process node has none, and goes on stopping.
+    /// The node's shutdown timeout has passed. A node goes on stopping past it.
     Passed,
 }
 
 /// Where a node's own shutdown stood when the harness read it: the phase its coordinator had
-/// reached, and its product deadline.
+/// reached, and its shutdown timeout.
 ///
-/// A node that outlives a harness wait is named with this, so a reader can tell a drain that is
-/// still inside its deadline from a terminal teardown that has outlasted it without a debugger.
+/// A node that outlives a harness wait is named with this, so a reader can tell a save or a move
+/// that is still going from a terminal teardown that has outlasted them without a debugger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NodeStopProgress {
     pub(crate) phase: ShutdownPhase,
@@ -44,13 +44,12 @@ pub(crate) struct NodeStopProgress {
 }
 
 impl NodeStopProgress {
-    /// Reads the phase and the deadline from a node's coordinator. Reading changes nothing in the
-    /// node.
+    /// Reads the phase and the shutdown timeout from a node's coordinator. Reading changes nothing
+    /// in the node.
     pub(crate) fn observe(shutdown: &ShutdownCoordinator) -> Self {
-        let deadline = match shutdown.request() {
-            None => ProductShutdownDeadline::NotRequested,
-            Some(request) => {
-                let deadline = request.deadline();
+        let deadline = match shutdown.moves_deadline() {
+            None => ProductShutdownDeadline::NotStarted,
+            Some(deadline) => {
                 if deadline.has_passed() {
                     ProductShutdownDeadline::Passed
                 } else {
@@ -69,15 +68,16 @@ impl fmt::Display for NodeStopProgress {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "in shutdown phase {:?}, ", self.phase)?;
         match self.deadline {
-            ProductShutdownDeadline::NotRequested => {
-                formatter.write_str("with no stop request accepted")
+            ProductShutdownDeadline::NotStarted => {
+                formatter.write_str("before its shutdown timeout began")
             }
             ProductShutdownDeadline::Ahead(remaining) => {
-                write!(formatter, "{remaining:?} before its own shutdown deadline")
+                write!(
+                    formatter,
+                    "{remaining:?} before its own shutdown timeout passes"
+                )
             }
-            ProductShutdownDeadline::Passed => {
-                formatter.write_str("past its own shutdown deadline")
-            }
+            ProductShutdownDeadline::Passed => formatter.write_str("past its own shutdown timeout"),
         }
     }
 }
@@ -194,9 +194,12 @@ impl fmt::Display for NodeStopRecord {
                 match shutdown {
                     Some(outcome) => write!(
                         formatter,
-                        "; shutdown phases: stop admission {:?}, drain support {:?}, terminal \
+                        "; shutdown phases: stop admission {:?}, save {:?}, moves {:?}, terminal \
                          teardown {:?}",
-                        outcome.stop_admission, outcome.drain_support, outcome.terminal_teardown
+                        outcome.stop_admission,
+                        outcome.save,
+                        outcome.moves,
+                        outcome.terminal_teardown
                     ),
                     None => formatter.write_str("; no shutdown outcome was reported"),
                 }

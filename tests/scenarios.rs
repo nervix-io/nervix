@@ -99,7 +99,7 @@ use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{
-        InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownPhaseOutcome,
+        InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownMoveOutcome,
         run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
@@ -4353,16 +4353,6 @@ async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schem
     world.last_command_output = Some(output);
 }
 
-#[given(expr = "a nervix-server process is started with drain timeout {string}")]
-async fn given_nervix_server_process_is_started_with_drain_timeout(
-    world: &mut ScenarioWorld,
-    drain_timeout: String,
-) {
-    let drain_timeout =
-        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
-    start_ready_server_process(world, &[ServerProcessOption::DrainTimeout(drain_timeout)]).await;
-}
-
 #[given(expr = "a nervix-server process is started with state snapshot interval {string}")]
 async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
     world: &mut ScenarioWorld,
@@ -4411,24 +4401,21 @@ async fn given_nervix_server_process_is_started_with_transaction_retention(
     start_ready_server_process(world, &options).await;
 }
 
-#[given(
-    expr = "a nervix-server process is started with drain timeout {string} and shutdown timeout \
-            {string}"
-)]
-async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
+/// Starts the server process with `shutdown_timeout` for its moves. The cluster's domain drain
+/// timeout and entity gate deadline, which may not exceed a node's shutdown timeout, are seeded no
+/// longer than it.
+#[given(expr = "a nervix-server process is started with shutdown timeout {string}")]
+async fn given_nervix_server_process_is_started_with_shutdown_timeout(
     world: &mut ScenarioWorld,
-    drain_timeout: String,
     shutdown_timeout: String,
 ) {
-    let drain_timeout =
-        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
     let shutdown_timeout =
         parse_duration_text(&shutdown_timeout).expect("shutdown timeout must be a valid duration");
+    let runtime_deadline = shutdown_timeout.min(nervix_models::DomainDrainTimeout::DEFAULT);
     let options = [
-        ServerProcessOption::DrainTimeout(drain_timeout),
         ServerProcessOption::ShutdownTimeout(shutdown_timeout),
-        ServerProcessOption::DomainDrainTimeout(drain_timeout),
-        ServerProcessOption::EntityGateDeadline(drain_timeout),
+        ServerProcessOption::DomainDrainTimeout(runtime_deadline),
+        ServerProcessOption::EntityGateDeadline(runtime_deadline),
     ];
     start_ready_server_process(world, &options).await;
 }
@@ -10753,32 +10740,26 @@ fn given_node_starts_with_setting(
     }
 }
 
-#[given(expr = "drain timeout is configured as {string}")]
-async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
-    assert!(
-        world.cluster.is_none(),
-        "drain timeout must be configured before cluster startup"
-    );
-    world.cluster_config.drain_timeout =
-        parse_duration_text(&timeout).expect("shutdown drain timeout must be valid");
-    // This fixture intentionally exercises a short node drain. Its domains and entity gate
-    // must use a policy that the node can honor, through the same first-bootstrap path.
-    let budget = world
-        .cluster_config
-        .drain_timeout
-        .min(world.cluster_config.shutdown_timeout);
-    world.cluster_config.runtime_parameters.domain_drain_timeout = Some(budget);
-    world.cluster_config.runtime_parameters.entity_gate_deadline = Some(budget);
-}
-
+/// Gives every node `timeout` for its moves. The cluster's domain drain timeout and entity gate
+/// deadline, which may not exceed a node's shutdown timeout, are seeded no longer than it, through
+/// the same first-bootstrap path.
 #[given(expr = "shutdown timeout is configured as {string}")]
 async fn given_shutdown_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
     assert!(
         world.cluster.is_none(),
         "shutdown timeout must be configured before cluster startup"
     );
-    world.cluster_config.shutdown_timeout =
-        parse_duration_text(&timeout).expect("shutdown timeout must be valid");
+    let timeout = parse_duration_text(&timeout).expect("shutdown timeout must be valid");
+    world.cluster_config.shutdown_timeout = timeout;
+    let runtime_parameters = &mut world.cluster_config.runtime_parameters;
+    let domain_drain_timeout = runtime_parameters
+        .domain_drain_timeout
+        .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
+    runtime_parameters.domain_drain_timeout = Some(domain_drain_timeout.min(timeout));
+    let entity_gate_deadline = runtime_parameters
+        .entity_gate_deadline
+        .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
+    runtime_parameters.entity_gate_deadline = Some(entity_gate_deadline.min(timeout));
 }
 
 #[given(expr = "schema change drain timeout is configured as {string}")]
@@ -10792,7 +10773,6 @@ async fn given_schema_change_drain_timeout_is_configured(
     );
     let timeout = parse_duration_text(&timeout).expect("schema drain timeout must be valid");
     world.cluster_config.runtime_parameters.domain_drain_timeout = Some(timeout);
-    world.cluster_config.drain_timeout = world.cluster_config.drain_timeout.max(timeout);
     world.cluster_config.shutdown_timeout = world.cluster_config.shutdown_timeout.max(timeout);
 }
 
@@ -10804,7 +10784,6 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
     );
     let timeout = parse_duration_text(&timeout).expect("entity gate deadline must be valid");
     world.cluster_config.runtime_parameters.entity_gate_deadline = Some(timeout);
-    world.cluster_config.drain_timeout = world.cluster_config.drain_timeout.max(timeout);
     world.cluster_config.shutdown_timeout = world.cluster_config.shutdown_timeout.max(timeout);
 }
 
@@ -14562,21 +14541,21 @@ fn when_materialized_snapshot_opening_pause_released(world: &mut ScenarioWorld, 
         .release_materialized_snapshot_opening(&materialized_snapshot_relay(world, &relay));
 }
 
-#[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
-async fn then_last_shutdown_reports_drain_support_phase(
+#[then(expr = "the last shutdown of node {string} reports its moves {string}")]
+async fn then_last_shutdown_reports_its_moves(
     world: &mut ScenarioWorld,
     node_id: String,
     outcome: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
     let expected = outcome
-        .parse::<ShutdownPhaseOutcome>()
-        .unwrap_or_else(|error| panic!("unknown shutdown phase outcome '{outcome}': {error}"));
+        .parse::<ShutdownMoveOutcome>()
+        .unwrap_or_else(|error| panic!("unknown shutdown move outcome '{outcome}': {error}"));
     let Some(shutdown) = world.cluster().last_shutdown_outcome(&node_id) else {
         panic!("node '{node_id}' has no finished shutdown that the scenario waited for");
     };
     assert_eq!(
-        shutdown.drain_support, expected,
+        shutdown.moves, expected,
         "node '{node_id}' finished its last shutdown with {shutdown:?}"
     );
 }
@@ -14588,6 +14567,38 @@ async fn when_all_nodes_are_stopped(world: &mut ScenarioWorld) {
         .shutdown()
         .await
         .expect("failed to stop all nodes");
+}
+
+#[when("every node begins stopping")]
+async fn when_every_node_begins_stopping(world: &mut ScenarioWorld) {
+    world.cluster_mut().begin_stopping_all_nodes();
+}
+
+/// Holds a node to a save that cannot end yet: after `wait`, it is still saving what it holds, or
+/// still moving its units and saving what did not move.
+#[then(expr = "node {string} is still saving or moving its units after {string}")]
+async fn then_node_is_still_saving_or_moving_after(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    wait: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let wait = parse_duration_text(&wait).expect("the wait must be a valid duration");
+    nervix_primitives::time::sleep(wait).await;
+    let progress = world.cluster_mut().node_stop_progress(&node_id);
+    let still_saving_or_moving = match progress {
+        Some(progress) => matches!(
+            progress.phase,
+            nervix_server::application::ShutdownPhase::Saving
+                | nervix_server::application::ShutdownPhase::Moving
+        ),
+        None => false,
+    };
+    assert!(
+        still_saving_or_moving,
+        "node '{node_id}' was expected to be still saving or moving after {wait:?}, but its \
+         shutdown stood {progress:?}"
+    );
 }
 
 #[when("all nodes are gracefully stopped")]
@@ -17045,23 +17056,23 @@ async fn then_last_cluster_operation_takes_at_least(world: &mut ScenarioWorld, d
     );
 }
 
-#[then(expr = "node {string} reports that its last shutdown passed its deadline")]
-async fn then_node_reports_that_its_last_shutdown_passed_its_deadline(
+#[then(expr = "node {string} reports that its last shutdown disrupted the cluster")]
+async fn then_node_reports_that_its_last_shutdown_disrupted_the_cluster(
     world: &mut ScenarioWorld,
     node_id: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
     let Some(failure) = world.cluster().node_run_failure(&node_id) else {
-        panic!("node '{node_id}' stopped without reporting that its shutdown deadline passed");
+        panic!("node '{node_id}' stopped without reporting a cluster disruption");
     };
     assert!(
-        failure.contains("did not finish before its shutdown deadline"),
+        failure.contains("a cluster disruption"),
         "node '{node_id}' stopped with an unrelated failure: {failure}"
     );
 }
 
-#[then(expr = "node {string} reports that its last shutdown finished before its deadline")]
-async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+#[then(expr = "node {string} reports that its last shutdown finished cleanly")]
+async fn then_node_reports_that_its_last_shutdown_finished_cleanly(
     world: &mut ScenarioWorld,
     node_id: String,
 ) {
@@ -17071,8 +17082,8 @@ async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
     }
 }
 
-#[then("every node reports that its last shutdown finished before its deadline")]
-async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+#[then("every node reports that its last shutdown did not disrupt the cluster")]
+async fn then_every_node_reports_that_its_last_shutdown_did_not_disrupt_the_cluster(
     world: &mut ScenarioWorld,
 ) {
     for node_id in world.cluster().node_ids() {
@@ -17086,8 +17097,8 @@ async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_dead
             );
         }
         assert!(
-            !shutdown.deadline_expired(),
-            "node '{node_id}' finished its last shutdown past its deadline: {shutdown:?}"
+            !shutdown.disrupted(),
+            "node '{node_id}' left units it could have moved: {shutdown:?}"
         );
     }
 }

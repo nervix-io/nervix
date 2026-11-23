@@ -424,8 +424,9 @@ Options:
   -h, --help  Print help
 
 Shutdown:
-      --drain-timeout <DRAIN_TIMEOUT>  Maximum time to wait for drain operations before
-                                       continuing [default: 30s]
+      --shutdown-timeout <SHUTDOWN_TIMEOUT>  Maximum time a stopping node's work may take to move
+                                             to other nodes once the node has saved it [default:
+                                             10m]
 """
 
 
@@ -443,7 +444,7 @@ class ServerReferenceTests(unittest.TestCase):
         self.assertEqual(captured, [[], ["completions"]])
         self.assertIn("# nervix-server Reference", reference)
         self.assertIn("## nervix-server\n\n```text\nNervix server", reference)
-        self.assertIn("--drain-timeout <DRAIN_TIMEOUT>", reference)
+        self.assertIn("--shutdown-timeout <SHUTDOWN_TIMEOUT>", reference)
         self.assertIn("## nervix-server completions", reference)
         self.assertIn("](node-settings.md)", reference)
         self.assertIn("](quickstart-running.md)", reference)

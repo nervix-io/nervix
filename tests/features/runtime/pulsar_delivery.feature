@@ -4,7 +4,8 @@ Feature: Pulsar receipt bounds and finishing accepted records
   Scenario Outline: STOP waits for the records a NO ACK Pulsar emitter's producer holds
     Given Pulsar is running
     And a stallable Pulsar endpoint is configured
-    And drain timeout is configured as "60s"
+    And schema change drain timeout is configured as "60s"
+    And entity gate deadline is configured as "60s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus statements
@@ -69,7 +70,8 @@ Feature: Pulsar receipt bounds and finishing accepted records
   Scenario Outline: Pulsar ACK TIMEOUT above thirty seconds survives a delayed broker receipt
     Given Pulsar is running
     And a stallable Pulsar endpoint is configured
-    And drain timeout is configured as "60s"
+    And schema change drain timeout is configured as "60s"
+    And entity gate deadline is configured as "60s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus statements

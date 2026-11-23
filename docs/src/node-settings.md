@@ -468,9 +468,10 @@ may tune that retry without changing the cluster's consensus prerequisite.
 Startup voter observation lasts twenty gossip rounds. Completion probes use one Raft heartbeat,
 authority reassignment retries four fifths of a heartbeat, cordon release keeps four heartbeats,
 and shutdown leader observation uses one tenth of a heartbeat. `--task-grace-period` controls
-cooperative listener and background-task stop grace, two seconds by default and capped by the
-remaining stop deadline. A drain may use the full configured timeout without cutting the
-listener's normal grace to zero.
+cooperative listener and background-task stop grace, two seconds by default. `--shutdown-timeout`
+bounds only the moves of a stopping node's work to other nodes, ten minutes by default, counted
+from the end of its save, which has no limit of its own; [Shutdown And
+Recovery](shutdown.md#the-shutdown-timeout) describes both.
 
 The complete parameter record stays allocation-free and `Copy`. Its validated parameter projection stores
 whole seconds and subsecond nanoseconds in eight bytes; every permitted duration, through
@@ -887,7 +888,10 @@ seconds by default. A compatible leader's heartbeat is shorter than twice the fo
 slowest heartbeat a compatible leader sends stays within a third of the follower's minimum
 election timeout. Gossip derives its failure detector the same way: it assumes ten gossip
 intervals between a peer's heartbeats until it has observed some, and takes no gap longer than
-twenty gossip intervals as a sample, 5 and 10 seconds by default.
+twenty gossip intervals as a sample, 5 and 10 seconds by default. A stopping node keeps gossiping
+until two gossip intervals, 1 second by default, have passed since it advertised that it is
+terminating, so its peers hear the advertisement before it leaves
+([Terminal Teardown](shutdown.md#terminal-teardown)).
 
 The maximum Raft election timeout also bounds the leader lease and a heartbeat's response wait.
 The interval still schedules heartbeats; an answer later than one interval but inside the lease
@@ -923,8 +927,7 @@ must each fit the total admission budget. Change related values in one statement
 combination publishes nothing. The unfold limit is a positive 32-bit record count, independent
 of the maximum declared emitter batch size.
 
-Both domain drain and gate budgets must independently fit every admitted node's local drain and
-shutdown budgets. Parameter transitions capture those capacity claims in their commit fence;
+Both domain drain and gate budgets must independently fit every admitted node's shutdown timeout. Parameter transitions capture those capacity claims in their commit fence;
 a concurrently changed claim requires revalidation. A node joining or restarting with insufficient
 local budgets refuses the selected committed policy before readiness. Departed membership retains
 its claim until `DROP NODE`, so increasing lifecycle policy may require updating that node or
@@ -1367,7 +1370,7 @@ describes, defaults included.
 | `--transaction-idle-timeout`, `--transaction-tombstone-retention`, `--transaction-max-statements`, `--transaction-max-source-bytes`, `--transaction-max-open` | cluster parameter | transaction limits |
 | `--command-retry-validity`, `--command-execution-capacity` | cluster parameter | command execution |
 | `--memory-high-watermark`, `--memory-low-watermark`, `--memory-pressure-check-interval`, `--memory-pressure-resume-jitter` | node capability | memory pressure |
-| `--drain-timeout`, `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
+| `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio`, `--otel-trace-export-timeout`, `--otel-trace-export-interval`, `--otel-trace-queue-capacity`, `--otel-trace-export-batch-spans` | node capability | trace export |
 | `--web-console-request-timeout`, `--web-console-connect-timeout`, `--web-console-retry-backoff`, `--web-console-retry-max-backoff`, `--web-console-restoration-backoff`, `--web-console-restore-frame-capacity` | node capability | [web console pacing](#web-console-pacing) |
@@ -1495,9 +1498,6 @@ store, binds a listener or starts a task:
 - A memory limit and a CPU count, when one is given, are above zero, and so is the node detection
   timeout.
 - The node's tags follow the [tag rules](#tags): at most 64, each key once.
-- The drain timeout does not exceed the shutdown timeout, which bounds every drain step. A drain
-  timeout equal to it lets the drain use the whole deadline; the defaults leave time for terminal
-  teardown after the drain.
 - The memory watermarks are set together or not at all, the low one below the high one, and with
   them the check interval is above zero.
 - The trace sample ratio lies between 0 and 1, and a trace export batch holds no more spans than
@@ -1511,7 +1511,6 @@ A value its option cannot read, such as malformed duration text or a sample rati
 range, ends the process with status `2` as the command line reports it. A relationship that does
 not hold, or a value outside its own bounds, ends the process with status `1` before it opens a
 store, with a message that names the settings involved and their values, such as
-`drain-timeout (60s) must not exceed shutdown-timeout (50s)` or
 `raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at`.
 The defaults satisfy every relationship, and the assertions that keep them doing so remain beside
 them.
@@ -1804,8 +1803,8 @@ error. The registered `node-settings-command-line` Bolero property generates val
 every group, scalar and pre-detection relationships held, and optional capability requests, and
 requires them to read back unchanged without losing omission after rendering as
 options, along with every duration and byte quantity. Public scenarios start a real
-`nervix-server` process with a drain timeout above its shutdown timeout or a Raft heartbeat below
-one millisecond and observe the refusal naming the settings, and restart a node of a one-node and a
+`nervix-server` process with a Raft heartbeat below one millisecond, or another relationship that
+does not hold, and observe the refusal naming the settings, and restart a node of a one-node and a
 three-node cluster with such a setting, through the harness step that names a setting for one
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.
