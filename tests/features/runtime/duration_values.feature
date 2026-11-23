@@ -434,7 +434,7 @@ Feature: Duration values
       """
       CREATE WASM PROCESSOR filtering FROM <input> COLLECT FOR 10ms MAX BATCH SIZE 1MiB
         DETACHED USING RESOURCE guest VERSION 1 FILE 'processors/filter_even.wasm'
-        MAX FUEL 1000000000 MAX MEMORY 64MiB
+        MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096
         UNBRANCHED TO <output> SET value = value
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       """
