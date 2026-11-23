@@ -488,7 +488,7 @@ async fn filter_map_can_read_branch_namespace() {
     let plan = plan_filter_map_messages(
         ProgramRun {
             executor: &Executor::default(),
-            now: Timestamp::now(),
+            now: Timestamp::from_unix_nanos(1),
             ack_timing: &SharedRemoteAckTiming::default(),
         },
         "deduplicator",
@@ -587,7 +587,7 @@ async fn projection_can_read_branch_namespace() {
     let plan = plan_filter_map_messages(
         ProgramRun {
             executor: &Executor::default(),
-            now: Timestamp::now(),
+            now: Timestamp::from_unix_nanos(1),
             ack_timing: &SharedRemoteAckTiming::default(),
         },
         "processor",
@@ -678,7 +678,7 @@ async fn inherit_all_preserves_fixed_size_array_values_through_the_vm() {
     let plan = plan_filter_map_messages(
         ProgramRun {
             executor: &Executor::default(),
-            now: Timestamp::now(),
+            now: Timestamp::from_unix_nanos(1),
             ack_timing: &SharedRemoteAckTiming::default(),
         },
         "junction",
@@ -754,7 +754,7 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
     let plan = plan_filter_map_messages(
         ProgramRun {
             executor: &Executor::default(),
-            now: Timestamp::now(),
+            now: Timestamp::from_unix_nanos(1),
             ack_timing: &SharedRemoteAckTiming::default(),
         },
         "junction",
