@@ -87,6 +87,12 @@ pub(crate) struct PreparedMongoDbClient {
 }
 
 impl MongoDbClientOptions {
+    /// The driver's options as the connection string and the client's keys left them.
+    #[cfg(test)]
+    pub(crate) fn driver_options(&self) -> &ClientOptions {
+        &self.options
+    }
+
     pub(crate) fn new(
         mut options: ClientOptions,
         config: &[ClientConfigEntry],
