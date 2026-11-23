@@ -102,6 +102,14 @@ const CLIENT_CONFIG: ClientConfigSchema = ClientConfigSchema::new(
 );
 
 /// The longest topic filter MQTT carries, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MQTT carries a topic filter as a UTF-8 Encoded String, whose two-byte length \
+                  prefix bounds it at 65,535 bytes"
+    )
+)]
 const MQTT_TOPIC_FILTER_MAX: usize = 65_535;
 
 /// The first level of an MQTT shared subscription. Every topic ingestor subscribes through the
@@ -217,9 +225,10 @@ pub struct MqttTopicIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
-/// Extra acknowledged publishes advertised to the broker and the separate QoS 0 read-ahead quota.
-/// Automatic acknowledgement uses this quota alone, with backpressure instead of overflow drops.
-pub const MQTT_SOURCE_READ_AHEAD_HEADROOM: u64 = 64;
+/// The node setting that sets the extra acknowledged publishes every `ACK`-mode `CONNECT`
+/// advertises, the separate QoS 0 read-ahead quota beside them, and the whole read-ahead under
+/// `NO ACK`, named as its definition in the MQTT connector names it.
+const READ_AHEAD_HEADROOM: &str = "mqtt-read-ahead-headroom";
 
 /// MQTT's largest packet: a 28-bit Remaining Length plus the five-byte fixed header.
 #[cfg_attr(
@@ -233,6 +242,14 @@ pub const MQTT_SOURCE_READ_AHEAD_HEADROOM: u64 = 64;
 pub const MQTT_MAXIMUM_PACKET_BYTES: u64 = (1 << 28) + 4;
 
 /// The largest value MQTT's Four Byte Integer, which carries the Maximum Packet Size, can hold.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MQTT 5's Four Byte Integer is a 32-bit unsigned value, so 0xFFFF_FFFF is the \
+                  largest it holds"
+    )
+)]
 const MQTT_FOUR_BYTE_INTEGER_MAX: u64 = 0xFFFF_FFFF;
 
 const _: () = assert!(
@@ -278,7 +295,7 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under \
-                     ACK SEQUENTIAL plus 64 up to 65,535",
+                     ACK SEQUENTIAL plus node setting mqtt-read-ahead-headroom up to 65,535",
                 ),
                 overflow: BufferOverflow::Backpressure,
             },
@@ -287,20 +304,14 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             holds: "ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the \
                     same packet-ordered read-ahead queue",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Items {
-                    count: MQTT_SOURCE_READ_AHEAD_HEADROOM,
-                    unit: "outcome",
-                },
+                capacity: BufferCapacity::NodeSetting(READ_AHEAD_HEADROOM),
                 overflow: BufferOverflow::DropAndCount,
             },
         },
         DeclaredBuffer {
             holds: "NO ACK outcomes in the packet-ordered read-ahead queue",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Items {
-                    count: MQTT_SOURCE_READ_AHEAD_HEADROOM,
-                    unit: "outcome",
-                },
+                capacity: BufferCapacity::NodeSetting(READ_AHEAD_HEADROOM),
                 overflow: BufferOverflow::Backpressure,
             },
         },

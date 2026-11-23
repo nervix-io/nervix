@@ -122,13 +122,6 @@ macro_rules! capability_definition {
     ($definition:ident, $name:literal, Duration, $default:expr) => {
         pub struct $definition;
         impl $definition {
-            #[cfg_attr(
-                nervix_lint,
-                nervix::constant(
-                    fixed,
-                    reason = "this setting definition owns its single compile-time default"
-                )
-            )]
             pub const DEFAULT: Duration = $default;
         }
         impl SettingDefinition for $definition {
@@ -149,13 +142,6 @@ macro_rules! capability_definition {
     ($definition:ident, $name:literal, Count, $default:expr) => {
         pub struct $definition;
         impl $definition {
-            #[cfg_attr(
-                nervix_lint,
-                nervix::constant(
-                    fixed,
-                    reason = "this setting definition owns its single compile-time default"
-                )
-            )]
             pub const DEFAULT: u64 = $default;
         }
         impl SettingDefinition for $definition {

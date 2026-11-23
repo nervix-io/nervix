@@ -460,6 +460,32 @@ pub struct IcebergPropertyCollision {
     pub storage_key: String,
 }
 
+/// How long an object-store metadata operation (stat, directory creation, rename or presign) may run
+/// when `timeout_ms` is omitted: the bound OpenDAL's timeout layer keeps for such an operation.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "OpenDAL's TimeoutLayer bounds a metadata operation (stat, create_dir, rename, \
+                  presign) at 60 seconds by default, and the emitter keeps that default when \
+                  timeout_ms is omitted"
+    )
+)]
+const OPENDAL_DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long an object-store read, write, list, copy or delete call may run when `timeout_ms` is
+/// omitted: the bound OpenDAL's timeout layer keeps for an I/O call.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "OpenDAL's TimeoutLayer bounds an I/O call (read, write, list, copy, delete) at \
+                  10 seconds by default, and the emitter keeps that default when timeout_ms is \
+                  omitted"
+    )
+)]
+const OPENDAL_DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// What the connector of a ICEBERG TABLE holds and how long it waits.
 const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
@@ -475,17 +501,17 @@ const ICEBERG_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
-            wait: "object-store metadata and delete operations",
+            wait: "object-store metadata operations: stat, directory creation, rename and presign",
             bound: WaitBound::Key {
                 key: DeadlineKey::Timeout,
-                omitted: OmittedDeadline::Default(Duration::from_secs(60)),
+                omitted: OmittedDeadline::Default(OPENDAL_DEFAULT_OPERATION_TIMEOUT),
             },
         },
         DeclaredWait {
-            wait: "object-store reads and writes",
+            wait: "object-store reads, writes, lists, copies and deletes",
             bound: WaitBound::Key {
                 key: DeadlineKey::Timeout,
-                omitted: OmittedDeadline::Default(Duration::from_secs(10)),
+                omitted: OmittedDeadline::Default(OPENDAL_DEFAULT_IO_TIMEOUT),
             },
         },
     ],

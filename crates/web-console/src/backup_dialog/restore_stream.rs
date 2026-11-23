@@ -43,24 +43,59 @@ use nervix_models::{ArchiveDigest, CommandExecutionReference, RestoreArchive};
 use thiserror::Error;
 use url::Url;
 
-use super::browser::{ArchiveFile, Browser, CallSocket as _, Received};
+use super::{
+    FRAME_TIMEOUT, RETRY_DELAY,
+    browser::{ArchiveFile, Browser, CallSocket as _, Received},
+};
 use crate::web_console_websocket_url_from_base;
 
-/// Archive bytes one restore frame carries, as the native clients send them.
+/// The most archive bytes one restore frame carries, as the native clients send them: a stream's
+/// chunk is the smaller of this and half the session frame limit the leader announced.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the backup and restore chapter's limits cap restore chunks from the Rust client \
+                  and the console alike at 256 KiB, or half the session frame when that is smaller"
+    )
+)]
 pub(crate) const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
 
 /// Archive bytes one read of the file digests at a time.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter's bounded buffers read at most 4 MiB of an archive at a \
+                  time while a restore digests it"
+    )
+)]
 pub(crate) const MEASURE_SLICE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Bytes the browser may hold queued on the connection before the stream waits for it to drain.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how much a restore should queue on its connection depends on the network, and \
+                  the console has no settings carrier yet; it stays fixed until its repair task \
+                  counts the queue in served frames https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 pub(crate) const MAX_BUFFERED_BYTES: u32 = 1024 * 1024;
 
 /// How often a stream that waits for its connection to drain looks again.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how often to look at a draining connection depends on how fast the network \
+                  drains the retained queue, and the console has no settings carrier yet; it \
+                  stays fixed until its repair task derives it from the queue or states its \
+                  reason https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 pub(crate) const DRAIN_POLL: Duration = Duration::from_millis(10);
-
-/// How long the connection may take to accept a chunk, and the reply to arrive once the last
-/// chunk was sent.
-pub(crate) const FRAME_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How many times a stream looks at a connection that does not drain before it counts as stalled.
 pub(crate) const MAX_DRAIN_POLLS: u128 = FRAME_TIMEOUT.as_millis() / DRAIN_POLL.as_millis();
@@ -68,10 +103,16 @@ const _: () = assert!(MAX_DRAIN_POLLS > 0);
 
 /// How many times one restore is streamed again before the console gives up on learning its
 /// outcome: about ten minutes of pauses, well inside the reference's retry validity.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long a restore keeps asking for its outcome depends on the cluster, and the \
+                  console has no settings carrier yet; it stays fixed until its repair task \
+                  retries until the served retry validity ends https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 pub(crate) const MAX_RESTORE_ATTEMPTS: usize = 600;
-
-/// The pause before a restore is streamed again.
-pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// The request identity of a restore's start. Each attempt is a stream of its own that exactly one
 /// reply answers, so the identity only has to be non-zero.

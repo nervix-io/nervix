@@ -15,7 +15,10 @@ pub(in super::super) fn replica_and_ownership_replacement_release_their_restored
         Replacement::Recovery,
     ] {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let checkpoint = placement("orders");
         let payload = vec![7; RESTORE_STATE_CHUNK_BYTES + 3];
         publish(&store, &checkpoint, &payload);
@@ -126,7 +129,10 @@ impl Replacement {
 #[test]
 pub(in super::super) fn queued_writers_and_publication_retries_keep_only_current_references() {
     let directory = tempfile::tempdir().assured("the test directory opens");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let checkpoint = placement("orders");
     let queued = store.latest_snapshot_writer();
     publish(&store, &checkpoint, b"selected");
@@ -179,7 +185,10 @@ pub(in super::super) fn queued_writers_and_publication_retries_keep_only_current
 #[test]
 pub(in super::super) fn retiring_a_scheduled_identity_reclaims_only_its_checkpoint_chunks() {
     let directory = tempfile::tempdir().assured("the test directory opens");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let checkpoint = placement("orders");
     publish(&store, &checkpoint, b"retired");
     store

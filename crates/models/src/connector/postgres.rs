@@ -55,6 +55,19 @@ macro_rules! default_pool_acquire_timeout_ms {
     };
 }
 
+/// How long one pool checkout may take where a client leaves `pool_acquire_timeout_ms` out, as the
+/// declared wait holds it: the same one literal the client schema publishes as `CONFIG` text.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Database Client Pools publishes 30 seconds where a Postgres client leaves \
+                  pool_acquire_timeout_ms out, and the key is how a client changes it"
+    )
+)]
+const DEFAULT_POOL_ACQUIRE_TIMEOUT: Duration =
+    Duration::from_millis(default_pool_acquire_timeout_ms!());
+
 /// The current keys this connector reads, shared by validation, completion and inspection.
 ///
 /// Nervix owns the address's scheme and its `sslmode`; the driver reads every other query option,
@@ -301,9 +314,7 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
                    authentication and the borrow test",
             bound: WaitBound::Key {
                 key: DeadlineKey::PoolAcquireTimeout,
-                omitted: OmittedDeadline::Default(Duration::from_millis(
-                    default_pool_acquire_timeout_ms!(),
-                )),
+                omitted: OmittedDeadline::Default(DEFAULT_POOL_ACQUIRE_TIMEOUT),
             },
         },
         DeclaredWait {

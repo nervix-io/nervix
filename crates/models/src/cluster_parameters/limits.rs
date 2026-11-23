@@ -187,6 +187,7 @@ impl SettingDefinition for ResourceMaxFileCount {
 /// This is cluster policy because exceeding it rejects the payload independently of placement.
 pub struct PayloadUnfoldLimit;
 impl PayloadUnfoldLimit {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: u64 = 65_536;
 }
 impl SettingDefinition for PayloadUnfoldLimit {
@@ -314,6 +315,15 @@ pub struct HttpHeaderFields;
 
 impl HttpHeaderFields {
     /// Application fields, leaving native request capacity for client and transport headers.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "Node Settings caps HTTP_HEADER_FIELDS at 16,384 to leave 8,192 \
+                      distinct-field slots of the native request map for client and transport \
+                      headers"
+        )
+    )]
     pub const MAXIMUM: u64 = 16_384;
 }
 
@@ -355,40 +365,16 @@ impl SettingDefinition for ClientBatchRows {
 
 impl ClientProducerSessionBytes {
     /// The compile-time source of this setting definition's default.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the setting definition owns this compile-time default, not an additional \
-                      policy input"
-        )
-    )]
     pub const DEFAULT: u64 = 33554432;
 }
 
 impl ClientConsumerSessionBytes {
     /// The compile-time source of this setting definition's default.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the setting definition owns this compile-time default, not an additional \
-                      policy input"
-        )
-    )]
     pub const DEFAULT: u64 = 33554432;
 }
 
 impl ClientBatchRows {
     /// The compile-time source of this setting definition's default.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the setting definition owns this compile-time default, not an additional \
-                      policy input"
-        )
-    )]
     pub const DEFAULT: u32 = 65536;
 }
 

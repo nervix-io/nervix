@@ -26,8 +26,8 @@ use nervix_models::{
 use super::{
     BranchInstanceAckBoundary, BranchKey, CompiledCodec, DomainClockLifecycle,
     DomainRoutingSnapshot, EmitterConnectorContext, EmitterPublishBatch, Executor, RelayMessage,
-    RelayRecordBatch, Runtime, emitter_encoding::encode_pending_broker_payloads,
-    prepare_branched_entrypoint_input,
+    RelayRecordBatch, Runtime, SharedRemoteAckTiming,
+    emitter_encoding::encode_pending_broker_payloads, prepare_branched_entrypoint_input,
 };
 use crate::{
     runtime_ack::AckSet,
@@ -137,6 +137,8 @@ fn tenant_batches(
 pub struct BranchedInputBenchmark {
     runtime: nervix_primitives::runtime::Runtime,
     executor: Executor,
+    /// The remote acknowledgement timing a route task keeps from its start.
+    ack_timing: SharedRemoteAckTiming,
     input: RelayRecordBatch,
 }
 
@@ -149,6 +151,7 @@ impl BranchedInputBenchmark {
         Self {
             runtime: benchmark_runtime(),
             executor: Executor::default(),
+            ack_timing: SharedRemoteAckTiming::default(),
             input,
         }
     }
@@ -157,6 +160,7 @@ impl BranchedInputBenchmark {
     pub fn prepare(&self) -> usize {
         let prepared = self.runtime.block_on(prepare_branched_entrypoint_input(
             &self.executor,
+            &self.ack_timing,
             self.input.clone(),
             BranchInstanceAckBoundary::Preserve,
         ));
@@ -265,6 +269,7 @@ impl TransformedEncodingBenchmark {
                         nervix_models::KafkaEmitterEntity::Topic,
                     ),
                 ),
+                remote_ack_timing: node_runtime.remote_ack_timing().clone(),
                 runtime: node_runtime,
                 domain,
                 emitter,

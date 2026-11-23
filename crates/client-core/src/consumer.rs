@@ -189,7 +189,8 @@ impl Client {
         };
         let opened =
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
-                for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+                for _ in 0..routing_attempts.get() {
                     nervix_primitives::task::consume_budget().await;
                     let (exchange, generation) = {
                         let exchange = self.inner.exchange.lock().await;

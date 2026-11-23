@@ -39,7 +39,16 @@ use crate::error::ArchiveReadError;
 /// The manifest's own path, which is always the archive's first entry.
 pub(crate) const MANIFEST_PATH: &str = "manifest.rkyv";
 
-/// The longest section path a manifest may name.
+/// The longest section path a manifest may name: Linux's `PATH_MAX`, far above the longest path the
+/// writer produces.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the backup and restore chapter's archive format limits a section path to 4096 \
+                  bytes, Linux's PATH_MAX, far above the 417-byte longest path the writer produces"
+    )
+)]
 const MAX_PATH_BYTES: usize = 4096;
 
 /// A validated relative path of one section inside an archive.
@@ -286,7 +295,9 @@ impl SectionPath {
     }
 
     /// Validates a path a manifest names: relative, made of non-empty segments, none of them `.`
-    /// or `..`, and within the length a tar header can carry.
+    /// or `..`, and at most the 4096 bytes of the section path limit. A tar entry carries a path of
+    /// any length, a longer one through a GNU long-name entry, so the limit is the archive
+    /// format's, not tar's.
     pub fn parse(raw: &str) -> Result<Self, Report<ArchiveReadError>> {
         let valid = !raw.is_empty()
             && raw.len() <= MAX_PATH_BYTES
@@ -430,6 +441,60 @@ mod tests {
             );
             SectionPath::parse(path.as_str()).verified("the path was just written validly");
         }
+    }
+
+    /// Every path the writer produces parses at its longest: each name at the 128-byte name limit,
+    /// the widest unit, branch fingerprint, version and group, and the longest owner kind. The
+    /// longest of them, a window group's argument columns, is the 417 bytes the backup and restore
+    /// chapter names beside the section path limit.
+    #[test]
+    fn the_longest_written_paths_parse() {
+        let name = "n".repeat(128);
+        let domain = domain(&name);
+        let entity = ModelName::parse(&name).assured("a 128-byte name is a valid model name");
+        let resource = resource(&name);
+        let unit = Unit::try_instance(Unit::MAX_INSTANCE_INDEX)
+            .assured("the largest instance index is a valid unit");
+        let fingerprint = BranchKeyFingerprint::new([u8::MAX; 32]);
+        let branch = Some(&fingerprint);
+        let version = NonZeroU64::MAX;
+        let group = u32::MAX;
+        let mut kind = ModelKind::Schema;
+        for candidate in <ModelKind as strum::IntoEnumIterator>::iter() {
+            if candidate.as_str().len() > kind.as_str().len() {
+                kind = candidate;
+            }
+        }
+        let paths = [
+            SectionPath::users(),
+            SectionPath::domain_record(&domain),
+            SectionPath::domain_models(&domain),
+            SectionPath::domain_partitions(&domain),
+            SectionPath::resource_version_record(&domain, &resource, version),
+            SectionPath::resource_archive(&domain, &resource, version),
+            SectionPath::wasm_state_descriptor(&domain, &entity, unit, branch),
+            SectionPath::wasm_guest_blob(&domain, &entity, unit, branch),
+            SectionPath::materialized_descriptor(&domain, &entity, unit),
+            SectionPath::materialized_identities(&domain, &entity, unit, group),
+            SectionPath::materialized_columns(&domain, &entity, unit, group),
+            SectionPath::deduplicator_descriptor(&domain, &entity, unit, branch),
+            SectionPath::deduplicator_keys(&domain, &entity, unit, branch, group),
+            SectionPath::inferencer_descriptor(&domain, &entity, unit, branch),
+            SectionPath::inferencer_tensor_values(&domain, &entity, unit, branch),
+            SectionPath::window_descriptor(&domain, &entity, unit, branch),
+            SectionPath::window_input_rows(&domain, &entity, unit, branch, group),
+            SectionPath::window_argument_columns(&domain, &entity, unit, branch, group),
+            SectionPath::kafka_offsets(&domain, &entity, unit),
+            SectionPath::branch_lifecycle(&domain, kind, &entity, unit),
+        ];
+        let mut longest = 0;
+        for path in &paths {
+            let parsed = SectionPath::parse(path.as_str()).assured("every written path parses");
+            assert_eq!(&parsed, path);
+            longest = longest.max(path.as_str().len());
+        }
+        assert_eq!(longest, 417);
+        assert!(longest < MAX_PATH_BYTES);
     }
 
     #[test]

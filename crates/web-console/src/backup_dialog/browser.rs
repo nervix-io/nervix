@@ -20,7 +20,18 @@ use crate::wait_for_browser_delay;
 /// The media type the browser saves an archive as.
 const ARCHIVE_MEDIA_TYPE: &str = "application/x-tar";
 
-/// How long the browser keeps the address of a saved archive before the console releases it.
+/// How long the browser keeps the address of a saved archive before the console releases it. The
+/// browser resolves the address when the download starts, and releasing it only refuses later
+/// uses, so this bounds how long the archive's memory stays held, never the download.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter releases a saved archive's object URL 60 seconds after \
+                  its download starts; the download resolved it at its start, so the delay only \
+                  bounds how long the archive's memory stays held"
+    )
+)]
 const SAVED_ARCHIVE_LIFETIME: Duration = Duration::from_secs(60);
 
 /// One message a console WebSocket received.
@@ -217,8 +228,9 @@ impl DownloadedArchive for BlobArchive {
             return Err(ArchiveSaveFailed);
         };
         let saved = save_address(&address, file_name);
-        // The browser reads the archive through its address while it saves it, so the address is
-        // released only once the save has long begun.
+        // The browser resolves the address when the save starts, and releasing it refuses only
+        // later uses; the address is released once the save has long begun, which bounds how long
+        // the archive's memory stays held.
         wasm_bindgen_futures::spawn_local(async move {
             wait_for_browser_delay(SAVED_ARCHIVE_LIFETIME).await;
             web_sys::Url::revoke_object_url(&address).discarded(

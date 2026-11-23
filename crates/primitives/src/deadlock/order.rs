@@ -20,7 +20,23 @@ use std::{
 
 use super::{BlockedAttempt, BoundedText, LockSite, TrackedLockId, TrackedThreadId};
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter retains at most 64 edges of each potential \
+                  cycle"
+    )
+)]
 pub const MAX_ORDER_EDGES: usize = 64;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter retains at most 1,024 source witnesses per \
+                  order edge"
+    )
+)]
 pub const MAX_ORDER_WITNESSES: usize = 1_024;
 /// The directed lock-instance edges one process's order history keeps. Ending a lock does not give
 /// its edges back, so a lock that lives for one request and is taken under the lock of an owner
@@ -28,6 +44,16 @@ pub const MAX_ORDER_WITNESSES: usize = 1_024;
 /// owner. The three-node 40-relay materialized restore with a leadership handoff leaves more than
 /// 13,000 such edges in one process, and more when its relay deliveries retry, so the bound leaves
 /// room for several times that.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter bounds a diagnostic run's order history \
+                  memory at 65,536 directed instance edges, several times the per-request edges \
+                  its largest qualified workload leaves, and turns a refused edge into an \
+                  explicit overload finding instead of dropping it"
+    )
+)]
 pub const MAX_ORDER_HISTORY_EDGES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

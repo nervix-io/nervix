@@ -24,13 +24,6 @@ use crate::{
     },
 };
 
-/// The users record's format version.
-const USERS_VERSION: u16 = 3;
-/// The domain record's format version.
-const DOMAIN_VERSION: u16 = 3;
-/// The resource version record's format version.
-const RESOURCE_VERSION_VERSION: u16 = 1;
-
 /// Every user of a cluster backup, in name order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsersRecord {
@@ -115,7 +108,14 @@ pub struct PublishedResourceVersion {
 
 impl ArchiveRecord for UsersRecord {
     const KIND: RecordKind = RecordKind::Users;
-    const VERSION: u16 = USERS_VERSION;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported users record shape"
+        )
+    )]
+    const VERSION: u16 = 3;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let wire = UsersWire {
@@ -161,7 +161,14 @@ impl ArchiveRecord for UsersRecord {
 
 impl ArchiveRecord for DomainRecord {
     const KIND: RecordKind = RecordKind::Domain;
-    const VERSION: u16 = DOMAIN_VERSION;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported domain record shape"
+        )
+    )]
+    const VERSION: u16 = 3;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let pace = match self.pace {
@@ -320,7 +327,14 @@ impl DomainRecord {
 
 impl ArchiveRecord for ResourceVersionRecord {
     const KIND: RecordKind = RecordKind::ResourceVersion;
-    const VERSION: u16 = RESOURCE_VERSION_VERSION;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported resource version record shape"
+        )
+    )]
+    const VERSION: u16 = 1;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         let state = match &self.state {

@@ -131,6 +131,11 @@ impl ConfiguredFaultInjection {
         None
     }
 
+    /// A node built without the test harness always drains its admitted work when it shuts down.
+    pub(crate) const fn runs_shutdown_drain(&self) -> bool {
+        true
+    }
+
     pub(crate) const fn overflows_wasm_state_page_reply(
         &self,
         _domain: &nervix_models::DomainName,

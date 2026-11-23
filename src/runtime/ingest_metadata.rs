@@ -313,6 +313,17 @@ impl IngestMetadataProjection {
     }
 }
 
+/// The text or byte value bytes a metadata builder reserves before its values are appended: none.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a text or byte metadata value is as long as its message makes it, so the \
+                  builder reserves offsets for its row bound and no value bytes it cannot know yet"
+    )
+)]
+const RESERVED_VALUE_BYTES: usize = 0;
+
 /// The Arrow builder of one read metadata field, of the field's declared type.
 enum IngestMetadataColumnBuilder {
     String(StringBuilder),
@@ -332,10 +343,14 @@ impl IngestMetadataColumnBuilder {
     /// because a value is as long as its message makes it.
     fn new(ty: IngestorMetadataType, row_bound: usize) -> Self {
         match ty {
-            IngestorMetadataType::String => {
-                Self::String(StringBuilder::with_capacity(row_bound, 0))
-            }
-            IngestorMetadataType::Bytes => Self::Bytes(BinaryBuilder::with_capacity(row_bound, 0)),
+            IngestorMetadataType::String => Self::String(StringBuilder::with_capacity(
+                row_bound,
+                RESERVED_VALUE_BYTES,
+            )),
+            IngestorMetadataType::Bytes => Self::Bytes(BinaryBuilder::with_capacity(
+                row_bound,
+                RESERVED_VALUE_BYTES,
+            )),
             IngestorMetadataType::Bool => Self::Bool(BooleanBuilder::with_capacity(row_bound)),
             IngestorMetadataType::U8 => Self::U8(UInt8Builder::with_capacity(row_bound)),
             IngestorMetadataType::U16 => Self::U16(UInt16Builder::with_capacity(row_bound)),
@@ -1920,6 +1935,7 @@ mod tests {
         let grouped_keys = vec![None, None];
         let grouped_outcomes = evaluate_filter_map_on_batch(
             &Executor::default(),
+            &SharedRemoteAckTiming::default(),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &grouped_carrier,
