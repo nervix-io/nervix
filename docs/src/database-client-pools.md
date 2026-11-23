@@ -131,7 +131,11 @@ connection: a checkout that runs out of it reports `checking out a Redis command
 finish within connect_timeout_ms` with the bound. Every Redis checkout tests the connection it
 hands over with a `PING`, which Redis must answer within the driver's 500 ms, as it must answer the
 `PUBLISH` that follows. A connection that fails the test is closed, and the checkout takes another
-idle connection or opens a new one within the same deadline. No key turns the test off, as a
+idle connection or opens a new one within the same deadline. The pool tries again by itself to open
+a connection that failed, after 400 ms and then twice as long each time, at most half of
+`connect_timeout_ms`, and stops at the first failure after `connect_timeout_ms` has passed since its
+first try; a checkout that ends without a connection fails its publish once, for the emitter's
+`RETRY POLICY` to try again. No key turns the test off, as a
 Postgres client's `pool_test_before_acquire` does. A MongoDB write has only its driver's deadlines:
 server selection ends after `serverSelectionTimeoutMS`, 30 seconds by default, and opening a
 connection's TCP and TLS session after `connectTimeoutMS`, 10 seconds by default, both set in
