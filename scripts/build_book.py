@@ -442,7 +442,7 @@ itself while this book was built, so it describes exactly the release you are re
 options are grouped by area: the node's identity, addresses and paths, which are not settings, and
 then one group per area of settings. [Node Settings](node-settings.md) explains the class of each
 setting and how its default and validation are owned, and
-[Running Nervix](quickstart-running.md) shows how to start a node with them.
+[Running Nervix](quickstart-running.md) shows how to start a node with them. [Sizing A Node](sizing.md) explains what a node derives from its CPU count and memory.
 
 {body}
 """

@@ -19,8 +19,8 @@ use nervix_connector::{EmitterFinish, EmitterFinishError};
 use nervix_primitives::{runtime::Builder, sync::oneshot, time::Instant};
 
 use super::{
-    CommandSendReceipt, PULSAR, PULSAR_OUTBOUND_CAPACITY, PulsarConnectionError, PulsarError,
-    PulsarProducerError, UnconfirmedPulsarPublication,
+    CommandSendReceipt, PULSAR, PulsarConnectionError, PulsarError, PulsarProducerError,
+    UnconfirmedPulsarPublication, outbound_capacity,
 };
 
 type DriverReceipt = Result<CommandSendReceipt, PulsarError>;
@@ -74,7 +74,7 @@ struct HandOver {
 
 #[derive(Debug, bolero::TypeGenerator)]
 struct ReceiptScript {
-    #[generator(bolero::generator::produce_with::<Vec<HandOver>>().len(0_usize..=PULSAR_OUTBOUND_CAPACITY))]
+    #[generator(bolero::generator::produce_with::<Vec<HandOver>>().len(0_usize..=outbound_capacity()))]
     records: Vec<HandOver>,
     wait_before_expiry: bool,
 }
@@ -106,7 +106,7 @@ impl ReceiptScript {
             }
             let expected_held = unanswered + usize::from(uncollected_answer);
             assert_eq!(owner.receipts.len(), expected_held);
-            assert!(owner.receipts.len() <= PULSAR_OUTBOUND_CAPACITY);
+            assert!(owner.receipts.len() <= outbound_capacity());
         }
         let had_receipts = unanswered > 0 || uncollected_answer;
         let deadline = if self.wait_before_expiry {
@@ -184,7 +184,7 @@ fn bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure() {
                         answer,
                         collect: false
                     };
-                    PULSAR_OUTBOUND_CAPACITY
+                    outbound_capacity()
                 ],
                 wait_before_expiry,
             };
@@ -202,7 +202,7 @@ fn bolero_receipts_keep_exact_unanswered_counts_and_the_first_failure() {
 async fn a_full_receipt_set_waits_for_any_answer_before_another_hand_over() {
     let mut owner = UnconfirmedPulsarPublication::<ScriptedReceipt>::default();
     let mut answers = Vec::new();
-    for _ in 0..PULSAR_OUTBOUND_CAPACITY {
+    for _ in 0..outbound_capacity() {
         nervix_primitives::task::consume_budget().await;
         owner.make_room().await;
         let (answer, receipt) = oneshot::channel::<DriverReceipt>();
@@ -220,11 +220,11 @@ async fn a_full_receipt_set_waits_for_any_answer_before_another_hand_over() {
     let mut waiting = Box::pin(owner.make_room());
     assert!(waiting.as_mut().now_or_never().is_none());
     answers
-        .remove(PULSAR_OUTBOUND_CAPACITY / 2)
+        .remove(outbound_capacity() / 2)
         .send(Ok(Answer::confirmation()))
         .assured("the production owner still retains the chosen receipt");
     waiting.await;
-    assert_eq!(owner.receipts.len(), PULSAR_OUTBOUND_CAPACITY - 1);
+    assert_eq!(owner.receipts.len(), outbound_capacity() - 1);
     owner.retain(Answer::Unanswered.receipt());
-    assert_eq!(owner.receipts.len(), PULSAR_OUTBOUND_CAPACITY);
+    assert_eq!(owner.receipts.len(), outbound_capacity());
 }

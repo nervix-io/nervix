@@ -82,8 +82,16 @@ use super::transport::{ClientTransport, RedirectAnswer, Redirects};
 const HTTP_EMITTER: &str = "HTTP";
 
 /// How many times its name lookup's share goes into what a request has of its attempt's
-/// `timeout_ms`. A policy input: whatever the name servers do, the address attempts, TLS and the
-/// request keep the rest of it.
+/// `timeout_ms`: the fixed share the HTTP REQUEST declaration publishes, so whatever the name
+/// servers do, the address attempts, TLS and the request keep the rest of it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the HTTP REQUEST emitter's declaration and the Name Resolution chapter give a \
+                  request's name lookup at most half of what is left of its timeout_ms"
+    )
+)]
 const LOOKUP_SHARE_DIVISOR: u32 = 2;
 
 const _: () = assert!(

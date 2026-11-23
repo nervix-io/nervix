@@ -408,7 +408,8 @@ operation receives that context, and the S3, GCS and Azure signers send the HTTP
 OpenDAL's credential providers through its transport too. The object-store client's optional
 `timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
 OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
-the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
+the key, metadata operations (stat, directory creation, rename and presign) allow 60 seconds, and
+reads, writes, lists, copies and deletes allow 10 seconds.
 Each of the two Iceberg HTTP clients receives the rustls configuration that the shared
 `RustlsClientConfigProvider` builds from its own client's entries. It holds the bundled WebPKI roots and the
 platform's native roots with the client's `tls_ca_file` added, and the identity of its
@@ -1829,9 +1830,11 @@ sender replacement or shutdown ends them. These correlations remain volatile and
 connector position or persisted commit. [Cluster Interconnect](./interconnect.md) owns their
 capacity and deadline contracts.
 
-The host refreshes pending ACK progress every 100 milliseconds during connector requests and
-retries. This cadence must stay shorter than an ingestor's one-second `ACK TIMEOUT` so a pending
-attached emitter attempt does not make the ingestor replay work while the emitter still owns it.
+The host refreshes pending ACK progress every committed `REMOTE_ACK_ALIVE_INTERVAL`, 100
+milliseconds by default, during connector requests and retries. This cadence must stay shorter than
+an ingestor's `ACK TIMEOUT`, such as a one-second one, so a pending attached emitter attempt does not
+make the ingestor replay work while the emitter still owns it. Each request or retry wait reads the
+interval once it is pending, so a committed change reaches the next one.
 
 Each ingestor host retains its exact instance readiness handle. Poll success and suspend/resume
 publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
@@ -1895,7 +1898,7 @@ does meanwhile:
 | Kafka | A consumer group's member pauses fetching and services its group through the hold hook, so it stays in its group; a domain-offset reader keeps its explicit assignment. |
 | Pulsar | The connection task answers the broker's pings, and the broker stops sending once the receiver queue's flow permits are spent. |
 | RabbitMQ | Heartbeats run on the client's own task. An acknowledged mode's prefetch bounds what the broker sends; under `NO ACK` Lapin's delivery queue keeps growing, without a bound. |
-| MQTT | The connection's driver task keeps the event loop, and with it the keep-alive, running while it reads up to 64 publishes ahead under `NO ACK`. Once those fill, the driver stops reading, and the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| MQTT | The connection's driver task keeps the event loop, and with it the keep-alive, running while it reads up to `--mqtt-read-ahead-headroom` publishes, 64 by default, ahead under `NO ACK`. Once those fill, the driver stops reading, and the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
 | Redis Pub/Sub | The dedicated reader keeps reading and sending idle probes until `subscription_buffer_messages` messages wait, then applies TCP backpressure; Redis closes the subscriber at its `client-output-buffer-limit`. |
 | WebSocket client | The hold hook keeps reading, answering the server's pings and writing the client's own, and parks one data frame in a declared read-ahead that the next read hands over first. Once a frame is parked nothing further is read: unread frames stay with the transport, and a server that pings with a deadline can close the connection. The idle window restarts when reading resumes, so the held time is not counted as the peer's silence. |
 
@@ -2113,19 +2116,22 @@ publishes or compact discard acknowledgements to the ingestor through a bounded 
 packet order. Admitted topic, payload and correlation bytes are copied out of the raw framing
 allocation, so a small admitted slice cannot retain an oversized neighbouring frame.
 
-In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
-Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
-Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 or 2 while that many
-wait on their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
-gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra capacity lets the
-connection keep reading while the host holds a batch. The broker holds back no publish at QoS 0,
-which a subscription at QoS 1 or 2 receives from a publisher that sends at QoS 0. In an `ACK` mode the
-read-ahead reserves the full Receive Maximum for QoS 1/2 packet outcomes and admits up to 64 QoS 0
-outcomes alongside them, in the same packet-ordered queue. Each queued QoS 0 outcome owns one
-capacity permit until the ingestor takes it. Excess QoS 0 publishes are dropped and counted, so
-they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK` or `PUBREC`, or stop
-keep-alive pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
-as an oversized outcome; no payload is counted twice.
+In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window plus the node's
+`--mqtt-read-ahead-headroom`, 64 by default, as its Receive Maximum, up to MQTT's largest Receive
+Maximum, 65,535: at the default, 65 under `ACK SEQUENTIAL` and `ACK PARALLEL MAX` plus 64 under
+`ACK PARALLEL`. The headroom is a node capability of the connector host, so nodes may run different
+values during a roll, and it changes nothing a statement declares. The broker then sends no further
+publish at QoS 1 or 2 while that many wait on their acknowledgements, so a batch holds at most that
+many, and an `ACK PARALLEL MAX` above 65,535 gathers at most 65,535 of them before its
+`BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the host holds a
+batch. The broker holds back no publish at QoS 0, which a subscription at QoS 1 or 2 receives from a
+publisher that sends at QoS 0. In an `ACK` mode the read-ahead reserves the full Receive Maximum for
+QoS 1/2 packet outcomes and admits up to the headroom's count of QoS 0 outcomes alongside them, in
+the same packet-ordered queue. Each queued QoS 0 outcome owns one capacity permit until the ingestor
+takes it. Excess QoS 0 publishes are dropped and counted, so they cannot stop event-loop polling,
+consume a QoS 1/2 slot, delay a `PUBACK` or `PUBREC`, or stop keep-alive pings. An oversized QoS 0
+publish that cannot enter read-ahead is counted as overflow rather than as an oversized outcome; no
+payload is counted twice.
 
 The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` for each ingestor unit,
 registered at zero, and hands the connector an `IngestorReadAheadOverflow` report in the unit's
@@ -2167,9 +2173,9 @@ cancellation, retirement debt and terminal close. The registered Shuttle check c
 production subscription owner's lifetime with controlled completion and no modeled network.
 
 Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
-Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outcome and polls
-nothing until the ingestor reads one, so the connection's flow control holds the broker back and
-the client sends no keep-alive until the host reads again.
+Its read-ahead holds the headroom's count of outcomes, 64 by default. Once it is full, the task
+holds the next outcome and polls nothing until the ingestor reads one, so the connection's flow
+control holds the broker back and the client sends no keep-alive until the host reads again.
 
 Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1, and a `PUBREC` for
 each at QoS 2, and returns once the event loop has written all of them to the connection and

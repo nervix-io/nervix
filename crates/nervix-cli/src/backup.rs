@@ -99,8 +99,18 @@ enum ArchiveOutput {
 /// The name of the archive in its staging directory.
 const STAGED_ARCHIVE: &str = "backup.nvxb";
 
-/// The archive bytes one read of the staged archive hands to standard output, a Linux pipe's
-/// default capacity.
+/// The archive bytes one read of the staged archive hands to standard output. The CLI copies a
+/// staged archive through one buffer of this size, which bounds only the CLI's own copy memory and
+/// the read and write calls the copy makes, never the bytes standard output receives.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the CLI copies a staged archive through one 64 KiB buffer; the copy writes \
+                  every byte it reads and keeps read and write failures apart at any size, so the \
+                  size bounds only the CLI's own copy memory and system calls, never the result"
+    )
+)]
 const DELIVERY_CHUNK_BYTES: usize = 64 * 1024;
 
 /// The device that keeps nothing written to it.
@@ -1066,14 +1076,9 @@ fn runtime_state_json(state: &DescribedRuntimeState) -> Value {
     }
 }
 
+/// A digest's text in a report: its lowercase hexadecimal digits.
 fn digest_hex(bytes: &[u8; 32]) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in bytes {
-        let byte = *byte;
-        hex.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
-        hex.push(char::from(b"0123456789abcdef"[usize::from(byte & 15)]));
-    }
-    hex
+    faster_hex::hex_string(bytes)
 }
 
 fn cut_json(cut: nervix_models::BackupCut) -> Value {
@@ -1529,6 +1534,28 @@ mod tests {
         assert_eq!(
             json,
             json!({ "error": { "code": "WRITE_FAILED", "message": "no staging" } })
+        );
+    }
+
+    /// No bit set, every bit set, and every hexadecimal digit in both halves of a byte.
+    #[test]
+    fn digest_hex_writes_fixed_digests_as_lowercase_hexadecimal() {
+        let every_digit = [
+            0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76,
+            0x54, 0x32, 0x10, 0x0f, 0xf0, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96,
+            0xa5, 0xb4, 0xc3, 0xd2,
+        ];
+        assert_eq!(
+            digest_hex(&[0x00; 32]),
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            digest_hex(&[0xff; 32]),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
+        assert_eq!(
+            digest_hex(&every_digit),
+            "000123456789abcdeffedcba98765432100ff01e2d3c4b5a69788796a5b4c3d2"
         );
     }
 }

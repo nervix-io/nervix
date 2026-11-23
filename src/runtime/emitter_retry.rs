@@ -3,8 +3,9 @@
 //! Layer: data plane.
 //! - **Owns.** The monotonic deadline of an emitter's next attempt, the keepalive of the
 //!   acknowledgements it holds between publishes, and how long each retry waits.
-//! - **Depends on.** The emitter's declared backoff, the physical-time capability, the
-//!   acknowledgements of its buffered and staged work, and its transient-error status.
+//! - **Depends on.** The emitter's declared backoff, the physical-time capability, the node's
+//!   installed remote acknowledgement timing, the acknowledgements of its buffered and staged work,
+//!   and its transient-error status.
 //! - **Must not know.** What the emitter publishes, which connector it publishes through, or the
 //!   domain clock its flush cadence reads.
 
@@ -21,17 +22,28 @@ use nervix_connector::{
 
 use super::*;
 
-pub(super) const RETRY_ACK_ALIVE_EACH: Duration = nervix_models::RemoteAckAliveInterval::DEFAULT;
+/// Why an emitter's acknowledgement beat always fits the monotonic clock.
+const ACK_ALIVE_BEAT_FITS: &str = "the installed alive interval is a validated cluster parameter \
+                                   of at most u32::MAX seconds, which the monotonic clock's \
+                                   64-bit seconds add to any instant it reports";
 
 /// One physical beat for buffered or connector-staged work. It retains no ACK handles and
 /// admits each input's obligations once, so hot input neither postpones the beat nor repeatedly
 /// copies the growing buffer's acknowledgements. A retry owns its own beat while active.
-#[derive(Default)]
+///
+/// Each beat waits the committed `REMOTE_ACK_ALIVE_INTERVAL` it reads as it is armed, so a
+/// committed change reaches the emitter's next beat.
 pub(super) struct EmitterBufferedKeepalive {
+    /// The installed remote acknowledgement timing the emitter task kept from its start.
+    timing: SharedRemoteAckTiming,
     next: Option<PhysicalDeadline>,
 }
 
 impl EmitterBufferedKeepalive {
+    pub(super) fn new(timing: SharedRemoteAckTiming) -> Self {
+        Self { timing, next: None }
+    }
+
     pub(super) fn include_batch(&mut self, batch: &EmitterPublishBatch) {
         if self.next.is_none() && batch.relay_batch().acks.iter().any(|acks| !acks.is_empty()) {
             self.arm();
@@ -41,8 +53,8 @@ impl EmitterBufferedKeepalive {
     fn arm(&mut self) {
         self.next = Some(
             PhysicalDeadlineCapability::operational()
-                .after(RETRY_ACK_ALIVE_EACH)
-                .assured("the acknowledgement keepalive interval is a fixed hundred milliseconds"),
+                .after(self.timing.ack_alive_interval())
+                .assured(ACK_ALIVE_BEAT_FITS),
         );
     }
 
@@ -135,9 +147,11 @@ impl AcknowledgementKeepalive for EmitterAcknowledgements {
 /// Both deadlines are monotonic. Retry backoff measures real unavailability of an external system
 /// and an acknowledgement keepalive measures a real upstream liveness expectation, so neither is
 /// scaled by the domain's pace. While a retry is scheduled it replaces the emitter's cadence wake,
-/// which stays armed and unchanged underneath it.
-#[derive(Default)]
+/// which stays armed and unchanged underneath it. Each keepalive beat waits the committed
+/// `REMOTE_ACK_ALIVE_INTERVAL` it reads as it is armed.
 pub(super) struct EmitterRetrySchedule {
+    /// The installed remote acknowledgement timing the emitter task kept from its start.
+    timing: SharedRemoteAckTiming,
     retry_at: Option<PhysicalDeadline>,
     ack_alive_at: Option<PhysicalDeadline>,
     acks: EmitterAcknowledgements,
@@ -145,6 +159,16 @@ pub(super) struct EmitterRetrySchedule {
 }
 
 impl EmitterRetrySchedule {
+    pub(super) fn new(timing: SharedRemoteAckTiming) -> Self {
+        Self {
+            timing,
+            retry_at: None,
+            ack_alive_at: None,
+            acks: EmitterAcknowledgements::default(),
+            waiting_for_stall_clear: false,
+        }
+    }
+
     pub(super) fn is_active(&self) -> bool {
         self.retry_at.is_some()
     }
@@ -168,7 +192,7 @@ impl EmitterRetrySchedule {
         if !acks.is_empty() {
             self.acks = acks;
         }
-        self.ack_alive_at = (!self.acks.is_empty()).then(|| Self::next_ack_alive_at(retry_at));
+        self.ack_alive_at = (!self.acks.is_empty()).then(|| self.next_ack_alive_at(retry_at));
         self.waiting_for_stall_clear = waiting_for_stall_clear;
         Ok(())
     }
@@ -187,7 +211,7 @@ impl EmitterRetrySchedule {
         if let Some(retry_at) = self.retry_at
             && self.ack_alive_at.is_none()
         {
-            self.ack_alive_at = Some(Self::next_ack_alive_at(retry_at));
+            self.ack_alive_at = Some(self.next_ack_alive_at(retry_at));
         }
     }
 
@@ -200,14 +224,14 @@ impl EmitterRetrySchedule {
         } else if let Some(retry_at) = self.retry_at
             && self.ack_alive_at.is_none()
         {
-            self.ack_alive_at = Some(Self::next_ack_alive_at(retry_at));
+            self.ack_alive_at = Some(self.next_ack_alive_at(retry_at));
         }
     }
 
-    fn next_ack_alive_at(retry_at: PhysicalDeadline) -> PhysicalDeadline {
+    fn next_ack_alive_at(&self, retry_at: PhysicalDeadline) -> PhysicalDeadline {
         let keepalive = PhysicalDeadlineCapability::operational()
-            .after(RETRY_ACK_ALIVE_EACH)
-            .assured("the acknowledgement keepalive interval is a fixed hundred milliseconds");
+            .after(self.timing.ack_alive_interval())
+            .assured(ACK_ALIVE_BEAT_FITS);
         // The last keepalive of a wait lands on the retry itself rather than after it.
         keepalive.min(retry_at)
     }
@@ -240,7 +264,7 @@ impl EmitterRetrySchedule {
             .is_some_and(|ack_alive_at| physical_time.is_reached(ack_alive_at))
         {
             self.acks.keep_alive();
-            self.ack_alive_at = Some(Self::next_ack_alive_at(retry_at));
+            self.ack_alive_at = Some(self.next_ack_alive_at(retry_at));
         }
         false
     }
@@ -338,7 +362,7 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn buffered_keepalive_preserves_its_beat_and_refreshes_only_surviving_obligations() {
-        let mut keepalive = EmitterBufferedKeepalive::default();
+        let mut keepalive = EmitterBufferedKeepalive::new(SharedRemoteAckTiming::default());
         keepalive.include_batch(&EmitterPublishBatch::from_batch(
             input_batch(),
             Timestamp::from_unix_nanos(0),
@@ -397,7 +421,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn retiring_the_last_branch_ack_keeps_the_physical_retry_deadline() {
         let (acks, completion) = AckSet::root();
-        let mut retry = EmitterRetrySchedule::default();
+        let mut retry = EmitterRetrySchedule::new(SharedRemoteAckTiming::default());
         retry
             .schedule(Duration::from_secs(60), acks.clone(), false)
             .assured("a one-minute fixture retry fits the physical clock");
@@ -481,7 +505,7 @@ mod tests {
 
     #[test]
     fn retry_schedule_preserves_its_deadline_until_a_retry_attempt() {
-        let mut retry = EmitterRetrySchedule::default();
+        let mut retry = EmitterRetrySchedule::new(SharedRemoteAckTiming::default());
         retry
             .schedule(Duration::from_secs(10), AckSet::empty(), false)
             .expect("the fixture backoff fits the monotonic clock range");
@@ -509,7 +533,7 @@ mod tests {
         let cadence = buffer
             .deadline()
             .expect("the push arms the logical cadence");
-        let mut retry = EmitterRetrySchedule::default();
+        let mut retry = EmitterRetrySchedule::new(SharedRemoteAckTiming::default());
 
         let idle = retry.wake(RuntimeWake::never().with_buffer(&context.clock, cadence.clone()));
         assert!(
@@ -537,7 +561,7 @@ mod tests {
 
     #[test]
     fn retry_schedule_releases_a_stall_as_soon_as_the_fault_clears() {
-        let mut retry = EmitterRetrySchedule::default();
+        let mut retry = EmitterRetrySchedule::new(SharedRemoteAckTiming::default());
         retry
             .schedule(Duration::from_secs(30), AckSet::empty(), true)
             .expect("the fixture backoff fits the monotonic clock range");
@@ -553,7 +577,7 @@ mod tests {
         let (existing, mut existing_completion) = AckSet::root();
         let (force_drained, mut force_completion) = AckSet::root();
         let (emitter_retained, mut emitter_completion) = AckSet::root();
-        let mut retry = EmitterRetrySchedule::default();
+        let mut retry = EmitterRetrySchedule::new(SharedRemoteAckTiming::default());
         retry
             .schedule(Duration::from_secs(30), existing, false)
             .expect("the fixture backoff fits the monotonic clock range");

@@ -47,6 +47,7 @@ async fn filter_evaluation_uses_the_typed_operation_when_the_error_site_is_unmap
         ProgramRun {
             executor: &Executor::default(),
             now: Timestamp::from_unix_nanos(1),
+            ack_timing: &SharedRemoteAckTiming::default(),
         },
         "processor",
         &named::<ModelName>("route_filter"),
@@ -110,6 +111,7 @@ async fn filter_predicate_evaluation_error_becomes_a_planned_message_error() {
         ProgramRun {
             executor: &Executor::default(),
             now: Timestamp::from_unix_nanos(1),
+            ack_timing: &SharedRemoteAckTiming::default(),
         },
         "processor",
         &named::<ModelName>("input_filter"),

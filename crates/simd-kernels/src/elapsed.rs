@@ -14,9 +14,25 @@ use thiserror::Error;
 use crate::LEVEL;
 
 /// The most significant figures a layout resolves, the limit HdrHistogram accepts.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "HdrHistogram accepts at most five significant figures, and a layout reproduces \
+                  its buckets"
+    )
+)]
 const MAX_SIGNIFICANT_FIGURES: u8 = 5;
 /// Every non-negative integer below this bound is exact in an `f64`. The lanes divide a doubled
 /// elapsed time in `f64`, so a layout keeps that numerator below it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "IEEE 754 binary64 represents every integer below 2^53 exactly in its 53-bit \
+                  significand"
+    )
+)]
 const EXACT_F64_INTEGERS: u64 = 1 << f64::MANTISSA_DIGITS;
 
 /// How elapsed nanoseconds become recorded units and log-linear buckets.

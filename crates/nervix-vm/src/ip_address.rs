@@ -45,7 +45,8 @@ use crate::{
 /// The unsigned integer that holds the bits of one family's addresses, most significant bit first,
 /// which is the order their octets have in network byte order.
 trait AddressBits: Copy + Eq + BitAnd<Output = Self> {
-    /// How many bits an address has, which is also its longest prefix.
+    /// How many bits an address has, which is also its longest prefix. Each address family's
+    /// protocol fixes it.
     const WIDTH: u8;
 
     /// The mask that keeps the first `prefix` bits, or `None` when an address is shorter than
@@ -57,6 +58,14 @@ macro_rules! address_bits {
     ($($native:ty => $width:literal),+ $(,)?) => {
         $(
             impl AddressBits for $native {
+                #[cfg_attr(
+                    nervix_lint,
+                    nervix::constant(
+                        fixed,
+                        reason = "an IPv4 address has 32 bits and an IPv6 address 128, the widths \
+                                  of the u32 and u128 that hold them"
+                    )
+                )]
                 const WIDTH: u8 = $width;
 
                 fn prefix_mask(prefix: u8) -> Option<Self> {

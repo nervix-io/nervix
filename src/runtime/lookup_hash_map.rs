@@ -790,6 +790,7 @@ mod tests {
             ProgramRun {
                 executor: &Executor::default(),
                 now: Timestamp::now(),
+                ack_timing: &SharedRemoteAckTiming::default(),
             },
             "deduplicator",
             &named::<ModelName>("project_titles"),

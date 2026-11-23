@@ -40,22 +40,31 @@ use crate::{
 };
 
 /// Archive bytes one upload frame carries.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client implementation manual (rule U-1) publishes 64 KiB as the upload \
+                  chunk the Rust client sends"
+    )
+)]
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Archive construction keeps one bounded read buffer and one bounded write buffer, avoiding
 /// a filesystem worker handoff for every small tar copy and header write.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol publishes the Rust client's bounded 1 MiB read and \
+                  write buffers for archive construction"
+    )
+)]
 const ARCHIVE_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// The request identity of an upload's start frame. Every attempt is a stream of its own that
 /// exactly one reply answers, so the identity only has to be non-zero.
 const UPLOAD_REQUEST_ID: RequestId = RequestId::new(NonZeroU64::MIN);
-
-// An upload opens at most one call per leader routing attempt, and its outcome counts the calls
-// it opened in a `u32`: every attempt number below the bound fits one.
-const _: () = assert!(
-    Client::MAX_LEADER_ROUTING_ATTEMPTS.ilog2() < u32::BITS,
-    "the calls an upload opens fit the u32 its outcome counts them in"
-);
 
 impl Client {
     pub async fn upload_resource_from_directory(
@@ -107,7 +116,8 @@ impl Client {
                 // How many calls the upload opened, the one under way included.
                 let mut calls = NonZeroU32::MIN;
                 let mut next_limits = None;
-                for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+                for attempt in 0..routing_attempts.get() {
                     nervix_primitives::task::consume_budget().await;
                     calls = Self::upload_calls_opened(attempt);
                     let start = UploadStart {
@@ -156,7 +166,7 @@ impl Client {
                         }
                         Err(UploadSendFailure::Transport(status))
                             if upload_status_is_retryable(&status)
-                                && self.await_retry(attempt).await =>
+                                && self.await_retry(attempt, routing_attempts).await =>
                         {
                             debug!(
                                 upload_identity = %upload_identity,
@@ -196,7 +206,9 @@ impl Client {
                             self.follow_leader(leader, RecoveryDeadline::RetryBudget)
                                 .await?;
                         }
-                        Routing::AwaitElection if self.await_retry(attempt).await => {
+                        Routing::AwaitElection
+                            if self.await_retry(attempt, routing_attempts).await =>
+                        {
                             debug!(
                                 upload_identity = %upload_identity,
                                 calls = calls.get(),
@@ -281,14 +293,10 @@ impl Client {
     }
 
     /// How many calls an upload has opened once it opened the call of its zero-based `attempt`.
-    fn upload_calls_opened(attempt: usize) -> NonZeroU32 {
-        let earlier = u32::try_from(attempt).assured(
-            "an upload makes fewer attempts than MAX_LEADER_ROUTING_ATTEMPTS, which a const \
-             assertion keeps within u32",
-        );
-        NonZeroU32::MIN.checked_add(earlier).assured(
-            "the calls before this one number fewer than MAX_LEADER_ROUTING_ATTEMPTS, so counting \
-             this one as well stays within u32",
+    fn upload_calls_opened(attempt: u32) -> NonZeroU32 {
+        NonZeroU32::MIN.checked_add(attempt).assured(
+            "an upload numbers its attempts below its routing attempts, a `NonZeroU32`, so \
+             counting this one as well stays within u32",
         )
     }
 }
