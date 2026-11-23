@@ -74,8 +74,24 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 };
 
 /// The longest topic Nervix consumes, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual's Pulsar topic rule admits 1 to 1,024 UTF-8 bytes for \
+                  ingestion and emission alike"
+    )
+)]
 const PULSAR_TOPIC_MAX: usize = 1024;
 /// The longest subscription Nervix consumes through, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual publishes 1 to 255 bytes as the Pulsar subscription rule \
+                  CREATE and ALTER apply"
+    )
+)]
 const PULSAR_SUBSCRIPTION_MAX: usize = 255;
 /// The domains a qualified topic may name, which Pulsar defines.
 const PULSAR_TOPIC_DOMAINS: [&str; 2] = ["persistent", "non-persistent"];
@@ -443,6 +459,20 @@ const PULSAR_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["Inbound frames have no size limit."],
 };
 
+/// How many messages a PULSAR TOPIC emitter's client queues for its connection, which also bounds
+/// the receipts the emitter holds under NO ACK: one bound sizes both.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how many messages must wait for a Pulsar connection depends on the broker's \
+                  round trip and the publish rate; the bound stays fixed until its repair task \
+                  declares it on the PULSAR TOPIC emitter's Plexus surface \
+                  https://app.clickup.com/t/86bd5vvd7"
+    )
+)]
+pub const PULSAR_OUTBOUND_CAPACITY: u64 = 100;
+
 /// What the connector of a PULSAR TOPIC emitter holds and how long it waits.
 const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
@@ -450,7 +480,7 @@ const PULSAR_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
             holds: "receipts held under NO ACK",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Items {
-                    count: 100,
+                    count: PULSAR_OUTBOUND_CAPACITY,
                     unit: "receipts",
                 },
                 overflow: BufferOverflow::Backpressure,

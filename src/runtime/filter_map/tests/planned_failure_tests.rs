@@ -58,6 +58,7 @@ async fn a_branch_key_that_fails_for_one_row_leaves_the_other_rows_their_keys() 
         ProgramRun {
             executor: &Executor::default(),
             now: Timestamp::from_unix_nanos(1),
+            ack_timing: &SharedRemoteAckTiming::default(),
         },
         &program,
         &batch.batch,
@@ -99,6 +100,7 @@ async fn branch_construction_refuses_inputs_and_keys_of_another_row_count() {
     let run = ProgramRun {
         executor: &Executor::default(),
         now: Timestamp::from_unix_nanos(1),
+        ack_timing: &SharedRemoteAckTiming::default(),
     };
 
     let error = evaluate_output_branch_program(
@@ -162,6 +164,7 @@ async fn a_failed_program_run_hands_back_every_acknowledgement() {
         ProgramRun {
             executor: &Executor::default(),
             now: Timestamp::from_unix_nanos(1),
+            ack_timing: &SharedRemoteAckTiming::default(),
         },
         &program,
         FilterMapBatchInputs {
@@ -216,6 +219,7 @@ async fn a_planned_batch_that_cannot_prepare_its_input_hands_back_its_acknowledg
         ProgramRun {
             executor: &Executor::default(),
             now: Timestamp::from_unix_nanos(1),
+            ack_timing: &SharedRemoteAckTiming::default(),
         },
         "junction",
         named::<ModelName>("validate_filter_map"),

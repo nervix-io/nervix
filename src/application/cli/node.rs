@@ -3,9 +3,10 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The command-line form of the node's identity, tags, listen and advertised
-//!   addresses, TLS files, name resolution files, storage paths and trace collector, and their
-//!   conversion into the node's resolved identity, including the addresses derived from others
-//!   when they are not given.
+//!   addresses, session transport mode, TLS files, name resolution files, storage paths, trace
+//!   collector, bootstrap permission and initial administrator credential, and their conversion
+//!   into the node's resolved identity, including the addresses derived from others when they are
+//!   not given.
 //! - **Depends on.** The vocabulary's node names, tags and endpoints, the resolver's configuration
 //!   and the cluster's interconnect address derivation.
 //! - **Must not know.** Settings, or what the node runs once it has started.

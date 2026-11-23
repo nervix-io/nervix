@@ -23,10 +23,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use ubyte::ByteUnit;
 
-use super::{
-    DEFAULT_MEMORY_PRESSURE_CHECK_INTERVAL, DEFAULT_MEMORY_PRESSURE_RESUME_JITTER,
-    MemoryPressureConfig, MemoryPressureConfigError,
-};
+use super::{MemoryPressureConfig, MemoryPressureConfigError};
 
 /// The allocated bytes at which the node pauses every ingestor. Without it, and without the low
 /// watermark, the node runs no memory-pressure supervisor.
@@ -113,7 +110,7 @@ impl SettingDefinition for MemoryPressureCheckInterval {
     const DERIVATION: Option<&'static str> = None;
 
     fn default_value(_: &()) -> Duration {
-        DEFAULT_MEMORY_PRESSURE_CHECK_INTERVAL
+        Duration::from_millis(500)
     }
 
     fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
@@ -134,7 +131,7 @@ impl SettingDefinition for MemoryPressureResumeJitter {
     const DERIVATION: Option<&'static str> = None;
 
     fn default_value(_: &()) -> Duration {
-        DEFAULT_MEMORY_PRESSURE_RESUME_JITTER
+        Duration::from_secs(1)
     }
 
     fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
@@ -227,9 +224,31 @@ impl Default for MemoryPressureSettings {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use ubyte::ByteUnit;
 
-    use super::{MemoryPressureConfigError, MemoryPressureSettings};
+    use super::{MemoryPressureConfig, MemoryPressureConfigError, MemoryPressureSettings};
+
+    #[test]
+    fn the_supervisor_samples_every_half_second_and_resumes_within_a_second_by_default() {
+        let config = MemoryPressureSettings::resolve(
+            Some(ByteUnit::Mebibyte(2)),
+            Some(ByteUnit::Mebibyte(1)),
+            None,
+            None,
+        )
+        .expect("a low watermark below its high watermark pairs with it")
+        .config()
+        .expect("paired watermarks configure the supervisor");
+        assert_eq!(config.check_interval, Duration::from_millis(500));
+        assert_eq!(config.resume_jitter, Duration::from_secs(1));
+        let built = MemoryPressureConfig::builder()
+            .high_watermark(ByteUnit::Mebibyte(2))
+            .low_watermark(ByteUnit::Mebibyte(1))
+            .build();
+        assert_eq!(built, config);
+    }
 
     #[test]
     fn an_omitted_pair_derives_from_memory_and_an_explicit_pair_keeps_its_thresholds() {

@@ -102,9 +102,10 @@ impl RetryBackoffSettings {
                 "Duration's u64 seconds times nanoseconds and at most one hundred fit u128",
             ) / 100;
         let extra = Duration::new(
-            u64::try_from(extra_nanos / 1_000_000_000)
+            u64::try_from(extra_nanos / NANOS_PER_SECOND)
                 .assured("a percentage at most one hundred cannot exceed the nominal duration"),
-            u32::try_from(extra_nanos % 1_000_000_000).assured("a nanosecond remainder fits u32"),
+            u32::try_from(extra_nanos % NANOS_PER_SECOND)
+                .assured("a nanosecond remainder fits u32"),
         );
         match nominal.checked_add(extra) {
             Some(value) => value.min(cap),
@@ -112,6 +113,17 @@ impl RetryBackoffSettings {
         }
     }
 }
+/// The nanoseconds in a second, which split a nanosecond count into the whole seconds and the
+/// nanosecond remainder `Duration::new` takes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a second is 10^9 nanoseconds, the unit of Duration::new's remainder"
+    )
+)]
+const NANOS_PER_SECOND: u128 = 1_000_000_000;
+
 impl Default for RetryBackoffSettings {
     fn default() -> Self {
         Self::resolve(None, None).assured("the retry defaults validate")

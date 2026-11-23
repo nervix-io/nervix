@@ -20,6 +20,7 @@ use nervix_primitives::{sync::Arc, time::timeout};
 
 use super::*;
 use crate::{
+    runtime::test_fixtures::commit_remote_ack_alive_interval,
     runtime_ack::{AckOutcome, AckProgress, AckSet},
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
@@ -41,6 +42,7 @@ async fn a_delivery_to_the_relay_owner_reports_its_records_alive_while_it_waits(
     batch.acks = vec![acks];
     let domain = domain("default");
     let relay = named::<RelayName>("orders");
+    let beat = services.remote_ack_timing.ack_alive_interval();
     let delivery = services.dispatch_to_owner(&domain, &relay, &batch, Unit::SINGLE);
     tokio::pin!(delivery);
 
@@ -48,7 +50,7 @@ async fn a_delivery_to_the_relay_owner_reports_its_records_alive_while_it_waits(
         let progress = nervix_primitives::select! {
             biased;
             _ = &mut delivery => panic!("the delivery waits at the engaged dispatch gate"),
-            progress = timeout(REMOTE_ACK_ALIVE_INTERVAL * 2, completion.wait_for_progress()) => {
+            progress = timeout(beat * 2, completion.wait_for_progress()) => {
                 progress
             }
         };
@@ -116,6 +118,7 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
         .await
         .expect("the open channel serves an earlier delivery");
     let domain = domain("default");
+    let beat = services.remote_ack_timing.ack_alive_interval();
     let delivery = services.dispatch_remote_runtime_consumers(&domain, Unit::SINGLE, &batch);
     tokio::pin!(delivery);
 
@@ -123,7 +126,7 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
         let progress = nervix_primitives::select! {
             biased;
             _ = &mut delivery => panic!("the delivery waits for the consumer's channel"),
-            progress = timeout(REMOTE_ACK_ALIVE_INTERVAL * 2, completion.wait_for_progress()) => {
+            progress = timeout(beat * 2, completion.wait_for_progress()) => {
                 progress
             }
         };
@@ -131,6 +134,83 @@ async fn a_delivery_to_a_remote_consumer_reports_its_records_alive_while_it_wait
             panic!("the delivery held through interval {interval} reports its record alive");
         };
         assert_eq!(progress, AckProgress::Alive);
+    }
+
+    drop(earlier_delivery);
+    delivery
+        .await
+        .expect_err("the stopped transport fails the attached delivery");
+    assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));
+}
+
+/// The delivering node reports a held delivery's records alive at the cluster's committed
+/// `REMOTE_ACK_ALIVE_INTERVAL`, the interval the receiving node reports them at once it has admitted
+/// them, rather than at the parameter's default.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_held_delivery_reports_its_records_alive_at_the_committed_alive_interval() {
+    let runtime = Runtime::default();
+    let committed = Duration::from_millis(300);
+    commit_remote_ack_alive_interval(&runtime, committed);
+    attach_loopback_cluster(&runtime, &named("node-1")).await;
+    let dispatcher = runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .assured("the loopback cluster installs its dispatcher");
+    dispatcher.interconnect.shutdown().await;
+    let consumer = named::<ClusterNodeName>("node-2");
+    let relay = named::<RelayName>("orders");
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+        0,
+        0,
+        vec![RemoteRuntimeConsumer {
+            node_id: consumer.clone(),
+            relay: relay.clone(),
+            mode: Some(AckMode::Attached),
+            unit_modes: BTreeMap::new(),
+        }],
+        Some(dispatcher),
+        RelayBranchPresences::single(Arc::new(BranchPresence::new())),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    let (acks, mut completion) = AckSet::root();
+    let batch = RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        None,
+        test_runtime_row([("value".into(), RuntimeValue::I64(1))]),
+        acks,
+    )
+    .assured("the fixture batch carries one valid I64 row");
+    let channel = services.outbound_slot(
+        &consumer,
+        &relay,
+        RelayPayloadKind::Routed,
+        &batch.key,
+        Unit::SINGLE,
+    );
+    let earlier_delivery = channel
+        .lock_for_delivery()
+        .await
+        .expect("the open channel serves an earlier delivery");
+    let domain = domain("default");
+    let started = Instant::now();
+    let delivery = services.dispatch_remote_runtime_consumers(&domain, Unit::SINGLE, &batch);
+    tokio::pin!(delivery);
+
+    for beat in 1..=2_u32 {
+        let progress = nervix_primitives::select! {
+            biased;
+            _ = &mut delivery => panic!("the delivery waits for the consumer's channel"),
+            progress = completion.wait_for_progress() => progress,
+        };
+        assert_eq!(progress, AckProgress::Alive);
+        assert!(
+            started.elapsed() >= committed * beat,
+            "beat {beat} of the held delivery came {:?} after it started, before {beat} committed \
+             alive intervals of {committed:?}",
+            started.elapsed(),
+        );
     }
 
     drop(earlier_delivery);

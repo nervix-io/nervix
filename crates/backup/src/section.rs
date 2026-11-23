@@ -25,14 +25,39 @@ use crate::{
 /// The bytes every record section begins with.
 pub(crate) const RECORD_MAGIC: [u8; 8] = *b"NVXBKREC";
 
-/// The magic, the kind and the version.
-pub(crate) const RECORD_HEADER_BYTES: usize = RECORD_MAGIC.len() + 2 + 2;
+/// The magic, then the kind and the version as little-endian `u16`s.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a record section header is the 8-byte magic, then the kind and the format \
+                  version as little-endian u16s, twelve bytes as Backup And Restore states"
+    )
+)]
+pub(crate) const RECORD_HEADER_BYTES: usize =
+    RECORD_MAGIC.len() + size_of::<u16>() + size_of::<u16>();
 
 /// The largest encoded record this crate writes or accepts, checked before reading or decoding.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Backup And Restore's limits bound one record section at 64 MiB, which writers \
+                  and readers both enforce"
+    )
+)]
 pub const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The alignment an rkyv payload is validated at.
-const RECORD_ALIGNMENT: usize = 16;
+/// The alignment an rkyv payload is validated at: that of the buffer rkyv encodes a record into.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "rkyv encodes a record into its default 16-byte-aligned buffer, so bytecheck \
+                  validates the payload at that alignment"
+    )
+)]
+const RECORD_ALIGNMENT: usize = <AlignedVec>::ALIGNMENT;
 
 /// What a record section holds. The tag is the archive contract, so a kind keeps its tag for as
 /// long as the format lives, and a new kind takes a new one.
@@ -92,7 +117,8 @@ impl RecordKind {
 /// the validated conversion from the section's bytes.
 pub trait ArchiveRecord: Sized {
     const KIND: RecordKind;
-    /// The format version of this kind that this crate writes and reads.
+    /// The format version of this kind that this crate writes and reads. A record section header
+    /// carries it as a little-endian u16, and each record kind fixes its own.
     const VERSION: u16;
 
     /// The complete section: the header, then the rkyv payload.
