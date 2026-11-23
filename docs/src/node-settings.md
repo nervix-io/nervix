@@ -977,7 +977,10 @@ smaller refuses to start with the same refusal and exit status. Provision a larg
 smaller quotas on a new cluster, or change an existing cluster's committed quotas through
 `ALTER CLUSTER SET` before joining it. The measured size of the database volume also enters the
 node's committed claim, so `ALTER CLUSTER SET` cannot raise a quota above it while the node stays
-admitted. A node that passes the preflight logs
+admitted. Against the same policy, after the volume, the node also checks that its drain and
+shutdown budgets hold the domain drain and gate budgets, and that `NODE_UNAVAILABILITY_TIMEOUT`
+exceeds its `--control-plane-health-probe-interval` plus the probe timeout, a tenth of the timeout.
+Either refusal stops the start with the same exit status. A node that passes the preflight logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
 volumes, the restore-staging quota it resolved and the properties it detected.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
