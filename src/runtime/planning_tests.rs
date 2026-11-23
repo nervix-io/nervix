@@ -298,6 +298,7 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
             limits: WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
                 max_memory_bytes: nonzero!(1_048_576u64),
+                max_table_elements: 4_096,
             },
             rejected_state_policy: WasmRejectedStatePolicy::Preserve,
         },
@@ -2257,6 +2258,7 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
                     limits: nervix_models::WasmProcessorLimits {
                         max_fuel: nonzero!(1_000_000_000u64),
                         max_memory_bytes: nonzero!(67_108_864u64),
+                        max_table_elements: 4_096,
                     },
                     global_error_policy: GeneralErrorPolicy::Ignore,
                     rejected_state_policy: Default::default(),

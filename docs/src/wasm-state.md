@@ -155,7 +155,8 @@ instance uses to execute belongs to that instance.
 
 A recreated instance therefore starts without buffered input, pending output, pending timeouts, or
 error state. The host keeps an instance whose callback failed unless the failure exhausted `MAX
-FUEL` or `MAX MEMORY`, so a Rust SDK guest that latched into error state stays latched, and keeps
+FUEL`, `MAX MEMORY` or `MAX TABLE ELEMENTS`, so a Rust SDK guest that latched into error state stays
+latched, and keeps
 saving its computation state, until its instance is recreated. Acknowledgement trees and tokens are
 in-memory hot-path state everywhere in Nervix; see [Acknowledgement
 state](./data-plane-concurrency.md#acknowledgement-state).
@@ -801,7 +802,8 @@ The owner renders the description of every entry the page returns on a scratch i
 instantiates the pinned module, initializes it with the branch's configuration, restores the
 committed checkpoint, calls `nervix_describe_state`, validates the sections like emitted output, and
 discards the instance. The render runs on the node's extension workers under the processor's
-`MAX FUEL` and `MAX MEMORY`, the host's guest buffer limit and the read's deadline, and charges the
+`MAX FUEL`, `MAX MEMORY` and `MAX TABLE ELEMENTS`, the host's guest buffer limit and the read's
+deadline, and charges the
 size of the checkpoint it restores to the node's state-read memory while it runs. It never touches the instance that
 processes input, takes its execution lane, or advances a checkpoint, and a render that fails, traps,
 exhausts a limit or runs past the deadline fails only that entry's description: nothing is latched,
@@ -944,11 +946,16 @@ resurrect an assignment.
 ## Local Engine Capabilities
 
 Each node explicitly configures Wasmtime from its validated local capabilities:
-`--wasm-stack-bytes` bounds the WASM stack (512 KiB by default), and
-`--wasm-memory-reservation-bytes` selects the virtual address reservation per guest memory
-(4 GiB on 64-bit hosts, 10 MiB on 32-bit hosts). A zero reservation permits relocatable memory
-growth. These values do not change the processor's declared linear-memory bound, fuel or recovery
-contract. A configuration Wasmtime cannot construct fails node initialization with its typed cause.
+`--wasm-stack-bytes` bounds the stack a guest's own frames use in one call (512 KiB by default),
+and each call runs on a stack of that size plus a fixed 1.5 MiB for the host functions the guest
+calls. `--wasm-memory-reservation-bytes` selects the virtual address reservation per guest memory
+(4 GiB on 64-bit hosts, 10 MiB on 32-bit hosts), `--wasm-memory-guard-bytes` the unmapped guard on
+each side of it (32 MiB on 64-bit hosts, 64 KiB on 32-bit hosts), and
+`--wasm-memory-growth-reservation-bytes` the extra address space a memory reserves when it grows
+past its reservation (2 GiB on 64-bit hosts, 1 MiB on 32-bit hosts). A zero reservation permits
+relocatable memory growth. These values do not change the processor's declared `MAX MEMORY`,
+`MAX TABLE ELEMENTS`, fuel or recovery contract. The edge validates them before the node opens a
+store, so Wasmtime is never handed a configuration it refuses.
 
 Parallel compilation stays disabled because module compilation already occupies bounded Bulk
 workers. This explicit derivation prevents nested compiler fan-out from bypassing the executor.

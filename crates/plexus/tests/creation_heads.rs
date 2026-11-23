@@ -128,8 +128,8 @@ fn creation_bodies_keep_their_reference_kind(
 )]
 #[case::wasm(
     "WASM PROCESSOR mapped FROM incoming DETACHED USING RESOURCE guest VERSION 1 FILE \
-     'guest.wasm' MAX FUEL 1000 MAX MEMORY 1MiB UNBRANCHED TO outgoing SET value = value ON \
-     MESSAGE ERROR LOG ON GLOBAL ERROR LOG"
+     'guest.wasm' MAX FUEL 1000 MAX MEMORY 1MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO outgoing \
+     SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG"
 )]
 fn creation_heads_preserve_models_canonical_text_and_statement_spans(
     #[values("CREATE", "CREATE IF NOT EXISTS")] prefix: &str,

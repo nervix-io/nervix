@@ -1376,8 +1376,10 @@ not alter a graph's stored execution contract. Each flag has an environment twin
 | `--vm-regex-search-cache-bytes` | 2 MiB | positive, addressable lazy-DFA cache per compiled regex |
 | `--vm-dynamic-pattern-cache-capacity` | 64 patterns | positive, per call site and compiled program |
 | `--vm-pattern-sets-per-batch` | 64 sets | positive, per dynamic `contains_any` call and batch |
-| `--wasm-stack-bytes` | 512 KiB | positive, addressable stack per WASM invocation |
+| `--wasm-stack-bytes` | 512 KiB | positive stack a guest's own frames may use in one call; with the fixed 1.5 MiB host allowance beside it, the stack each guest call runs on must be addressable |
 | `--wasm-memory-reservation-bytes` | 4 GiB on 64-bit hosts; 10 MiB on 32-bit hosts | virtual address reservation per guest memory; zero permits relocatable growth |
+| `--wasm-memory-guard-bytes` | 32 MiB on 64-bit hosts; 64 KiB on 32-bit hosts | unmapped guard region on each side of every guest memory; compiled guest code skips the bounds check of an access whose static offset falls inside it |
+| `--wasm-memory-growth-reservation-bytes` | 2 GiB on 64-bit hosts; 1 MiB on 32-bit hosts | extra address space a guest memory reserves to grow into when it is larger than its reservation or moves to grow past it |
 | `--udf-watchdog` | 5 s | positive; each call of a compiled Roto UDF that returns later fails its whole batch |
 | `--connector-retry-multiplier` | 2 | positive multiplier applied between reconnect attempts |
 | `--connector-retry-jitter-percent` | 0 | 0 through 100 percent added to the next multiplied delay, within the declared cap |
@@ -1400,7 +1402,14 @@ values may differ during a rolling restart.
 
 WASM parallel compilation is explicitly disabled: independent module compilations already run
 on bounded Bulk workers, so nested compilation fan-out cannot escape that admission boundary.
-Stack and address reservation do not replace a processor's declared linear-memory or fuel limits.
+Wasmtime runs every guest call on a stack of its own. That call stack is derived, never a flag: it
+holds `--wasm-stack-bytes` for the guest's frames and a fixed 1.5 MiB beside them for the host
+functions the guest calls, the headroom every guest call has had. The defaults keep the 2 MiB call
+stack Wasmtime used before Nervix set it. The guard region sits before each guest memory as well as
+after it: a memory that fits in the reservation takes the reservation and two guards, and one that
+has to move to grow takes its current size, the growth reserve and two guards. Stack, address
+reservation, guard and growth reserve do not replace a processor's declared `MAX FUEL`,
+`MAX MEMORY` or `MAX TABLE ELEMENTS`.
 
 `--udf-watchdog` is checked when a Roto UDF call returns: a call that took longer fails its whole
 batch, and each node judges the calls it runs by its own value. It cannot interrupt native code
@@ -1465,6 +1474,9 @@ store, binds a listener or starts a task:
 - The trace sample ratio lies between 0 and 1, and a trace export batch holds no more spans than
   the trace queue.
 - A trace collector endpoint, when one is given, is a URI; the empty text is not.
+- The WASM stack is positive, and with the 1.5 MiB host allowance beside it the stack each guest
+  call runs on is addressable. Two WASM memory guards around the larger of the memory reservation
+  and the growth reserve are addressable too.
 
 A value its option cannot read, such as malformed duration text or a sample ratio outside its
 range, ends the process with status `2` as the command line reports it. A relationship that does

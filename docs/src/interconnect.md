@@ -576,13 +576,15 @@ descriptors, so checkpoint identity and inspection operations advance as one wir
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the `parametrizer`
-Model kind, an inferencer's required `WORKING MEMORY` policy, the typed `payload` expression scope,
+Model kind, an inferencer's required `WORKING MEMORY` policy, a WASM processor's required
+`MAX TABLE ELEMENTS`, the typed `payload` expression scope,
 typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and
 consensus commands with their exact request and independent binding records, the engine and
-connector host capabilities in each node's incarnation-bound claim, the ordered `RATE LIMIT`
+connector host capabilities in each node's incarnation-bound claim (the WASM memory guard and growth
+reserve among them), the ordered `RATE LIMIT`
 clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
 rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
 carries for a unit whose ingestor writes `RATE LIMIT`. The fingerprint also includes the

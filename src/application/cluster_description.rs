@@ -563,7 +563,7 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
 
 fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
     format!(
-        "{}={} {}={} {}={} {}={} {}={} {}={} wasm-parallel-compilation={} {}={}",
+        "{}={} {}={} {}={} {}={} {}={} {}={} {}={} {}={} wasm-parallel-compilation={} {}={}",
         nervix_vm::VmInlineRowLimit::NAME,
         values.vm_inline_row_limit,
         nervix_vm::VmRegexSearchCacheBytes::NAME,
@@ -576,6 +576,10 @@ fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
         values.wasm_stack_bytes,
         nervix_wasm::WasmMemoryReservationBytes::NAME,
         values.wasm_memory_reservation_bytes,
+        nervix_wasm::WasmMemoryGuardBytes::NAME,
+        values.wasm_memory_guard_bytes,
+        nervix_wasm::WasmMemoryGrowthReservationBytes::NAME,
+        values.wasm_memory_growth_reservation_bytes,
         values.wasm_parallel_compilation,
         nervix_roto::UdfWatchdog::NAME,
         timing_text(values.udf_watchdog),

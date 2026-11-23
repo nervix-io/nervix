@@ -495,6 +495,7 @@ pub enum Identifier {
     Mount,
     Config,
     Table,
+    Elements,
     Namespace,
     Catalog,
     Same,
