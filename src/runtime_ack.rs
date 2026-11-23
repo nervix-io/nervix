@@ -121,6 +121,9 @@ pub struct AckSet {
 pub struct AckRootTracker {
     outstanding: AtomicUsize,
     ownership_handoff_outstanding: AtomicUsize,
+    /// The confirmed roots among `outstanding` that resolved and wait for their owner to confirm
+    /// the outcome outside the tree, such as a source's transport answering an acknowledgement.
+    confirming: AtomicUsize,
 }
 
 /// Parks the acknowledgement shares of some sets for as long as it lives.
@@ -390,6 +393,14 @@ impl AckRootTracker {
         self.ownership_handoff_outstanding
             .fetch_add(0, Ordering::AcqRel)
     }
+
+    /// The confirmed roots that resolved and whose owner is still confirming the outcome, read by
+    /// read-modify-write for the reason [`Self::outstanding`] gives. A root counts here from the
+    /// moment it resolves, before its owner observes the resolution, until the owner drops its
+    /// completion, so a reader never misses a confirmation that its root's resolution started.
+    pub fn confirming(&self) -> usize {
+        self.confirming.fetch_add(0, Ordering::AcqRel)
+    }
 }
 
 impl AckCompletion {
@@ -630,10 +641,15 @@ impl AckHandle {
                 self.release_root_trackers();
                 None
             }
-            TrackerRelease::AfterConfirmation => Some(AckConfirmation {
-                trackers: self.0.root_trackers.clone(),
-                ownership_handoff: held_for_ownership_handoff,
-            }),
+            TrackerRelease::AfterConfirmation => {
+                for tracker in &self.0.root_trackers {
+                    tracker.confirming.fetch_add(1, Ordering::AcqRel);
+                }
+                Some(AckConfirmation {
+                    trackers: self.0.root_trackers.clone(),
+                    ownership_handoff: held_for_ownership_handoff,
+                })
+            }
         };
         self.finish_completion(AckResolution {
             outcome,
@@ -783,6 +799,7 @@ impl AckHandle {
 impl Drop for AckConfirmation {
     fn drop(&mut self) {
         for tracker in &self.trackers {
+            tracker.confirming.fetch_sub(1, Ordering::AcqRel);
             if self.ownership_handoff {
                 tracker
                     .ownership_handoff_outstanding
@@ -1081,8 +1098,22 @@ mod tests {
             AckSet::confirmed_roots(vec![domain.clone(), ingestor.clone()]);
         let attached = acks.attached();
 
+        for tracker in [&domain, &ingestor] {
+            assert_eq!(
+                tracker.confirming(),
+                0,
+                "an unresolved root confirms nothing yet"
+            );
+        }
         acks.ack_success();
         attached.ack_success();
+        for tracker in [&domain, &ingestor] {
+            assert_eq!(
+                tracker.confirming(),
+                1,
+                "a root counts as confirming as it resolves, before its owner observes it"
+            );
+        }
         assert_eq!(
             completion.wait_for_progress().await,
             AckProgress::Complete(AckOutcome::Ack)
@@ -1090,12 +1121,14 @@ mod tests {
         for tracker in [&domain, &ingestor] {
             assert_eq!(tracker.outstanding(), 1);
             assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+            assert_eq!(tracker.confirming(), 1);
         }
 
         drop(completion);
         for tracker in [&domain, &ingestor] {
             assert_eq!(tracker.outstanding(), 0);
             assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+            assert_eq!(tracker.confirming(), 0);
         }
     }
 
@@ -1110,6 +1143,7 @@ mod tests {
 
         assert_eq!(tracker.outstanding(), 0);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        assert_eq!(tracker.confirming(), 0);
     }
 
     #[nervix_primitives::test]
@@ -1999,6 +2033,11 @@ mod shuttle_tests {
                                     1,
                                     "a resolved root its owner has not confirmed stays counted"
                                 );
+                                assert_eq!(
+                                    domain.confirming(),
+                                    1,
+                                    "a resolved root its owner has not confirmed is confirming"
+                                );
                                 drop(resolution);
                             }
                             Err(TryRecvError::Empty) => {}
@@ -2016,6 +2055,7 @@ mod shuttle_tests {
                 for tracker in [&domain, &ingestor] {
                     assert_eq!(tracker.outstanding(), 0);
                     assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+                    assert_eq!(tracker.confirming(), 0);
                 }
             },
             None,

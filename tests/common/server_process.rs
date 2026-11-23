@@ -161,8 +161,6 @@ pub(crate) enum ServerProcessOption {
         endpoint: TraceCollectorEndpoint,
         service: String,
     },
-    /// `--drain-timeout`.
-    DrainTimeout(Duration),
     /// The first bootstrap's `--domain-drain-timeout` seed.
     DomainDrainTimeout(Duration),
     /// The first bootstrap's `--entity-gate-deadline` seed.
@@ -233,11 +231,6 @@ impl ServerProcessOption {
                 command
                     .arg("--otel-service-name")
                     .arg(format!("{service}-{node_id}"));
-            }
-            Self::DrainTimeout(timeout) => {
-                command
-                    .arg("--drain-timeout")
-                    .arg(humantime::format_duration(*timeout).to_string());
             }
             Self::DomainDrainTimeout(timeout) => {
                 command

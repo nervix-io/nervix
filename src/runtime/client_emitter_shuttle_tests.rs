@@ -23,8 +23,8 @@ use nervix_primitives::sync::{Arc, atomic::Ordering};
 use uuid::Uuid;
 
 use super::{
-    ClientEmitterAnswer, ClientEmitterBudget, ClientEmitterDescription, ClientEmitterEndpoint,
-    ClientEmitterPayload, ClientEmitterRefusal, ClientEmitterResult,
+    super::test_domain_clock, ClientEmitterAnswer, ClientEmitterBudget, ClientEmitterDescription,
+    ClientEmitterEndpoint, ClientEmitterPayload, ClientEmitterRefusal, ClientEmitterResult,
 };
 use crate::metrics::RuntimeMetrics;
 
@@ -128,6 +128,7 @@ fn shuttle_consumer_loss_and_ack_race_release_one_retained_delivery() {
                 },
                 false,
                 tracing::Span::none(),
+                test_domain_clock(&DomainName::parse("test").expect("literal domain")),
             ));
             let credit = NonZeroU64::new(1024).assured("literal credit");
             let first = endpoint
@@ -226,6 +227,7 @@ fn shuttle_publish_cancellation_and_ack_race_release_one_reservation() {
                 },
                 false,
                 tracing::Span::none(),
+                test_domain_clock(&DomainName::parse("test").expect("literal domain")),
             ));
             let credit = NonZeroU64::new(1024).assured("literal credit");
             let mut consumer = endpoint

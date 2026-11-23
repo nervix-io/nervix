@@ -51,7 +51,11 @@ Feature: Runtime node input collection
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "input_collector" is saved as placeholder "junction_owner"
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/input-collection"
+    # A collection bounds its hold from above only: a node that applies a newer runtime revision
+    # during the hold, as every node does after a failover, flushes the collection early, in more
+    # batches than one per branch.
+    When the runtime revision each node applied is recorded
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/input-collection"
       """
       {"tenant":"alpha","sequence":1}
       """
@@ -67,7 +71,7 @@ Feature: Runtime node input collection
       """
       {"tenant":"beta","sequence":2}
       """
-    Then within "30s" the relay subscription receives payloads no sooner than "3s" after the first http payload was posted
+    Then within "30s" the relay subscription receives payloads no sooner than "3s" after the first http payload was posted, unless a node applied a newer runtime revision
       """
       {"sequence":1,"tenant":"alpha"}
       {"sequence":2,"tenant":"alpha"}
@@ -75,7 +79,7 @@ Feature: Runtime node input collection
       {"sequence":2,"tenant":"beta"}
       """
     And within "5s" node "node-1" eventually reports describe ingestor "input_collection_ingestor" as "batches_total sent relay=incoming physical_node=node-1 total=4"
-    And node "{{junction_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2
+    And node "{{junction_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2, unless a node applied a newer runtime revision
       """
       target_kind="JUNCTION"
       target="input_collector"

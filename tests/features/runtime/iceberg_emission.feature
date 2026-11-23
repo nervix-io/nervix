@@ -1731,7 +1731,11 @@ Feature: Iceberg emission
       | 71      | first  |
       | 72      | second |
     Then within "60s" the Iceberg catalog gate holds a commit
-    When the Iceberg catalog gate refuses the commit it holds
+    # The retry backoff bounds the emitter's wait from above only: a node that applies a newer
+    # runtime revision meanwhile, as every node does after a failover, flushes the emitter, which
+    # publishes what its retry holds at once.
+    When the runtime revision each node applied is recorded
+    And the Iceberg catalog gate refuses the commit it holds
     Then within "30s" DESCRIBE EMITTER "iceberg_refused" on the leader node contains
       """
       transient error: failed to commit Iceberg staged batches
@@ -1742,7 +1746,7 @@ Feature: Iceberg emission
       """
     # The retry comes no sooner than its backoff, and it staged the other branch's row before it
     # commits again: the file the refused commit began with and the newer one are both staged.
-    And within "120s" the Iceberg catalog gate holds a commit no sooner than "10s" after it refused one
+    And within "120s" the Iceberg catalog gate holds a commit no sooner than "10s" after it refused one, unless a node applied a newer runtime revision
     And the temp directory holds 2 Iceberg staging files
     And batch "rows" remains pending for "1s"
     # The retried commit appends only what it began with. The newer row waits for a commit of its

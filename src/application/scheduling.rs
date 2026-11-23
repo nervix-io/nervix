@@ -28,31 +28,35 @@ use nervix_consensus::{
 };
 use nervix_interconnect::{
     RequestError, StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
+    StoppingNodeUnmoved,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, NodeUnitRef, PlacementGroupSchedule,
-    QuiesceLevel, ScheduledNode, Unit,
+    QuiesceLevel, ScheduledNode, StopCut, StopCutReason, Unit,
 };
 use nervix_primitives::time::{Instant, sleep};
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::{
     AppError,
     command_result::{CommandDisposition, CommandResult, LeaderRedirect},
     describe_output::format_placement_unit_nodes,
+    domain_lifecycle::DomainAlterError,
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
         AssignmentRelocation, DrainMove, PlannedOwnershipHandoff, format_planned_ownership_move,
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
     placement_groups::{PlacementGroupAssignments, PlacementGroupIndex},
-    schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
+    schedule_planning::{
+        DomainSchedulePlanningSnapshot, PreparedDomainSchedule, SchedulePlanningStale,
+    },
     session_service::SessionServiceImpl,
-    shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
+    shutdown::{ShutdownDeadline, ShutdownMoveOutcome, ShutdownPhaseOutcome},
 };
 use crate::{
     registry::{ActiveGraph, assign_server_listener_nodes},
-    runtime::LocalGraphDrainOutcome,
+    runtime::OwnershipHandoffError,
 };
 
 mod settings;
@@ -179,20 +183,79 @@ impl fmt::Display for ShutdownDrainObservation<'_> {
     }
 }
 
-/// The one drain timeout that a graceful shutdown's ownership move and local graph drain share,
-/// which never reaches past the shutdown deadline.
-struct ShutdownDrainBudget {
+/// The time a stopping node's moves have: the shutdown timeout, counted from the end of the node's
+/// save, and the grace the release of the cordon its moves set keeps even once that has passed.
+struct ShutdownMoveBudget {
     release_grace: Duration,
-    started: Instant,
-    timeout: Duration,
     deadline: ShutdownDeadline,
 }
 
 /// The leader's view of the time a stopping node gave it for moving scheduled work. Each unit
-/// keeps a share of that time for the units after it and for the stopping node's local drain.
+/// leaves a sixth of that time for the units after it and for the stopping node to hear the answer
+/// before its shutdown timeout passes.
 struct ShutdownLeaderDrainBudget {
     started: Instant,
     timeout: Duration,
+}
+
+/// What a drain of one node came to: the command's result, and why the units it left on the node
+/// did not move.
+struct NodeDrainReport {
+    result: CommandResult,
+    /// Why the units the drain left on the node did not move. It is absent when the drain left
+    /// none, and when it ended before it planned any move, as when it could not cordon the node.
+    unmoved: Option<StoppingNodeUnmoved>,
+}
+
+/// Why the units a drain left on its node did not move, gathered unit by unit.
+#[derive(Debug, Default)]
+struct DrainUnmovedUnits(Option<StoppingNodeUnmoved>);
+
+impl DrainUnmovedUnits {
+    /// Records a unit the drain left on its node for `reason`. A drain that left one unit that
+    /// could have moved left units that could have moved, whatever else it left.
+    fn record(&mut self, reason: StoppingNodeUnmoved) {
+        let gathered = match (self.0, reason) {
+            (Some(StoppingNodeUnmoved::CouldHaveMoved), _)
+            | (_, StoppingNodeUnmoved::CouldHaveMoved) => StoppingNodeUnmoved::CouldHaveMoved,
+            (_, StoppingNodeUnmoved::NowhereToMove) => StoppingNodeUnmoved::NowhereToMove,
+        };
+        self.0 = Some(gathered);
+    }
+
+    /// Whether the drain left any unit on its node.
+    fn any(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
+/// How many more times a drain plans a move again because the nodes eligible to take it changed
+/// while it planned the move, as when a peer begins stopping at the same moment.
+///
+/// During a drain each such change is a member changing its eligibility, so a drain plans again at
+/// most once for each member of the membership. A change after that fails the move as before.
+#[derive(Debug)]
+struct DrainEligibilityReplans {
+    remaining: usize,
+}
+
+impl DrainEligibilityReplans {
+    fn for_members(members: usize) -> Self {
+        Self { remaining: members }
+    }
+
+    /// Whether the drain plans again after `error`: only when the eligible nodes changed, and
+    /// only while re-plans remain, of which this takes one.
+    fn take(&mut self, error: &Report<SchedulePlanningStale>) -> bool {
+        let SchedulePlanningStale::Eligibility { .. } = error.current_context() else {
+            return false;
+        };
+        let Some(remaining) = self.remaining.checked_sub(1) else {
+            return false;
+        };
+        self.remaining = remaining;
+        true
+    }
 }
 
 impl ShutdownLeaderDrainBudget {
@@ -213,61 +276,83 @@ impl ShutdownLeaderDrainBudget {
     }
 }
 
-impl ShutdownDrainBudget {
-    fn start(timeout: Duration, deadline: ShutdownDeadline, release_grace: Duration) -> Self {
+impl ShutdownMoveBudget {
+    fn new(deadline: ShutdownDeadline, release_grace: Duration) -> Self {
         Self {
             release_grace,
-            started: Instant::now(),
-            timeout,
             deadline,
         }
     }
 
-    /// What remains of the drain timeout, which is nothing once it or the shutdown deadline has
-    /// passed.
+    /// What remains of the shutdown timeout, which is nothing once it has passed.
     fn remaining(&self) -> Duration {
-        self.drain_remaining().min(self.deadline.remaining())
+        self.deadline.remaining()
     }
 
-    /// How long the release of the cordon the node's own drain set may wait, and never past the
-    /// shutdown deadline. While voters that stay can commit it, that is what remains of the drain
-    /// timeout, or the release grace when less than that remains. When they cannot, it is the
-    /// release grace alone, since only voters that are stopping too could commit the release.
+    /// How long the release of the cordon the node's moves set may wait. While voters that stay
+    /// can commit it, that is what remains of the shutdown timeout, or the release grace when less
+    /// than that remains. When they cannot, it is the release grace alone, since only voters that
+    /// are stopping too could commit the release.
     fn cordon_release_bound(&self, quorum: ShutdownReleaseQuorum) -> Duration {
-        let wait = match quorum {
-            ShutdownReleaseQuorum::Staying => self.drain_remaining().max(self.release_grace),
+        match quorum {
+            ShutdownReleaseQuorum::Staying => self.deadline.remaining().max(self.release_grace),
             ShutdownReleaseQuorum::Leaving => self.release_grace,
-        };
-        wait.min(self.deadline.remaining())
-    }
-
-    /// What remains of the drain timeout alone, which is nothing once it has passed.
-    fn drain_remaining(&self) -> Duration {
-        self.timeout
-            .checked_sub(self.started.elapsed())
-            .unwrap_or(Duration::ZERO)
+        }
     }
 }
 
-/// What moving this node's scheduled work to other nodes did before its local graphs drain.
+/// What a stopping node's save left for its moves to do.
+pub(in crate::application) enum ShutdownSave {
+    /// No live schedulable node besides this one could take its work, so the node saved all of
+    /// it, and nothing moves.
+    Saved,
+    /// Another node can take this node's work. Its units move first, and the node saves what did
+    /// not move once the moves end.
+    MovesFirst,
+}
+
+/// What moving this node's scheduled work to other nodes did.
 enum ShutdownOwnershipMove {
     /// No live schedulable node can take the work, so nothing was cordoned or moved.
     NoReplacement,
-    /// The drain timeout or the shutdown deadline passed before a leader was observed, so the drain
-    /// was never requested and nothing was cordoned or moved.
+    /// The shutdown timeout passed before a leader was observed, so the drain was never requested
+    /// and nothing was cordoned or moved.
     NotRequested,
-    /// The leader was asked to cordon the node and move its scheduled work, and that drain ended
-    /// with this outcome.
-    Requested(ShutdownPhaseOutcome),
+    /// The leader was asked to cordon the node and move its scheduled work, and the moves came to
+    /// this outcome.
+    Requested(ShutdownMoveOutcome),
 }
 
 impl ShutdownOwnershipMove {
-    /// What the move of the node's scheduled work came to.
-    fn outcome(&self) -> ShutdownPhaseOutcome {
+    /// What the move of the node's scheduled work came to, which it also logs. A move that could
+    /// have taken place and did not complete is a disruption of the cluster.
+    fn outcome(&self, local_node_id: &ClusterNodeName, timeout: Duration) -> ShutdownMoveOutcome {
         match self {
-            Self::NoReplacement => ShutdownPhaseOutcome::Completed,
-            Self::NotRequested => ShutdownPhaseOutcome::Abandoned,
-            Self::Requested(outcome) => *outcome,
+            Self::NoReplacement | Self::Requested(ShutdownMoveOutcome::NowhereToMove) => {
+                info!(
+                    node_id = %local_node_id,
+                    "no other node can take this node's units, so they stay saved here and a \
+                     restart restores them"
+                );
+                ShutdownMoveOutcome::NowhereToMove
+            }
+            Self::Requested(ShutdownMoveOutcome::Moved) => {
+                info!(
+                    node_id = %local_node_id,
+                    "every unit of this node moved to another node"
+                );
+                ShutdownMoveOutcome::Moved
+            }
+            Self::NotRequested | Self::Requested(ShutdownMoveOutcome::Disrupted) => {
+                error!(
+                    node_id = %local_node_id,
+                    shutdown_timeout = %humantime::format_duration(timeout),
+                    "this node's units did not all move before the shutdown timeout passed or \
+                     their move failed, so the units left stay saved here and a restart restores \
+                     them: a cluster disruption"
+                );
+                ShutdownMoveOutcome::Disrupted
+            }
         }
     }
 
@@ -336,30 +421,52 @@ enum ShutdownDrainRoute {
     Leader(ClusterNodeName),
 }
 
-/// How the leader answered what a stopping node asked about its own scheduled work.
+/// How the leader answered a stopping node's request to move its scheduled work.
+#[derive(Debug)]
 enum ShutdownDrainAnswer {
-    /// The leader completed the action and described it.
+    /// Every unit of the node moved, as the leader's report describes.
     Completed {
         leader: ClusterNodeName,
         report: String,
     },
-    /// The leader could not complete the action and described why.
+    /// The leader's drain left units on the stopping node, for `unmoved`. The report names each
+    /// unit and why it did not move.
+    Unmoved {
+        leader: ClusterNodeName,
+        report: String,
+        unmoved: StoppingNodeUnmoved,
+    },
+    /// The leader could not drain the node and described why.
     Failed {
         leader: ClusterNodeName,
         report: String,
     },
-    /// No answer arrived because the request failed in transport. The leader may still have acted
-    /// on it.
-    Unanswered {
-        leader: ClusterNodeName,
-        error: Report<RequestError>,
-    },
+    /// While the node asked, every node that could have taken its work began stopping or left, so
+    /// it stopped asking.
+    NoReplacement,
 }
 
 impl ShutdownDrainAnswer {
+    /// Whether the leader's answer leaves units on the node that it judged could have moved.
+    fn could_have_moved(&self) -> bool {
+        match self {
+            Self::Unmoved {
+                unmoved: StoppingNodeUnmoved::CouldHaveMoved,
+                ..
+            }
+            | Self::Failed { .. } => true,
+            Self::Completed { .. }
+            | Self::Unmoved {
+                unmoved: StoppingNodeUnmoved::NowhereToMove,
+                ..
+            }
+            | Self::NoReplacement => false,
+        }
+    }
+
     /// Logs how the leader answered the drain of `local_node_id`, and returns what the move of the
     /// node's scheduled work came to.
-    fn into_drain_outcome(self, local_node_id: &ClusterNodeName) -> ShutdownPhaseOutcome {
+    fn into_drain_outcome(self, local_node_id: &ClusterNodeName) -> ShutdownMoveOutcome {
         match self {
             Self::Completed { leader, report } => {
                 info!(
@@ -368,29 +475,63 @@ impl ShutdownDrainAnswer {
                     message = report,
                     "drained local node before graceful shutdown"
                 );
-                ShutdownPhaseOutcome::Completed
+                ShutdownMoveOutcome::Moved
             }
-            Self::Failed { leader, report } => {
+            Self::Unmoved {
+                leader,
+                report,
+                unmoved: StoppingNodeUnmoved::NowhereToMove,
+            } => {
+                info!(
+                    node_id = %local_node_id,
+                    leader = %leader,
+                    message = report,
+                    "the leader found no other node that can take the units left on this node"
+                );
+                ShutdownMoveOutcome::NowhereToMove
+            }
+            Self::Unmoved {
+                leader,
+                report,
+                unmoved: StoppingNodeUnmoved::CouldHaveMoved,
+            }
+            | Self::Failed { leader, report } => {
                 warn!(
                     node_id = %local_node_id,
                     leader = %leader,
                     message = report,
                     "failed to drain local node before graceful shutdown"
                 );
-                ShutdownPhaseOutcome::Abandoned
+                ShutdownMoveOutcome::Disrupted
             }
-            Self::Unanswered { leader, error } => {
-                warn!(
+            Self::NoReplacement => {
+                info!(
                     node_id = %local_node_id,
-                    leader = %leader,
-                    error = %format_args!("{error:#}"),
-                    "the leader did not answer the graceful shutdown drain of the local node"
+                    "every node that could take this node's units began stopping or left, so it \
+                     stopped asking the leader to move them"
                 );
-                ShutdownPhaseOutcome::Abandoned
+                ShutdownMoveOutcome::NowhereToMove
             }
         }
     }
+}
 
+/// How the leader answered a stopping node's request to release the cordon its drain set.
+#[derive(Debug)]
+enum ShutdownReleaseAnswer {
+    /// The leader released the cordon.
+    Completed {
+        leader: ClusterNodeName,
+        report: String,
+    },
+    /// The leader could not release the cordon and described why.
+    Failed {
+        leader: ClusterNodeName,
+        report: String,
+    },
+}
+
+impl ShutdownReleaseAnswer {
     /// Logs how the leader answered the release of the cordon the drain of `local_node_id` set, and
     /// returns what that release came to.
     fn into_cordon_release_outcome(self, local_node_id: &ClusterNodeName) -> ShutdownPhaseOutcome {
@@ -413,16 +554,56 @@ impl ShutdownDrainAnswer {
                 );
                 ShutdownPhaseOutcome::Abandoned
             }
-            Self::Unanswered { leader, error } => {
-                warn!(
-                    node_id = %local_node_id,
-                    leader = %leader,
-                    error = %format_args!("{error:#}"),
-                    "the leader did not answer the release of the shutdown drain cordon"
-                );
-                ShutdownPhaseOutcome::Abandoned
-            }
         }
+    }
+}
+
+/// What a stopping node's requests to its leaders have shown so far in its shutdown.
+#[derive(Debug, Default)]
+struct ShutdownLeaderRequests {
+    /// The leader the node's requests last went unanswered by, so that the node logs each leader
+    /// that stops answering once rather than at every attempt.
+    unanswered: Option<ClusterNodeName>,
+    /// The nodes the interconnect found had left the cluster when this node asked them. A node
+    /// that stops within one gossip round of advertising that it is terminating can still look
+    /// live and not terminating to its peers until their health interval for it ends, so the
+    /// stopping node trusts what its own requests found: such a node takes none of its work, is
+    /// no voter that stays, and is not asked again.
+    departed: BTreeSet<ClusterNodeName>,
+}
+
+impl ShutdownLeaderRequests {
+    /// Records that `leader` did not answer this node's `request` for `error`, and logs it: at
+    /// `info` the first time this leader does not answer, at `debug` after that.
+    fn record_unanswered(
+        &mut self,
+        local_node_id: &ClusterNodeName,
+        leader: &ClusterNodeName,
+        request: &'static str,
+        error: &Report<RequestError>,
+    ) {
+        if let RequestError::TargetLeft { node, .. } = error.current_context() {
+            self.departed.insert(node.clone());
+        }
+        if self.unanswered.as_ref() == Some(leader) {
+            debug!(
+                node_id = %local_node_id,
+                leader = %leader,
+                request,
+                error = %format_args!("{error:#}"),
+                "the leader still did not answer this stopping node's request"
+            );
+            return;
+        }
+        info!(
+            node_id = %local_node_id,
+            leader = %leader,
+            request,
+            error = %format_args!("{error:#}"),
+            "the leader did not answer this stopping node's request, so the node asks the leader \
+             it observes next within its shutdown timeout"
+        );
+        self.unanswered = Some(leader.clone());
     }
 }
 
@@ -725,14 +906,37 @@ impl SessionServiceImpl {
         node_id: ClusterNodeName,
         execution: Option<&CommandExecution>,
     ) -> CommandResult {
-        self.drain_node_with_budget(node_id, execution, None).await
+        self.drain_node_with_budget(node_id, execution, None)
+            .await
+            .result
     }
 
+    /// Cordons `node_id` and moves its scheduled work to other nodes, and reports why the units it
+    /// left on the node did not move.
     async fn drain_node_with_budget(
         &self,
         node_id: ClusterNodeName,
         execution: Option<&CommandExecution>,
         shutdown_budget: Option<Duration>,
+    ) -> NodeDrainReport {
+        let mut unmoved = DrainUnmovedUnits::default();
+        let result = self
+            .drain_node_units(node_id, execution, shutdown_budget, &mut unmoved)
+            .await;
+        NodeDrainReport {
+            result,
+            unmoved: unmoved.0,
+        }
+    }
+
+    /// The body of [`Self::drain_node_with_budget`], recording in `unmoved` why each unit it leaves
+    /// on the node does not move.
+    async fn drain_node_units(
+        &self,
+        node_id: ClusterNodeName,
+        execution: Option<&CommandExecution>,
+        shutdown_budget: Option<Duration>,
+        unmoved: &mut DrainUnmovedUnits,
     ) -> CommandResult {
         let shutdown_budget = shutdown_budget.map(ShutdownLeaderDrainBudget::new);
         let membership = self.inner.consensus.membership_nodes().await;
@@ -763,9 +967,12 @@ impl SessionServiceImpl {
             .sum::<usize>();
         let mut moved = 0usize;
         let mut outcomes = Vec::new();
-        let mut failed = false;
         let mut failed_units = BTreeSet::<(DomainName, String)>::new();
         let mut failed_domains = BTreeSet::<DomainName>::new();
+        // Destinations that refused a move because they are terminating, which this drain plans
+        // nothing more onto.
+        let mut terminating_destinations = BTreeSet::<ClusterNodeName>::new();
+        let mut eligibility_replans = DrainEligibilityReplans::for_members(membership.len());
         'drain: loop {
             let mut handled_this_iteration = false;
 
@@ -774,7 +981,7 @@ impl SessionServiceImpl {
                     continue;
                 }
                 let Some(_alter_guard) = self.inner.runtime.try_begin_domain_alter(&domain) else {
-                    failed = true;
+                    unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                     failed_domains.insert(domain.clone());
                     outcomes.push(format!(
                         "- domain={} owner={node_id} failed: a model or schedule change is \
@@ -829,7 +1036,10 @@ impl SessionServiceImpl {
                 let planning = self
                     .capture_domain_schedule_planning_snapshot(&inputs)
                     .await;
-                let replacement_nodes = planning.cluster_nodes().to_vec();
+                let replacement_nodes = Self::drain_replacement_nodes(
+                    planning.cluster_nodes(),
+                    &terminating_destinations,
+                );
                 let live_voter_set = planning
                     .live_voters()
                     .iter()
@@ -838,7 +1048,7 @@ impl SessionServiceImpl {
                 let replacement_node_set =
                     replacement_nodes.iter().cloned().collect::<BTreeSet<_>>();
                 if replacement_nodes.is_empty() {
-                    failed = true;
+                    unmoved.record(StoppingNodeUnmoved::NowhereToMove);
                     failed_domains.insert(domain.clone());
                     outcomes.push(format!(
                         "- domain={} owner={node_id} failed: no live schedulable raft voters \
@@ -869,7 +1079,7 @@ impl SessionServiceImpl {
                 let desired = match desired {
                     Ok(desired) => desired,
                     Err(error) => {
-                        failed = true;
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={domain} owner={node_id} failed: {error:#}"
@@ -880,7 +1090,7 @@ impl SessionServiceImpl {
                 };
                 let Some(current_domain) = inputs.schedule() else {
                     if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
-                        failed = true;
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: {error}",
@@ -890,7 +1100,15 @@ impl SessionServiceImpl {
                         break;
                     }
                     if let Err(error) = planning.validate_eligibility(self).await {
-                        failed = true;
+                        if eligibility_replans.take(&error) {
+                            outcomes.push(format!(
+                                "- domain={domain} owner={node_id}: scheduling eligibility \
+                                 changed while it was planned; planning it again"
+                            ));
+                            handled_this_iteration = true;
+                            break;
+                        }
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: {error}",
@@ -917,7 +1135,7 @@ impl SessionServiceImpl {
                                 )
                                 .await;
                         }
-                        failed = true;
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: could not publish initial \
@@ -931,7 +1149,7 @@ impl SessionServiceImpl {
                         .activate_drained_revision(shutdown_budget.as_ref(), None)
                         .await
                     {
-                        failed = true;
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: could not activate initial \
@@ -958,7 +1176,7 @@ impl SessionServiceImpl {
                 ) {
                     Ok(targets) => targets,
                     Err(error) => {
-                        failed = true;
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={domain} owner={node_id} failed: {error:#}"
@@ -981,7 +1199,7 @@ impl SessionServiceImpl {
                 mark_complete_ownership_transitions(Some(current_domain), &mut next);
                 let planned_moves = planned_ownership_moves(Some(current_domain), Some(&next));
                 if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
-                    failed = true;
+                    unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                     failed_units.insert(unit_key);
                     outcomes.push(format!(
                         "- {} owner={node_id} failed: {error}",
@@ -991,7 +1209,16 @@ impl SessionServiceImpl {
                     break;
                 }
                 if let Err(error) = planning.validate_eligibility(self).await {
-                    failed = true;
+                    if eligibility_replans.take(&error) {
+                        outcomes.push(format!(
+                            "- {} owner={node_id}: scheduling eligibility changed while it was \
+                             planned; planning it again",
+                            drain_move.label
+                        ));
+                        handled_this_iteration = true;
+                        break;
+                    }
+                    unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                     failed_units.insert(unit_key);
                     outcomes.push(format!(
                         "- {} owner={node_id} failed: {error}",
@@ -1004,7 +1231,7 @@ impl SessionServiceImpl {
                     .as_ref()
                     .map(ShutdownLeaderDrainBudget::unit_handoff_budget);
                 if unit_budget == Some(Duration::ZERO) {
-                    failed = true;
+                    unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                     outcomes.push(format!(
                         "- {} owner={node_id} failed: the stopping node's drain budget left no \
                          time for another ownership handoff",
@@ -1036,17 +1263,29 @@ impl SessionServiceImpl {
                 let mut handoff = match preparation.await {
                     Ok(handoff) => handoff,
                     Err(error) => {
-                        failed = true;
+                        // The destination's own word is authoritative where this leader's view
+                        // still shows it eligible, so the unit is planned onto another node.
+                        if let Some(destination) = Self::terminating_destination_refusal(&error) {
+                            outcomes.push(format!(
+                                "- {} owner={node_id} not moved onto node '{destination}', which \
+                                 is terminating; planning it onto another node",
+                                drain_move.label
+                            ));
+                            terminating_destinations.insert(destination);
+                            handled_this_iteration = true;
+                            break;
+                        }
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         failed_units.insert(unit_key);
                         if planned_moves.is_empty() {
                             outcomes.push(format!(
-                                "- {} owner={node_id} failed: {error}",
+                                "- {} owner={node_id} failed: {error:#}",
                                 drain_move.label
                             ));
                         } else {
                             outcomes.extend(planned_moves.iter().map(|moved| {
                                 format!(
-                                    "- kind={} name={} owner={} failed: {error}",
+                                    "- kind={} name={} owner={} failed: {error:#}",
                                     moved.entity.kind.as_ref(),
                                     moved.entity.identifier.as_str(),
                                     moved.former_owner
@@ -1079,7 +1318,7 @@ impl SessionServiceImpl {
                             )
                             .await;
                     }
-                    failed = true;
+                    unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                     failed_units.insert(unit_key);
                     outcomes.extend(planned_moves.iter().map(|moved| {
                         format!(
@@ -1121,7 +1360,7 @@ impl SessionServiceImpl {
                     if activation_error.is_none() {
                         outcomes.push(format_planned_ownership_move(ownership_move));
                     } else if let Some(error) = &activation_error {
-                        failed = true;
+                        unmoved.record(StoppingNodeUnmoved::CouldHaveMoved);
                         outcomes.push(format!(
                             "- kind={} name={} owner={} failed: destination '{}' did not \
                              activate: {error}",
@@ -1154,7 +1393,7 @@ impl SessionServiceImpl {
             message.push('\n');
             message.push_str(&outcomes.join("\n"));
         }
-        if failed {
+        if unmoved.any() {
             command_error(message)
         } else {
             command_ok(message)
@@ -1181,19 +1420,11 @@ impl SessionServiceImpl {
         }
     }
 
-    pub(in crate::application) async fn drain_local_node_before_shutdown(
-        &self,
-        drain_timeout: Duration,
-        deadline: ShutdownDeadline,
-    ) -> ShutdownPhaseOutcome {
-        let budget = ShutdownDrainBudget::start(
-            drain_timeout,
-            deadline,
-            self.inner.raft_timings.heartbeat_interval() * 4,
-        );
-        // Stop ingestor admission before the leader begins moving downstream nodes. A Kafka poll
-        // admitted while an emitter moves can otherwise leave its source ACK root waiting on that
-        // move until the entire drain budget expires.
+    /// Closes this stopping node's intake and, when no other node can take its work, saves
+    /// everything it holds, then reports what its moves are left to do.
+    pub(in crate::application) async fn save_local_node_before_moves(&self) -> ShutdownSave {
+        // Ingestor admission stops before anything moves. A Kafka poll admitted while an emitter
+        // moves could otherwise leave its source acknowledgement waiting on that move.
         self.inner.runtime.close_local_intake();
         let local_node_id = self.inner.consensus.local_node_id().clone();
         #[cfg(feature = "testing")]
@@ -1201,40 +1432,115 @@ impl SessionServiceImpl {
             .runtime
             .pause_graceful_drain_if_armed(&local_node_id)
             .await;
+        if self
+            .shutdown_replacement_exists(&local_node_id, &BTreeSet::new())
+            .await
+        {
+            return ShutdownSave::MovesFirst;
+        }
+        self.save_local_node_for_shutdown().await;
+        ShutdownSave::Saved
+    }
+
+    /// Moves this stopping node's scheduled work to other nodes within `deadline`, saves what did
+    /// not move, and releases the cordon the moves set, then reports what the moves came to.
+    pub(in crate::application) async fn move_local_node_for_shutdown(
+        &self,
+        save: ShutdownSave,
+        deadline: ShutdownDeadline,
+    ) -> ShutdownMoveOutcome {
+        let local_node_id = self.inner.consensus.local_node_id().clone();
+        let ShutdownSave::MovesFirst = save else {
+            return ShutdownOwnershipMove::NoReplacement
+                .outcome(&local_node_id, deadline.timeout());
+        };
+        info!(
+            node_id = %local_node_id,
+            shutdown_timeout = %humantime::format_duration(deadline.timeout()),
+            "moving this node's units to other nodes within the shutdown timeout"
+        );
+        let budget =
+            ShutdownMoveBudget::new(deadline, self.inner.raft_timings.heartbeat_interval() * 4);
         let operator_cordon_exists = self
             .inner
             .consensus
             .cordoned_node_ids()
             .await
             .contains(&local_node_id);
+        let mut requests = ShutdownLeaderRequests::default();
         let ownership_move = self
-            .move_local_ownership_for_shutdown(&local_node_id, &budget)
+            .move_local_ownership_for_shutdown(&local_node_id, &budget, &mut requests)
             .await;
         let drain_cordon = ownership_move.drain_cordon(operator_cordon_exists);
-
-        // Moving ownership hands scheduled work to other nodes. Everything this node has already
-        // admitted, including all of its work when no replacement exists, completes here before
-        // terminal teardown, within what remains of the same drain timeout. The release of the
-        // drain's cordon runs beside it, so a consensus write that takes long does not shorten the
-        // time admitted work has to complete.
+        // What did not move is saved here, beside the release of the cordon the moves set, so a
+        // consensus write that takes long does not hold the save back.
         let cordon_settlement =
-            self.settle_shutdown_drain_cordon(&local_node_id, drain_cordon, &budget);
-        let local_drain = self.drain_local_graphs_for_shutdown(&budget);
-        let (cordon_outcome, local_outcome) =
-            futures_util::future::join(cordon_settlement, local_drain).await;
-        ownership_move
-            .outcome()
-            .combine(cordon_outcome)
-            .combine(local_outcome)
+            self.settle_shutdown_drain_cordon(&local_node_id, drain_cordon, &budget, &mut requests);
+        let remainder = self.save_local_node_for_shutdown();
+        futures_util::future::join(cordon_settlement, remainder).await;
+        ownership_move.outcome(&local_node_id, deadline.timeout())
+    }
+
+    /// Saves everything this stopping node holds, and reports what the save cut.
+    ///
+    /// The save holds this node's installation turn while it runs. An installation of the
+    /// committed state would install or restart units while the save stops this node's
+    /// executions, so the save waits for the one under way, and none begins until the save ends;
+    /// terminal teardown then ends the wait of any that asked meanwhile.
+    async fn save_local_node_for_shutdown(&self) {
+        let installation_turn = self
+            .inner
+            .runtime_admission
+            .begin_installation(&self.inner.drain_support_shutdown)
+            .await;
+        let report = self.inner.runtime.save_local_node().await;
+        drop(installation_turn);
+        for (domain, cuts) in &report.cuts {
+            for cut in cuts {
+                Self::report_shutdown_cut(domain, cut);
+            }
+        }
+    }
+
+    /// Logs one cut of a stopping node's save, by the reason the save cut it.
+    fn report_shutdown_cut(domain: &DomainName, cut: &StopCut) {
+        match cut.kind.reason() {
+            StopCutReason::NotSavedYet => warn!(
+                domain = domain.as_str(),
+                entity_kind = %cut.entity_kind.as_ref(),
+                entity = %cut.entity,
+                kind = %cut.kind.as_str(),
+                items = cut.items,
+                "graceful shutdown cut held work that has no saved form yet"
+            ),
+            StopCutReason::SessionEnded => warn!(
+                domain = domain.as_str(),
+                entity_kind = %cut.entity_kind.as_ref(),
+                entity = %cut.entity,
+                kind = %cut.kind.as_str(),
+                items = cut.items,
+                "graceful shutdown ended an ingestor's session and cut the payloads its pause \
+                 retained"
+            ),
+            StopCutReason::Enforcement => warn!(
+                domain = domain.as_str(),
+                entity_kind = %cut.entity_kind.as_ref(),
+                entity = %cut.entity,
+                kind = %cut.kind.as_str(),
+                items = cut.items,
+                "graceful shutdown cut work that was still in motion as it saved"
+            ),
+        }
     }
 
     /// Leaves an operator's cordon in place, and releases the cordon this stopping node's own
-    /// drain may have set within the release bound of `budget`.
+    /// moves may have set within the release bound of `budget`.
     async fn settle_shutdown_drain_cordon(
         &self,
         local_node_id: &ClusterNodeName,
         drain_cordon: ShutdownDrainCordon,
-        budget: &ShutdownDrainBudget,
+        budget: &ShutdownMoveBudget,
+        requests: &mut ShutdownLeaderRequests,
     ) -> ShutdownPhaseOutcome {
         match drain_cordon {
             ShutdownDrainCordon::NeverSet => ShutdownPhaseOutcome::Completed,
@@ -1246,15 +1552,17 @@ impl SessionServiceImpl {
                 ShutdownPhaseOutcome::Completed
             }
             ShutdownDrainCordon::SetByDrain => {
-                let quorum = self.shutdown_release_quorum(local_node_id).await;
-                let release_bound = budget.cordon_release_bound(quorum);
-                let release = self.clear_shutdown_drain_cordon(local_node_id);
-                match nervix_primitives::time::timeout(release_bound, release).await {
-                    Ok(outcome) => outcome,
-                    Err(_) => {
+                // The release's bound is judged again while it waits: voters a moment ago still
+                // shown as staying may by now have been heard to be stopping too.
+                let departed = requests.departed.clone();
+                let release = self.clear_shutdown_drain_cordon(local_node_id, requests);
+                let bound = self.shutdown_cordon_release_bound(local_node_id, budget, &departed);
+                nervix_primitives::select! {
+                    outcome = release => outcome,
+                    waited = bound => {
                         warn!(
                             node_id = %local_node_id,
-                            timeout = ?release_bound,
+                            timeout = ?waited,
                             "timed out clearing shutdown drain cordon"
                         );
                         ShutdownPhaseOutcome::Abandoned
@@ -1264,31 +1572,46 @@ impl SessionServiceImpl {
         }
     }
 
-    /// Completes the work this stopping node has already admitted, within what remains of the
-    /// drain timeout.
-    async fn drain_local_graphs_for_shutdown(
+    /// Resolves once the release of the cordon this node's moves set has waited as long as
+    /// `budget` allows, and returns how long that was. The bound depends on whether voters that
+    /// stay could commit the release, so it is judged again every tenth of a heartbeat interval,
+    /// leaving the `departed` nodes out of the voters that stay.
+    async fn shutdown_cordon_release_bound(
         &self,
-        budget: &ShutdownDrainBudget,
-    ) -> ShutdownPhaseOutcome {
-        let local_drain = self.inner.runtime.drain_local_graphs(budget.remaining());
-        match local_drain.await {
-            LocalGraphDrainOutcome::Quiescent => ShutdownPhaseOutcome::Completed,
-            LocalGraphDrainOutcome::Abandoned => ShutdownPhaseOutcome::Abandoned,
+        local_node_id: &ClusterNodeName,
+        budget: &ShutdownMoveBudget,
+        departed: &BTreeSet<ClusterNodeName>,
+    ) -> Duration {
+        let started = Instant::now();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let quorum = self.shutdown_release_quorum(local_node_id, departed).await;
+            let bound = budget.cordon_release_bound(quorum);
+            let waited = started.elapsed();
+            let Some(left) = bound.checked_sub(waited) else {
+                return waited;
+            };
+            if left.is_zero() {
+                return waited;
+            }
+            let rejudge = self.inner.raft_timings.heartbeat_interval() / 10;
+            sleep(left.min(rejudge)).await;
         }
     }
 
     async fn move_local_ownership_for_shutdown(
         &self,
         local_node_id: &ClusterNodeName,
-        budget: &ShutdownDrainBudget,
+        budget: &ShutdownMoveBudget,
+        requests: &mut ShutdownLeaderRequests,
     ) -> ShutdownOwnershipMove {
-        let route = self.shutdown_drain_route(local_node_id);
+        let route = self.shutdown_drain_route(local_node_id, &requests.departed);
         let route = match nervix_primitives::time::timeout(budget.remaining(), route).await {
             Ok(route) => route,
             Err(_) => {
                 warn!(
                     node_id = %local_node_id,
-                    timeout = ?budget.timeout,
+                    timeout = ?budget.deadline.timeout(),
                     "timed out reaching the leader before requesting a graceful shutdown drain"
                 );
                 return ShutdownOwnershipMove::NotRequested;
@@ -1300,30 +1623,29 @@ impl SessionServiceImpl {
         };
         // A requested drain may cordon the node before it moves anything, so a drain that times out
         // still counts as requested.
-        let drain = self.ask_shutdown_drain_leader(
-            local_node_id,
-            leader,
-            StoppingNodeDrainAction::Drain {
-                budget: budget.remaining(),
-            },
-        );
+        let drain =
+            self.request_shutdown_drain(local_node_id, leader, budget.remaining(), requests);
         let answer = match nervix_primitives::time::timeout(budget.remaining(), drain).await {
             Ok(answer) => answer,
             Err(_) => {
                 warn!(
                     node_id = %local_node_id,
-                    timeout = ?budget.timeout,
+                    timeout = ?budget.deadline.timeout(),
                     "timed out moving scheduled work off the local node before graceful shutdown"
                 );
-                return ShutdownOwnershipMove::Requested(ShutdownPhaseOutcome::Abandoned);
+                return ShutdownOwnershipMove::Requested(ShutdownMoveOutcome::Disrupted);
             }
         };
         ShutdownOwnershipMove::Requested(answer.into_drain_outcome(local_node_id))
     }
 
-    /// Finds where this node's drain is requested. Finding it asks the leader for nothing, so the
-    /// node is not cordoned whatever route this returns.
-    async fn shutdown_drain_route(&self, local_node_id: &ClusterNodeName) -> ShutdownDrainRoute {
+    /// Whether a live schedulable node besides this one could take its work. Answering asks the
+    /// leader for nothing.
+    async fn shutdown_replacement_exists(
+        &self,
+        local_node_id: &ClusterNodeName,
+        departed: &BTreeSet<ClusterNodeName>,
+    ) -> bool {
         let availability = self.inner.cluster.availability_state().await;
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();
         let drain_targets = self
@@ -1331,15 +1653,52 @@ impl SessionServiceImpl {
             .consensus
             .schedulable_live_voter_ids(placement_candidate_node_ids)
             .await;
-        if !drain_targets.iter().any(|node_id| node_id != local_node_id) {
-            info!(
-                node_id = %local_node_id,
-                "no live schedulable replacement node remains; admitted work completes in place"
-            );
-            return ShutdownDrainRoute::NoReplacement;
+        debug!(
+            node_id = %local_node_id,
+            drain_targets = ?drain_targets,
+            "the live, schedulable nodes that are not terminating, as this stopping node sees them"
+        );
+        drain_targets
+            .iter()
+            .any(|node_id| node_id != local_node_id && !departed.contains(node_id))
+    }
+
+    /// Finds the leader this node's drain is requested from, waiting until one is observed, or
+    /// finds that no other node can take the work. Finding it asks the leader for nothing, so the
+    /// node is not cordoned whatever route this returns.
+    ///
+    /// A leader in `departed` left the cluster, so the node waits for the next one instead.
+    async fn shutdown_drain_route(
+        &self,
+        local_node_id: &ClusterNodeName,
+        departed: &BTreeSet<ClusterNodeName>,
+    ) -> ShutdownDrainRoute {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if !self
+                .shutdown_replacement_exists(local_node_id, departed)
+                .await
+            {
+                return ShutdownDrainRoute::NoReplacement;
+            }
+            if let Some(leader) = self.current_shutdown_leader(departed).await {
+                return ShutdownDrainRoute::Leader(leader);
+            }
+            sleep(self.inner.raft_timings.heartbeat_interval() / 10).await;
         }
-        let leader = self.wait_for_shutdown_drain_leader().await;
-        ShutdownDrainRoute::Leader(leader)
+    }
+
+    /// The leader this node observes, unless it observes none or the leader it observes is one of
+    /// the `departed` nodes.
+    async fn current_shutdown_leader(
+        &self,
+        departed: &BTreeSet<ClusterNodeName>,
+    ) -> Option<ClusterNodeName> {
+        let leader = self.inner.consensus.current_leader().await?;
+        if departed.contains(&leader) {
+            return None;
+        }
+        Some(leader)
     }
 
     /// Whether this stopping node and the voters that are live and not terminating can commit the
@@ -1347,71 +1706,180 @@ impl SessionServiceImpl {
     async fn shutdown_release_quorum(
         &self,
         local_node_id: &ClusterNodeName,
+        departed: &BTreeSet<ClusterNodeName>,
     ) -> ShutdownReleaseQuorum {
         let availability = self.inner.cluster.availability_state().await;
-        let staying_node_ids = availability.placement_candidate_node_ids();
+        let mut staying_node_ids = availability.placement_candidate_node_ids();
+        staying_node_ids.retain(|node_id| !departed.contains(node_id));
         let voters = self.inner.consensus.membership_voter_ids().await;
         ShutdownReleaseQuorum::of(local_node_id, &voters, &staying_node_ids)
     }
 
-    /// Asks `leader` to act on this stopping node's own scheduled work, and asks the leader this
-    /// node observes next whenever the node asked does not lead, or lost its leadership while
-    /// draining or releasing the cordon. While this node leads, it acts for itself.
+    /// Asks `first_leader` to move this stopping node's scheduled work within `budget`, and asks
+    /// the leader this node observes next whenever the node asked does not lead, lost its
+    /// leadership while draining, or did not answer, as a leader that is stopping too does not.
+    /// It stops asking once no other node can take the work. While this node leads, it acts for
+    /// itself.
     ///
     /// A leader that loses leadership during a drain preserves committed moves and lets the next
     /// leader plan the remaining ones within the same budget.
-    /// Another leader hears the request over the interconnect, which authenticates this node by its
-    /// certificate, so asking needs no user credential.
-    async fn ask_shutdown_drain_leader(
+    async fn request_shutdown_drain(
         &self,
         local_node_id: &ClusterNodeName,
         first_leader: ClusterNodeName,
-        action: StoppingNodeDrainAction,
+        budget: Duration,
+        requests: &mut ShutdownLeaderRequests,
     ) -> ShutdownDrainAnswer {
         let mut leader = first_leader;
         let requested_at = Instant::now();
         loop {
             nervix_primitives::task::consume_budget().await;
-            let current_action = match action {
-                StoppingNodeDrainAction::Drain { budget } => StoppingNodeDrainAction::Drain {
-                    budget: budget
-                        .checked_sub(requested_at.elapsed())
-                        .unwrap_or(Duration::ZERO),
-                },
-                StoppingNodeDrainAction::ReleaseCordon => StoppingNodeDrainAction::ReleaseCordon,
-            };
-            let response = if &leader == local_node_id {
-                self.act_for_stopping_node(local_node_id.clone(), current_action)
-                    .await
-            } else {
-                let request = StoppingNodeDrainRequest {
-                    action: current_action,
-                };
-                match self.inner.interconnect.request(&leader, request).await {
-                    Ok(response) => response,
-                    Err(error) => return ShutdownDrainAnswer::Unanswered { leader, error },
-                }
-            };
-            match response {
-                StoppingNodeDrainResponse::Completed { report } => {
+            let remaining = budget
+                .checked_sub(requested_at.elapsed())
+                .unwrap_or(Duration::ZERO);
+            let action = StoppingNodeDrainAction::Drain { budget: remaining };
+            match self
+                .ask_shutdown_leader(local_node_id, &leader, action)
+                .await
+            {
+                Ok(StoppingNodeDrainResponse::Completed { report }) => {
                     return ShutdownDrainAnswer::Completed { leader, report };
                 }
-                StoppingNodeDrainResponse::Failed { report } => {
-                    return ShutdownDrainAnswer::Failed { leader, report };
+                Ok(StoppingNodeDrainResponse::Unmoved { report, unmoved }) => {
+                    let answer = ShutdownDrainAnswer::Unmoved {
+                        leader,
+                        report,
+                        unmoved,
+                    };
+                    return self
+                        .judge_unmoved_at_the_end(local_node_id, answer, &requests.departed)
+                        .await;
                 }
-                StoppingNodeDrainResponse::NotLeader => {
+                Ok(StoppingNodeDrainResponse::Failed { report }) => {
+                    let answer = ShutdownDrainAnswer::Failed { leader, report };
+                    return self
+                        .judge_unmoved_at_the_end(local_node_id, answer, &requests.departed)
+                        .await;
+                }
+                Ok(StoppingNodeDrainResponse::NotLeader) => {
                     sleep(self.inner.raft_timings.heartbeat_interval() / 10).await;
-                    leader = self.wait_for_shutdown_drain_leader().await;
+                }
+                Err(error) => {
+                    requests.record_unanswered(local_node_id, &leader, "drain", &error);
+                    sleep(self.inner.raft_timings.heartbeat_interval()).await;
                 }
             }
+            leader = match self
+                .shutdown_drain_route(local_node_id, &requests.departed)
+                .await
+            {
+                ShutdownDrainRoute::Leader(leader) => leader,
+                ShutdownDrainRoute::NoReplacement => return ShutdownDrainAnswer::NoReplacement,
+            };
         }
     }
 
-    async fn wait_for_shutdown_drain_leader(&self) -> ClusterNodeName {
+    /// Judges, once the leader has answered, whether the units its drain left on this node could
+    /// still have moved. A move can fail toward a node that began stopping, or left, while the
+    /// leader attempted it, before any refusal named why; once no other node can take the work,
+    /// the units that did not move had nowhere to move. Any other answer is returned as it is.
+    async fn judge_unmoved_at_the_end(
+        &self,
+        local_node_id: &ClusterNodeName,
+        answer: ShutdownDrainAnswer,
+        departed: &BTreeSet<ClusterNodeName>,
+    ) -> ShutdownDrainAnswer {
+        if !answer.could_have_moved() {
+            return answer;
+        }
+        if self
+            .shutdown_replacement_exists(local_node_id, departed)
+            .await
+        {
+            return answer;
+        }
+        match answer {
+            ShutdownDrainAnswer::Unmoved { leader, report, .. }
+            | ShutdownDrainAnswer::Failed { leader, report } => ShutdownDrainAnswer::Unmoved {
+                leader,
+                report,
+                unmoved: StoppingNodeUnmoved::NowhereToMove,
+            },
+            answer @ (ShutdownDrainAnswer::Completed { .. }
+            | ShutdownDrainAnswer::NoReplacement) => answer,
+        }
+    }
+
+    /// Asks the leader to release the cordon this stopping node's drain set, and asks the leader
+    /// this node observes next whenever the node asked does not lead, lost its leadership while
+    /// releasing it, or did not answer. Releasing a cordon is idempotent, so asking again is safe
+    /// even when an earlier release still commits.
+    async fn request_shutdown_cordon_release(
+        &self,
+        local_node_id: &ClusterNodeName,
+        requests: &mut ShutdownLeaderRequests,
+    ) -> ShutdownReleaseAnswer {
+        let mut leader = self
+            .wait_for_shutdown_drain_leader(&requests.departed)
+            .await;
         loop {
             nervix_primitives::task::consume_budget().await;
-            let leader = self.inner.consensus.current_leader().await;
-            if let Some(leader) = leader {
+            let action = StoppingNodeDrainAction::ReleaseCordon;
+            match self
+                .ask_shutdown_leader(local_node_id, &leader, action)
+                .await
+            {
+                Ok(StoppingNodeDrainResponse::Completed { report }) => {
+                    return ShutdownReleaseAnswer::Completed { leader, report };
+                }
+                // A leader answers a release only with its outcome; an answer that describes a
+                // drain released nothing.
+                Ok(
+                    StoppingNodeDrainResponse::Failed { report }
+                    | StoppingNodeDrainResponse::Unmoved { report, .. },
+                ) => {
+                    return ShutdownReleaseAnswer::Failed { leader, report };
+                }
+                Ok(StoppingNodeDrainResponse::NotLeader) => {
+                    sleep(self.inner.raft_timings.heartbeat_interval() / 10).await;
+                }
+                Err(error) => {
+                    requests.record_unanswered(local_node_id, &leader, "cordon release", &error);
+                    sleep(self.inner.raft_timings.heartbeat_interval()).await;
+                }
+            }
+            leader = self
+                .wait_for_shutdown_drain_leader(&requests.departed)
+                .await;
+        }
+    }
+
+    /// Asks `leader` once to act on this stopping node's own scheduled work. While this node leads,
+    /// it acts for itself. Another leader hears the request over the interconnect, which
+    /// authenticates this node by its certificate, so asking needs no user credential.
+    async fn ask_shutdown_leader(
+        &self,
+        local_node_id: &ClusterNodeName,
+        leader: &ClusterNodeName,
+        action: StoppingNodeDrainAction,
+    ) -> Result<StoppingNodeDrainResponse, Report<RequestError>> {
+        if leader == local_node_id {
+            return Ok(self
+                .act_for_stopping_node(local_node_id.clone(), action)
+                .await);
+        }
+        let request = StoppingNodeDrainRequest { action };
+        self.inner.interconnect.request(leader, request).await
+    }
+
+    /// Waits until this node observes a leader that is not one of the `departed` nodes.
+    async fn wait_for_shutdown_drain_leader(
+        &self,
+        departed: &BTreeSet<ClusterNodeName>,
+    ) -> ClusterNodeName {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(leader) = self.current_shutdown_leader(departed).await {
                 return leader;
             }
             sleep(self.inner.raft_timings.heartbeat_interval() / 10).await;
@@ -1421,11 +1889,10 @@ impl SessionServiceImpl {
     async fn clear_shutdown_drain_cordon(
         &self,
         local_node_id: &ClusterNodeName,
+        requests: &mut ShutdownLeaderRequests,
     ) -> ShutdownPhaseOutcome {
-        let leader = self.wait_for_shutdown_drain_leader().await;
-        let release = StoppingNodeDrainAction::ReleaseCordon;
         let answer = self
-            .ask_shutdown_drain_leader(local_node_id, leader, release)
+            .request_shutdown_cordon_release(local_node_id, requests)
             .await;
         answer.into_cordon_release_outcome(local_node_id)
     }
@@ -1463,9 +1930,9 @@ impl SessionServiceImpl {
             .spawn(async move { service.act_for_stopping_node(node_id, action).await });
         match task.await {
             Ok(Some(response)) => response,
-            Ok(None) => StoppingNodeDrainResponse::Failed {
-                report: "the leader reached its shutdown deadline before it finished".to_string(),
-            },
+            // A leader that is turning off acts for no stopping node any more, so the node that
+            // asked waits for the leader that follows.
+            Ok(None) => StoppingNodeDrainResponse::NotLeader,
             Err(error) => StoppingNodeDrainResponse::Failed {
                 report: format!("the leader's drain task failed: {error}"),
             },
@@ -1485,22 +1952,31 @@ impl SessionServiceImpl {
         }
         match action {
             StoppingNodeDrainAction::Drain { budget } => {
-                let drained = self
+                let NodeDrainReport {
+                    result: drained,
+                    unmoved,
+                } = self
                     .drain_node_with_budget(node_id.clone(), None, Some(budget))
                     .await;
                 if drained.succeeded() {
-                    StoppingNodeDrainResponse::Completed {
+                    return StoppingNodeDrainResponse::Completed {
                         report: drained.message,
-                    }
-                } else if drained.is_not_leader()
+                    };
+                }
+                if drained.is_not_leader()
                     || self.inner.consensus.current_leader().await.as_ref()
                         != Some(self.inner.consensus.local_node_id())
                 {
-                    Self::stopping_node_drain_retry_response(&node_id, &drained)
-                } else {
-                    StoppingNodeDrainResponse::Failed {
+                    return Self::stopping_node_drain_retry_response(&node_id, &drained);
+                }
+                match unmoved {
+                    Some(unmoved) => StoppingNodeDrainResponse::Unmoved {
                         report: drained.message,
-                    }
+                        unmoved,
+                    },
+                    None => StoppingNodeDrainResponse::Failed {
+                        report: drained.message,
+                    },
                 }
             }
             StoppingNodeDrainAction::ReleaseCordon => {
@@ -1575,6 +2051,34 @@ impl SessionServiceImpl {
             targets,
             &BTreeSet::new(),
         )
+    }
+
+    /// The nodes a drain may move units onto: the planning snapshot's schedulable nodes `candidates`,
+    /// without the nodes that refused a move of this drain because they are terminating.
+    fn drain_replacement_nodes(
+        candidates: &[ClusterNodeName],
+        terminating: &BTreeSet<ClusterNodeName>,
+    ) -> Vec<ClusterNodeName> {
+        let mut replacements = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if !terminating.contains(candidate) {
+                replacements.push(candidate.clone());
+            }
+        }
+        replacements
+    }
+
+    /// The destination that refused to prepare a move of `error`'s handoff because it is
+    /// terminating, when that refusal is what ended the preparation.
+    fn terminating_destination_refusal(
+        error: &Report<DomainAlterError>,
+    ) -> Option<ClusterNodeName> {
+        let Some(OwnershipHandoffError::DestinationTerminating { node }) =
+            error.downcast_ref::<OwnershipHandoffError>()
+        else {
+            return None;
+        };
+        Some(node.clone())
     }
 
     fn move_next_scheduled_node_for_drain_excluding(

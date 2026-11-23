@@ -22,7 +22,7 @@ use nervix_models::{DomainName, DomainState};
 
 use super::{
     DomainClock, DomainClockAccessError, DomainClockAccessResult, DomainClockLifecycle,
-    DomainExecutionSnapshot, DomainIngestionSnapshot, Runtime,
+    DomainExecutionSnapshot, DomainIngestionSnapshot, NodeSave, Runtime,
 };
 
 /// Lifecycle information read by recurring task paths from the clock's coherent publication.
@@ -100,10 +100,13 @@ impl DomainClockLifecycle {
 }
 
 impl DomainClock {
-    /// Whether the domain is stopping: its intake holds while the work in motion finishes, and the
-    /// stop's drain waits for no work that cannot move on.
+    /// Whether the domain is stopping on this node: a stop of the domain, or the save of the node
+    /// it runs on, lets the work in motion finish and waits for no work that cannot move on.
     pub(in crate::runtime) fn is_stopping(&self) -> bool {
         let publication = self.inner.published.load();
+        if publication.node == NodeSave::Saving {
+            return true;
+        }
         matches!(
             publication.task_state.as_ref(),
             Some(DomainTaskState {

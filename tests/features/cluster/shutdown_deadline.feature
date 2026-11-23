@@ -1,5 +1,5 @@
 @shutdown_qualification
-Feature: Process shutdown deadline
+Feature: Process shutdown and its timeout
 
   Scenario Outline: Graceful shutdown cancels an accepted resource upload <progress>
     Given a nervix-server process is started
@@ -21,8 +21,8 @@ Feature: Process shutdown deadline
       | waiting for its next chunk    |
       | sending chunks slowly         |
 
-  Scenario Outline: The shutdown deadline ends a process whose drain cannot finish in a <pace> domain
-    Given a nervix-server process is started with drain timeout "5s" and shutdown timeout "5s"
+  Scenario Outline: A node with nowhere to move saves what it holds and stops in a <pace> domain
+    Given a nervix-server process is started with shutdown timeout "5s"
     And the server process is configured with these Plexus commands
       """
       <domain>
@@ -65,8 +65,10 @@ Feature: Process shutdown deadline
       {"sequence":1}
       """
     And the server process receives SIGTERM
-    Then the server process exits with status 1 no sooner than "5s" and within "60s" of the last signal
-    And the server process log contains "shutdown deadline expired"
+    Then the server process exits with status 0 within "4s" of the last signal
+    And the server process log contains "graceful shutdown cut held work that has no saved form yet"
+    And the server process log contains "entity=held_output kind=emitter_undelivered items=1"
+    And the server process log contains "no other node can take this node's units, so they stay saved here and a restart restores them"
 
     Examples:
       | pace                                   | domain                                                       | start                             |
