@@ -29,7 +29,7 @@ fn options() -> TransportOptions {
         ..Default::default()
     })
     .assured("the declared bounds hold every reserved traffic class")
-    .options(None, None)
+    .options(None)
 }
 
 #[test]

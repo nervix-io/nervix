@@ -133,7 +133,7 @@ async fn runtime_shutdown_cancels_remote_ack_watcher_tasks() {
         .await
         .assured("the tracked watcher sends before entering its pending state");
 
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
 
     let dropped = timeout(ASYNC_EVENT_FAILSAFE, dropped_rx).await;
     assert!(
@@ -211,7 +211,7 @@ async fn a_cancelled_remote_delivery_resolves_its_records_and_returns_its_owner(
         dispatcher.executor.snapshot().relay_memory.reserved_bytes,
         0
     );
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
 }
 
 #[nervix_primitives::test]
@@ -239,7 +239,7 @@ async fn remote_ack_watcher_memory_is_released_when_the_registrar_run_differs() 
         0
     );
     acks.ack_success();
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
 }
 
 #[nervix_primitives::test]
@@ -284,7 +284,7 @@ async fn wide_remote_ack_batch_owns_one_charged_task_and_releases_it_on_shutdown
         executor.snapshot().relay_memory.reserved_bytes,
         expected_bytes,
     );
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
     assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0,);
     drop(roots);
 }
@@ -321,7 +321,7 @@ async fn a_watcher_held_by_a_full_relay_budget_starts_once_room_returns() {
         1024 + 4096
     );
     acks.ack_success();
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
     assert_eq!(
         dispatcher.executor.snapshot().relay_memory.reserved_bytes,
         0
@@ -1335,7 +1335,7 @@ async fn teardown_ends_the_silence_sweeps_after_the_overrunning_sweep_it_interru
     });
     teardown.cancelled().await;
 
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
 
     assert_eq!(
         sweeps.load(Ordering::Relaxed),

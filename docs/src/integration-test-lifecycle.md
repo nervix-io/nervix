@@ -1481,7 +1481,7 @@ branches to start from `INITIAL` after their relay presence and retained state h
 
 Two kinds of deadline meet in every scenario.
 
-A **product deadline** is configuration a node enforces on itself: its shutdown and drain timeouts,
+A **product deadline** is configuration a node enforces on itself: its shutdown timeout,
 its command retry validity and transaction idle timeout, its node-unavailability timeout and the
 election timeouts its Raft heartbeat derives. Test clusters start with test values for some of
 them. A scenario about one of them configures it, drives the node to it, and asserts the outcome
@@ -2651,7 +2651,7 @@ its command line: the scenario's cluster configuration becomes the owners' class
 groups, through the same validation. A scenario names any other setting for one node with
 `Given <node> starts with <setting> = <value>`, where the setting is the option's long name without
 its leading dashes and the value is written as the command line reads it, for example
-`Given node-2 starts with drain-timeout = 1m`. The harness applies such settings over the
+`Given node-2 starts with shutdown-timeout = 1m`. The harness applies such settings over the
 cluster's own from that node's next launch on, in the order the scenario named them, by rendering
 the node's settings as options, appending the named ones and reading the result with the server's
 own options groups, so a later setting of the same name replaces an earlier one and no setting
@@ -2663,7 +2663,7 @@ report, and that failure is terminal. A scenario whose subject is the refusal st
 asserts it with `Then node "<node>" refused to start because "<text>"`. A node the startup preflight
 refuses ends the same way, as an application error of its task. The settings of the current launch
 also decide how long a scenario-driven stop of that node may take, so a scenario that names a longer
-shutdown or drain timeout lengthens that bound with it.
+shutdown timeout lengthens that bound with it.
 
 Test clusters start with a 166 ms Raft heartbeat, so the election timeouts consensus derives from
 it, 996 ms to 1,992 ms, stay just inside the one and two seconds scenarios size their leader waits

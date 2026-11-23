@@ -440,7 +440,7 @@ run_domain_time() {
                    window_width_logical_ms: $width_ms,
                    window_width_physical_ms: ($width_ms / $rate)},
           physical_limits: {node_unavailability_timeout: $unavailability,
-                            graceful_stop_grace_seconds: 60},
+                            graceful_stop_grace_seconds: 720},
           rounds: $rounds,
           verdicts: {clock: ($clock[0] | del(.observers)), windows: $windows[0]},
           observers: ($clock[0].observers // null),

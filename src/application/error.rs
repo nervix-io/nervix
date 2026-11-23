@@ -156,8 +156,6 @@ pub enum AppError {
     InvalidWasmEngineSettings,
     #[error("invalid UDF capabilities")]
     InvalidUdfSettings,
-    #[error("invalid shutdown timeouts")]
-    InvalidShutdownTimeouts,
     #[error("failed to read the node settings")]
     ReadSettings,
     #[error("failed to initialize memory pressure monitor")]
@@ -173,10 +171,11 @@ pub enum AppError {
     StartDeadlockDiagnostics,
     #[error("failed to start termination signal supervision")]
     SuperviseTerminationSignals,
-    #[error("failed to start shutdown deadline supervision")]
-    SuperviseShutdownDeadline,
     #[error("the task running the public listeners failed")]
     JoinPublicListeners,
-    #[error("graceful shutdown did not finish before its shutdown deadline")]
-    ShutdownDeadlineExpired,
+    #[error(
+        "the shutdown timeout passed, or a move failed, before this node's work moved to other \
+         nodes: a cluster disruption"
+    )]
+    ShutdownDisrupted,
 }

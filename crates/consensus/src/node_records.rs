@@ -335,7 +335,7 @@ mod tests {
             revision: std::num::NonZeroU64::MIN,
             values: ClusterParameterValues::default(),
         });
-        candidate.claim.capabilities.shutdown.drain_timeout = Duration::from_secs(1);
+        candidate.claim.capabilities.shutdown.shutdown_timeout = Duration::from_secs(1);
         let unchanged = state.clone();
         assert!(matches!(
             announce(&mut state, &candidate).response,
