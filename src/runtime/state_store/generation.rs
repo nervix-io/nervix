@@ -281,6 +281,14 @@ impl StoredCheckpoint {
     // Segmented headers have no out-of-line archived fields: their encoding is exactly the
     // archived root. Larger current values are Inline. Maintenance never copies or decodes those
     // large payloads; Fjall's size query and caches retain their separate allocation owner.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a stored segmented checkpoint header has no out-of-line fields, so its \
+                      persisted encoding is exactly the archived StoredCheckpoint root"
+        )
+    )]
     pub(super) const SEGMENTED_BYTES: usize = std::mem::size_of::<ArchivedStoredCheckpoint>();
 
     pub(super) fn decode(raw: &[u8]) -> error_stack::Result<Self, RuntimePersistenceError> {

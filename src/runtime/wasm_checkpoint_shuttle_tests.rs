@@ -284,8 +284,8 @@ fn held_input_resolves_once_after_its_checkpoint(checkpoint: CheckpointEnd, deli
         let branch = nervix_primitives::task::spawn(async move {
             processing.ack_success();
             // The checkpoint under way reports the held input alive, racing its delivery's end.
-            holds
-                .keep_alive_while(nervix_primitives::task::yield_now())
+            SharedRemoteAckTiming::default()
+                .keep_alive_while(&holds, nervix_primitives::task::yield_now())
                 .await;
             match checkpoint {
                 CheckpointEnd::Completed => {

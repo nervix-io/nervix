@@ -124,6 +124,13 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn failed_ingestor_recheck(
+        &self,
+        _ingestor: &IngestorName,
+    ) -> Option<Duration> {
+        None
+    }
+
     pub(in crate::runtime) fn ingestor_confirmation_delay(
         &self,
         _ingestor: &DomainNodeRef,

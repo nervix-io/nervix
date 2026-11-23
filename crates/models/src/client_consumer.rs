@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
     )
 )]
 pub const MAX_CLIENT_CONSUMERS_PER_SESSION: usize = 32;
-pub const DEFAULT_CLIENT_CONSUMER_SESSION_BYTES: u64 = crate::ClientConsumerSessionBytes::DEFAULT;
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -55,10 +54,3 @@ impl ClientConsumerLimits {
         self.batches.get() <= MAX_CLIENT_CONSUMER_BATCHES
     }
 }
-
-const _: () = {
-    assert!(
-        DEFAULT_CLIENT_CONSUMER_SESSION_BYTES + crate::DEFAULT_CLIENT_PRODUCER_SESSION_BYTES
-            <= 64 * 1024 * 1024
-    );
-};

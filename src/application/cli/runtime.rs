@@ -41,15 +41,17 @@ pub struct RuntimeArgs {
     #[arg(
         long = RestoreStagingMaxBytes::NAME,
         env = "NERVIX_RESTORE_STAGING_MAX_BYTES",
-        help = "Maximum unpublished restore checkpoint key and value bytes per node; without it \
-                the smaller of 128 GiB and the capacity of the database's volume"
+        help = super::settings::capability_help::<RestoreStagingMaxBytes>(
+            "Maximum unpublished restore checkpoint key and value bytes per node",
+            HumanBytes(RestoreStagingMaxBytes::default_value(&())),
+        )
     )]
     pub restore_staging_max_bytes: Option<HumanBytes>,
-    #[arg(long = StateInspectionMaxRows::NAME, env = "NERVIX_INSPECTION_MAX_ROWS", help = "Maximum rows in one state inspection reply")]
+    #[arg(long = StateInspectionMaxRows::NAME, env = "NERVIX_INSPECTION_MAX_ROWS", help = super::settings::capability_help::<StateInspectionMaxRows>("Maximum rows in one state inspection reply", StateInspectionMaxRows::default_value(&())))]
     pub inspection_max_rows: Option<NonZeroUsize>,
-    #[arg(long = StateInspectionMaxSections::NAME, env = "NERVIX_INSPECTION_MAX_SECTIONS", help = "Maximum named Row sections in one state inspection reply")]
+    #[arg(long = StateInspectionMaxSections::NAME, env = "NERVIX_INSPECTION_MAX_SECTIONS", help = super::settings::capability_help::<StateInspectionMaxSections>("Maximum named Row sections in one state inspection reply", StateInspectionMaxSections::default_value(&())))]
     pub inspection_max_sections: Option<NonZeroUsize>,
-    #[arg(long = StateInspectionReadTimeout::NAME, env = "NERVIX_INSPECTION_READ_TIMEOUT", help = "Elapsed deadline of one complete state inspection read")]
+    #[arg(long = StateInspectionReadTimeout::NAME, env = "NERVIX_INSPECTION_READ_TIMEOUT", help = super::settings::capability_help::<StateInspectionReadTimeout>("Elapsed deadline of one complete state inspection read", HumanDuration(StateInspectionReadTimeout::default_value(&()))))]
     pub inspection_read_timeout: Option<HumanDuration>,
     #[command(flatten)]
     pub data_plane: super::data_plane::DataPlaneArgs,
@@ -82,7 +84,9 @@ impl RuntimeArgs {
             inspection_max_sections: Some(*settings.inspection.max_sections.value()),
             inspection_read_timeout: Some(HumanDuration(*settings.inspection.read_timeout.value())),
             state_snapshot_interval: Some(HumanDuration(settings.state_snapshot_interval())),
-            restore_staging_max_bytes: settings.restore_staging_max_bytes().map(HumanBytes),
+            restore_staging_max_bytes: settings
+                .requested_restore_staging_max_bytes()
+                .map(HumanBytes),
         }
     }
 

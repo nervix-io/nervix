@@ -77,6 +77,14 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 };
 
 /// The longest queue name SQS admits, its `.fifo` suffix included.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Amazon SQS refuses a queue name longer than 80 characters, a FIFO queue's .fifo \
+                  suffix included"
+    )
+)]
 const SQS_QUEUE_MAX: usize = 80;
 /// The suffix the name of every FIFO queue ends in.
 const SQS_FIFO_SUFFIX: &str = ".fifo";

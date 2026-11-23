@@ -25,7 +25,21 @@ use crate::{
 };
 
 /// Conversion holds one identity section and one Arrow section at a time.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Backup And Restore's limits bound a materialized identity group section at 1 MiB"
+    )
+)]
 pub const MATERIALIZED_IDENTITIES_BYTES: u64 = 1024 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Backup And Restore's limits bound a materialized Arrow group section at 8 MiB"
+    )
+)]
 pub const MATERIALIZED_COLUMNS_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One immutable generation of a materialized relay. Each group has an identity record and an
@@ -84,6 +98,14 @@ struct IdentitiesWire {
 
 impl ArchiveRecord for MaterializedRelayDescriptor {
     const KIND: RecordKind = RecordKind::MaterializedRelayDescriptor;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported materialized relay descriptor \
+                      shape"
+        )
+    )]
     const VERSION: u16 = 4;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
@@ -137,6 +159,14 @@ impl ArchiveRecord for MaterializedRelayDescriptor {
 
 impl ArchiveRecord for MaterializedIdentitiesRecord {
     const KIND: RecordKind = RecordKind::MaterializedIdentities;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported materialized record identities \
+                      shape"
+        )
+    )]
     const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {

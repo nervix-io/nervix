@@ -10,7 +10,9 @@ use nervix_connector::{EmitterFinishResult, EmitterLifecycle};
 use super::*;
 use crate::runtime::{
     events::RuntimeErrorEvent,
-    test_fixtures::{emitter_context, input_batch},
+    test_fixtures::{
+        commit_remote_ack_alive_interval, emitter_context, input_batch, input_batch_with,
+    },
 };
 
 fn task_state(context: &EmitterConnectorContext) -> EmitterTaskState {
@@ -71,6 +73,7 @@ fn batch_context<'a>(
         envelope: None,
         http_requests: None,
         materialized_state,
+        remote_ack_timing: &context.remote_ack_timing,
     }
 }
 
@@ -839,6 +842,70 @@ async fn emitter_acknowledgement_handle_preserves_ack_lifecycle() {
     acks.acknowledge();
     assert_eq!(completion.wait().await, AckOutcome::Ack);
     assert!(EmitterRecordAcknowledgements::new(AckSet::empty()).is_empty());
+}
+
+/// The beat that keeps the acknowledgements of an emitter's buffered work alive waits the
+/// cluster's committed `REMOTE_ACK_ALIVE_INTERVAL`, the interval a remote receiver reports a
+/// delivery's records at, rather than the parameter's default.
+#[nervix_primitives::test(start_paused = true)]
+async fn buffered_work_is_kept_alive_at_the_committed_alive_interval() {
+    let context = emitter_context();
+    let committed = Duration::from_millis(300);
+    commit_remote_ack_alive_interval(&context.runtime, committed);
+    let mut state = task_state(&context);
+    let (acks, _completion) = AckSet::root();
+    state
+        .keepalive
+        .include_batch(&EmitterPublishBatch::from_batch(
+            input_batch_with(1, 0, acks),
+            Timestamp::from_unix_nanos(0),
+        ));
+
+    nervix_primitives::time::advance(committed - Duration::from_millis(1)).await;
+    assert!(
+        !state.keepalive.take_due(),
+        "the beat of buffered work waits the committed alive interval"
+    );
+    nervix_primitives::time::advance(Duration::from_millis(1)).await;
+    assert!(
+        state.keepalive.take_due(),
+        "the beat of buffered work is due once the committed alive interval has passed"
+    );
+}
+
+/// A scheduled retry reports the acknowledgements it holds alive every committed
+/// `REMOTE_ACK_ALIVE_INTERVAL` until it runs, rather than every default interval.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_retry_keeps_its_held_acknowledgements_alive_at_the_committed_alive_interval() {
+    let context = emitter_context();
+    let committed = Duration::from_millis(300);
+    commit_remote_ack_alive_interval(&context.runtime, committed);
+    let mut state = task_state(&context);
+    let (acks, mut completion) = AckSet::root();
+    state.retry.defer(
+        &context,
+        EmitterRetryDeferral {
+            cause: EmitterRetryCause::Publish,
+            wait: Duration::from_secs(60),
+            acks: EmitterAcknowledgements::from(acks),
+            waiting_for_stall_clear: false,
+            reason: None,
+        },
+    );
+
+    nervix_primitives::time::advance(committed - Duration::from_millis(1)).await;
+    assert!(!state.retry.retry_is_due());
+    assert!(
+        futures_util::FutureExt::now_or_never(completion.wait_for_progress()).is_none(),
+        "the retry reports nothing before the committed alive interval has passed"
+    );
+    nervix_primitives::time::advance(Duration::from_millis(1)).await;
+    assert!(!state.retry.retry_is_due());
+    assert_eq!(
+        completion.wait_for_progress().await,
+        AckProgress::Alive,
+        "the retry reports its held acknowledgements once the committed alive interval has passed"
+    );
 }
 
 /// An emitter whose transport client still holds records once the loop ends. It answers its

@@ -27,8 +27,9 @@ pub struct DiagnosticArgs {
     pub deadlock_evidence: Option<PathBuf>,
 
     /// Disable runtime order checking in an order-instrumented diagnostic artifact.
-    #[clap(
+    #[arg(
         long,
+        env = "NERVIX_DEADLOCK_ACTIVE_ONLY",
         help = "Check active cycles only; compiled order instrumentation retains its cost"
     )]
     pub deadlock_active_only: bool,

@@ -29,6 +29,14 @@ use crate::{
 
 /// The largest Arrow IPC group of deduplicator keys, window input rows or window arguments a
 /// reader accepts. Conversion holds one group at a time.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Backup And Restore's limits bound each deduplicator key, window input and \
+                  window argument group section at 8 MiB"
+    )
+)]
 pub const BRANCH_STATE_GROUP_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The last column of every deduplicator key group: when each key was seen, in UTC nanoseconds.
@@ -157,6 +165,14 @@ struct DelayedRemovalWire {
 
 impl ArchiveRecord for DeduplicatorStateDescriptor {
     const KIND: RecordKind = RecordKind::DeduplicatorStateDescriptor;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported deduplicator keyspace descriptor \
+                      shape"
+        )
+    )]
     const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
@@ -204,6 +220,13 @@ impl ArchiveRecord for DeduplicatorStateDescriptor {
 
 impl ArchiveRecord for WindowStateDescriptor {
     const KIND: RecordKind = RecordKind::WindowStateDescriptor;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported window state descriptor shape"
+        )
+    )]
     const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {

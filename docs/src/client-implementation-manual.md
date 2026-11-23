@@ -99,7 +99,9 @@ A `Membership` notice describes the serving node's observation of a join, leave 
 change. A command's application progress is internal node-to-node traffic; its client-visible
 completion is the correlated command outcome under
 [Commands And Execution Identity](#commands-and-execution-identity). Notice delivery has its own
-bounded, gap-reporting stream and supplies no command outcome.
+bounded, gap-reporting stream and supplies no command outcome. The native client bounds that stream
+with its `notice-capacity` and `notice-bytes` capabilities; see
+[Connection Capabilities](client-tools-cli.md#connection-capabilities).
 
 An upload is a separate call with its own frames; see [Resource Uploads](#resource-uploads). So is
 the download of a backup's archive; see [Backup Downloads](#backup-downloads), and a restore with its
@@ -554,7 +556,9 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
   as `SubscriptionEnded` with `RelayRemoved` would, and when it refuses it as `RelayChanged`, as
   `RelayChanged` would; S-4 then holds for it. When the session refuses the reopening for any other
   reason, the client MUST report the refusal with its typed cause and SHOULD send it again on that
-  session after a wait that grows with each refusal, rather than at a fixed rate. A reopening left
+  session after a wait that grows with each refusal, rather than at a fixed rate; the native
+  client's wait starts at its `restoration-backoff` and doubles up to its
+  `restoration-max-backoff`. A reopening left
   unanswered past the request timeout ends that session. Its reader MUST be woken even when the
   transport remains connected, and MUST open the next session to restore the desired subscription;
   the unanswered request is not a server refusal to retry on the ended session. A client MUST
@@ -565,8 +569,9 @@ reset. A genuine reset failure arrives as `RequestFailed` and follows the failur
 - **S-8.** A client MUST bound what it retains for subscriptions, per subscription and in total, and
   SHOULD let one subscription retain at least one frame of the frame limit. Local configurable
   limits MUST validate positive capacities and every derived record/byte product before opening
-  the transport. The native client uses its typed capabilities for subscription retention and
-  upload/restore queues; see [Connection Capabilities](client-tools-cli.md#connection-capabilities).
+  the transport. The native client uses its typed capabilities for subscription and notice
+  retention, its request, upload and restore queues and its restoration waits; see
+  [Connection Capabilities](client-tools-cli.md#connection-capabilities).
 - **S-9.** A client that stops reading a `BLOCKING` subscription holds back the relay it reads. A
   client that cannot keep up SHOULD use `DROPPING` delivery.
 
@@ -883,7 +888,8 @@ remain the schema the ingestor declares; a payload field cannot replace the auth
   size and BLAKE3 digest of the archive; then the archive as `RestoreChunk` frames in order, each
   non-empty and within one frame, adding up to exactly the declared size; then the client
   half-closes the stream, or on a console WebSocket keeps the connection open for the reply (T-3a).
-  The Rust client and the web console send 256 KiB chunks.
+  The Rust client and the web console send 256 KiB chunks, or half a session frame when that is
+  smaller.
 - **W-2.** A client MUST create one execution reference per logical restore, following E-1 to E-4,
   and MUST keep the reference, the statement, and the archive's bytes until the restore's outcome is
   known. Every attempt MUST send all three unchanged, and the digest MUST be computed over exactly

@@ -211,6 +211,12 @@ violates instead of softening the contract to match today's imports.
 - Every server-side runtime entity that binds a configured listening port runs on every live node,
   with a listener independent of leadership and placement that stays present across every cluster
   event: leader changes, node joins, node restarts and recovery.
+- Every public listener enforces its declared
+  [listener bounds](docs/src/node-settings.md#listener-bounds), node capabilities logged at startup
+  and shown in `DESCRIBE CLUSTER`: a connection ceiling, request-head, TLS-handshake and idle
+  deadlines, keepalive, and body and message caps charged to an executor memory class before the
+  bytes are held. Excess gets a typed refusal. An accept failure never stops an accept loop, the
+  interconnect's included, and a node-local one waits the declared pause.
 - A consensus append-stream adapter consumes the caller's first request before attempting peer
   admission, so the caller's retry and cancellation gates also govern immediate failures. Leading
   empty probes use management capacity, where an unconfirmed first-data prefix is checked before
@@ -381,7 +387,8 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   for cluster disruption ([Planned operations cost backpressure, never
   data](#planned-operations-cost-backpressure-never-data)). `task::spawn_cpu` belongs to the
   executor's worker pools, `spawn_blocking` to its storage workers, and `block_in_place` to no file
-  by default.
+  by default. An embedded engine's own parallelism (ONNX Runtime's threads, WASM parallel
+  compilation) is pinned or disabled where the executor already owns that admission.
 - **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
   thread through `thread::{spawn, Builder, scope, spawn_detached}` or `unmodeled::thread::Builder`,
   lists exactly those items in `crates/primitives/blocking-permissions.toml` with its owner, why it
@@ -549,7 +556,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   label statements and inspection, transaction effects, execution identity and archive fidelity.
 - [Node Settings](docs/src/node-settings.md): setting declarations, defaults, derivations,
   fixed-value contracts, validation, carriers, change procedures, capability sizing, settings
-  enforcement.
+  enforcement. [Sizing A Node](docs/src/sizing.md) owns what an operator sizes a node and a
+  cluster from, and how settings behave during a roll.
 - [Cryptography](docs/src/cryptography.md): how Nervix obtains a TLS provider, a digest used for
   security, a random value, a password or key derivation or a signature; the interconnect's fixed
   TLS set, the outward TLS policy and the paths it governs; a non-approved hash or the purpose a
@@ -867,6 +875,13 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 
 ## Node Settings
 
+- Every option `nervix-server` accepts is a setting of its owner's class-typed group or part of the
+  node's provisioning (identity, addresses, TLS and resolver files, paths, bootstrap and trace
+  export), declared in one options file per area, and its help states each setting's class, default
+  and derivation for the generated reference. The composition root builds every owner and engine
+  from resolved settings as typed inputs, never from a `Default`, positional values or ambient
+  configuration. A client tool's own values are local options under the same discipline, validated
+  before it connects and never sent to a server.
 - A setting is a field of a class-typed group, declared by a `SettingDefinition` with exactly one
   sealed class (`Prerequisites`, `ClusterParameters` or `NodeCapabilities`), its semantic value,
   name, single default, optional derivation and validation. Groups carry `Setting<D>` fields, and
@@ -874,30 +889,69 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
 - A **prerequisite** is what a node must bring to reach the live cluster. It travels through gossip
   and the handshake and is checked at join, and nothing needed to reach the cluster depends on what
   a node learns only after reaching it. [Node Settings](docs/src/node-settings.md) owns the closed
-  list and timing bounds.
+  list and timing bounds; a new prerequisite first shows why a cluster parameter applied by
+  rebuilding its owner cannot express it. A refusal stops only the joining or returning run, which
+  the leader judges against every live voter.
 - A **cluster parameter** is what the cluster accepts or promises: one Raft-committed value, seeded
-  only at first bootstrap and changed by an administrative Plexus statement. A value the registry
-  validates against is never an independent node flag.
+  only by the first bootstrap, whose seed option refuses every other start, and changed only by
+  `ALTER CLUSTER SET`. Its transition is validated at commit against the existing Models and every
+  admitted node's committed capabilities, which a joining node also checks before it reports ready.
+  Nodes apply a commit live, rebuilding an owner that captured the value at construction in place,
+  and a joining or returning node takes the record from the live cluster, never from its stale log.
+  An operation keeps the values it captured at admission. A value the registry validates against,
+  or that decides a statement's, Model's or record's outcome, is a cluster parameter or fixed, never
+  an independent node flag or a consumer's second default.
 - A **node capability** is what one node can carry: detected or overridden locally and announced
-  through Raft, with its bounds honoured by peers and its committed record used by placement. It
-  changes no cluster acceptance rule or guarantee.
-- Derived values are named methods on their owner, never flags. Defaults are written once, in the
+  through Raft, with its bounds honoured by peers and its committed record used by placement; a node
+  without a committed record receives no placements. It changes no cluster acceptance rule or
+  guarantee. Whatever a peer must honour is announced by its owner (a receive bound in that record,
+  a session limit at session open, a heartbeat at link open), and the peer uses the announced value,
+  never its own default or an assumption that nodes agree.
+- A value computed from other settings or the machine is a named derivation on its owner, never a
+  flag of its own. Whatever mirrors a setting (the charge for a buffer it sizes, a chunk, a
+  deadline, a restated default or bound) takes it from the resolved setting or its definition, and a
+  charge covers what is allocated at every valid value. Defaults and bounds are written once, in the
   owning definition, and dependent defaults stay `Option` at the edge until resolved against typed
-  context. Operator-supplied relationships are validated before I/O, and transitions at commit.
+  context. An explicit value is kept exactly and refused when it does not fit, never rounded,
+  clamped or reduced. Operator-supplied relationships are validated before I/O, and transitions at
+  commit.
+- Before any listener binds or store opens, the
+  [startup preflight](docs/src/node-settings.md#the-startup-preflight) checks what the node needs
+  from its environment, such as memory against its budgets, its directories and its resolver, and a
+  failure refuses the start with a typed report naming the setting and the values.
+- Every bound, deadline, capacity and pool an embedded library enforces (HTTP, gRPC and WebSocket
+  servers, consensus, the databases, the WASM and ONNX engines, connector drivers) is set
+  explicitly from a setting, a derivation or a fixed contract, never left at its implicit default.
+  No compiler rule sees an omitted option, so review owns this.
 - A fixed constant declares `nervix::constant(fixed, reason = "...")` under
   `cfg_attr(nervix_lint, ...)`, with a reason naming the wire format, RFC, persisted layout, ABI or
-  invariant that fixes it; a convenient literal is not a fixed-value contract.
+  invariant that fixes it; a convenient literal is not a fixed-value contract. A value a maintained
+  implementation defines comes from its typed constant, and a reason cites a contract its
+  specification or owning chapter states; when the chapter is silent, the change writes the
+  contract there.
 - A value that depends on the external system is a clause or declared client key of the connector's
   Plexus surface, owned by its connector epic; node settings own host policy.
-- A settings change stays correct through a rolling restart in any order, takes full effect when the
-  last node adopts it, and rolls back the same way in reverse. Only prerequisites reject
-  incompatible peers, and mixed operational values within the current shape introduce no alternate
-  data representation.
-- Flags are `--<area>-<name>` and `NERVIX_<AREA>_<NAME>`. Resolved settings are observable with
-  secrets redacted, including per-node capabilities and committed-versus-running drift.
-- The temporary `hidden_tunables` count, of governed numeric constants and literal policy calls
-  outside class defaults and reviewed fixed contracts, only decreases as area owners adopt the
-  declarations; its compiler-rule replacement removes the detector and the baseline entry together.
+- A node capability change, and a prerequisite timing change within its bound, stays correct through
+  a rolling restart in any order, takes full effect when the last node adopts it and rolls back the
+  same way in reverse. The other prerequisites change only by provisioning, and no cluster parameter
+  changes in a roll. Only prerequisites reject incompatible peers, and mixed operational values
+  within the current shape introduce no alternate data representation.
+- An option is named by its definition's `NAME`, a new name taking the form `--<area>-<name>`, and
+  its environment twin is `NERVIX_` followed by that name in upper snake case. Resolved settings are
+  observable with secrets redacted, including per-node capabilities and committed-versus-running
+  drift.
+- A change to the server's command line, startup settings or initialization contract keeps the
+  [Kubernetes operator](docs/src/installation-kubernetes.md#deployment-qualification)'s generated
+  startup command, chart and example current in the same delivery, with the server image's
+  deployment check as its evidence.
+- The `nervix::hidden_tunable` compiler diagnostic refuses numeric policy outside a setting's
+  definition, a group's defaults, a derivation from typed input and a fixed contract: a constant of
+  a governed numeric type, and a numeric literal that chooses a duration, a capacity, a channel
+  capacity or a permit count. [Hidden
+  Tunables](docs/src/architecture-enforcement.md#hidden-tunables) owns what it recognizes. A value
+  that resists the class test is not a setting: it is fixed with the reason that fixes it, never
+  kept as a literal, and a retained exception is a reason-bearing expectation on that one
+  declaration or operation, naming its repair task.
 
 ## Cryptography
 
@@ -1202,8 +1256,9 @@ selection, what each form of evidence establishes, and the workaround audit and 
 Real Nervix compiler diagnostics, across the complete declared configuration matrix, check Model
 consumption, language dependencies, recurring cluster awaits, node identities, installation state,
 synchronization, failure signatures, discarded outcomes, canonical panic APIs, report-bearing
-tracing fields, integer and `Duration` clamped arithmetic and `Option` and `Result` adapter control
-flow and [branch collection ownership](#a-branch-owns-its-runtime). Finite API recognition is Rust
+tracing fields, integer and `Duration` clamped arithmetic, `Option` and `Result` adapter control
+flow, [numeric policy outside declared settings](#node-settings) and [branch collection
+ownership](#a-branch-owns-its-runtime). Finite API recognition is Rust
 code in the rules, and no policy is inferred from filenames,
 sharing traits or method names. Contracts and reviewed exceptions live beside their source owners
 under `cfg_attr(nervix_lint, ...)`, move with their module, and state the actual recurring,
@@ -1269,9 +1324,9 @@ inventory and CI policy, and native coverage uses matching LLVM tools.
 ### The ratchet
 
 Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual Rust
-cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, functions
-whose cyclomatic complexity exceeds 30 and [`hidden_tunables`](#node-settings) over tracked and
-newly authored Rust, [`non_aws_lc_crypto`](#cryptography) over the product dependency graph, and
+cast expressions, struct fields whose presence depends on `cfg(feature = "testing")` and functions
+whose cyclomatic complexity exceeds 30 over tracked and newly authored Rust,
+[`non_aws_lc_crypto`](#cryptography) over the product dependency graph, and
 [`branch_inversions`](#a-branch-owns-its-runtime) over the complete checked compiler matrix.
 Its stable source parser sees inactive branches and named or tuple fields; raw identifiers, import
 aliases, qualified paths and conditional documentation attributes are not those facts. CI fails
@@ -1517,6 +1572,9 @@ miss-heavy keys; a lower count or a shorter function is not a speedup.
 - The scenario suite and harness regressions are the `nervix-scenarios` package rooted at `tests/`,
   with only test targets and dev-dependencies, so the server is never linked twice and its `testing`
   feature stays out of ordinary builds.
+- A scenario sets a node's setting through `Given <node> starts with <setting> = <value>`, never a
+  step per setting, and a test whose invariant depends on a capacity configures it instead of
+  inheriting a host-derived default.
 - Scenarios run nodes in-process. A test whose subject is a process (its signals, exit status,
   command line, open-file limit or crash) re-runs its own executable through
   `tests/common/process_program.rs`, which starts `current_exe` with `arg0` set to `nervix-server`

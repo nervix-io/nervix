@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "observes engine settings through public interfaces")
 )]
 
-use std::time::Duration;
+use std::{process::Stdio, time::Duration};
 
 use cucumber::{then, when};
 use meticulous::ResultExt as _;
@@ -21,6 +21,11 @@ use crate::{
     CLI_TERMINAL_DISPLAY_TIMEOUT, CliTerminal, ScenarioWorld, TEST_AUTH_PASSWORD,
     TEST_AUTH_USERNAME, expand_placeholders, scenario_cli_binary,
 };
+
+/// How long one CLI run may take before its step fails it. A run the CLI refuses ends before it
+/// connects, and one it accepts ends within the CLI's own deadlines, so the bound only has to be
+/// generous.
+const CLI_RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[then(expr = "the data execution count on node {string} is saved")]
 async fn save_data_executions(world: &mut ScenarioWorld, node: String) {
@@ -101,6 +106,10 @@ async fn repl_with_capabilities(world: &mut ScenarioWorld, node: String) {
             "20ms",
             "--retry-max-backoff",
             "200ms",
+            "--restoration-backoff",
+            "250ms",
+            "--restoration-max-backoff",
+            "4s",
             "--subscription-record-capacity",
             "48",
             "--subscription-retained-frames",
@@ -111,6 +120,12 @@ async fn repl_with_capabilities(world: &mut ScenarioWorld, node: String) {
             "4",
             "--restore-frame-capacity",
             "5",
+            "--request-frame-capacity",
+            "16",
+            "--notice-capacity",
+            "64",
+            "--notice-bytes",
+            "524288",
         ],
     )
     .assured("the CLI starts on its terminal");
@@ -124,4 +139,41 @@ async fn repl_with_capabilities(world: &mut ScenarioWorld, node: String) {
         );
     }
     world.cli_terminal = Some(terminal);
+}
+
+/// Runs `command` once through the CLI on `node` with the connection capability flags
+/// `capabilities`, written as the operator types them, and keeps how the run ended.
+#[when(expr = "the CLI executes {string} on node {string} with connection capabilities {string}")]
+async fn cli_executes_with_capabilities(
+    world: &mut ScenarioWorld,
+    command: String,
+    node: String,
+    capabilities: String,
+) {
+    let node = expand_placeholders(world, &node);
+    let uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a node");
+    let mut process = tokio::process::Command::new(scenario_cli_binary());
+    process
+        .args([
+            "--server",
+            &uri,
+            "--domain",
+            &world.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+        ])
+        .args(capabilities.split_whitespace())
+        .args(["--command", &command])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = timeout(CLI_RUN_TIMEOUT, process.output())
+        .await
+        .assured("the CLI ends within its run timeout")
+        .assured("the CLI process starts");
+    world.last_cli_output = Some(output);
 }

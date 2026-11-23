@@ -1,8 +1,10 @@
 //! Acknowledgement renewal for retained runtime work and connector reconnect cadence.
 //!
 //! Layer: data plane.
-//! - **Owns.** Borrowed acknowledgement scopes and bounded reconnect delays.
-//! - **Depends on.** Runtime ACK sets, retry settings and primitive timers.
+//! - **Owns.** Borrowed acknowledgement scopes, the beat they renew at, and bounded reconnect
+//!   delays.
+//! - **Depends on.** Runtime ACK sets, the installed remote acknowledgement timing, retry settings
+//!   and primitive timers.
 //! - **Must not know.** Source protocols, graph planning, worker admission or error policies.
 
 use nervix_connector::ParsedRetryPolicy;
@@ -24,44 +26,90 @@ pub(in crate::runtime) trait AcknowledgementKeepalive {
     fn needs_keepalive(&self) -> bool {
         true
     }
+}
 
-    /// Await `future` while reporting these acknowledgements alive every
-    /// `REMOTE_ACK_ALIVE_INTERVAL`, as a remote receiver reports the acknowledgements it holds, so
-    /// an ingestor's `ACK TIMEOUT` does not expire while work done on their behalf is still under
-    /// way.
-    async fn keep_alive_while<F>(&self, future: F) -> F::Output
+/// Held work reports the acknowledgements it holds alive at the committed
+/// `REMOTE_ACK_ALIVE_INTERVAL`, as a remote receiver reports the records of a delivery it holds.
+///
+/// An owner of held work keeps this node's installed timing from its creation. A keepalive scope
+/// polls its work before it arms anything, so work that completes at its first poll reads no
+/// interval and arms no timer. The scope reads the interval when it first finds its work pending
+/// and keeps it until the work ends, as a delivery keeps the timing it captured, so a committed
+/// change reaches a running owner at its next scope without rebuilding the owner.
+impl SharedRemoteAckTiming {
+    /// Await `future` while reporting `acks` alive as it starts and every alive interval it stays
+    /// pending, so an ingestor's `ACK TIMEOUT` does not expire while work done on their behalf is
+    /// still under way.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "held work renews its retained acknowledgement obligation while it waits"
+        )
+    )]
+    pub(in crate::runtime) async fn keep_alive_while<A, F>(&self, acks: &A, future: F) -> F::Output
     where
+        A: AcknowledgementKeepalive + ?Sized,
         F: std::future::Future,
     {
-        if self.needs_keepalive() {
-            self.keep_alive();
+        if acks.needs_keepalive() {
+            acks.keep_alive();
         }
-        self.keep_alive_while_pending(future).await
+        self.keep_alive_while_pending(acks, future).await
     }
 
-    /// Await `future`, reporting these acknowledgements alive each time another
-    /// `REMOTE_ACK_ALIVE_INTERVAL` passes with `future` still pending. Unlike
-    /// [`Self::keep_alive_while`] it reports nothing up front, so work that ends within one
-    /// interval, as a relay delivery ordinarily does, reports nothing at all.
-    async fn keep_alive_while_pending<F>(&self, future: F) -> F::Output
+    /// Await `future`, reporting `acks` alive each time another alive interval passes with
+    /// `future` still pending. Unlike [`Self::keep_alive_while`] it reports nothing up front, so
+    /// work that ends within one interval, as a relay delivery ordinarily does, reports nothing at
+    /// all.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "held work renews its retained acknowledgement obligation while it waits"
+        )
+    )]
+    pub(in crate::runtime) async fn keep_alive_while_pending<A, F>(
+        &self,
+        acks: &A,
+        future: F,
+    ) -> F::Output
     where
+        A: AcknowledgementKeepalive + ?Sized,
         F: std::future::Future,
     {
         // Pin before selecting the empty-ACK path so this wrapper stores the owned future once.
         // Borrowing that one future on both paths also keeps nested delivery futures bounded.
         let mut future = std::pin::pin!(future);
-        if !self.needs_keepalive() {
+        if !acks.needs_keepalive() {
             return future.await;
         }
+        let mut interval = None;
         loop {
             nervix_primitives::task::consume_budget().await;
+            // The work is polled first, and the beat reads the interval and arms its timer only
+            // once the work is pending.
             nervix_primitives::select! {
                 biased;
                 result = &mut future => return result,
-                _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
+                _ = self.ack_alive_beat(&mut interval) => {}
             }
-            self.keep_alive();
+            acks.keep_alive();
         }
+    }
+
+    /// Waits one alive interval of a keepalive scope. The scope's first beat reads the committed
+    /// interval into `interval`, and every later beat of the scope waits that same interval.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "held work renews its retained acknowledgement obligation while it waits"
+        )
+    )]
+    pub(in crate::runtime) async fn ack_alive_beat(&self, interval: &mut Option<Duration>) {
+        let interval = *interval.get_or_insert_with(|| self.ack_alive_interval());
+        sleep(interval).await;
     }
 }
 
@@ -221,19 +269,53 @@ impl RuntimeReconnectBackoff {
 
     pub(in crate::runtime) async fn wait_with_ack_alive(
         &mut self,
+        timing: &SharedRemoteAckTiming,
         shutdown_rx: &mut watch::Receiver<bool>,
         acks: &(impl AcknowledgementKeepalive + ?Sized),
     ) -> bool {
         let delay = self.take_next_delay();
-        Self::wait_duration_with_ack_alive(delay, shutdown_rx, acks).await
+        Self::wait_duration_with_ack_alive(delay, timing, shutdown_rx, acks).await
     }
 
+    /// Waits `delay`, reporting `acks` alive as the wait starts, every committed alive interval of
+    /// `timing` and as it ends, unless shutdown ends it first. The wait reads the interval once,
+    /// when it first has time left to wait.
     pub(in crate::runtime) async fn wait_duration_with_ack_alive(
         delay: Duration,
+        timing: &SharedRemoteAckTiming,
         shutdown_rx: &mut watch::Receiver<bool>,
         acks: &(impl AcknowledgementKeepalive + ?Sized),
     ) -> bool {
-        let deadline = Instant::now() + delay;
+        Self::wait_reporting_alive(Instant::now() + delay, None, timing, shutdown_rx, acks).await
+    }
+
+    /// Waits one committed alive interval of `timing`, reporting `acks` alive as the wait starts
+    /// and as it ends, unless shutdown ends it first.
+    pub(in crate::runtime) async fn wait_ack_alive_interval(
+        timing: &SharedRemoteAckTiming,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        acks: &(impl AcknowledgementKeepalive + ?Sized),
+    ) -> bool {
+        let interval = timing.ack_alive_interval();
+        Self::wait_reporting_alive(
+            Instant::now() + interval,
+            Some(interval),
+            timing,
+            shutdown_rx,
+            acks,
+        )
+        .await
+    }
+
+    /// Waits until `deadline`, reporting `acks` alive as the wait starts, every alive interval and
+    /// as it ends. `interval` is the alive interval the wait already read, if any.
+    async fn wait_reporting_alive(
+        deadline: Instant,
+        mut interval: Option<Duration>,
+        timing: &SharedRemoteAckTiming,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        acks: &(impl AcknowledgementKeepalive + ?Sized),
+    ) -> bool {
         loop {
             nervix_primitives::task::consume_budget().await;
             acks.keep_alive();
@@ -243,12 +325,133 @@ impl RuntimeReconnectBackoff {
             if remaining.is_zero() {
                 return true;
             }
+            let beat = *interval.get_or_insert_with(|| timing.ack_alive_interval());
             nervix_primitives::select! {
                 changed = shutdown_rx.changed() => {
                     return !(changed.is_err() || *shutdown_rx.borrow());
                 }
-                _ = sleep(remaining.min(REMOTE_ACK_ALIVE_INTERVAL)) => {}
+                _ = sleep(remaining.min(beat)) => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use super::*;
+    use crate::runtime_ack::AckProgress;
+
+    /// A publication holding `interval` as its committed alive interval.
+    fn installed(interval: Duration) -> SharedRemoteAckTiming {
+        let timing = SharedRemoteAckTiming::default();
+        timing.install(nervix_models::RemoteAckTiming {
+            remote_ack_alive_interval: interval,
+            ..nervix_models::RemoteAckTiming::default()
+        });
+        timing
+    }
+
+    /// A keepalive scope beats at the alive interval it read when its work first waited, until the
+    /// work ends, and the scope after a committed change beats at the changed interval.
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_keepalive_scope_keeps_its_interval_and_the_next_scope_reads_a_change() {
+        let first = Duration::from_millis(300);
+        let changed = Duration::from_millis(40);
+        let timing = installed(first);
+        let (acks, mut completion) = AckSet::root();
+
+        let (release, released) = oneshot::channel::<()>();
+        let started = Instant::now();
+        let scope = timing.keep_alive_while_pending(&acks, released);
+        let mut scope = std::pin::pin!(scope);
+        for beat in 1..=2_u32 {
+            let progress = nervix_primitives::select! {
+                biased;
+                _ = &mut scope => panic!("the held work is still pending"),
+                progress = completion.wait_for_progress() => progress,
+            };
+            assert_eq!(progress, AckProgress::Alive);
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed >= first * beat && elapsed < first * beat + changed,
+                "beat {beat} came {elapsed:?} after the scope started"
+            );
+            // A change committed while the scope runs reaches only the scopes after it.
+            timing.install(nervix_models::RemoteAckTiming {
+                remote_ack_alive_interval: changed,
+                ..nervix_models::RemoteAckTiming::default()
+            });
+        }
+        release
+            .send(())
+            .assured("the scope still holds the receiver it waits on");
+        scope
+            .await
+            .assured("the released work completes with the value sent to it");
+
+        let (release, released) = oneshot::channel::<()>();
+        let restarted = Instant::now();
+        let scope = timing.keep_alive_while_pending(&acks, released);
+        let mut scope = std::pin::pin!(scope);
+        let progress = nervix_primitives::select! {
+            biased;
+            _ = &mut scope => panic!("the held work is still pending"),
+            progress = completion.wait_for_progress() => progress,
+        };
+        assert_eq!(progress, AckProgress::Alive);
+        let elapsed = restarted.elapsed();
+        assert!(
+            elapsed >= changed && elapsed < first,
+            "the scope after the change beat {elapsed:?} after it started"
+        );
+        release
+            .send(())
+            .assured("the scope still holds the receiver it waits on");
+        scope
+            .await
+            .assured("the released work completes with the value sent to it");
+    }
+
+    /// Work that completes at its first poll reports nothing alive.
+    #[nervix_primitives::test(start_paused = true)]
+    async fn work_that_completes_at_once_reports_nothing() {
+        let timing = installed(Duration::from_millis(300));
+        let (acks, mut completion) = AckSet::root();
+
+        timing
+            .keep_alive_while_pending(&acks, std::future::ready(()))
+            .await;
+
+        assert!(
+            futures_util::FutureExt::now_or_never(completion.wait_for_progress()).is_none(),
+            "a scope whose work completed at its first poll reports nothing"
+        );
+    }
+
+    /// A wait of one alive interval lasts the committed interval and reports its acknowledgements
+    /// alive as it starts and as it ends.
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_wait_of_one_alive_interval_lasts_the_committed_interval() {
+        let committed = Duration::from_millis(300);
+        let timing = installed(committed);
+        let (_shutdown, mut shutdown_rx) = watch::channel(false);
+        let (acks, mut completion) = AckSet::root();
+
+        let started = Instant::now();
+        assert!(
+            RuntimeReconnectBackoff::wait_ack_alive_interval(&timing, &mut shutdown_rx, &acks)
+                .await
+        );
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= committed && elapsed < committed * 2,
+            "the wait lasted {elapsed:?}"
+        );
+        assert_eq!(completion.wait_for_progress().await, AckProgress::Alive);
     }
 }

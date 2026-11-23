@@ -43,6 +43,14 @@ pub enum SubscriptionEvent {
 
 impl SubscriptionEvent {
     /// The bytes an event is charged for itself, beyond the frame its rows keep alive.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the subscription byte allowances charge the announced frame plus the \
+                      in-memory event header, which is exactly the size of the event type"
+        )
+    )]
     pub(crate) const HEADER_BYTES: usize = std::mem::size_of::<Self>();
 
     /// The subscription the event belongs to.

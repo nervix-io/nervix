@@ -5926,6 +5926,21 @@ selections = [
 ]
 
 [[workload]]
+coverage = "Exercises committed-parameter validation, live installation and the UDF compile path on one and three nodes; the compile budget's elapsed-time check has no tracked synchronization."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.udf-compile-budget"
+invariant = "A committed UDF_COMPILE_BUDGET refuses zero, installs live on every node, refuses a UDF whose compilation and test blocks outlast it without storing it, and admits one again once raised."
+invocation = "cluster-parameters"
+scenario = "The UDF compile budget refuses a UDF whose test blocks outlast it on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
 coverage = "Each live node installs the committed policy before command completion."
 examples = 2
 feature = "tests/features/cluster/cluster_parameters.feature"

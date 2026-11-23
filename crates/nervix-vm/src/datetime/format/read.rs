@@ -72,9 +72,25 @@ const WEEKDAY_NAMES: [&[u8]; 7] = [
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 
 /// The most digits `%s` reads: every signed 64-bit count of seconds.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter has %s read one to nineteen digits, the \
+                  decimal width of every signed 64-bit count of seconds"
+    )
+)]
 const LONGEST_UNIX_SECONDS: usize = 19;
 
 /// The most digits `%.f` reads after its `.`: a nanosecond.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a DATETIME counts nanoseconds, so %.f reads one to nine fraction digits, as the \
+                  Expression Functions chapter states"
+    )
+)]
 const LONGEST_FRACTION: usize = 9;
 
 /// A text column read as DATETIME values, and why every lane that names no instant failed.
