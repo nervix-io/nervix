@@ -57,13 +57,6 @@ use crate::{
 #[cfg(test)]
 pub(crate) const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
 
-/// Request frames queued for an exchange before a sender waits for the transport.
-const REQUEST_FRAME_CAPACITY: usize = 32;
-
-/// Server notices retained for one exchange, bounded both by records and retained bytes.
-const SERVER_NOTICE_CAPACITY: usize = 128;
-pub(crate) const SERVER_NOTICE_BYTES: usize = 1024 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum EventQueueError {
     /// Events arrived faster than they were read, and the queue dropped the ones it held. The
@@ -519,7 +512,11 @@ impl SessionEvents {
     pub(crate) fn new(capabilities: crate::ClientCapabilities) -> Self {
         let desired = DesiredSubscriptions::new();
         let subscriptions = EventQueue::for_subscriptions(capabilities);
-        let notices = EventQueue::new(SERVER_NOTICE_CAPACITY, SERVER_NOTICE_BYTES);
+        // Server notices retained for one exchange, bounded both by records and retained bytes.
+        let notices = EventQueue::new(
+            capabilities.notice_capacity().get(),
+            capabilities.notice_bytes().get(),
+        );
         let (leadership, observed_leadership) = watch::channel(None);
         let (domains, observed_domains) = watch::channel(None);
         Self {
@@ -691,7 +688,9 @@ impl Exchange {
         emitters: EventTargets,
     ) -> error_stack::Result<Self, ClientError> {
         let mut opening_channel = channel.clone();
-        let (frames, outbound) = mpsc::channel(REQUEST_FRAME_CAPACITY);
+        // Request frames queued for the exchange before a sender waits for the transport.
+        let (frames, outbound) =
+            mpsc::channel(connector.capabilities().request_frame_capacity().get());
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
         let opened = nervix_primitives::time::timeout(connector.connect_timeout(), async {

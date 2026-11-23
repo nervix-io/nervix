@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** The MQTT client and event loop each ingestor instance subscribes through, its
 //!   session and quality-of-service settings, the Maximum Packet Size and the Receive Maximum every
-//!   connection advertises and local admission of publishes within the client's bound, the shared
+//!   connection advertises, the node's read-ahead headroom that widens it and sizes the read-ahead,
+//!   and local admission of publishes within the client's bound, the shared
 //!   subscription every instance joins with Retain As Published, the client identity each instance
 //!   connects with and the conflict among identities its instances render alike, the batches a read
 //!   gathers from its connection's read-ahead and how a read ends when the host cancels it, manual
@@ -30,6 +31,7 @@
 
 mod delivered_publish;
 mod driver;
+mod settings;
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
@@ -52,8 +54,8 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{
-    ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MQTT_SOURCE_READ_AHEAD_HEADROOM,
-    MqttBroker, MqttClientConfig, MqttQos, MqttSession,
+    ClientConfigEntry, ConnectorKind, MQTT_MAXIMUM_PACKET_BYTES, MqttBroker, MqttClientConfig,
+    MqttQos, MqttSession,
 };
 use nervix_primitives::{
     sync::Arc,
@@ -64,6 +66,7 @@ use rumqttc::{
     DisconnectReasonCode, Event, EventLoop, Incoming, ManualAck, Outgoing, PubAck, PubRec, Publish,
     QoS, SessionMode, SubscribeFilter, SubscribeReasonCode, UnsubAckReason,
 };
+pub use settings::{MqttReadAheadHeadroom, MqttReadAheadSettings, MqttReadAheadSettingsError};
 use thiserror::Error;
 
 use crate::topic::{client_options::MqttClientOptions, connection::MqttConnectionError};
@@ -244,44 +247,58 @@ pub struct MqttTopicIngestorSettings {
     /// The host's report of QoS 0 publishes that do not fit ACK-mode read-ahead, which it resolved
     /// once for the executing unit.
     pub read_ahead_overflow: IngestorReadAheadOverflow,
+    /// The node's read-ahead headroom, which the host resolved once for every MQTT ingestor it
+    /// runs.
+    pub read_ahead: MqttReadAheadSettings,
 }
 
-/// Who acknowledges an ingestor's publishes, and how many of them may wait on their acknowledgements.
+/// Who acknowledges an ingestor's publishes, how many of them may wait on their acknowledgements,
+/// and how many more publishes its connection reads ahead: the node's read-ahead headroom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IngestorAcknowledgement {
-    /// The client acknowledges each publish on receipt.
-    OnReceipt,
+    /// The client acknowledges each publish on receipt, and the connection reads at most
+    /// `headroom` publishes ahead of the ingestor before it holds the next one back.
+    OnReceipt { headroom: NonZeroUsize },
     /// The ingestor acknowledges each publish once the host accepted it. Every connection
-    /// advertises `receive_maximum`, the window and its headroom, as its Receive Maximum, so the
+    /// advertises `receive_maximum`, the window and `headroom`, as its Receive Maximum, so the
     /// broker sends no further publish at quality of service 1 or 2 while that many wait on their
-    /// acknowledgements.
-    Manual { receive_maximum: NonZeroU16 },
+    /// acknowledgements. The read-ahead holds `headroom` QoS 0 outcomes beside them.
+    Manual {
+        receive_maximum: NonZeroU16,
+        headroom: NonZeroUsize,
+    },
 }
 
 impl IngestorAcknowledgement {
     /// The acknowledgement of an ingestor whose publishes may wait on their acknowledgements `window`
-    /// at a time, or that acknowledges none itself.
-    fn of(window: Option<NonZeroU64>) -> Self {
+    /// at a time, or that acknowledges none itself, with the node's `read_ahead` headroom.
+    fn of(window: Option<NonZeroU64>, read_ahead: MqttReadAheadSettings) -> Self {
+        let headroom = read_ahead.headroom();
         let Some(window) = window else {
-            return Self::OnReceipt;
+            return Self::OnReceipt { headroom };
         };
+        let advertised_headroom: u64 = headroom.get().arch_into();
         // MQTT carries the Receive Maximum as a Two Byte Integer, so a wider one is advertised as
         // the widest one the protocol holds: the broker sends no more unacknowledged publishes.
-        let Some(admitted) = window.checked_add(MQTT_SOURCE_READ_AHEAD_HEADROOM) else {
+        let Some(admitted) = window.checked_add(advertised_headroom) else {
             return Self::Manual {
                 receive_maximum: NonZeroU16::MAX,
+                headroom,
             };
         };
         let receive_maximum = match NonZeroU16::try_from(admitted) {
             Ok(receive_maximum) => receive_maximum,
             Err(_) => NonZeroU16::MAX,
         };
-        Self::Manual { receive_maximum }
+        Self::Manual {
+            receive_maximum,
+            headroom,
+        }
     }
 
     fn ack_mode(self) -> AckMode {
         match self {
-            Self::OnReceipt => AckMode::Automatic,
+            Self::OnReceipt { .. } => AckMode::Automatic,
             Self::Manual { .. } => AckMode::Manual,
         }
     }
@@ -292,28 +309,27 @@ impl IngestorAcknowledgement {
     /// batch, which holds no more of them than the Receive Maximum admits.
     fn request_capacity(self) -> NonZeroUsize {
         match self {
-            Self::OnReceipt => NonZeroUsize::MIN,
-            Self::Manual { receive_maximum } => NonZeroUsize::from(receive_maximum),
+            Self::OnReceipt { .. } => NonZeroUsize::MIN,
+            Self::Manual {
+                receive_maximum, ..
+            } => NonZeroUsize::from(receive_maximum),
         }
     }
 
     /// Every acknowledged outcome the Receive Maximum admits, plus separate QoS 0 headroom.
     /// Automatic acknowledgement keeps only the headroom and its existing backpressure.
     fn read_ahead(self) -> NonZeroUsize {
-        let headroom = usize::try_from(MQTT_SOURCE_READ_AHEAD_HEADROOM)
-            .assured("MQTT's read-ahead headroom fits every supported native target");
-        let headroom =
-            NonZeroUsize::new(headroom).assured("MQTT's declared read-ahead headroom is nonzero");
         match self {
-            Self::OnReceipt => headroom,
-            Self::Manual { receive_maximum } => {
-                let acknowledged = usize::from(receive_maximum.get());
-                let capacity = acknowledged
-                    .checked_add(headroom.get())
-                    .assured("the supported native targets hold MQTT's 65,535 slots plus 64");
-                NonZeroUsize::new(capacity)
-                    .assured("the acknowledged window and its headroom are both nonzero")
-            }
+            Self::OnReceipt { headroom } => headroom,
+            Self::Manual {
+                receive_maximum,
+                headroom,
+            } => NonZeroUsize::from(receive_maximum)
+                .checked_add(headroom.get())
+                .assured(
+                    "the headroom's definition keeps it within the native channel bound beside \
+                     MQTT's 65,535 slots",
+                ),
         }
     }
 }
@@ -494,6 +510,7 @@ impl MqttTopicIngestorPlan {
             acknowledgement_window,
             dns,
             read_ahead_overflow,
+            read_ahead,
         } = settings;
         let client_id_conflict = Self::identity_conflict(&instances);
         Self {
@@ -509,7 +526,7 @@ impl MqttTopicIngestorPlan {
                 MqttQos::Qos1 => QoS::AtLeastOnce,
                 MqttQos::Qos2 => QoS::ExactlyOnce,
             },
-            acknowledgement: IngestorAcknowledgement::of(acknowledgement_window),
+            acknowledgement: IngestorAcknowledgement::of(acknowledgement_window, read_ahead),
             client_id_conflict,
             dns,
             read_ahead_overflow,
@@ -754,7 +771,10 @@ impl MqttTopicIngestorPlan {
             options.set_broker_session_resume_policy(BrokerSessionResumePolicy::AllowBrokerOnly);
         }
         options.set_ack_mode(acknowledgement.ack_mode());
-        if let IngestorAcknowledgement::Manual { receive_maximum } = acknowledgement {
+        if let IngestorAcknowledgement::Manual {
+            receive_maximum, ..
+        } = acknowledgement
+        {
             // The broker sends no further publish that asks for an acknowledgement while this many
             // wait on theirs, so neither the read-ahead nor the client's requests fill with them.
             options.set_receive_maximum(Some(receive_maximum.get()));
@@ -1215,7 +1235,7 @@ mod tests {
             config,
             "default-client",
             MqttSession::Clean,
-            IngestorAcknowledgement::OnReceipt,
+            IngestorAcknowledgement::of(None, MqttReadAheadSettings::default()),
             fixture.dns.clone(),
         )
     }
@@ -1242,6 +1262,7 @@ mod tests {
             acknowledgement_window: Some(nonzero!(1u64)),
             dns,
             read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
+            read_ahead: MqttReadAheadSettings::default(),
         }
     }
 
@@ -1256,7 +1277,7 @@ mod tests {
             &config,
             "fallback",
             MqttSession::Persistent,
-            IngestorAcknowledgement::of(Some(nonzero!(1u64))),
+            IngestorAcknowledgement::of(Some(nonzero!(1u64)), MqttReadAheadSettings::default()),
             fixture.dns.clone(),
         )
         .expect("persistent MQTT client must be valid");
@@ -1277,7 +1298,7 @@ mod tests {
                 &config,
                 "bounded",
                 session,
-                IngestorAcknowledgement::of(Some(nonzero!(1u64))),
+                IngestorAcknowledgement::of(Some(nonzero!(1u64)), MqttReadAheadSettings::default()),
                 fixture.dns.clone(),
             )
             .expect("the bounded MQTT client is valid");
@@ -1293,36 +1314,89 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn an_acknowledging_connection_advertises_its_window_and_headroom_as_receive_maximum() {
+        struct Advertisement {
+            window: NonZeroU64,
+            headroom: NonZeroUsize,
+            advertised: u16,
+        }
+
         let config = [entry("addr", "mqtt://127.0.0.1:1883")];
         let fixture = DnsFixture::start().await;
-        for (window, advertised) in [
-            (nonzero!(1u64), 65),
-            (nonzero!(2_000u64), 2_064),
-            (nonzero!(65_471u64), u16::MAX),
-            (nonzero!(65_472u64), u16::MAX),
-            (NonZeroU64::MAX, u16::MAX),
-        ] {
+        let default = MqttReadAheadSettings::default().headroom();
+        let configured = nonzero!(10usize);
+        let advertisements = [
+            Advertisement {
+                window: nonzero!(1u64),
+                headroom: default,
+                advertised: 65,
+            },
+            Advertisement {
+                window: nonzero!(2_000u64),
+                headroom: default,
+                advertised: 2_064,
+            },
+            Advertisement {
+                window: nonzero!(65_471u64),
+                headroom: default,
+                advertised: u16::MAX,
+            },
+            Advertisement {
+                window: nonzero!(65_472u64),
+                headroom: default,
+                advertised: u16::MAX,
+            },
+            Advertisement {
+                window: NonZeroU64::MAX,
+                headroom: default,
+                advertised: u16::MAX,
+            },
+            Advertisement {
+                window: nonzero!(1u64),
+                headroom: configured,
+                advertised: 11,
+            },
+            Advertisement {
+                window: nonzero!(2_000u64),
+                headroom: configured,
+                advertised: 2_010,
+            },
+            Advertisement {
+                window: nonzero!(65_525u64),
+                headroom: configured,
+                advertised: u16::MAX,
+            },
+            Advertisement {
+                window: nonzero!(65_526u64),
+                headroom: configured,
+                advertised: u16::MAX,
+            },
+        ];
+        for advertisement in advertisements {
             nervix_primitives::task::consume_budget().await;
+            let read_ahead = MqttReadAheadSettings::resolve(Some(advertisement.headroom))
+                .assured("the fixture's headroom fits the native channel");
             let UnstartedConnection { eventloop, .. } = MqttTopicIngestorPlan::client_from_config(
                 &config,
                 "windowed",
                 MqttSession::Persistent,
-                IngestorAcknowledgement::of(Some(window)),
+                IngestorAcknowledgement::of(Some(advertisement.window), read_ahead),
                 fixture.dns.clone(),
             )
             .expect("an acknowledging MQTT client is valid");
 
             assert_eq!(
                 eventloop.options.receive_maximum(),
-                Some(advertised),
-                "a window of {window} is advertised with its headroom, as far as MQTT can carry"
+                Some(advertisement.advertised),
+                "a window of {} is advertised with a headroom of {}, as far as MQTT can carry",
+                advertisement.window,
+                advertisement.headroom
             );
         }
         let UnstartedConnection { eventloop, .. } = MqttTopicIngestorPlan::client_from_config(
             &config,
             "on-receipt",
             MqttSession::Clean,
-            IngestorAcknowledgement::OnReceipt,
+            IngestorAcknowledgement::of(None, MqttReadAheadSettings::default()),
             fixture.dns.clone(),
         )
         .expect("a client that acknowledges on receipt is valid");
@@ -1335,7 +1409,8 @@ mod tests {
 
     #[test]
     fn read_ahead_reserves_the_receive_maximum_and_separate_qos_zero_headroom() {
-        let on_receipt = IngestorAcknowledgement::OnReceipt;
+        let default = MqttReadAheadSettings::default();
+        let on_receipt = IngestorAcknowledgement::of(None, default);
         assert_eq!(on_receipt.read_ahead().get(), 64);
         assert_eq!(
             on_receipt.request_capacity(),
@@ -1343,35 +1418,84 @@ mod tests {
             "a connection that acknowledges on receipt queues one request at a time"
         );
 
-        let sequential = IngestorAcknowledgement::of(Some(NonZeroU64::MIN));
+        let sequential = IngestorAcknowledgement::of(Some(NonZeroU64::MIN), default);
         assert_eq!(
             sequential,
             IngestorAcknowledgement::Manual {
-                receive_maximum: nonzero!(65u16)
+                receive_maximum: nonzero!(65u16),
+                headroom: nonzero!(64usize),
             }
         );
         assert_eq!(sequential.read_ahead().get(), 129);
         assert_eq!(sequential.request_capacity().get(), 65);
 
-        let parallel = IngestorAcknowledgement::of(Some(nonzero!(2_000u64)));
+        let parallel = IngestorAcknowledgement::of(Some(nonzero!(2_000u64)), default);
         assert_eq!(
             parallel,
             IngestorAcknowledgement::Manual {
-                receive_maximum: nonzero!(2_064u16)
+                receive_maximum: nonzero!(2_064u16),
+                headroom: nonzero!(64usize),
             }
         );
         assert_eq!(parallel.read_ahead().get(), 2_128);
         assert_eq!(parallel.request_capacity().get(), 2_064);
 
-        let wide = IngestorAcknowledgement::of(Some(nonzero!(70_000u64)));
+        let wide = IngestorAcknowledgement::of(Some(nonzero!(70_000u64)), default);
         assert_eq!(
             wide,
             IngestorAcknowledgement::Manual {
-                receive_maximum: NonZeroU16::MAX
+                receive_maximum: NonZeroU16::MAX,
+                headroom: nonzero!(64usize),
             }
         );
         assert_eq!(wide.read_ahead().get(), 65_599);
         assert_eq!(wide.request_capacity().get(), usize::from(u16::MAX));
+    }
+
+    #[test]
+    fn a_configured_headroom_sizes_the_advertised_window_qos_zero_quota_and_no_ack_read_ahead() {
+        let read_ahead = MqttReadAheadSettings::resolve(Some(nonzero!(3usize)))
+            .assured("three publishes fit the native channel");
+
+        let on_receipt = IngestorAcknowledgement::of(None, read_ahead);
+        assert_eq!(
+            on_receipt,
+            IngestorAcknowledgement::OnReceipt {
+                headroom: nonzero!(3usize)
+            }
+        );
+        assert_eq!(
+            on_receipt.read_ahead().get(),
+            3,
+            "NO ACK reads ahead exactly the configured headroom"
+        );
+        assert_eq!(on_receipt.request_capacity(), NonZeroUsize::MIN);
+
+        let sequential = IngestorAcknowledgement::of(Some(NonZeroU64::MIN), read_ahead);
+        assert_eq!(
+            sequential,
+            IngestorAcknowledgement::Manual {
+                receive_maximum: nonzero!(4u16),
+                headroom: nonzero!(3usize),
+            }
+        );
+        assert_eq!(
+            sequential.read_ahead().get(),
+            7,
+            "the advertised window and a QoS 0 quota of the configured headroom"
+        );
+        assert_eq!(sequential.request_capacity().get(), 4);
+
+        let wide = IngestorAcknowledgement::of(Some(nonzero!(70_000u64)), read_ahead);
+        assert_eq!(
+            wide,
+            IngestorAcknowledgement::Manual {
+                receive_maximum: NonZeroU16::MAX,
+                headroom: nonzero!(3usize),
+            },
+            "MQTT still caps the advertised Receive Maximum at 65,535"
+        );
+        assert_eq!(wide.read_ahead().get(), 65_538);
     }
 
     #[test]
@@ -1638,6 +1762,7 @@ mod tests {
             acknowledgement_window: Some(nonzero!(1u64)),
             dns: fixture.dns.clone(),
             read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
+            read_ahead: MqttReadAheadSettings::default(),
         });
         assert_eq!(
             plan.subscribe_filter,

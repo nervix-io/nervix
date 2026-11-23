@@ -481,7 +481,10 @@ impl RuntimeStateStore {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use nervix_models::SettingDefinition as _;
+
     use super::*;
+    use crate::runtime::RestoreStagingMaxBytes;
 
     /// One fresh diagnostic test process installs the detector before constructing any store or
     /// executor locks, then exercises the same production owners as the ordinary regressions.
@@ -691,7 +694,7 @@ mod tests {
         RuntimeStateStore::from_database(
             Database::builder(path).open().assured("database opens"),
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .assured("state store opens")
     }
@@ -946,7 +949,7 @@ mod tests {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .assured("runtime state store opens");
         let domain = DomainName::parse("orders").assured("test domain is valid");
@@ -1609,7 +1612,7 @@ mod tests {
                     .open()
                     .assured("database opens"),
                 Executor::default(),
-                crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+                RestoreStagingMaxBytes::default_value(&()).as_u64(),
             );
             let Err(error) = result else {
                 panic!("a damaged current format marker must fail to open");

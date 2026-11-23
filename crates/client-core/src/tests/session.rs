@@ -8,6 +8,8 @@
 
 mod foreign_restore;
 
+mod request_frames;
+
 mod restore_reply;
 
 use std::{

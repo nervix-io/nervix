@@ -101,13 +101,77 @@ struct ReplicationStreamSlotQuotas {
     append: StdArc<Semaphore>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter's pool layout gives a management connection 64 \
+                  streams, which this partition divides"
+    )
+)]
 const MANAGEMENT_TOTAL_STREAMS: usize = PoolClass::Management.stream_slots_per_connection();
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 4 of a management connection's stream slots \
+                  for discovery"
+    )
+)]
 const MANAGEMENT_DISCOVERY_STREAMS: usize = 4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 8 of a management connection's stream slots \
+                  for application liveness"
+    )
+)]
 const MANAGEMENT_LIVENESS_STREAMS: usize = 8;
-pub(crate) const MANAGEMENT_PROGRESS_STREAMS: usize = MANAGEMENT_LIVENESS_STREAMS;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 8 of a management connection's stream slots \
+                  for progress reports and relay status"
+    )
+)]
+pub(crate) const MANAGEMENT_PROGRESS_STREAMS: usize = 8;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 4 of a management connection's stream slots \
+                  for runtime and relay admission"
+    )
+)]
 const MANAGEMENT_ADMISSION_STREAMS: usize = 4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 4 of a management connection's stream slots \
+                  for relay cancellation"
+    )
+)]
 const MANAGEMENT_CANCELLATION_STREAMS: usize = 4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 4 of a management connection's stream slots \
+                  for relay terminal outcomes"
+    )
+)]
 const MANAGEMENT_TERMINAL_STREAMS: usize = 4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a management connection reserves the sum of its subquotas, and the interconnect \
+                  chapter refuses a peer stream limit that cannot hold them beside shared traffic"
+    )
+)]
 const MANAGEMENT_RESERVED_STREAMS: usize = MANAGEMENT_DISCOVERY_STREAMS
     + MANAGEMENT_LIVENESS_STREAMS
     + MANAGEMENT_PROGRESS_STREAMS
@@ -118,6 +182,14 @@ const _: () = assert!(
     MANAGEMENT_RESERVED_STREAMS < MANAGEMENT_TOTAL_STREAMS,
     "reserved management stream quotas must leave shared capacity",
 );
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter shares the 32 management stream slots the reserved \
+                  subquotas leave"
+    )
+)]
 pub(crate) const MANAGEMENT_SHARED_STREAMS: usize =
     MANAGEMENT_TOTAL_STREAMS - MANAGEMENT_RESERVED_STREAMS;
 const _: () = assert!(
@@ -133,6 +205,14 @@ const _: () = assert!(
         && MANAGEMENT_TERMINAL_STREAMS > 0,
     "every reserved management stream class must have capacity",
 );
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter's pool layout gives a replication connection 8 \
+                  streams, which this partition divides"
+    )
+)]
 const REPLICATION_TOTAL_STREAMS: usize = PoolClass::Replication.stream_slots_per_connection();
 /// One live append stream per follower, and room for its replacement while the live one is still
 /// being torn down.
@@ -149,19 +229,68 @@ const _: () = assert!(
     REPLICATION_APPEND_STREAMS > 0 && REPLICATION_APPEND_STREAMS < REPLICATION_TOTAL_STREAMS,
     "the reserved append stream quota must leave shared replication capacity",
 );
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter shares the 6 replication stream slots the 2 append \
+                  slots leave"
+    )
+)]
 const REPLICATION_SHARED_STREAMS: usize = REPLICATION_TOTAL_STREAMS - REPLICATION_APPEND_STREAMS;
 const _: () = assert!(
     REPLICATION_SHARED_STREAMS + REPLICATION_APPEND_STREAMS == REPLICATION_TOTAL_STREAMS,
     "replication stream subquotas must exactly partition the HTTP/2 stream capacity",
 );
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter's pool layout gives a bulk connection 4 streams, which \
+                  this partition divides"
+    )
+)]
 const BULK_TOTAL_STREAMS: usize = PoolClass::Bulk.stream_slots_per_connection();
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 2 of a bulk connection's stream slots for \
+                  resources"
+    )
+)]
 const BULK_RESOURCE_STREAMS: usize = 2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter reserves 1 of a bulk connection's stream slots for \
+                  snapshots"
+    )
+)]
 const BULK_SNAPSHOT_STREAMS: usize = 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a bulk connection reserves its resource and snapshot subquotas, and the \
+                  interconnect chapter refuses a peer stream limit that cannot hold them beside \
+                  shared traffic"
+    )
+)]
 const BULK_RESERVED_STREAMS: usize = BULK_RESOURCE_STREAMS + BULK_SNAPSHOT_STREAMS;
 const _: () = assert!(
     BULK_RESERVED_STREAMS < BULK_TOTAL_STREAMS,
     "reserved bulk stream quotas must leave shared capacity",
 );
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the interconnect chapter leaves 1 bulk stream slot for other bulk work, which \
+                  backup section fetches use"
+    )
+)]
 const BULK_SHARED_STREAMS: usize = BULK_TOTAL_STREAMS - BULK_RESERVED_STREAMS;
 const _: () = assert!(
     BULK_SHARED_STREAMS + BULK_RESERVED_STREAMS == BULK_TOTAL_STREAMS,

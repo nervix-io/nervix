@@ -124,6 +124,7 @@ clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 error-stack = { workspace = true }
 eventsource-stream = { workspace = true }
+faster-hex = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
 flatbuffers = { workspace = true }

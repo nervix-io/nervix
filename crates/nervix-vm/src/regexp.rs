@@ -42,6 +42,14 @@ use regex_automata::{
 
 /// The most bytes a compiled pattern may occupy. A pattern past this limit is not compiled and
 /// reports `CompiledTooBig`, whatever its source. It is the limit the `regex` crate applies.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits a compiled regular expression to 10 \
+                  MiB, the size limit the regex crate applies by default"
+    )
+)]
 pub const COMPILED_PATTERN_SIZE_LIMIT: usize = 10 * (1 << 20);
 
 /// The regular-expression builtins, which share one pattern-preparation contract.

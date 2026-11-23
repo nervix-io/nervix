@@ -2459,7 +2459,9 @@ report of a term older than the leadership it last asked, and it never asks a ta
 leads, because a leader asked to transfer to itself stops its heartbeats and hands leadership to
 whichever follower's election timeout passes first. Every repeated request is printed with the
 leadership that prompted it, and a move that runs out of budget names each leadership that prompted
-one and the last status the target reported.
+one and the last status the target reported. The fault injector carries a request to every node of
+the cluster on a channel that keeps one request, the most a move has outstanding, and each node
+acts only on a request that names it as the leader to transfer from.
 
 The leader-failover scenario `A leadership transfer reaches its target after another voter wins the
 election it started` blocks the target's consensus connectivity until the third voter leads. The
@@ -3065,7 +3067,10 @@ under the cleanup budget. The harness requests the stop and waits for the node's
 longest of five minutes, the node's configured shutdown timeout, and its configured drain phases:
 the application drain when graceful drain is enabled plus the runtime's branch stop timeout for the
 configured domain drain. A scenario that configures a longer product deadline raises the watchdog
-with it, so the harness never cuts a product deadline short.
+with it, so the harness never cuts a product deadline short. A scenario node skips the application
+drain unless the scenario enables graceful shutdown drain before the cluster starts: the harness
+asks the fault injector to skip it as each node launches, and a node built without the test harness
+always drains.
 Node-specific stop steps resolve a saved scenario placeholder before selecting the node, including
 the graceful stop used to exercise ownership handoff during drain.
 

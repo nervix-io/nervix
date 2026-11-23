@@ -9,10 +9,11 @@
 )]
 
 use fjall::Database;
-use nervix_models::{DomainNodeRef, ModelKind, SchemaFingerprint};
+use nervix_models::{DomainNodeRef, ModelKind, SchemaFingerprint, SettingDefinition as _};
 use tempfile::tempdir;
 
 use super::*;
+use crate::runtime::RestoreStagingMaxBytes;
 
 #[test]
 fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state() {
@@ -23,7 +24,7 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     let store = RuntimeStateStore::from_database(
         db,
         Executor::default(),
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .expect("state store should open");
     let domain = domain("default");

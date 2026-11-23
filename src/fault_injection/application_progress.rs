@@ -14,7 +14,7 @@ use nervix_interconnect::ApplicationProgress;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::{mpsc, oneshot};
 
-use super::{CommandPausePoint, FaultInjection};
+use super::{CommandPausePoint, FaultInjection, SCENARIO_REQUEST_CAPACITY};
 
 /// A scenario's request that one node query another node's application progress over the
 /// interconnect, as a revision barrier on that node queries it. A node asked for its own progress
@@ -125,7 +125,7 @@ impl FaultInjection {
         &self,
         node: ClusterNodeName,
     ) -> mpsc::Receiver<ApplicationProgressQuery> {
-        let (sender, receiver) = mpsc::channel(1);
+        let (sender, receiver) = mpsc::channel(SCENARIO_REQUEST_CAPACITY);
         self.inner.application_progress_queries.insert(node, sender);
         receiver
     }

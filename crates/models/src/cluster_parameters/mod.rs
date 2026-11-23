@@ -412,6 +412,7 @@ parameter_values! {
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
     udf_code_bytes: UdfCodeBytes(u64) => Bytes,
+    udf_compile_budget: UdfCompileBudget(Duration) => Duration,
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
     http_header_fields: HttpHeaderFields(u64) => Count<u32>,
     client_batch_rows: ClientBatchRows(u64) => Count<u32>,

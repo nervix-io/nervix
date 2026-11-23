@@ -35,20 +35,61 @@ use crate::{
 const MAGIC: [u8; 8] = *b"NVXDLEVD";
 
 /// The record kind of deadlock evidence. The tag is the format's contract, so it never changes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an evidence file's header names deadlock evidence as record kind 1, a format \
+                  tag that never changes"
+    )
+)]
 const EVIDENCE_KIND: u16 = 1;
 
 /// The format version this crate writes and reads.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an evidence file's header carries format version 3, the one shape the \
+                  data-plane concurrency chapter names and this crate reads"
+    )
+)]
 const EVIDENCE_VERSION: u16 = 3;
 
 /// The magic, the kind and the version.
-const HEADER_BYTES: usize = MAGIC.len() + 2 + 2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an evidence file's header is its 8-byte magic followed by its kind and its \
+                  version as little-endian u16s"
+    )
+)]
+const HEADER_BYTES: usize =
+    MAGIC.len() + size_of_val(&EVIDENCE_KIND) + size_of_val(&EVIDENCE_VERSION);
 
 /// The largest evidence file this crate writes or reads. Encoding also checks this bound, since
 /// cumulative potential cycles may retain several acquisition contexts per edge.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter bounds an evidence artifact at 128 MiB"
+    )
+)]
 pub(crate) const MAX_EVIDENCE_BYTES: u64 = 128 * 1024 * 1024;
 
-/// The alignment an rkyv payload is validated at.
-const PAYLOAD_ALIGNMENT: usize = 16;
+/// The alignment an rkyv payload is validated at: that of the buffer `rkyv::to_bytes` encodes it
+/// in, which decoding realigns the payload to.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "decoding realigns the payload to the 16-byte alignment of the buffer rkyv's \
+                  to_bytes encodes it in"
+    )
+)]
+const PAYLOAD_ALIGNMENT: usize = <AlignedVec>::ALIGNMENT;
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) struct EvidenceWire {

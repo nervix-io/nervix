@@ -339,6 +339,7 @@ impl Preflight<'_> {
             ),
             engines: self.settings.runtime.engine_capabilities(),
             connector_host: self.settings.runtime.connector_host.capabilities(),
+            membership: self.settings.membership.capabilities(),
             listeners: self.settings.listeners.bounds(),
             cpu_count,
             memory_bytes,

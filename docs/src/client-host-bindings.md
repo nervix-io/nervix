@@ -60,8 +60,8 @@ the Rust client's `a_prepared_command_completes_on_a_host_thread_with_half_a_jav
 
 Every wait accepts an optional cancellation token. Another host thread can trigger it. Its
 optional physical deadline bounds that call independently of connection, request and retry
-deadlines in `ConnectOptions`. The host token accepts at most one day and checks monotonic-clock
-overflow. A triggered token wins over a simultaneously ready result; cancellation and deadline
+deadlines in `ConnectOptions`. The host token accepts at most one day, the longest deadline the
+Rust client accepts, and checks monotonic-clock overflow. A triggered token wins over a simultaneously ready result; cancellation and deadline
 expiry have distinct failure kinds. A Ruby interrupt cancels the current call's child token,
 leaving sibling calls and their shared parent token intact.
 
@@ -171,7 +171,9 @@ preserves nulls and redaction, with sensitive fields nullable. Subscription list
 available in the verified frame; the C Row scalar accessors do not flatten lists.
 
 Endpoint fields preserve written order, exact scalar widths, every list level, nullability and
-sensitivity. Builders copy each supplied buffer before returning, so callers can immediately
+sensitivity. A host names a field's type one level at a time, each list before its element, and a
+field nests at most 32 list levels before its scalar: a deeper one is an `InvalidArgument` failure
+naming the field. Builders copy each supplied buffer before returning, so callers can immediately
 reuse it. Consumers decode and cache a delivered batch on first batch access, validating schema
 and row count. The one batch encoding is canonical Arrow IPC; an imported stream must match that
 contract. [Client Ingestors And Emitters](client-io-architecture.md) owns its transport, credit

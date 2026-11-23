@@ -20,8 +20,6 @@ use crate::{
     },
 };
 
-const STATE_RECORD_VERSION: u16 = 6;
-
 /// One branch's committed WASM guest save. The raw blob is a separate section at the descriptor's
 /// corresponding guest-blob path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +77,14 @@ pub struct BranchLifecycleRecord {
 
 impl ArchiveRecord for WasmStateDescriptor {
     const KIND: RecordKind = RecordKind::WasmStateDescriptor;
-    const VERSION: u16 = STATE_RECORD_VERSION;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported WASM guest state descriptor shape"
+        )
+    )]
+    const VERSION: u16 = 6;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         encode_record(
@@ -124,6 +129,13 @@ impl ArchiveRecord for WasmStateDescriptor {
 
 impl ArchiveRecord for KafkaOffsetsRecord {
     const KIND: RecordKind = RecordKind::KafkaOffsets;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported Kafka domain offsets shape"
+        )
+    )]
     const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
@@ -174,7 +186,14 @@ impl ArchiveRecord for KafkaOffsetsRecord {
 
 impl ArchiveRecord for BranchLifecycleRecord {
     const KIND: RecordKind = RecordKind::BranchLifecycle;
-    const VERSION: u16 = STATE_RECORD_VERSION;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported branch lifecycle shape"
+        )
+    )]
+    const VERSION: u16 = 6;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         StreamedBranchLifecycle {

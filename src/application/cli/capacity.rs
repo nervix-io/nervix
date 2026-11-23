@@ -32,7 +32,7 @@ pub struct CapacityArgs {
     pub relay_decoded_bytes: Option<HumanBytes>,
     #[arg(long = nervix_interconnect::BulkChunkBytes::NAME, env = "NERVIX_INTERCONNECT_BULK_CHUNK_BYTES", help = "Largest bulk response chunk this node accepts; defaults to the executor's bulk chunk limit")]
     pub bulk_chunk_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_interconnect::BulkReceiveWindow::NAME, env = "NERVIX_INTERCONNECT_BULK_RECEIVE_WINDOW", help = "The HTTP/2 receive window reserved by each bulk stream; defaults to 1MiB")]
+    #[arg(long = nervix_interconnect::BulkReceiveWindow::NAME, env = "NERVIX_INTERCONNECT_BULK_RECEIVE_WINDOW", help = super::settings::capability_help::<nervix_interconnect::BulkReceiveWindow>("The HTTP/2 receive window reserved by each bulk stream", HumanBytes(<nervix_interconnect::BulkReceiveWindow as nervix_models::SettingDefinition>::default_value(&()))))]
     pub bulk_window_bytes: Option<HumanBytes>,
     #[arg(long = CpuCount::NAME, env = "NERVIX_CPU_COUNT", help = "The CPU capacity of this node; defaults to the process's cgroup-aware available parallelism")]
     pub cpu_count: Option<u64>,
