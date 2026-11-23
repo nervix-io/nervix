@@ -165,7 +165,7 @@ impl Runtime {
                 compiled_wasm_modules: DashMap::default(),
                 schedule_application: Mutex::new(ScheduleApplication::default()),
                 #[cfg(test)]
-                test_applied_schedule: ArcSwapOption::empty(),
+                test_installed_schedule: Mutex::new(crate::registry::InstalledSchedule::default()),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
                 domain_status_changed,
