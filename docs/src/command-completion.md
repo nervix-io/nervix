@@ -217,6 +217,13 @@ Each phase only advances. This is volatile readiness evidence: a new process sta
 phase absent, while the durable command identity, effect progress and outcome remain in the
 replicated execution ledger. A replacement incarnation must establish its own readiness.
 
+Beside its phases, the record keeps the newest runtime revision the incarnation failed to prepare,
+with the reason the incarnation rendered for it, until the incarnation prepares that revision or a
+later one. The runtime applicator records it when applying a revision fails, for example when an
+[entity swap](./execution-plans.md#incremental-changes-and-rebuilds) cannot complete, and the
+incarnation keeps retrying on its reconciliation cadence. A failure of an earlier revision never
+replaces a later one, and the reason names domains and entities, never the records they carry.
+
 The local owner publishes advances through a watch. A node pushes its newest record to its
 observed leader, which retains reports by full incarnation and merges late reports monotonically.
 A barrier combines its own record, the reports its leader received and authenticated revision-query
@@ -257,6 +264,12 @@ so frequent reports cannot starve queries by repeatedly cancelling them. An owne
 polls the batch while the barrier reads the leader's participant view: a probe can already hold the
 executor permit that the view request needs. Ending the barrier aborts that task. Every wake still
 checks the current leader tenure, required process incarnations, fixed revision and deadline.
+
+A required incarnation whose record, held report or query reply shows that it failed to prepare the
+barrier's runtime revision, or a later one, and has not prepared it since, ends a prepared or ready
+barrier at once with that node and its reason, instead of leaving it to the deadline. The command
+answers with them; the node keeps retrying, and a later success replaces the failure in its record.
+An authoritative barrier reads no runtime failure.
 
 Runtime activation has two explicit phases. First, every required node applies the authoritative
 models, schedules, clocks, resource bindings, and stopped or running lifecycle state and reports

@@ -344,7 +344,7 @@ Feature: Tolerant conversions
         ON GENERAL ERROR LOG;
       CREATE INFERENCER convert_measurements FROM raw_measurements
         USING RESOURCE inference VERSION 1
-        FILE 'models/scalar_identity.onnx'
+        FILE 'models/scalar_identity.onnx' WORKING MEMORY RELEASED
         INPUTS {
           "value" <tensor_type>[] = coalesce(TRY_CAST(input.raw AS F32), -1.0 AS F32)
         }

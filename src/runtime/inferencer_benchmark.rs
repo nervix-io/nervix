@@ -28,9 +28,10 @@ use nervix_models::{
     DomainState, DomainStatus, FieldName, FlushPolicy, InferencerModelFingerprint,
     InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
     InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, MessageErrorPolicy, Model, ModelKind,
-    ModelName, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName,
-    ResourceId, ResourceName, RouteConstruction, SchemaField, SchemaFingerprint, Timestamp, Unit,
+    InferencerTensorRepresentation, InferencerTensorSchema, InferencerWorkingMemory,
+    MessageErrorPolicy, Model, ModelKind, ModelName, ParseAsType, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, RelayName, ResourceId, ResourceName, RouteConstruction, SchemaField,
+    SchemaFingerprint, Timestamp, Unit,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use tempfile::TempDir;
@@ -38,7 +39,7 @@ use tempfile::TempDir;
 use super::{
     BranchPresence, BranchRuntime, DomainRoutingSnapshot, RelayBoundaryFanout,
     RelayBoundaryServices, RelayBranchPresences, RelayOwnerTask, RelayRecordBatch, RelayRetention,
-    RelayRuntimeFanIn, Runtime, planning,
+    RelayRuntimeFanIn, RetainedStateOpening, Runtime, planning,
 };
 use crate::{
     registry::{PlannedModel, branched_node_specs_from_models},
@@ -280,6 +281,7 @@ impl InferencerBranchFixture {
             resource,
             resource_version: 1,
             file: format!("models/{}", model.file),
+            working_memory: InferencerWorkingMemory::Released,
             inputs: model
                 .inputs
                 .iter()
@@ -340,7 +342,13 @@ impl InferencerBranchFixture {
                 .await
                 .assured("the fixture inferencer's branch template binds");
         let branch = template
-            .instantiate(&runtime, &domain, None, 1)
+            .instantiate(
+                &runtime,
+                &domain,
+                None,
+                1,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .assured("the fixture inferencer branch instantiates")
             .into_inner();

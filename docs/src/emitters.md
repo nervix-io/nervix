@@ -207,9 +207,13 @@ CREATE KAFKA TOPIC EMITTER orders_out
 `INSTANCES <count>` runs that many instances, and `INSTANCES PER PARTITION` one instance for each
 partition of the branch its input relays share. Instance `i` of `n` serves the input partitions `p`
 with `p mod n = i`; with `PER PARTITION`, instance `p` serves partition `p`. One key lives in one
-partition, so one instance publishes all of a key's records, in the order its relay delivered them,
-and the order of each key holds end to end. Records of different keys published by different
-instances have no order between them.
+partition, so one instance publishes all of a key's records, in the order its relay delivered them.
+The order of each key then holds end to end, with two exceptions: under `ACK PARALLEL` a record
+retried after a failure follows the records the destination already confirmed, as
+[Publishing modes](#publishing-modes) describes, and a driver that sends a request again by itself
+can reorder records where its entity's driver limits say so, as a [Kafka](#kafka) producer does
+with librdkafka's defaults under `NO ACK` and `ACK PARALLEL`. Records of different keys published
+by different instances have no order between them.
 
 Every instance is its own placement unit and task, with its own buffer, `FLUSH` cadence, retry
 schedule and backoff, open destination, confirmation window and acknowledgement keepalive. A relay
@@ -287,7 +291,10 @@ The shared variables are:
 - `ACK SEQUENTIAL` publishes and confirms one record before sending the next.
 - `ACK PARALLEL MAX <n>` permits at most `n` records to await confirmation, where `n` is at least
   one. Nervix fills the window, waits for the oldest confirmation when it is full, and completes a
-  flush only after every record in that flush has been confirmed.
+  flush only after every record in that flush has been confirmed. A record retried after a failure
+  is published after the records of its window that the destination already confirmed, so a
+  failure can reorder the window's records; `ACK SEQUENTIAL` never has a later record confirmed
+  before an earlier one.
 - `ACK TIMEOUT <duration>` bounds one asynchronous broker confirmation. Expiry is ambiguous, not a
   record rejection: Nervix retries the still-unconfirmed records as an infrastructure failure.
   The broker may have accepted a timed-out record, so confirming modes are at least once and can
@@ -648,6 +655,11 @@ HTTP/2 when the endpoint's TLS negotiates it and HTTP/1.1 otherwise, and:
   and a tunnel the proxy refuses, `407` included, keep the request pending for the next attempt.
 - No proxy environment variable, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` or their
   lowercase forms, has any effect on either side.
+- Neither side sends a request again by itself. An HTTP/2 endpoint's refusal of a request,
+  `REFUSED_STREAM` or a graceful `GOAWAY`, fails that poll or that emitted attempt, and the
+  ingestor or the emitter's `RETRY POLICY` decides when to send it again. Polling still writes a
+  request on a new connection when the pooled connection it picked closed before any of the
+  request was sent, which no endpoint sees.
 
 ```plexus
 CREATE HTTP CLIENT partner CONFIG {
@@ -1254,8 +1266,10 @@ Bare fields, `message.field`, and `input.field` read the source row. Direct emit
 `INHERIT` and all current direct emitters reject `INVOKE`.
 
 Nervix checks these mappings against the source schema during `CREATE` and `ALTER`, before opening
-the destination. Database and Iceberg columns accept Plexus scalar, array and vector types; OTEL
-fields require their documented exact types. For example, an I32 source field can supply
+the destination. Database and Iceberg columns accept Plexus scalar, array and vector types, except a
+`DURATION`, alone or as a list element, which each of them declares rejected: `VALUES key 'wait' is
+a DURATION, which POSTGRES TABLE declares rejected`. OTEL fields require their documented exact
+types. For example, an I32 source field can supply
 `severity_number`, while the integer literal `9` is inferred as I64 and is refused for that field.
 OTEL attributes accept supported scalar values and arrays or vectors of those values; `RESOURCE`
 entries must be literal expressions. Mapping types are never implicitly coerced. A refused
@@ -1313,7 +1327,7 @@ That expression surface applies to the full Nervix internal schema type set:
 
 - `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - `F32`, `F64`
-- `BOOL`, `STRING`, `DATETIME`
+- `BOOL`, `STRING`, `DATETIME`, `DURATION`, `BYTES`
 
 Nested conditions and chained calls such as `contains(lower(trim(input.raw)), 'warn')` are supported
 before encoding.
@@ -1553,7 +1567,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | PARTITION FROM BRANCH native topic metadata response: driver default, receive.message.max.bytes 100000000; when full, fails the publish for the host to retry<br>records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |
 | Network waits | PARTITION FROM BRANCH topic metadata, including connector executor admission: driver default, socket.timeout.ms, 60 s; maximum 300 s<br>a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, delivery.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>a failed publish under ACK, for the reports of the records its purge gave up: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |
-| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
+| Driver limits | Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets delivery.timeout.ms from ACK TIMEOUT.<br>librdkafka sends a failed produce request again by itself, up to message.send.max.retries times, until the record's delivery.timeout.ms passes. Under ACK the emitter's RETRY POLICY retries what is unresolved after that; under NO ACK a record librdkafka gives up is lost. Unless the client's CONFIG sets enable.idempotence=true or max.in.flight.requests.per.connection=1, a resend can put one key's records out of order under NO ACK and ACK PARALLEL.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
@@ -1616,6 +1630,21 @@ queue is an infrastructure condition paced by the declared retry policy. In eith
 whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
 the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
+
+librdkafka also sends a failed produce request again by itself, up to `message.send.max.retries`
+times, until the record's `delivery.timeout.ms` passes: `ACK TIMEOUT` under `ACK`, and the client's
+own value, 300 seconds by default, under `NO ACK`. These resends happen beneath the emitter's
+`RETRY POLICY`, which under `ACK` retries only what is still unresolved once the producer gave up,
+and under `NO ACK` never sees a record the producer already took. With librdkafka's defaults,
+idempotence off and up to 1,000,000 requests in flight on each broker connection, a resend can land
+after a batch sent later, so one key's records can arrive out of order under `NO ACK` and
+`ACK PARALLEL`, and a resend after a lost broker answer can store a record twice.
+`enable.idempotence=true` in the client's `CONFIG` keeps the order and lets the broker drop a
+resent copy it already stored; librdkafka then requires `acks=all` and at most 5 requests in
+flight, and a producer whose configuration disagrees fails to start.
+`max.in.flight.requests.per.connection=1` keeps the order without idempotence, with one request at
+a time on each broker connection. `ACK SEQUENTIAL` has one record in flight per instance, so no
+resend reorders it. Which of these to use is the client's choice, and Nervix changes none of them.
 
 The producer keeps librdkafka's topic auto-creation default. A broker that permits it can create a
 missing topic during producer metadata discovery, before the first record is written. Nervix's
@@ -2071,7 +2100,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the command pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | checking out a connection, the PING that tests it and a new one's name resolution, connection, TLS and Redis setup included: `connect_timeout_ms`; 30s when omitted<br>the answer to the checkout's PING and to the PUBLISH: driver default, 500 ms |
-| Driver limits | A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the connection that sent it. |
+| Driver limits | A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the connection that sent it.<br>The pool tries again to open a connection that failed, after 400 ms and then twice as long each time, at most half of connect_timeout_ms, and stops at the first failure after connect_timeout_ms has passed since its first try. A publish whose checkout ends without a connection fails, and RETRY POLICY decides the next attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-emit).
@@ -2108,7 +2137,12 @@ connection out of the client's pool and returns it once Redis answers. The pool 
 connection it hands over with a `PING`, so each publish takes two round trips; a connection that
 fails the test is closed, and the checkout takes another one or opens a new one. Checking out,
 that test and opening a new connection share the client's `connect_timeout_ms`, 30 seconds by
-default. Redis must answer each command on a command connection, the `PING` and the `PUBLISH`,
+default. The pool tries again by itself to open a connection that failed, after 400 ms and then
+twice as long each time, at most half of `connect_timeout_ms`, and stops at the first failure
+after `connect_timeout_ms` has passed since its first try. Those tries happen while a checkout
+waits within the same deadline, so a short outage can end before the publish fails; a checkout
+that ends without a connection fails the publish once, and the emitter's `RETRY POLICY` decides
+when it tries again. Redis must answer each command on a command connection, the `PING` and the `PUBLISH`,
 within the driver's 500 ms, which no key changes. A `PUBLISH` answered later fails the publish as
 transient and is retried, although Redis may already have delivered it, so its subscribers can
 receive it twice.
@@ -3780,8 +3814,20 @@ follows `ON MESSAGE ERROR` as a `refused` `publish` error naming the code, such 
 `MongoDB rejected document with code 11000`. Every other document stays unresolved and is written
 again on the emitter's `RETRY POLICY` backoff, so a retry never carries a document the server
 applied or refused for good. A write the server never answered, such as one whose connection
-failed, leaves every document it carried unresolved, so its retry can store a document twice, as
+failed and whose resend by the driver, described below, failed too, leaves every document it
+carried unresolved, so its retry can store a document twice, as
 [Database writes](#database-writes) describes.
+
+Before a write fails, the MongoDB driver may already have sent it again by itself. On a replica
+set or a sharded cluster it sends a write again once after a network error or a retryable server
+error, such as a primary stepping down, with the same transaction number, so the server applies
+each document once whatever the first attempt did. It sends the collection lookup again once in
+the same way, on any deployment. After an error the server labels as overload, it sends either
+again up to twice, with a backoff of its own. Only what the driver leaves unresolved reaches the
+emitter's `RETRY POLICY`, whose retries are new writes the server cannot tell from the first. These
+are the driver's defaults, and the client's `addr` URL changes them with `retryWrites`,
+`retryReads` and `maxAdaptiveRetries`: `retryWrites=false`, for example, leaves every resend of a
+write to `RETRY POLICY`.
 
 A write concern the deployment cannot satisfy, such as `w=2` on a single-member replica set or a
 `w=majority` write whose `wtimeoutMS` ran out, does not undo the documents the server applied. The
@@ -3866,7 +3912,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait, the collection lookup and a write: unbounded |
-| Driver limits | A document above the declared BSON document limit is rejected. |
+| Driver limits | A document above the declared BSON document limit is rejected.<br>The driver sends a write, or the collection lookup at open, again by itself: once after a network error or a retryable server error, a write only on a replica set or sharded cluster, and up to twice with its own backoff after an error the server labels as overload. A resent write carries the same transaction number, so the server applies each document once. The connection string's retryWrites, retryReads and maxAdaptiveRetries change this, and RETRY POLICY retries what the driver leaves unresolved. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MONGODB COLLECTION capability and mirror reference](connector-capabilities.md#mongodb-collection-emit).
@@ -4360,8 +4406,9 @@ store ignores it.
 
 The emitter's declared `RETRY POLICY` is the only retry of a failed open, staging write or commit.
 The emitter retries it after the policy's backoff and keeps the acknowledgements of its staged rows
-alive meanwhile. The catalog library's own commit retries are disabled, and an object-store call
-makes one attempt: OpenDAL has no retry layer, and the object-store HTTP client resends no request.
+alive meanwhile. The catalog library's own commit retries are disabled, and the REST catalog's HTTP
+client sends each catalog request once. An object-store call makes one attempt too: OpenDAL has no
+retry layer, and the object-store HTTP client resends no request.
 
 Set `timeout_ms` in the `S3`, `GCS` or `AZURE_BLOB` client's `CONFIG` to bound each object-store
 operation, including DNS, connection, TLS and credential requests. It also bounds each read or
@@ -4465,7 +4512,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 
 | Emitter | Duplicate conditions (`ATTACHED`) | Additional loss conditions | Idempotency available in Nervix |
 | --- | --- | --- | --- |
-| Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
+| Kafka | `ACK` retry after an ambiguous delivery report or timeout; librdkafka's own resend after a lost broker answer unless the client enables idempotence; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration, which keeps librdkafka's own resends from storing a record twice but not a retry the emitter sends after `ACK TIMEOUT` |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | On a `NATS STREAM` emitter, `MESSAGE ID`: JetStream does not store again a message whose `Nats-Msg-Id` its stream stored within the stream's duplicate window, which the stream's operator configures. A retry carries the ID its first attempt carried, and an ID computed from the record's own fields also covers its redelivery within that window. Core `NO ACK` offers none |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |

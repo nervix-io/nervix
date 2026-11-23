@@ -650,7 +650,7 @@ static void test_boundary_fields_and_arguments(void) {
     HOLD(nx_fields, fields);
     const nx_type scalars[] = {NX_TYPE_U8, NX_TYPE_I8, NX_TYPE_U16, NX_TYPE_I16,
         NX_TYPE_U32, NX_TYPE_I32, NX_TYPE_U64, NX_TYPE_I64, NX_TYPE_F32, NX_TYPE_F64,
-        NX_TYPE_BOOL, NX_TYPE_STRING, NX_TYPE_BYTES, NX_TYPE_DATETIME};
+        NX_TYPE_BOOL, NX_TYPE_STRING, NX_TYPE_BYTES, NX_TYPE_DATETIME, NX_TYPE_DURATION};
     for (size_t i = 0; i < sizeof scalars / sizeof scalars[0]; ++i) {
         char name[32];
         snprintf(name, sizeof name, "field_%zu", i);

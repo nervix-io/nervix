@@ -32,6 +32,17 @@ relay is branched by high-cardinality values such as tenant, user, account, or d
 lifecycle metrics identify the parametrizer, not the concrete key. A partitioned relay or processor's series
 carry its partition, whose cardinality is bounded by the partition count its parametrizer declares.
 
+## The Node's Own Traces
+
+A node provisioned with a collector exports the spans its `tracing` instrumentation records to that
+collector over OTLP gRPC. Each span's resource names the configured service and the
+OpenTelemetry SDK's own identity, and nothing else. [Trace Export](node-settings.md#trace-export)
+lists the endpoint, the service name and the sampling, timeout, interval, queue and batch
+capabilities, all shown on each node's `DESCRIBE CLUSTER` capability line. No `OTEL_*`
+environment variable applies: none of them adds a resource attribute or a request header, sets a
+span limit, sampler or batch, or names another collector. A span that finds the export queue full
+is dropped, and export failures never reach connector retries or acknowledgements.
+
 ## Metric Labels
 
 Graph metric series use these labels:
@@ -432,11 +443,8 @@ Relay admission:
 - `nervix_interconnect_unresolved_outcome_age_seconds`: how long the oldest unacknowledged relay
   outcome has been waiting. A rising value means acknowledgements are not coming back
 - `nervix_interconnect_relay_channel_watermarks`: the relay channel watermarks this node retains for
-  the channels its peers opened, across every peer. Each peer has a fixed budget of 8,192
-- `nervix_interconnect_relay_channel_watermarks_evicted_total`: watermarks forgotten before their
-  ten-minute retention ended because their peer's budget needed the position for another channel.
-  A count that keeps rising means a peer opens more relay channels within ten minutes than the
-  budget holds; see
+  the channels its peers opened, across every peer. Each is charged to the relay memory class while
+  it is retained and is forgotten only once its own retention has passed; see
   [Bounded Correlation And Peer Owners](./interconnect.md#bounded-correlation-and-peer-owners)
 
 Execution admission:

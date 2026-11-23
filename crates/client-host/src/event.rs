@@ -461,6 +461,9 @@ impl Event {
             CellView::Datetime(value) => {
                 target.copy_from_slice(&value.unix_nanos().to_ne_bytes());
             }
+            CellView::Duration(value) => {
+                target.copy_from_slice(&value.nanoseconds().to_ne_bytes());
+            }
             CellView::String(_) | CellView::Bytes(_) | CellView::List(_) => {
                 return Err(Failure::new(
                     FailureKind::Type,
@@ -700,6 +703,7 @@ impl ColumnLevels {
             | ParseAsType::Bool
             | ParseAsType::String
             | ParseAsType::Datetime
+            | ParseAsType::Duration
             | ParseAsType::F32
             | ParseAsType::F64
             | ParseAsType::Bytes => self.push_value(ty, cell),

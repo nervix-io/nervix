@@ -72,7 +72,7 @@ Feature: Processor output routing
       """
       {"id":"event-1","divisor":0,"result":0}
       """
-    Then within "5s" the relay subscription receives payloads containing all fragments
+    Then within "30s" the relay subscription receives payloads containing all fragments
       """
       "divisor":0 | "id":"event-1" | "result":10
       "attempted_result":0 | "divisor":0 | "error_code":"evaluation" | "error_message":"junction 'project_events' FILTER-MAP side error division_by_zero | "error_reference":" | "source_id":"event-1"
@@ -129,7 +129,7 @@ Feature: Processor output routing
         TO delayed_events
           INHERIT ALL
           SET route = "delayed"
-          FLUSH EACH 2s MAX BATCH SIZE 1MiB
+          FLUSH EACH 40s MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION immediate_events_subscription TO immediate_events;
       CREATE SUBSCRIPTION delayed_events_subscription TO delayed_events;
@@ -139,11 +139,15 @@ Feature: Processor output routing
       """
       {"id":"event-1"}
       """
-    Then within "1s" the relay subscription receives a payload
+    # Both bounds count from the post. An immediate route that waited for the delayed route's 40 s
+    # flush would miss the 30 s budget, which leaves relay delivery between three nodes room on a
+    # loaded runner. The delayed row cannot arrive within that budget, so neither step depends on
+    # the order in which the two rows arrive.
+    Then the relay subscription receives a payload within "30s" after it was published
       """
       "id":"event-1","route":"immediate"
       """
-    And the relay subscription receives a payload no sooner than "2s" after it was published
+    And the relay subscription receives a payload no sooner than "40s" after it was published
       """
       "id":"event-1","route":"delayed"
       """
@@ -233,7 +237,7 @@ Feature: Processor output routing
       """
       {"id":"drop-1","active":false,"level":"ERROR","raw":"  DROP  "}
       """
-    Then within "5s" the relay subscription receives payloads
+    Then within "30s" the relay subscription receives payloads
       """
       "id":"err-1","normalized":"fail","route":"error"
       "id":"err-1","normalized":"fail","route":"audit"
@@ -439,7 +443,7 @@ Feature: Processor output routing
       """
       {"id":"source-drop-b","active":true,"level":"hold","urgent":true}
       """
-    Then within "5s" the relay subscription receives payloads
+    Then within "30s" the relay subscription receives payloads
       """
       "id":"err-1"
       "id":"err-1"

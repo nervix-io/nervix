@@ -1005,6 +1005,19 @@ for a detach reply can queue ticks that arrived before the reply; the post-detac
 the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
 pre-reply tick therefore does not masquerade as delivery after detach.
 
+The relay subscription steps read rows in the order the scenario's session receives them. A step
+that waits for one payload reads rows until one contains its expected text and reads past the
+others. Rows of different branches have no delivery order ([Fan-Out Across
+Nodes](./client-session-protocol.md#fan-out-across-nodes)), so a scenario that expects rows of
+several branches waits for them in one step: `the relay subscription receives payloads` matches
+each listed fragment once, in any order, and `the relay subscription receives payloads containing
+all fragments` also checks each row's branch key, written as a `key={...}` fragment beside the row.
+Two one-payload waits in a row would assume an order the product does not promise: the second
+branch's row can arrive while the first wait still runs, and that wait reads past it. The scenario
+world keeps every row a one-payload wait read past, and a later one-payload wait that times out
+names the rows among them that contain its expected text, so such a failure says that the row
+arrived before its wait began.
+
 The generator cadence assertion checks execution timestamps rather than subscription throughput.
 Every row must preserve the expected source fields and its concrete branch key, timestamps must
 increase within each branch, and a complete occurrence has one shared timestamp across both
@@ -3567,8 +3580,10 @@ goes back with the scenario's other fixture ports at the end of cleanup.
 
 ## gRPC Receivers
 
-The node trace-export scenarios start one or three real server processes with `--otel-enabled`,
-separate service names and the scenario's DNS configuration. A local gRPC collector captures their
+The node trace-export scenarios start one or three real server processes with a collector
+endpoint, given as `--otel-otlp-endpoint` or as its environment twin, separate service names and
+the scenario's DNS configuration. One scenario also sets every OpenTelemetry environment variable
+and requires that none of them reaches the export. A local gRPC collector captures their
 OTLP trace requests; the steps decode the current trace schema and require spans from every node
 and a query for the collector's fixture name. This uses the process cluster's existing readiness
 and failure diagnostics. Processes are dropped before the DNS authority, resolver files and

@@ -14,9 +14,10 @@ Feature: Cross-language client conformance
   The rows cover the extremes of every integer width, 64-bit values on both sides of the
   JavaScript safe-integer boundary, an absent and a present-zero optional value, strings with
   multi-byte characters and an embedded NUL, bytes that are not UTF-8, empty strings and bytes,
-  float sign and subnormal bits, the extreme DATETIME nanoseconds, a redacted sensitive field and
-  two interleaved concrete branches, on both an unpartitioned relay and distinct units of a relay
-  with four partitions.
+  float sign and subnormal bits, the extreme DATETIME nanoseconds, the longest, the zero and the
+  shortest DURATION a literal writes, a redacted sensitive field and two interleaved concrete
+  branches, on both an unpartitioned relay and distinct units of a relay with four partitions. A
+  client batch also carries the extreme signed DURATION nanoseconds both ways.
   Strings and bytes are reported as hex, floats as their bits.
 
   @client_upload_failure
@@ -81,7 +82,7 @@ Feature: Cross-language client conformance
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA typed_row (
+      CREATE SCHEMA typed_message (
         id U32,
         tenant STRING,
         u8v U8,
@@ -100,6 +101,27 @@ Feature: Cross-language client conformance
         at DATETIME,
         maybe I64 OPTIONAL,
         secret STRING SENSITIVE
+      );
+      CREATE SCHEMA typed_row (
+        id U32,
+        tenant STRING,
+        u8v U8,
+        i8v I8,
+        u16v U16,
+        i16v I16,
+        u32v U32,
+        i32v I32,
+        u64v U64,
+        i64v I64,
+        f32v F32,
+        f64v F64,
+        flag BOOL,
+        text STRING,
+        raw BYTES,
+        at DATETIME,
+        maybe I64 OPTIONAL,
+        secret STRING SENSITIVE,
+        wait DURATION
       );
       CREATE WIRE JSON SCHEMA typed_row_wire MODE STRICT (
         id integer,
@@ -123,7 +145,7 @@ Feature: Cross-language client conformance
       );
       CREATE WIRE JSON CODEC typed_row_codec
         FROM WIRE SCHEMA typed_row_wire
-        TO SCHEMA typed_row
+        TO SCHEMA typed_message
         ENCODE at AS RFC3339, raw AS BASE64;
       CREATE SCHEMA tenant_key ( tenant STRING );
       CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m <partition_clause>;
@@ -151,7 +173,12 @@ Feature: Cross-language client conformance
               raw = hex_decode(hex_encode(message.raw)),
               at = coalesce(message.at, now()),
               maybe = nullif(message.maybe, -1),
-              secret = concat(message.secret, '')
+              secret = concat(message.secret, ''),
+              wait = CASE message.id
+                WHEN 1 AS U32 THEN 106751d 23h 47m 16s 854ms 775us 807ns
+                WHEN 2 AS U32 THEN 0s
+                ELSE 1ns
+              END
           BRANCHED BY by_tenant
           SET tenant = message.tenant
           FLUSH IMMEDIATE
@@ -195,12 +222,13 @@ Feature: Cross-language client conformance
       FIELD at DATETIME required public
       FIELD maybe I64 nullable public
       FIELD secret STRING required sensitive
+      FIELD wait DURATION required public
       PARAMETRIZER by_tenant
       KEY tenant STRING required public
       SUBSCRIBED
-      ROW [tenant=str:61636d65] id=u32:1 tenant=str:61636d65 u8v=u8:255 i8v=i8:127 u16v=u16:65535 i16v=i16:32767 u32v=u32:4294967295 i32v=i32:2147483647 u64v=u64:18446744073709551615 i64v=i64:9223372036854775807 f32v=f32:7f7fffff f64v=f64:7fefffffffffffff flag=bool:true text=str:68c3a96c6c6f20e4b896e7958c20f09f9a80 raw=bytes:00fffe8000 at=datetime:9223372036854775807 maybe=null secret=redacted
-      ROW [tenant=str:62657461] id=u32:2 tenant=str:62657461 u8v=u8:0 i8v=i8:-128 u16v=u16:0 i16v=i16:-32768 u32v=u32:0 i32v=i32:-2147483648 u64v=u64:0 i64v=i64:-9223372036854775808 f32v=f32:80000000 f64v=f64:0000000000000001 flag=bool:false text=str:610062 raw=bytes: at=datetime:-9223372036854775808 maybe=i64:0 secret=redacted
-      ROW [tenant=str:61636d65] id=u32:3 tenant=str:61636d65 u8v=u8:1 i8v=i8:-1 u16v=u16:1 i16v=i16:-1 u32v=u32:1 i32v=i32:-1 u64v=u64:9007199254740993 i64v=i64:-9007199254740993 f32v=f32:3fc00000 f64v=f64:3fb999999999999a flag=bool:true text=str: raw=bytes:00 at=datetime:1 maybe=i64:9007199254740992 secret=redacted
+      ROW [tenant=str:61636d65] id=u32:1 tenant=str:61636d65 u8v=u8:255 i8v=i8:127 u16v=u16:65535 i16v=i16:32767 u32v=u32:4294967295 i32v=i32:2147483647 u64v=u64:18446744073709551615 i64v=i64:9223372036854775807 f32v=f32:7f7fffff f64v=f64:7fefffffffffffff flag=bool:true text=str:68c3a96c6c6f20e4b896e7958c20f09f9a80 raw=bytes:00fffe8000 at=datetime:9223372036854775807 maybe=null secret=redacted wait=duration:9223372036854775807
+      ROW [tenant=str:62657461] id=u32:2 tenant=str:62657461 u8v=u8:0 i8v=i8:-128 u16v=u16:0 i16v=i16:-32768 u32v=u32:0 i32v=i32:-2147483648 u64v=u64:0 i64v=i64:-9223372036854775808 f32v=f32:80000000 f64v=f64:0000000000000001 flag=bool:false text=str:610062 raw=bytes: at=datetime:-9223372036854775808 maybe=i64:0 secret=redacted wait=duration:0
+      ROW [tenant=str:61636d65] id=u32:3 tenant=str:61636d65 u8v=u8:1 i8v=i8:-1 u16v=u16:1 i16v=i16:-1 u32v=u32:1 i32v=i32:-1 u64v=u64:9007199254740993 i64v=i64:-9007199254740993 f32v=f32:3fc00000 f64v=f64:3fb999999999999a flag=bool:true text=str: raw=bytes:00 at=datetime:1 maybe=i64:9007199254740992 secret=redacted wait=duration:1
       CHECKS ok
       CLOSED completed
       PASS
@@ -533,7 +561,8 @@ Feature: Cross-language client conformance
         tags <tags_type>,
         grid <grid_type>,
         spans <spans_type> OPTIONAL,
-        secret STRING SENSITIVE
+        secret STRING SENSITIVE,
+        wait DURATION
       );
       CREATE SCHEMA typed_out_row (
         id U32,
@@ -557,6 +586,7 @@ Feature: Cross-language client conformance
         grid <grid_type>,
         spans <spans_type> OPTIONAL,
         secret STRING SENSITIVE,
+        wait DURATION,
         echo U32
       );
       CREATE SCHEMA tenant_key ( tenant STRING );
@@ -615,6 +645,7 @@ Feature: Cross-language client conformance
       OUTPUT FIELD grid <grid_type> required public
       OUTPUT FIELD spans <spans_type> nullable public
       OUTPUT FIELD secret STRING required sensitive
+      OUTPUT FIELD wait DURATION required public
       OUTPUT FIELD echo U32 required public
       PRODUCER generation=1 state=active admission=open window=sequential/1 ack_timeout=60000000000 credit=2/1048576
       INPUT FIELD id U32 required public
@@ -638,6 +669,7 @@ Feature: Cross-language client conformance
       INPUT FIELD grid <grid_type> required public
       INPUT FIELD spans <spans_type> nullable public
       INPUT FIELD secret STRING required sensitive
+      INPUT FIELD wait DURATION required public
       OPENED
       NEXT deadline
       NEXT cancelled
@@ -646,9 +678,9 @@ Feature: Cross-language client conformance
       SUBMITTED first
       DELIVERY relay=typed_rows members=3 branch=32 identity=16 reference=16
       PENDING first unresolved
-      ROW id=u32:1 tenant=str:61636d65 u8v=u8:255 i8v=i8:127 u16v=u16:65535 i16v=i16:32767 u32v=u32:4294967295 i32v=i32:2147483647 u64v=u64:18446744073709551615 i64v=i64:9223372036854775807 f32v=f32:7f7fffff f64v=f64:7fefffffffffffff flag=bool:true text=str:68c3a96c6c6f20e4b896e7958c20f09f9a80 raw=bytes:00fffe8000 at=datetime:9223372036854775807 maybe=null tags=[str:61,str:,str:68c3a96c6c6f] grid=[[i16:1,i16:-2],[i16:32767,i16:-32768]] spans=[[datetime:-9223372036854775808,datetime:9223372036854775807]] secret=str:7331 echo=u32:1
-      ROW id=u32:2 tenant=str:61636d65 u8v=u8:0 i8v=i8:-128 u16v=u16:0 i16v=i16:-32768 u32v=u32:0 i32v=i32:-2147483648 u64v=u64:0 i64v=i64:-9223372036854775808 f32v=f32:80000000 f64v=f64:0000000000000001 flag=bool:false text=str:610062 raw=bytes: at=datetime:-9223372036854775808 maybe=i64:0 tags=[] grid=[[i16:0,i16:0],[i16:0,i16:0]] spans=null secret=str:7332 echo=u32:2
-      ROW id=u32:3 tenant=str:61636d65 u8v=u8:1 i8v=i8:-1 u16v=u16:1 i16v=i16:-1 u32v=u32:1 i32v=i32:-1 u64v=u64:9007199254740993 i64v=i64:-9007199254740993 f32v=f32:3fc00000 f64v=f64:3fb999999999999a flag=bool:true text=null raw=null at=datetime:1 maybe=i64:9007199254740992 tags=[str:78] grid=[[i16:-1,i16:1],[i16:2,i16:-2]] spans=[] secret=str:7333 echo=u32:3
+      ROW id=u32:1 tenant=str:61636d65 u8v=u8:255 i8v=i8:127 u16v=u16:65535 i16v=i16:32767 u32v=u32:4294967295 i32v=i32:2147483647 u64v=u64:18446744073709551615 i64v=i64:9223372036854775807 f32v=f32:7f7fffff f64v=f64:7fefffffffffffff flag=bool:true text=str:68c3a96c6c6f20e4b896e7958c20f09f9a80 raw=bytes:00fffe8000 at=datetime:9223372036854775807 maybe=null tags=[str:61,str:,str:68c3a96c6c6f] grid=[[i16:1,i16:-2],[i16:32767,i16:-32768]] spans=[[datetime:-9223372036854775808,datetime:9223372036854775807]] secret=str:7331 wait=duration:9223372036854775807 echo=u32:1
+      ROW id=u32:2 tenant=str:61636d65 u8v=u8:0 i8v=i8:-128 u16v=u16:0 i16v=i16:-32768 u32v=u32:0 i32v=i32:-2147483648 u64v=u64:0 i64v=i64:-9223372036854775808 f32v=f32:80000000 f64v=f64:0000000000000001 flag=bool:false text=str:610062 raw=bytes: at=datetime:-9223372036854775808 maybe=i64:0 tags=[] grid=[[i16:0,i16:0],[i16:0,i16:0]] spans=null secret=str:7332 wait=duration:-9223372036854775808 echo=u32:2
+      ROW id=u32:3 tenant=str:61636d65 u8v=u8:1 i8v=i8:-1 u16v=u16:1 i16v=i16:-1 u32v=u32:1 i32v=i32:-1 u64v=u64:9007199254740993 i64v=i64:-9007199254740993 f32v=f32:3fc00000 f64v=f64:3fb999999999999a flag=bool:true text=null raw=null at=datetime:1 maybe=i64:9007199254740992 tags=[str:78] grid=[[i16:-1,i16:1],[i16:2,i16:-2]] spans=[] secret=str:7333 wait=duration:1 echo=u32:3
       RETRY confirmed
       REDELIVERED same identity new reference
       ACK stale_reference

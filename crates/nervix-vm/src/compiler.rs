@@ -5,7 +5,7 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
-use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
+use arrow_array::{BooleanArray, DurationNanosecondArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -276,6 +276,7 @@ enum LiteralKey {
     Float64(u64),
     Boolean(bool),
     Utf8(String),
+    Duration(i64),
     Null,
 }
 
@@ -323,7 +324,10 @@ impl BranchSelection {
                 // A written NULL is not a match. Constant folding reports it as unfoldable rather
                 // than as false, so the literal is decided here instead.
                 Literal::Null => return Self::NeverTaken,
-                Literal::Int64(_) | Literal::Float64(_) | Literal::String(_) => {}
+                Literal::Int64(_)
+                | Literal::Float64(_)
+                | Literal::String(_)
+                | Literal::Duration(_) => {}
             }
         }
 
@@ -604,8 +608,8 @@ impl Compiler {
                     return Err(Report::new(CompileError {
                         code: CompileErrorCode::TypeMismatch,
                         message: format!(
-                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
-                             argument, found {first_type:?}",
+                            "function '{}' requires a scalar numeric, BOOL, STRING, DATETIME or \
+                             DURATION argument, found {first_type:?}",
                             function.plexus_name()
                         ),
                         span: args[0].span,
@@ -618,8 +622,8 @@ impl Compiler {
                     return Err(Report::new(CompileError {
                         code: CompileErrorCode::TypeMismatch,
                         message: format!(
-                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
-                             argument, found {first_type:?}",
+                            "function '{}' requires a scalar numeric, BOOL, STRING, DATETIME or \
+                             DURATION argument, found {first_type:?}",
                             function.plexus_name()
                         ),
                         span: args[0].span,
@@ -755,12 +759,16 @@ impl Compiler {
         }))
     }
 
-    /// The types a window orders values or keys by: numbers, booleans, strings and datetimes.
+    /// The types a window orders values or keys by: numbers, booleans, strings, datetimes and
+    /// durations.
     fn is_window_orderable(data_type: &DataType) -> bool {
         data_type.is_numeric()
             || matches!(
                 data_type,
-                DataType::Boolean | DataType::Utf8 | DataType::Timestamp(TimeUnit::Nanosecond, _)
+                DataType::Boolean
+                    | DataType::Utf8
+                    | DataType::Timestamp(TimeUnit::Nanosecond, _)
+                    | DataType::Duration(TimeUnit::Nanosecond)
             )
     }
 
@@ -1254,6 +1262,7 @@ impl Compiler {
                 Literal::Float64(_) => DataType::Float64,
                 Literal::Bool(_) => DataType::Boolean,
                 Literal::String(_) => DataType::Utf8,
+                Literal::Duration(_) => DataType::Duration(TimeUnit::Nanosecond),
                 Literal::Null => {
                     return Err(Report::new(CompileError {
                         code: CompileErrorCode::UntypedNull,
@@ -2002,6 +2011,9 @@ impl Compiler {
                     Literal::Bool(value) => (RegisterType::Boolean, ScalarValue::Boolean(*value)),
                     Literal::String(value) => {
                         (RegisterType::Utf8, ScalarValue::Utf8(value.clone()))
+                    }
+                    Literal::Duration(value) => {
+                        (RegisterType::Duration, ScalarValue::Duration(*value))
                     }
                     Literal::Null => {
                         return Err(Report::new(CompileError {
@@ -2845,6 +2857,7 @@ impl LiteralKey {
             Literal::Float64(value) => Self::Float64(value.to_bits()),
             Literal::Bool(value) => Self::Boolean(*value),
             Literal::String(value) => Self::Utf8(value.clone()),
+            Literal::Duration(value) => Self::Duration(*value),
             Literal::Null => Self::Null,
         }
     }
@@ -2857,6 +2870,7 @@ impl ScalarValue {
             ScalarValue::Float64(_) => RegisterType::Float64,
             ScalarValue::Boolean(_) => RegisterType::Boolean,
             ScalarValue::Utf8(_) => RegisterType::Utf8,
+            ScalarValue::Duration(_) => RegisterType::Duration,
         }
     }
 }
@@ -2968,6 +2982,9 @@ fn evaluate_set_element(element: &SpannedExpr) -> Result<TypedArray, SetElementD
                 value.as_str()
             ])))
         }
+        Expr::Literal(Literal::Duration(value)) => Ok(TypedArray::Duration(
+            DurationNanosecondArray::from_value(*value, 1),
+        )),
         Expr::Literal(Literal::Null) => Err(SetElementDefect::Null),
         Expr::Unary { op, expr } => {
             let value = evaluate_set_element(expr)?;
@@ -3017,6 +3034,7 @@ fn fold_constant_expr(
             Literal::Float64(value) => Some(FoldedValue::NonNull(ScalarValue::Float64(*value))),
             Literal::Bool(value) => Some(FoldedValue::NonNull(ScalarValue::Boolean(*value))),
             Literal::String(value) => Some(FoldedValue::NonNull(ScalarValue::Utf8(value.clone()))),
+            Literal::Duration(value) => Some(FoldedValue::NonNull(ScalarValue::Duration(*value))),
             Literal::Null => None,
         }),
         Expr::FieldRef(_) | Expr::InternalFieldRef(_) => Ok(None),

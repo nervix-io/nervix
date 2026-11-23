@@ -378,8 +378,10 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
   answer the caller maps to its own outcome, never a decode, encode or authentication failure; the
   executor's refusing `run_cpu` and `run_storage` serve only such requests. A wait ends in a refusal
   only once the executor admits no more work, which its owner treats as its own stop. Loss is reserved
-  for cluster disruption. `task::spawn_cpu` belongs to the executor's worker pools,
-  `spawn_blocking` to its storage workers, and `block_in_place` to no file by default.
+  for cluster disruption ([Planned operations cost backpressure, never
+  data](#planned-operations-cost-backpressure-never-data)). `task::spawn_cpu` belongs to the
+  executor's worker pools, `spawn_blocking` to its storage workers, and `block_in_place` to no file
+  by default.
 - **Exact permissions.** Any other file naming `spawn_blocking` or `block_in_place`, or creating a
   thread through `thread::{spawn, Builder, scope, spawn_detached}` or `unmodeled::thread::Builder`,
   lists exactly those items in `crates/primitives/blocking-permissions.toml` with its owner, why it
@@ -767,6 +769,16 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   alteration waits for the work in motion, a payload an ingestor holds while it waits for a place on
   the bounded executor included, rather than cutting it, and a full queue holds back what feeds it
   rather than dropping what it was handed.
+- Backpressure is the one control of data-plane resources, and the data plane has no magic limits.
+  What a data-plane path holds, the bookkeeping that keeps its processing correct included (channel
+  watermarks, acknowledgement and admission state, outcomes kept for reconciliation), is charged to
+  an executor memory class or to a bound declared with its capacity and overflow. A full bound holds
+  back the work that would fill it, as a capacity refusal its sender retries, a held delivery or a
+  wait for a place, until room returns. No count, cap, budget, quota or eviction of its own drops,
+  forgets, refuses or invalidates work or that bookkeeping when it fills, and work fails only when
+  its own captured deadline passes or the cluster is disrupted. An existing limit that loses,
+  forgets or refuses work in place of backpressure is a defect recorded on ClickUp, never extended
+  or copied.
 - In async code, a loop whose body performs async work calls
   `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one
@@ -819,6 +831,30 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   catalogs, namespaces, tables, buckets or collections as a side effect of node startup or data
   processing. External entities are provisioned explicitly by test setup, deployment policy or
   operator action, and a missing one surfaces as an initialization or publish error.
+
+### Planned operations cost backpressure, never data
+
+- Only a cluster disruption may lose, refuse or repeat a record: a node crash, a network partition,
+  a failover or forced recovery of a node that stopped answering, or a deadline the operator set
+  expiring. Even then the loss is the narrowest the disruption forces, and it is reported.
+- Everything else keeps every record it was given. That covers every planned or routine operation
+  (an alteration, a move, a drain, a rebalance, a handoff, a pause or quiesce, a repartition, a
+  reconciliation retry, a restart in order) and every temporary condition of a healthy cluster (a
+  closed gate, a full queue or buffer, a busy worker pool, an owner or channel being replaced, a
+  slow consumer or peer). It waits, holds the record or applies backpressure; it never negatively
+  acknowledges, drops, fails, returns for re-sending or diverts to an error route the work it
+  accepted, as a way to make progress.
+- The cost of a planned operation is higher latency and backpressure, never loss, a duplicate or a
+  negative acknowledgement. Planned operations are as gentle as possible: they hold no more and no
+  longer than their change needs.
+- When waiting appears to deadlock, the repair is the order of the operation (what it closes, drains
+  or hands over, and when), never failing the work. "The source will retry" is not a delivery
+  guarantee: a re-send is a duplicate to consumers that already took the record, and a
+  `MODE NO ACK` source loses it.
+- A path that refuses or drops accepted work because of a transient condition is a defect, whatever
+  a comment, chapter, test or Shuttle check says about its intent. No change adds one, and none
+  widens or relies on one; an existing one is recorded on ClickUp against its repair task and is
+  never cited as precedent. A test asserts that the work is kept, never that it is refused.
 
 ### Observability
 

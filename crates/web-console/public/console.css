@@ -3399,6 +3399,7 @@ button {
 .create-correlator-left-timeout,
 .create-correlator-right-timeout,
 .create-inferencer-state-initial,
+.create-inferencer-working-memory,
 .create-wasm-rejected-state,
 .create-wasm-global-error {
   display: flex;
@@ -3425,6 +3426,7 @@ button {
 .create-window-aggregate-references legend,
 .create-correlator-route-references legend,
 .create-inferencer-state-initial legend,
+.create-inferencer-working-memory legend,
 .create-wasm-rejected-state legend,
 .create-wasm-global-error legend,
 .create-generator-route-references legend,
@@ -3448,6 +3450,7 @@ button {
 .create-inferencer-tensors,
 .create-tensor-dimensions,
 .create-wasm-limits,
+.create-inferencer-memory,
 .create-wasm-policies,
 .create-processor-state,
 .create-processor-routes,
@@ -3470,6 +3473,7 @@ button {
 .create-processor-binding,
 .create-inferencer-tensors,
 .create-wasm-limits,
+.create-inferencer-memory,
 .create-wasm-policies,
 .create-processor-state,
 .create-processor-routes,
@@ -3487,6 +3491,7 @@ button {
 .create-processor-binding h3,
 .create-inferencer-tensors h3,
 .create-wasm-limits h3,
+.create-inferencer-memory h3,
 .create-wasm-policies h3,
 .create-processor-state h3,
 .create-processor-routes h3,
@@ -3525,6 +3530,7 @@ button {
 .create-processor-correlation button,
 .create-generator-source button,
 .create-inferencer-tensors button,
+.create-inferencer-memory button,
 .create-wasm-policies button,
 .create-processor-state button,
 .create-processor-routes button,
@@ -3544,6 +3550,7 @@ button {
 .create-processor-correlation button.active,
 .create-generator-source button.active,
 .create-inferencer-tensors button.active,
+.create-inferencer-memory button.active,
 .create-wasm-policies button.active,
 .create-processor-state button.active,
 .create-processor-routes button.active,
@@ -3582,6 +3589,7 @@ button {
 .create-processor-binding p,
 .create-inferencer-tensors p,
 .create-wasm-limits p,
+.create-inferencer-memory p,
 .create-wasm-policies p {
   margin: 0;
   color: var(--text-d);

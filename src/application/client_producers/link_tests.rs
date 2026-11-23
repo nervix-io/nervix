@@ -2,17 +2,19 @@
 //!
 //! Test harness outside the product layer order.
 //! - **Owns.** Assertions that the serving side of a link counts a forwarded batch as possibly
-//!   admitted only once it cleared that batch, and that losing the owning node answers every batch
-//!   it never cleared as not admitted before it ends the producer.
+//!   admitted only once it cleared that batch, that losing the owning node answers every batch it
+//!   never cleared as not admitted before it ends the producer, and that a batch above the
+//!   producer's grant is answered on the serving side and never handed to the link.
 //! - **Depends on.** The serving side's record of forwarded batches and a forwarded route's
 //!   events.
 //! - **Must not know.** The interconnect transport, sessions, or the owning node's endpoint.
 
 use std::num::NonZeroU64;
 
+use bytes::Bytes;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClientProducerAdmission, ClientProducerEndReason, ClientSubmissionOutcome,
+    ClientBatchDefect, ClientProducerAdmission, ClientProducerEndReason, ClientSubmissionOutcome,
     ClientSubmissionRefusal,
 };
 use nervix_primitives::sync::{mpsc, watch};
@@ -21,6 +23,67 @@ use super::*;
 
 fn submission(id: u64) -> NonZeroU64 {
     NonZeroU64::new(id).assured("a literal non-zero identity")
+}
+
+/// A forwarded route whose owning node granted batches of at most `largest_batch` bytes, and the
+/// events it answers its producer with.
+fn route_granted(
+    largest_batch: u64,
+) -> (ForwardedRoute, mpsc::UnboundedReceiver<ClientProducerEvent>) {
+    let (events, outcomes) = mpsc::unbounded_channel();
+    let (admission, _admission) = watch::channel(ClientProducerAdmission::Open);
+    let route = ForwardedRoute {
+        events,
+        admission,
+        submissions: ForwardedSubmissions::default(),
+        largest_batch: NonZeroU64::new(largest_batch).assured("a literal non-zero grant"),
+    };
+    (route, outcomes)
+}
+
+#[test]
+fn a_batch_above_the_grant_is_answered_as_too_large_and_never_handed_to_the_link() {
+    let (mut route, mut outcomes) = route_granted(1024);
+    let largest = route.take(submission(1), Bytes::from(vec![0x5a; 1024]));
+    assert_eq!(
+        largest,
+        Some(vec![0x5a; 1024]),
+        "a batch as large as the grant goes over the link"
+    );
+    let above = route.take(submission(2), Bytes::from(vec![0x5a; 1025]));
+    assert_eq!(
+        above, None,
+        "a batch one byte above the grant stays on this node"
+    );
+    assert_eq!(
+        route.submissions.uncleared(),
+        vec![submission(1)],
+        "only the batch handed to the link waits for the owning node"
+    );
+    let Ok(ClientProducerEvent::Outcome {
+        submission: answered,
+        outcome,
+        detail,
+    }) = outcomes.try_recv()
+    else {
+        panic!("the batch above the grant is answered at once");
+    };
+    assert_eq!(answered.get(), submission(2));
+    assert_eq!(
+        outcome,
+        ClientSubmissionOutcome::NotAdmitted(ClientSubmissionRefusal::InvalidBatch(
+            ClientBatchDefect::TooLarge
+        )),
+        "the serving node gives the answer the owning node gives a batch above its grant"
+    );
+    assert_eq!(
+        detail.as_deref(),
+        Some("a batch of 1025 bytes exceeds the 1024 byte limit")
+    );
+    assert!(
+        outcomes.try_recv().is_err(),
+        "the batch handed to the link is answered by the owning node alone"
+    );
 }
 
 #[test]
@@ -50,13 +113,7 @@ fn only_a_batch_that_was_forwarded_and_has_no_outcome_is_cleared() {
 
 #[test]
 fn a_lost_owner_leaves_only_the_batches_it_never_cleared_not_admitted() {
-    let (events, mut outcomes) = mpsc::unbounded_channel();
-    let (admission, _admission) = watch::channel(ClientProducerAdmission::Open);
-    let mut route = ForwardedRoute {
-        events,
-        admission,
-        submissions: ForwardedSubmissions::default(),
-    };
+    let (mut route, mut outcomes) = route_granted(1024);
     for id in 1..=4 {
         route.submissions.track(submission(id));
     }

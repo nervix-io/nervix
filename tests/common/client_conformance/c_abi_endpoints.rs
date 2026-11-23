@@ -77,6 +77,7 @@ fn type_code(ty: FieldType) -> i32 {
         FieldType::Datetime => 14,
         FieldType::FixedList => 15,
         FieldType::List => 16,
+        FieldType::Duration => 17,
     }
 }
 
@@ -174,6 +175,7 @@ const INPUT_FIELDS: &[FieldSpec] = &[
     )
     .nullable(),
     FieldSpec::new("secret", STRING).sensitive(),
+    FieldSpec::new("wait", &[Level::of(FieldType::Duration)]),
 ];
 
 /// The field the emitter adds to every output row: the row's `id` again.
@@ -206,6 +208,7 @@ struct Row {
     grid: [[i16; 2]; 2],
     spans: Option<&'static [[i64; 2]]>,
     secret: &'static str,
+    wait: i64,
 }
 
 impl Row {
@@ -233,6 +236,7 @@ impl Row {
             grid: [[0; 2]; 2],
             spans: None,
             secret: "s",
+            wait: 0,
         }
     }
 }
@@ -264,6 +268,7 @@ fn typed_rows() -> Vec<Row> {
             grid: [[1, -2], [i16::MAX, i16::MIN]],
             spans: Some(&[[i64::MIN, i64::MAX]]),
             secret: "s1",
+            wait: i64::MAX,
         },
         Row {
             id: 2,
@@ -287,6 +292,7 @@ fn typed_rows() -> Vec<Row> {
             grid: [[0, 0], [0, 0]],
             spans: None,
             secret: "s2",
+            wait: i64::MIN,
         },
         Row {
             id: 3,
@@ -310,6 +316,7 @@ fn typed_rows() -> Vec<Row> {
             grid: [[-1, 1], [2, -2]],
             spans: Some(&[]),
             secret: "s3",
+            wait: 1,
         },
     ]
 }
@@ -401,6 +408,7 @@ fn column(name: &str, rows: &[Row]) -> io::Result<HostColumn> {
         "f64v" => fixed(&|row| row.f64v.to_ne_bytes().to_vec()),
         "flag" => fixed(&|row| vec![u8::from(row.flag)]),
         "at" => fixed(&|row| row.at.to_ne_bytes().to_vec()),
+        "wait" => fixed(&|row| row.wait.to_ne_bytes().to_vec()),
         "text" => HostColumn {
             states: Some(states_of(rows.iter().map(|row| row.text.is_some()))),
             offsets: Vec::new(),
@@ -599,6 +607,7 @@ fn scalar_name(ty: FieldType) -> &'static str {
         FieldType::Datetime => "DATETIME",
         FieldType::FixedList => "FIXED_LIST",
         FieldType::List => "LIST",
+        FieldType::Duration => "DURATION",
     }
 }
 
@@ -607,7 +616,11 @@ fn width(ty: FieldType) -> io::Result<usize> {
         FieldType::U8 | FieldType::I8 | FieldType::Bool => Ok(1),
         FieldType::U16 | FieldType::I16 => Ok(2),
         FieldType::U32 | FieldType::I32 | FieldType::F32 => Ok(4),
-        FieldType::U64 | FieldType::I64 | FieldType::F64 | FieldType::Datetime => Ok(8),
+        FieldType::U64
+        | FieldType::I64
+        | FieldType::F64
+        | FieldType::Datetime
+        | FieldType::Duration => Ok(8),
         other => Err(io::Error::other(format!("{other:?} is not fixed-width"))),
     }
 }
@@ -1006,6 +1019,10 @@ impl LeafView {
                     ),
                     FieldType::Datetime => format!(
                         "datetime:{}",
+                        i64::from_ne_bytes(bytes.try_into().expect("eight bytes"))
+                    ),
+                    FieldType::Duration => format!(
+                        "duration:{}",
                         i64::from_ne_bytes(bytes.try_into().expect("eight bytes"))
                     ),
                     other => return Err(io::Error::other(format!("{other:?} is not fixed-width"))),

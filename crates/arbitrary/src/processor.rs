@@ -9,8 +9,9 @@ use nervix_models::{
     CreateReorderer, CreateWasmProcessor, CreateWindowProcessor, Expression,
     InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
     InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, RequestedResourceVersion,
-    WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound, WindowStateLimit,
+    InferencerTensorRepresentation, InferencerTensorSchema, InferencerWorkingMemory,
+    RequestedResourceVersion, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
+    WindowStateLimit,
 };
 
 use crate::{
@@ -286,6 +287,10 @@ impl Arbitrary<'_> {
             resource: self.name(),
             resource_version: self.requested_version(),
             file: self.string(),
+            working_memory: self.entropy.pick([
+                InferencerWorkingMemory::Released,
+                InferencerWorkingMemory::Retained,
+            ]),
             inputs,
             state,
             output_schema,

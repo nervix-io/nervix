@@ -211,7 +211,9 @@ not change the applicability of the lifecycle Deloxide lanes.
 Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
 form, codec and header support, and batching legality in the vocabulary. Direct-value entities
 also declare their mapped-value types there: destination columns accept the current Plexus scalar,
-array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
+array and vector types except `DURATION`, which every native store binding declares rejected
+because no column type holds it losslessly, while OTEL protocol fields require their declared exact
+types and refuse a `DURATION` as well. The OTEL
 connector verifies its prepared input schema against that same type table as an internal plan
 guarantee. An impossible mapped type is not a retryable connector initialization failure.
 
@@ -336,6 +338,17 @@ including a path another feature adds or changes. Each rule names the section th
   every answer already given before a failure ends the publish; see [Emitter boundary](#emitter-boundary).
   The RabbitMQ emitter, which settles what its broker confirmed itself when it loses a channel, is
   the one brokered emitter that does not use the window yet.
+- **A driver sends nothing again that its entity does not declare.** A request a driver would send
+  again by itself after writing any of it, beneath the host's `RETRY POLICY`, is turned off in every
+  client Nervix builds whose settings the operator cannot reach, as in the shared [HTTP
+  client](#http-client-transport) and the Iceberg clients. A request a connection pool moves to a
+  fresh connection before writing any of it reached no server and is not sent again. A driver retry
+  that turning off would make worse is kept and stated with its bound in the entity's driver limits,
+  as the Redis command pool's retry of a failed connection open within `connect_timeout_ms` is. A
+  resend the operator configures through the client's pass-through driver options, such as
+  librdkafka's resends or a MongoDB connection string's `retryWrites`, keeps the driver's default,
+  and the entity's driver limits and manual state that default, what it can duplicate or reorder,
+  and the option that changes it.
 - **Every buffer and every wait is declared with its bound.** The deadline keys keep one meaning,
   no driver call parks an asynchronous worker, and each deadline key an entity's waits name has its
   stalled-peer scenario. A change adds no unbounded buffer and no wait that only a stop ends; one
@@ -369,6 +382,9 @@ A change that adds or alters an ingestor or emitter entity, or a host path that 
 - a payload its codec refuses becomes a decode rejection rather than failing its whole batch;
 - each emitter answers `finish` for what its client can still hold once a publish returns, and a
   brokered emitter in `MODE ACK` awaits its broker through the `ConfirmationWindow`;
+- every request a driver sends again by itself after writing any of it is turned off, or declared
+  in the entity's driver limits with its bound, what it can duplicate or reorder, and the option
+  that changes it;
 - the [bounds review checklist](#review-checklist) holds;
 - a new host protocol on these paths has a Shuttle check over its production owner.
 
@@ -408,7 +424,9 @@ emitter's location and the initial table's effective storage properties. Table m
 retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
 an object URL for a different storage root is refused. OpenDAL's credential providers keep their
 own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
-neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt. Catalog
+requests make one attempt too: the Reqwest 0.12 catalog client's retry policy is off, although that
+client speaks HTTP/1.1, where the policy never sends a request again.
 An Azure location's host names the Blob service for `wasb`/`wasbs` and the Data Lake service for
 `abfs`/`abfss`, and the emitter checks that service and the container before `@` when it opens.
 Object requests for every Azure scheme go to the account's Data Lake endpoint, which the connector
@@ -439,6 +457,12 @@ one contract:
   names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
   client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  It sends each request once. Reqwest's own policy, which would send a request again after an
+  HTTP/2 `REFUSED_STREAM` or graceful `GOAWAY`, is off, so the refusal fails the attempt and the
+  connector's retry policy decides about the next one. The connection pool beneath still writes a
+  request on a fresh connection when the reused connection it chose closed before any of the
+  request was written; that request never reached the server, and Reqwest offers no way to turn
+  that choice off.
   It obtains its preconfigured rustls client from `RustlsClientConfigProvider`, the same owner the
   HTTP request emitter uses: bundled Mozilla roots plus native roots, with every certificate in
   `tls_ca_file` added and the optional paired client certificate and key. An empty native store
