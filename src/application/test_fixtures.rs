@@ -133,55 +133,113 @@ pub(in crate::application) struct TestTlsFiles {
     pub(in crate::application) private_key: PathBuf,
 }
 
+/// The certificate authority of one test cluster. The nodes it issues trust it, and so each other,
+/// as the members of a cluster do.
+pub(crate) struct TestCertificateAuthority {
+    certificate: rcgen::Certificate,
+    key: KeyPair,
+}
+
+impl TestCertificateAuthority {
+    pub(crate) fn generate() -> Self {
+        let mut params = CertificateParams::default();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let key = KeyPair::generate().expect("test CA key should generate");
+        let certificate = params.self_signed(&key).expect("test CA should self-sign");
+        Self { certificate, key }
+    }
+
+    /// The TLS material of `node_id` in `cluster_id`, signed by this authority.
+    fn issue(&self, cluster_id: &str, node_id: &ClusterNodeName) -> TestTlsFiles {
+        let mut node_params =
+            CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+                .expect("test endpoint SANs should be valid");
+        node_params.subject_alt_names.push(SanType::URI(
+            format!("nervix://cluster/{cluster_id}/node/{node_id}")
+                .try_into()
+                .expect("test identity URI should be IA5"),
+        ));
+        node_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        node_params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
+        let node_key = KeyPair::generate().expect("test node key should generate");
+        let certificate = node_params
+            .signed_by(&node_key, &self.certificate, &self.key)
+            .expect("test node certificate should sign");
+
+        let directory = tempfile::tempdir().expect("test TLS directory should be created");
+        let ca_path = directory.path().join("ca.pem");
+        let certificate_path = directory.path().join("node.pem");
+        let private_key_path = directory.path().join("node-key.pem");
+        std::fs::write(&ca_path, self.certificate.pem()).expect("test CA should be written");
+        std::fs::write(&certificate_path, certificate.pem())
+            .expect("test certificate should be written");
+        std::fs::write(&private_key_path, node_key.serialize_pem())
+            .expect("test private key should be written");
+        TestTlsFiles {
+            _directory: directory,
+            ca: ca_path,
+            certificate: certificate_path,
+            private_key: private_key_path,
+        }
+    }
+
+    /// A loopback interconnect for `node_id` in `cluster_id`, which authenticates every other
+    /// interconnect this authority issued.
+    pub(crate) async fn interconnect(
+        &self,
+        cluster_id: &str,
+        node_id: &ClusterNodeName,
+    ) -> Transport {
+        let files = self.issue(cluster_id, node_id);
+        let tls = TlsConfigBundle::from_pem_files(
+            &files.ca,
+            &files.certificate,
+            &files.private_key,
+            TransportClock::system(),
+        )
+        .expect("test TLS bundle should load");
+        let addr = "127.0.0.1:0"
+            .parse()
+            .expect("ephemeral interconnect address must parse");
+        let dns = nervix_dns::DnsResolver::load(
+            nervix_dns::DnsConfiguration::system(),
+            nervix_dns::DnsSettings::default(),
+        )
+        .await
+        .expect("the host's resolver configuration should load");
+        let (transport, _rx) = Transport::bind(
+            addr,
+            nervix_interconnect::TransportIdentity {
+                cluster_id: cluster_id.to_string(),
+                node_id: node_id.clone(),
+                advertised_host: "127.0.0.1".to_string(),
+                join_terms: super::NodeSettings::default().join_terms(),
+            },
+            tls,
+            Default::default(),
+            nervix_execution::Executor::default(),
+            nervix_interconnect::PeerResolver::new(dns),
+        )
+        .await
+        .expect("test transport should bind");
+        transport
+    }
+}
+
+/// The TLS material of `node_id` in `cluster_id`, under an authority of its own.
 pub(in crate::application) fn test_tls_files(
     cluster_id: &str,
     node_id: &ClusterNodeName,
 ) -> TestTlsFiles {
-    let mut ca_params = CertificateParams::default();
-    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca_params.key_usages = vec![
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
-    let ca_key = KeyPair::generate().expect("test CA key should generate");
-    let ca = ca_params
-        .self_signed(&ca_key)
-        .expect("test CA should self-sign");
-
-    let mut node_params =
-        CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-            .expect("test endpoint SANs should be valid");
-    node_params.subject_alt_names.push(SanType::URI(
-        format!("nervix://cluster/{cluster_id}/node/{node_id}")
-            .try_into()
-            .expect("test identity URI should be IA5"),
-    ));
-    node_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    node_params.extended_key_usages = vec![
-        ExtendedKeyUsagePurpose::ServerAuth,
-        ExtendedKeyUsagePurpose::ClientAuth,
-    ];
-    let node_key = KeyPair::generate().expect("test node key should generate");
-    let certificate = node_params
-        .signed_by(&node_key, &ca, &ca_key)
-        .expect("test node certificate should sign");
-
-    let directory = tempfile::tempdir().expect("test TLS directory should be created");
-    let ca_path = directory.path().join("ca.pem");
-    let certificate_path = directory.path().join("node.pem");
-    let private_key_path = directory.path().join("node-key.pem");
-    std::fs::write(&ca_path, ca.pem()).expect("test CA should be written");
-    std::fs::write(&certificate_path, certificate.pem())
-        .expect("test certificate should be written");
-    std::fs::write(&private_key_path, node_key.serialize_pem())
-        .expect("test private key should be written");
-    TestTlsFiles {
-        _directory: directory,
-        ca: ca_path,
-        certificate: certificate_path,
-        private_key: private_key_path,
-    }
+    TestCertificateAuthority::generate().issue(cluster_id, node_id)
 }
 
 fn test_db_path() -> PathBuf {
@@ -375,40 +433,11 @@ fn test_session_service(
     }
 }
 
+/// A loopback interconnect for `node_id` in `cluster_id`, under an authority of its own.
 pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeName) -> Transport {
-    let files = test_tls_files(cluster_id, node_id);
-    let tls = TlsConfigBundle::from_pem_files(
-        &files.ca,
-        &files.certificate,
-        &files.private_key,
-        TransportClock::system(),
-    )
-    .expect("test TLS bundle should load");
-    let addr = "127.0.0.1:0"
-        .parse()
-        .expect("ephemeral interconnect address must parse");
-    let dns = nervix_dns::DnsResolver::load(
-        nervix_dns::DnsConfiguration::system(),
-        nervix_dns::DnsSettings::default(),
-    )
-    .await
-    .expect("the host's resolver configuration should load");
-    let (transport, _rx) = Transport::bind(
-        addr,
-        nervix_interconnect::TransportIdentity {
-            cluster_id: cluster_id.to_string(),
-            node_id: node_id.clone(),
-            advertised_host: "127.0.0.1".to_string(),
-            join_terms: super::NodeSettings::default().join_terms(),
-        },
-        tls,
-        Default::default(),
-        nervix_execution::Executor::default(),
-        nervix_interconnect::PeerResolver::new(dns),
-    )
-    .await
-    .expect("test transport should bind");
-    transport
+    TestCertificateAuthority::generate()
+        .interconnect(cluster_id, node_id)
+        .await
 }
 
 /// The model a schedule entry of `kind` carries in these tests.

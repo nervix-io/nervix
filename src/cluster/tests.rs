@@ -113,6 +113,144 @@ fn a_gossip_exchange_larger_than_one_message_is_refused() {
     );
 }
 
+/// The settings of the member `node_id` of the cluster `test`, reached on `interconnect`. It joins
+/// through `bootstrap` when that names a member.
+fn loopback_member_settings(
+    node_id: &ClusterNodeName,
+    interconnect: &InterconnectTransport,
+    bootstrap: Option<SocketAddr>,
+) -> ClusterSettings {
+    let address = interconnect.local_addr();
+    ClusterSettings {
+        cluster_id: "test".to_string(),
+        node_id: node_id.clone(),
+        grpc_listen_addr: address,
+        client_advertise_url: crate::application::test_fixtures::test_service_url(address),
+        console_advertise_url: crate::application::test_fixtures::test_service_url(address),
+        interconnect_advertise_addr: address.into(),
+        bootstrap_host: bootstrap.map(|seed| seed.to_string()),
+        recovered_members: BTreeMap::new(),
+        interconnect: interconnect.clone(),
+        membership: MembershipSettings::default(),
+        prerequisites: interconnect.local_prerequisites(),
+        fault_injection: crate::ConfiguredFaultInjection::default(),
+    }
+}
+
+/// Waits until `cluster` sees `peer` live, and fails the test once `bound` passes first.
+async fn wait_until_live(cluster: &ClusterHandle, peer: &ClusterNodeName, bound: Duration) {
+    let seen = nervix_primitives::time::timeout(bound, async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if cluster.live_node(peer).await.is_some() {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(seen.is_ok(), "'{peer}' was not seen live within {bound:?}");
+}
+
+/// Chitchat fills every delta it gossips up to its own datagram bound of 65,507 bytes, while the
+/// gossip transport carries at most `MAX_GOSSIP_MESSAGE_BYTES`. A member whose state a peer lacks
+/// by more than one exchange carries must still reach that peer whole, in as many exchanges as it
+/// takes. Subscription interests are the state that grows with the work a node serves. Chitchat
+/// compresses a delta in blocks but counts the block it is still filling at its uncompressed size,
+/// so a full delta ends up below that bound by what its last block compressed away. Long random
+/// relay names compress too little for that to bring a full delta under the transport's bound.
+#[nervix_primitives::test]
+async fn a_peer_learns_gossip_state_larger_than_one_exchange_carries() {
+    const DOMAIN: &str = "gossip";
+    const INTERESTS: usize = 400;
+    const RELAY_NAME_CHARACTERS: usize = 500;
+    const MEMBERSHIP_BOUND: Duration = Duration::from_secs(30);
+    const CONVERGENCE_BOUND: Duration = Duration::from_secs(30);
+
+    let first = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let second = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
+    let authority = crate::application::test_fixtures::TestCertificateAuthority::generate();
+    let first_interconnect = authority.interconnect("test", &first).await;
+    let second_interconnect = authority.interconnect("test", &second).await;
+    let first_cluster = start_cluster(loopback_member_settings(
+        &first,
+        &first_interconnect,
+        None,
+    ))
+    .await
+    .assured("the first member starts on its loopback interconnect");
+    let second_cluster = start_cluster(loopback_member_settings(
+        &second,
+        &second_interconnect,
+        Some(first_interconnect.local_addr()),
+    ))
+    .await
+    .assured("the second member starts with the first as its bootstrap host");
+    wait_until_live(&second_cluster, &first, MEMBERSHIP_BOUND).await;
+    wait_until_live(&first_cluster, &second, MEMBERSHIP_BOUND).await;
+
+    let mut random = fastrand::Rng::with_seed(61_440);
+    let mut relays = Vec::with_capacity(INTERESTS);
+    for _ in 0..INTERESTS {
+        let mut relay = String::with_capacity(RELAY_NAME_CHARACTERS);
+        for _ in 0..RELAY_NAME_CHARACTERS {
+            relay.push(random.alphanumeric());
+        }
+        relays.push(relay);
+    }
+    for relay in &relays {
+        first_cluster
+            .reconcile_local_subscription_interest(DOMAIN, relay, || true)
+            .await;
+    }
+
+    // Chitchat sends a member's keys in the order of their versions, so the last interest
+    // arriving means every earlier one arrived too.
+    let first_identity = first_cluster.local_node_identity().await;
+    let last_relay = relays
+        .last()
+        .assured("the fixture advertises at least one interest");
+    let last_version = first_cluster
+        .local_subscription_interest_version(DOMAIN, last_relay)
+        .await
+        .assured("the first member advertises the interest it reconciled above");
+    let learned_last = nervix_primitives::time::timeout(
+        CONVERGENCE_BOUND,
+        second_cluster.wait_for_subscription_interest(
+            &first_identity,
+            DOMAIN,
+            last_relay,
+            last_version,
+        ),
+    )
+    .await;
+    let index = second_cluster.subscription_interest_index();
+    let mut missing = Vec::new();
+    for relay in &relays {
+        if !index.contains(&first_identity, DOMAIN, relay, 1) {
+            missing.push(relay.as_str());
+        }
+    }
+    assert!(
+        learned_last.is_ok() && missing.is_empty(),
+        "node-2 still lacks {} of the {} subscription interests node-1 advertised, \
+         {CONVERGENCE_BOUND:?} after node-1 advertised them",
+        missing.len(),
+        relays.len(),
+    );
+
+    second_cluster
+        .shutdown()
+        .await
+        .assured("the second member's gossip stops");
+    first_cluster
+        .shutdown()
+        .await
+        .assured("the first member's gossip stops");
+    second_interconnect.shutdown().await;
+    first_interconnect.shutdown().await;
+}
+
 fn health_identity(node: &str, incarnation: u64) -> ClusterNodeIdentity {
     ClusterNodeIdentity::new(
         ClusterNodeName::parse(node).assured("the test node name is valid"),
