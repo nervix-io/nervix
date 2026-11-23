@@ -1308,6 +1308,73 @@ mod tests {
         }
     }
 
+    /// The resend and ordering settings the Emitters manual declares for a producer whose client
+    /// sets none of them: librdkafka sends a failed batch again until the record's delivery bound,
+    /// with up to a million requests in flight and idempotence off, so a resend can overtake a later
+    /// batch.
+    #[test]
+    fn a_producer_keeps_librdkafkas_resend_defaults_when_its_client_sets_none() {
+        let entries = [entry("bootstrap.servers", "127.0.0.1:9092")];
+
+        for mode in [
+            BrokerPublishingMode::NoAck,
+            confirmed(Duration::from_secs(5)),
+        ] {
+            let native = KafkaTopicEmitter::producer_config(&entries, mode)
+                .assured("the client entries pass through")
+                .create_native_config()
+                .assured("librdkafka accepts a producer with its own defaults");
+            for (property, declared) in [
+                ("enable.idempotence", "false"),
+                ("max.in.flight.requests.per.connection", "1000000"),
+                ("message.send.max.retries", "2147483647"),
+                ("retry.backoff.ms", "100"),
+            ] {
+                assert_eq!(
+                    native
+                        .get(property)
+                        .assured("librdkafka reads every producer property it declares"),
+                    declared,
+                    "{property} in {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// Idempotence, acknowledgements, requests in flight and resends are the operator's choices in
+    /// the client's `CONFIG`, so every mode hands them to librdkafka as written.
+    #[test]
+    fn a_producer_takes_its_clients_resend_and_ordering_settings_as_written() {
+        let entries = [
+            entry("bootstrap.servers", "127.0.0.1:9092"),
+            entry("enable.idempotence", "true"),
+            entry("request.required.acks", "-1"),
+            entry("max.in.flight.requests.per.connection", "5"),
+            entry("message.send.max.retries", "10"),
+            entry("retry.backoff.ms", "250"),
+        ];
+
+        for mode in [
+            BrokerPublishingMode::NoAck,
+            confirmed(Duration::from_secs(5)),
+        ] {
+            let native = KafkaTopicEmitter::producer_config(&entries, mode)
+                .assured("the client entries pass through")
+                .create_native_config()
+                .assured("librdkafka accepts the client's resend and ordering settings");
+            for written in &entries[1..] {
+                assert_eq!(
+                    native
+                        .get(&written.key)
+                        .assured("librdkafka reads every producer property it declares"),
+                    written.value,
+                    "{} in {mode:?}",
+                    written.key
+                );
+            }
+        }
+    }
+
     #[test]
     fn native_queue_configuration_installs_a_positive_capacity_or_its_typed_failure() {
         let config = KafkaTopicEmitter::producer_config(

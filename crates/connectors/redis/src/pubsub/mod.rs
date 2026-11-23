@@ -193,11 +193,12 @@ impl Drop for RedisCommandConnection {
 /// Every entry is an independent connection, so the declared maximum bounds sockets rather than
 /// handles, and a checked-out connection carries one publisher's outstanding operation alone.
 /// Checking a connection out waits at most the client's `connect_timeout_ms`, which also bounds
-/// opening each new connection. The pool keeps the declared minimum of established connections,
-/// counting the ones publishers have checked out with the idle ones, and opens another only for a
-/// publisher that finds none idle. It closes a connection idle for the client's
-/// `pool_idle_timeout_ms` or older than its `pool_max_lifetime_ms`, then opens connections again to
-/// keep the minimum.
+/// opening each new connection; an open that fails is tried again within that deadline, after
+/// 400 ms and then twice as long each time, at most half the deadline. The pool keeps the declared
+/// minimum of established connections, counting the ones publishers have checked out with the idle
+/// ones, and opens another only for a publisher that finds none idle. It closes a connection idle
+/// for the client's `pool_idle_timeout_ms` or older than its `pool_max_lifetime_ms`, then opens
+/// connections again to keep the minimum.
 #[derive(Clone, Debug)]
 pub struct RedisCommandPool {
     shared: Arc<RedisCommandPoolShared>,
@@ -347,9 +348,17 @@ pub async fn open_redis_command_pool(
     };
     // Without the driver's idle minimum, which counts idle connections only and would open another
     // beside every connection a publisher checks out: the pool's own keeper holds the minimum.
+    //
+    // bb8 tries again to open a connection that failed, and stops at the first failure that comes
+    // after `connect_timeout_ms` has passed since its first try: the deadline the checkout waiting
+    // for it also keeps. It is kept: bb8 hands a waiting checkout no open failure, so without it a
+    // checkout would still wait out the whole deadline, only with one open instead of several. The
+    // publish that checkout serves fails once when it ends without a connection, and the emitter's
+    // `RETRY POLICY` decides the next attempt.
     let connections = bb8::Pool::builder()
         .max_size(bounds.maximum().get())
         .connection_timeout(connect_timeout.bound())
+        .retry_connection(true)
         .idle_timeout(Some(lifetimes.idle))
         .max_lifetime(Some(lifetimes.maximum))
         .build_unchecked(manager);
@@ -1022,10 +1031,65 @@ mod tests {
         assert_eq!(config.idle_timeout, Some(Duration::from_secs(10 * 60)));
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(30 * 60)));
         assert_eq!(config.connection_timeout, default_connect_timeout().bound());
+        // An open that fails is tried again within the checkout's deadline.
+        assert!(config.retry_connection);
         // The driver's idle minimum would open a connection beside every checkout.
         assert_eq!(config.min_idle, None);
         // A minimum of zero has nothing to keep.
         assert!(pool.shared._minimum.is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_checkout_tries_again_to_open_a_connection_only_within_connect_timeout_ms() {
+        use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixture = Fixture::start().await;
+        // A peer that closes every connection before Redis's setup is answered, so each open fails.
+        let listener = nervix_primitives::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("a loopback listener binds");
+        let address = listener
+            .local_addr()
+            .assured("a bound listener has an address");
+        let opens = nervix_primitives::sync::Arc::new(AtomicUsize::new(0));
+        let counted = opens.clone();
+        let _peer = nervix_primitives::task::AbortOnDropHandle::new(
+            nervix_primitives::task::spawn(async move {
+                loop {
+                    nervix_primitives::task::consume_budget().await;
+                    let Ok((connection, _)) = listener.accept().await else {
+                        return;
+                    };
+                    counted.fetch_add(1, Ordering::AcqRel);
+                    drop(connection);
+                }
+            }),
+        );
+        let config = [
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: format!("redis://{address}"),
+            },
+            ClientConfigEntry {
+                key: "connect_timeout_ms".to_string(),
+                value: "1000".to_string(),
+            },
+        ];
+        let pool = open_redis_command_pool(&config, bounds(0, 1), fixture.dns.clone())
+            .await
+            .assured("a pool with no minimum opens without a connection");
+
+        let checkout = pool.shared.commands.connections.get().await;
+        let opened = opens.load(Ordering::Acquire);
+
+        assert!(
+            matches!(checkout, Err(bb8::RunError::TimedOut)),
+            "a checkout that finds no connection ends at connect_timeout_ms"
+        );
+        assert!(
+            opened >= 2,
+            "the pool tries opening again within the checkout's deadline: {opened} opens"
+        );
     }
 
     #[nervix_primitives::test]

@@ -185,6 +185,41 @@ mod tests {
         }
     }
 
+    /// Retryable writes and reads and the overload retries are the driver's own resends, which
+    /// the operator configures in the connection string: the driver's defaults apply when it says
+    /// nothing, and what it writes reaches the driver unchanged.
+    #[test]
+    fn the_connection_strings_retry_options_reach_the_driver_as_written() {
+        let unset =
+            MongoDbClientConfiguration::parse(&config("mongodb://unresolvable.invalid/events"))
+                .assured("a connection string without retry options is valid")
+                .into_options();
+        let unset = unset.driver_options();
+        assert_eq!(
+            unset.retry_writes, None,
+            "the driver retries writes by default"
+        );
+        assert_eq!(
+            unset.retry_reads, None,
+            "the driver retries reads by default"
+        );
+        assert_eq!(
+            unset.max_adaptive_retries, None,
+            "the driver's own overload retry count applies"
+        );
+
+        let written = MongoDbClientConfiguration::parse(&config(
+            "mongodb://unresolvable.invalid/events?retryWrites=false&retryReads=false&\
+             maxAdaptiveRetries=0",
+        ))
+        .assured("the connection string's retry options are valid")
+        .into_options();
+        let written = written.driver_options();
+        assert_eq!(written.retry_writes, Some(false));
+        assert_eq!(written.retry_reads, Some(false));
+        assert_eq!(written.max_adaptive_retries, Some(0));
+    }
+
     #[test]
     fn a_configuration_resolves_one_valid_database() {
         let address = "mongodb://unresolvable.invalid";

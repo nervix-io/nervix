@@ -372,6 +372,93 @@ async fn iceberg_catalog_authentication_uses_the_node_dns_client() {
         .assured("the catalog server task completes");
 }
 
+#[nervix_primitives::test]
+async fn iceberg_catalog_sends_a_request_its_connection_closes_unanswered_only_once() {
+    let dns = DnsResolver::load(
+        DnsConfiguration::system(),
+        nervix_dns::DnsSettings::default(),
+    )
+    .await
+    .assured("the host's resolver configuration loads");
+    let catalog_listener =
+        nervix_primitives::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the catalog endpoint can bind");
+    let catalog_port = catalog_listener
+        .local_addr()
+        .assured("the catalog endpoint has an address")
+        .port();
+    let requests = nervix_primitives::sync::Arc::new(AtomicUsize::new(0));
+    let counted = requests.clone();
+    // Every connection the client opens is read and closed without an answer, so each request it
+    // sends fails and the count says how often the client sent one.
+    let catalog_server = nervix_primitives::task::AbortOnDropHandle::new(
+        nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let (mut stream, _) = catalog_listener
+                    .accept()
+                    .await
+                    .assured("the catalog listener accepts while the test runs");
+                let mut bytes = [0_u8; 4096];
+                let read = stream
+                    .read(&mut bytes)
+                    .await
+                    .assured("the catalog request is readable");
+                if read > 0 {
+                    counted.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+        }),
+    );
+    let catalog_config = [ClientConfigEntry {
+        key: "uri".to_string(),
+        value: format!("http://127.0.0.1:{catalog_port}"),
+    }];
+    let tls = IcebergClientTlsError::Catalog
+        .client_config(&catalog_config, &Default::default())
+        .assured("a catalog client without TLS files trusts the default roots");
+    let storage_root = Url::parse("s3://bucket/table").assured("the fixture storage root is a URL");
+    let storage =
+        DnsStorageFactory::new(IcebergStorageBackend::S3, &dns, &storage_root, None, &tls)
+            .assured("the object-store client can be built without a request");
+    let properties: BTreeMap<String, String> =
+        IcebergCatalogProperties::pair(IcebergStorageBackend::S3, &[], &catalog_config)
+            .assured("a catalog paired with an empty storage client sets no shared property")
+            .iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect();
+    let connection = IcebergCatalogConnection {
+        name: "fixture",
+        properties: &properties,
+        tls: &tls,
+        storage,
+    };
+
+    // The catalog fetches its configuration before its first operation, not when it is built.
+    let catalog = connection
+        .open(&dns)
+        .await
+        .assured("building the REST catalog sends no request");
+    let table = TableIdent::from_strs(["events", "orders"]).assured("the fixture names a table");
+
+    let loaded =
+        nervix_primitives::time::timeout(Duration::from_secs(10), catalog.load_table(&table))
+            .await
+            .assured("a table load whose configuration request goes unanswered ends");
+
+    assert!(
+        loaded.is_err(),
+        "the catalog's configuration request was never answered"
+    );
+    assert_eq!(
+        requests.load(Ordering::Acquire),
+        1,
+        "the emitter's retry policy owns the next attempt"
+    );
+    catalog_server.abort();
+}
+
 fn commit_policy(interval_millis: u64, max_size: u64) -> IcebergCommitPolicy {
     IcebergCommitPolicy {
         interval: Duration::from_millis(interval_millis),
