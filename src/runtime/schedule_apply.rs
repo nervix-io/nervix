@@ -224,10 +224,10 @@ impl Runtime {
         for (domain_id, change) in &revision_plan.domains {
             let domain = &change.revision;
             // The control plane plans each domain's change against the schedule its execution
-            // runs, so the predecessor matches unless the execution was installed outside schedule
-            // application. Such an execution that already runs the desired schedule takes no
-            // change; any other one is rebuilt rather than given a delta planned for another
-            // predecessor.
+            // runs, and schedule application installs every execution, so the predecessor
+            // matches. An execution found running another revision would have been installed
+            // outside it: if it already runs the desired schedule it takes no change, and any other
+            // one is rebuilt rather than given a delta planned for another predecessor.
             let (already_applied, predecessor_matches) = match self.inner.executions.get(domain_id)
             {
                 Some(execution) => (
