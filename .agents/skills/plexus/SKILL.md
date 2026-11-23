@@ -234,7 +234,10 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
   [Ingestors → Instancing](../../../docs/src/ingestors.md#instancing). When one emitter would funnel
   a partitioned branch back into one node, decide its `INSTANCES` (a count or `PER PARTITION`); read
   [Emitters → Emitter instances](../../../docs/src/emitters.md#emitter-instances) for the per-key
-  ordering it keeps, the entities that run one instance, and placement.
+  ordering it keeps, the entities that run one instance, and placement. Where a Kafka emitter under
+  `MODE NO ACK` or `MODE ACK PARALLEL MAX <n>` must keep each key's order, check that its client's
+  `CONFIG` sets `enable.idempotence=true` or `max.in.flight.requests.per.connection=1`; read
+  [Emitters → Kafka](../../../docs/src/emitters.md#kafka).
 - Processing: filtering, construction, Roto UDFs, deduplication, ordering, windows, inference,
   WASM fuel and linear-memory budgets, correlation, materialized state, lookup, generation, or
   repartitioning.

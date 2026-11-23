@@ -315,7 +315,8 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
          finishes. The broker confirms that exact unread starting offset before the reader can \
          retire, so even a subsequent START AT LATEST join cannot skip it; replacing the reader \
          after a topology commit admits the partition.",
-        "Connector control execution has two workers per node by default. A commit still \
+        "Connector control execution has two workers per node by default. librdkafka sends a \
+         commit again by itself while the group has no reachable coordinator, and a commit still \
          unanswered after its caller's 30 s deadline retains its worker and the ingestor's one \
          in-flight commit until the native call ends. Native subscribe, assign, pause, resume and \
          unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.",
@@ -397,6 +398,12 @@ const KAFKA_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[
         "Kafka clients accept one name per property and refuse Nervix-owned keys. MODE ACK sets \
          delivery.timeout.ms from ACK TIMEOUT.",
+        "librdkafka sends a failed produce request again by itself, up to \
+         message.send.max.retries times, until the record's delivery.timeout.ms passes. Under ACK \
+         the emitter's RETRY POLICY retries what is unresolved after that; under NO ACK a record \
+         librdkafka gives up is lost. Unless the client's CONFIG sets enable.idempotence=true or \
+         max.in.flight.requests.per.connection=1, a resend can put one key's records out of order \
+         under NO ACK and ACK PARALLEL.",
         "message.max.bytes 1000000",
         "A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through \
          ON MESSAGE ERROR.",
