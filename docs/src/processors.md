@@ -564,6 +564,7 @@ CREATE INFERENCER score_events
   FROM features
   USING RESOURCE scoring VERSION 1
   FILE "score.onnx"
+  WORKING MEMORY RELEASED
   INPUTS {
     "features" DENSE TENSOR<F32>[2] = input.features
   }
@@ -591,6 +592,38 @@ model's exact `F32` element type.
 `USING RESOURCE` requires `VERSION <n>` or `VERSION LATEST`. The inferencer loads the model file
 from the one version it stores, so a later upload of the resource does not change the scoring
 model; see [Versioning](resources.md#versioning).
+
+### Working memory
+
+Every `CREATE INFERENCER` states its working memory right after `FILE`: `WORKING MEMORY RELEASED` or
+`WORKING MEMORY RETAINED`. The clause has no default. It decides what a concrete branch's model
+keeps, from one run to the next, of the memory a run computes in: the intermediate tensors between
+the model's operators and the tensors it answers with. Every concrete branch runs its own copy of
+the model, so the choice applies once per branch.
+
+- `RELEASED` keeps nothing between runs. A run allocates each intermediate tensor when it needs it
+  and frees it when the run ends, so between runs a branch holds only its model: the weights and
+  the graph ONNX Runtime optimized from them. Memory a run frees goes back to the process, where
+  another branch's run can use it.
+- `RETAINED` keeps a run's working memory for the branch's next run, in a memory pool of the
+  branch's own and a memory plan for each set of input shapes it has run. A later run then
+  allocates almost nothing. The pool never shrinks: each concrete branch keeps up to the largest
+  working memory any of its runs needed until the branch ends, and a batched model keeps a plan
+  for every batch size it runs.
+
+`RELEASED` costs one allocation and one release per intermediate tensor in every run. That is
+noticeable only for a model made of many small operations, run on small batches: a model of 120
+small operations, run one message at a time, measured about 9% slower per run released than
+retained. A model whose operators do substantial work, or whose batch sizes vary, gains nothing
+measurable from `RETAINED` and keeps the most memory with it. No executor budget counts the memory
+`RETAINED` keeps, and it is kept once per concrete branch, so choose `RETAINED` only for a model
+you have measured; see [Capacity Planning](capacity-planning.md#per-branch-cost-structure).
+
+`SHOW CREATE INFERENCER` renders the clause after `FILE`, and `DESCRIBE INFERENCER` reports it as
+`working memory: released` or `working memory: retained`. Nervix also sets every other option of
+the ONNX Runtime session itself rather than leaving it to the library: one operator thread and one
+graph thread (see [Execution](#execution)), and the library's full graph optimization level. The
+binding inspection at `CREATE` never runs the model, and its session is always released.
 
 ### Execution
 
@@ -625,7 +658,9 @@ message at a time, a message's working set is its mapped input, the native copy 
 public outputs and any carried state; a message whose working set exceeds the configured relay
 operation limit fails alone through the general error policy, and the other messages of the batch
 run in admitted jobs whose working sets fit that limit. A batched call cannot be divided, so it runs
-whole and is charged at most that limit.
+whole and is charged at most that limit. The charge covers what Nervix holds for the run, not the
+intermediate tensors the model computes inside it: [`WORKING MEMORY RELEASED`](#working-memory)
+frees those when the run ends, and `RETAINED` keeps them for the branch's next run.
 
 Acknowledgements wait for dispatch: the inferencer releases its share of a message once every route
 has taken or buffered its own. A route failure's error record carries the admitted input message as
@@ -641,6 +676,7 @@ CREATE INFERENCER running_total
   FROM features
   USING RESOURCE scoring VERSION 1
   FILE 'running_sum.onnx'
+  WORKING MEMORY RELEASED
   INPUTS { 'features' DENSE TENSOR<F32>[2] = input.features }
   STATE {
     'state_in' FROM 'state_out' DENSE TENSOR<F32>[2] INITIAL ZEROS
@@ -719,8 +755,8 @@ published, persisted, replicated, moved, archived and recovered.
 
 ### Inspect inference configuration and state
 
-`DESCRIBE INFERENCER <name>;` reports the pinned resource version and file, execution mode,
-`INPUTS`, `STATE` and `OUTPUT SCHEMA` declarations, branch policy and output routes. The static
+`DESCRIBE INFERENCER <name>;` reports the pinned resource version and file, working memory,
+execution mode, `INPUTS`, `STATE` and `OUTPUT SCHEMA` declarations, branch policy and output routes. The static
 state bytes per branch count the declared native `F32` tensor elements; snapshot framing and
 ONNX session memory are outside that count. A stateless inferencer reports zero.
 

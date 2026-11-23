@@ -240,7 +240,8 @@ fn operands_outside_each_signature_are_rejected_when_the_program_is_compiled() {
         (
             "least(input.tags)",
             "unsupported_function",
-            "function 'least' requires numeric, BOOL, STRING or DATETIME input, found Generic",
+            "function 'least' requires numeric, BOOL, STRING, DATETIME or DURATION input, found \
+             Generic",
         ),
         (
             "greatest()",
@@ -250,7 +251,7 @@ fn operands_outside_each_signature_are_rejected_when_the_program_is_compiled() {
         (
             "clamp(input.active, FALSE, TRUE)",
             "unsupported_function",
-            "function 'clamp' requires numeric, STRING or DATETIME input, found Boolean",
+            "function 'clamp' requires numeric, STRING, DATETIME or DURATION input, found Boolean",
         ),
         (
             "clamp(input.weight, 0.0)",

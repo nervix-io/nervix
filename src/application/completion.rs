@@ -17,7 +17,7 @@
     )
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::Report;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
@@ -26,7 +26,8 @@ use nervix_consensus::{LeaderTenure, Observer};
 use nervix_interconnect::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse, ApplicationProgress,
     ApplicationProgressPhase, ApplicationRevisionRequest, HandlerRegistrationError,
-    HttpsListenerInstallation, HttpsListenerInstallationRequest, Transport,
+    HttpsListenerInstallation, HttpsListenerInstallationRequest, RuntimeApplicationFailure,
+    Transport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
 use nervix_primitives::{sync::Arc, task::AbortOnDropHandle};
@@ -222,6 +223,26 @@ impl ApplicationRevisionPhase {
         };
         reached >= revision
     }
+
+    /// The runtime failure that keeps `progress` from reaching `revision` in this phase: the
+    /// incarnation failed to prepare that revision or a later one, and has not prepared it since.
+    /// An authoritative revision fails at no runtime.
+    fn failure(
+        self,
+        progress: &ApplicationProgress,
+        revision: u64,
+    ) -> Option<&RuntimeApplicationFailure> {
+        match self {
+            Self::Authoritative => None,
+            Self::RuntimePrepared | Self::RuntimeReady => {
+                let failure = progress.runtime_failure()?;
+                if failure.revision < revision || self.is_complete(progress, revision) {
+                    return None;
+                }
+                Some(failure)
+            }
+        }
+    }
 }
 
 /// The live process incarnations a revision barrier waits for, of those the leader's effective
@@ -244,8 +265,81 @@ impl ApplicationRevisionParticipants<'_> {
     }
 }
 
-pub(in crate::application) struct ApplicationRevisionTimeout {
-    pub(in crate::application) pending_nodes: Vec<ClusterNodeName>,
+/// Why a revision barrier ended before every participant reached its revision.
+pub(in crate::application) enum ApplicationRevisionIncomplete {
+    /// The deadline passed while these nodes had not reached the revision.
+    Timeout { pending_nodes: Vec<ClusterNodeName> },
+    /// A participant failed to prepare the revision, or a later one, and has not prepared it
+    /// since.
+    Failed {
+        node: ClusterNodeName,
+        failure: RuntimeApplicationFailure,
+    },
+}
+
+impl ApplicationRevisionIncomplete {
+    /// The runtime error of a barrier for preparing runtime revision `revision`.
+    pub(in crate::application) fn preparation_error(
+        self,
+        revision: u64,
+    ) -> Report<crate::runtime::RuntimeError> {
+        match self {
+            Self::Timeout { pending_nodes } => {
+                Report::new(crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+                    revision,
+                    pending_nodes,
+                })
+            }
+            Self::Failed { node, failure } => Self::failed_error(revision, node, failure),
+        }
+    }
+
+    /// The runtime error of a barrier for runtime revision `revision` becoming ready.
+    pub(in crate::application) fn readiness_error(
+        self,
+        revision: u64,
+    ) -> Report<crate::runtime::RuntimeError> {
+        match self {
+            Self::Timeout { pending_nodes } => {
+                Report::new(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+                    revision,
+                    pending_nodes,
+                })
+            }
+            Self::Failed { node, failure } => Self::failed_error(revision, node, failure),
+        }
+    }
+
+    fn failed_error(
+        revision: u64,
+        node: ClusterNodeName,
+        failure: RuntimeApplicationFailure,
+    ) -> Report<crate::runtime::RuntimeError> {
+        let RuntimeApplicationFailure {
+            revision: failed_revision,
+            reason,
+        } = failure;
+        Report::new(crate::runtime::RuntimeError::RuntimeRevisionFailed {
+            revision,
+            node,
+            failed_revision,
+            reason,
+        })
+    }
+}
+
+/// What the participants a barrier queried directly answered about its revision.
+#[derive(Default)]
+struct ProbedRevisions {
+    completed: BTreeSet<ClusterNodeIdentity>,
+    failed: BTreeMap<ClusterNodeIdentity, RuntimeApplicationFailure>,
+}
+
+/// What one participant answered a barrier's direct query.
+enum ProbedRevision {
+    Completed(ClusterNodeIdentity),
+    Failed(ClusterNodeIdentity, RuntimeApplicationFailure),
+    Pending,
 }
 
 async fn probe_application_revisions(
@@ -254,7 +348,7 @@ async fn probe_application_revisions(
     local_identity: ClusterNodeIdentity,
     revision: u64,
     phase: ApplicationRevisionPhase,
-) -> BTreeSet<ClusterNodeIdentity> {
+) -> ProbedRevisions {
     let mut probes = FuturesUnordered::new();
     for expected_identity in pending_nodes {
         if expected_identity == local_identity {
@@ -269,24 +363,36 @@ async fn probe_application_revisions(
                 Ok(response) => response,
                 Err(error) => {
                     Err::<(), _>(error).reported("observe application revision");
-                    return None;
+                    return ProbedRevision::Pending;
                 }
             };
-            if response.identity != expected_identity || !phase.is_complete(&response, revision) {
-                return None;
+            if response.identity != expected_identity {
+                return ProbedRevision::Pending;
             }
-            Some(expected_identity)
+            if phase.is_complete(&response, revision) {
+                return ProbedRevision::Completed(expected_identity);
+            }
+            match phase.failure(&response, revision) {
+                Some(failure) => ProbedRevision::Failed(expected_identity, failure.clone()),
+                None => ProbedRevision::Pending,
+            }
         });
     }
 
-    let mut completed_nodes = BTreeSet::new();
-    while let Some(completed_node) = probes.next().await {
+    let mut probed = ProbedRevisions::default();
+    while let Some(answer) = probes.next().await {
         nervix_primitives::task::consume_budget().await;
-        if let Some(completed_node) = completed_node {
-            completed_nodes.insert(completed_node);
+        match answer {
+            ProbedRevision::Completed(identity) => {
+                probed.completed.insert(identity);
+            }
+            ProbedRevision::Failed(identity, failure) => {
+                probed.failed.insert(identity, failure);
+            }
+            ProbedRevision::Pending => {}
         }
     }
-    completed_nodes
+    probed
 }
 
 /// What one live process incarnation answered about its HTTPS listener.
@@ -370,7 +476,7 @@ pub(in crate::application) async fn wait_for_application_revision(
     phase: ApplicationRevisionPhase,
     participants: ApplicationRevisionParticipants<'_>,
     deadline: nervix_primitives::time::Instant,
-) -> Result<(), ApplicationRevisionTimeout> {
+) -> Result<(), ApplicationRevisionIncomplete> {
     let BarrierNode {
         retry_interval,
         cluster,
@@ -381,6 +487,7 @@ pub(in crate::application) async fn wait_for_application_revision(
     let local_identity = progress.identity();
     let mut observer = progress.observer();
     let mut directly_completed_nodes = BTreeSet::new();
+    let mut directly_failed_nodes = BTreeMap::new();
     let mut deadline_elapsed = false;
     let mut pending_probes = None;
 
@@ -398,7 +505,7 @@ pub(in crate::application) async fn wait_for_application_revision(
                     Some(tenure) => tenure.leader_id().clone(),
                     None => local_identity.node_id().clone(),
                 };
-                return Err(ApplicationRevisionTimeout {
+                return Err(ApplicationRevisionIncomplete::Timeout {
                     pending_nodes: vec![pending_node],
                 });
             }
@@ -421,6 +528,7 @@ pub(in crate::application) async fn wait_for_application_revision(
         } = view;
         participants.retain(&mut expected_nodes);
         directly_completed_nodes.retain(|identity| expected_nodes.contains(identity));
+        directly_failed_nodes.retain(|identity, _| expected_nodes.contains(identity));
 
         let mut completed_nodes = BTreeSet::new();
         if phase.is_complete(&local_progress, revision) {
@@ -442,8 +550,30 @@ pub(in crate::application) async fn wait_for_application_revision(
             }
             continue;
         }
+        // A pending participant that failed to prepare the revision ends the wait with that
+        // failure: it retries on its own cadence, and the barrier answers why it is not done.
+        for pending in &pending_nodes {
+            let failure = if pending == &local_identity {
+                phase.failure(&local_progress, revision).cloned()
+            } else {
+                let held = held_progress
+                    .iter()
+                    .find(|held| &held.identity == pending)
+                    .and_then(|held| phase.failure(held, revision).cloned());
+                match held {
+                    Some(failure) => Some(failure),
+                    None => directly_failed_nodes.get(pending).cloned(),
+                }
+            };
+            if let Some(failure) = failure {
+                return Err(ApplicationRevisionIncomplete::Failed {
+                    node: pending.node_id().clone(),
+                    failure,
+                });
+            }
+        }
         if deadline_elapsed {
-            return Err(ApplicationRevisionTimeout {
+            return Err(ApplicationRevisionIncomplete::Timeout {
                 pending_nodes: pending_nodes
                     .into_iter()
                     .map(|identity| identity.node_id().clone())
@@ -472,8 +602,8 @@ pub(in crate::application) async fn wait_for_application_revision(
             }
             observed_nodes = probes => {
                 pending_probes = None;
-                let observed_nodes = match observed_nodes {
-                    Ok(nodes) => nodes,
+                let observed = match observed_nodes {
+                    Ok(observed) => observed,
                     Err(failure) => {
                         let panic = failure.try_into_panic().assured(
                             "the barrier owns the probe task's only abort handle, so nothing \
@@ -482,8 +612,10 @@ pub(in crate::application) async fn wait_for_application_revision(
                         std::panic::resume_unwind(panic)
                     }
                 };
-                directly_completed_nodes.extend(observed_nodes);
-                if directly_completed_nodes.len() == completed_before_probe {
+                let observed_failure = !observed.failed.is_empty();
+                directly_completed_nodes.extend(observed.completed);
+                directly_failed_nodes.extend(observed.failed);
+                if directly_completed_nodes.len() == completed_before_probe && !observed_failure {
                     nervix_primitives::select! {
                         biased;
                         _ = nervix_primitives::time::sleep_until(deadline) => {
@@ -593,20 +725,27 @@ impl SessionServiceImpl {
     ) -> Result<(), Report<CompletionError>> {
         let deadline = self.completion_deadline()?;
 
-        wait_for_application_revision(
+        let applied = wait_for_application_revision(
             self.barrier_node(),
             revision,
             ApplicationRevisionPhase::Authoritative,
             ApplicationRevisionParticipants::EveryLiveNode,
             deadline,
         )
-        .await
-        .map_err(|timeout| {
-            Report::new(CompletionError::Visibility {
-                revision,
-                pending_nodes: timeout.pending_nodes,
-            })
-        })
+        .await;
+        let Err(incomplete) = applied else {
+            return Ok(());
+        };
+        let pending_nodes = match incomplete {
+            ApplicationRevisionIncomplete::Timeout { pending_nodes } => pending_nodes,
+            // An authoritative revision fails at no runtime, so its barrier names a node only as
+            // one that has not applied it.
+            ApplicationRevisionIncomplete::Failed { node, .. } => vec![node],
+        };
+        Err(Report::new(CompletionError::Visibility {
+            revision,
+            pending_nodes,
+        }))
     }
 
     /// Waits until the HTTPS listener of every live process incarnation installed the TLS VHOSTs
@@ -735,12 +874,7 @@ impl SessionServiceImpl {
             deadline,
         )
         .await
-        .map_err(|timeout| {
-            Report::new(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                revision,
-                pending_nodes: timeout.pending_nodes,
-            })
-        })
+        .map_err(|incomplete| incomplete.readiness_error(revision))
     }
 }
 
@@ -819,8 +953,8 @@ mod tests {
 
     use super::{
         super::test_fixtures::{TestService, build_test_service},
-        ApplicationRevisionParticipants, ApplicationRevisionPhase, CompletionParticipants,
-        accepted_completion_participants, wait_for_application_revision,
+        ApplicationRevisionIncomplete, ApplicationRevisionParticipants, ApplicationRevisionPhase,
+        CompletionParticipants, accepted_completion_participants, wait_for_application_revision,
     };
 
     #[test]
@@ -925,7 +1059,10 @@ mod tests {
         else {
             panic!("a named live node that has not prepared the revision must hold the barrier");
         };
-        assert_eq!(named_timeout.pending_nodes, vec![local.node_id().clone()]);
+        let ApplicationRevisionIncomplete::Timeout { pending_nodes } = named_timeout else {
+            panic!("a named live node that has not prepared the revision holds it to its deadline");
+        };
+        assert_eq!(pending_nodes, vec![local.node_id().clone()]);
 
         let Err(every_timeout) = wait_for_application_revision(
             barrier_node,
@@ -938,7 +1075,10 @@ mod tests {
         else {
             panic!("a barrier over every live node must wait for the local node");
         };
-        assert_eq!(every_timeout.pending_nodes, vec![local.node_id().clone()]);
+        let ApplicationRevisionIncomplete::Timeout { pending_nodes } = every_timeout else {
+            panic!("a local node that has not prepared the revision holds it to its deadline");
+        };
+        assert_eq!(pending_nodes, vec![local.node_id().clone()]);
 
         service
             .inner

@@ -77,7 +77,7 @@ Feature: Composed sequence values
               matrix = list_reshape(output.normalized AS <cast_type>, 2, 3)
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE INFERENCER read_matrix FROM matrices
-        USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx'
+        USING RESOURCE inference VERSION 1 FILE 'models/matrix_identity.onnx' WORKING MEMORY RELEASED
         INPUTS { 'matrix' <tensor_type>[2, 3] = input.matrix }
         OUTPUT SCHEMA { 'transformed' <tensor_type>[2, 3] }
         BRANCHED BY by_tenant TO scores SET transformed = transformed

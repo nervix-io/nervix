@@ -193,14 +193,16 @@ async fn peer_departure_reclaims_an_admitted_relays_capacity() {
     pair.transport_b.shutdown().await;
 }
 
-/// One-byte rows on `delivery`, carrying the admission `ack_id` of `registrar`.
+/// One-byte rows on `delivery`, carrying the admission `ack_id` of `registrar`, whose delivery
+/// captured `timing`.
 fn turnover_payload(
     delivery: RelayDelivery,
     ack_id: u64,
     registrar: &ClusterNodeName,
+    timing: nervix_models::RemoteAckTiming,
 ) -> RelayPayload {
     RelayPayload {
-        ack_timing: nervix_models::RemoteAckTiming::default(),
+        ack_timing: timing,
         decoded_bytes: 0,
         delivery,
         kind: RelayPayloadKind::Routed,
@@ -217,17 +219,73 @@ fn turnover_payload(
     }
 }
 
-/// A receiver whose watermark budget is smaller than a sender's channel turnover keeps admitting
-/// the sender's new channels through the authenticated connection, and answers a repeated request
-/// for a channel it forgot as retired on the grant, status and cancellation paths instead of
-/// admitting it again.
+/// The transport takes the relay channel retention the committed cluster parameters give: it starts
+/// from the definitions' defaults, follows a committed `REMOTE_RELAY_TOTAL_TIMEOUT` once the
+/// parameters are installed, so an owner still awaiting membership ends and the sweep passes by
+/// it, and keeps that value when the same parameters are installed again.
 #[nervix_primitives::test]
-async fn a_receiver_admits_channel_turnover_beyond_its_watermark_budget() {
+async fn installed_cluster_parameters_give_the_transport_their_relay_channel_retention() {
+    let pair = connected_transports().await;
+    assert_eq!(
+        pair.transport_b.inner.committed_relay_retention(),
+        crate::RelayChannelRetention::default()
+    );
+    let lowered =
+        nervix_models::ClusterParameterValues::resolve(nervix_models::ClusterParameterSeedValues {
+            remote_relay_total_timeout: Some(Duration::from_secs(20)),
+            ..nervix_models::ClusterParameterSeedValues::default()
+        })
+        .assured("a twenty-second total admission budget fits every acknowledgement relationship");
+    pair.transport_b.install_cluster_parameters(lowered);
+    assert_eq!(
+        pair.transport_b
+            .inner
+            .committed_relay_retention()
+            .duration(),
+        Duration::from_secs(40)
+    );
+    pair.transport_b.install_cluster_parameters(lowered);
+    assert_eq!(
+        pair.transport_b
+            .inner
+            .committed_relay_retention()
+            .duration(),
+        Duration::from_secs(40)
+    );
+    pair.transport_a.shutdown().await;
+    pair.transport_b.shutdown().await;
+}
+
+/// A validated timing whose total admission budget is one second, so a receiver keeps what its
+/// deliveries leave behind for two seconds.
+fn one_second_timing() -> nervix_models::RemoteAckTiming {
+    let timing = nervix_models::RemoteAckTiming {
+        remote_ack_alive_interval: Duration::from_millis(100),
+        remote_ack_dispatch_timeout: Duration::from_millis(500),
+        remote_ack_silence_timeout: Duration::from_secs(2),
+        remote_ack_sweep_interval: Duration::from_millis(100),
+        remote_relay_total_timeout: Duration::from_secs(1),
+        remote_relay_instantiation_wait: Duration::from_millis(500),
+    };
+    timing
+        .validate()
+        .assured("the one-second timing is coherent");
+    timing
+}
+
+/// A receiver keeps the watermark of every channel a sender opened through the authenticated
+/// connection, charged to its relay memory, however many channels turned over, and answers a
+/// repeated request for one of them from that watermark instead of admitting it again. Each
+/// watermark keeps the retention its delivery captured: once that has passed, the receiver's own
+/// sweep forgets the watermarks and returns their charge, and a request for a forgotten channel is
+/// answered as retired on the grant, status and cancellation paths.
+#[nervix_primitives::test]
+async fn a_receiver_charges_every_channel_watermark_until_its_retention_passes() {
     let options = TransportOptions {
         incoming_queue_capacity: 1,
-        relay_channel_watermark_capacity: 2,
         ..TransportOptions::default()
     };
+    let timing = one_second_timing();
     let mut pair = connected_transports_with_options(options).await;
     pair.transport_b
         .register_outbound_target(
@@ -244,10 +302,10 @@ async fn a_receiver_admits_channel_turnover_beyond_its_watermark_budget() {
         pair.transport_a
             .send(
                 &pair.node_b,
-                Envelope::RelayPayload(turnover_payload(delivery, ack_id, &pair.node_a)),
+                Envelope::RelayPayload(turnover_payload(delivery, ack_id, &pair.node_a, timing)),
             )
             .await
-            .assured("every new channel is granted while forgotten ones make room");
+            .assured("every new channel is granted");
         let received = timeout(Duration::from_secs(10), pair.incoming_b.recv())
             .await
             .assured("the body reaches its intake within the fixture deadline")
@@ -260,6 +318,7 @@ async fn a_receiver_admits_channel_turnover_beyond_its_watermark_budget() {
                 .admit(),
             RelayAdmissionDecision::Admitted
         );
+        drop(received);
         // The sender's one-item queue also takes the receiver's progress reports, so the
         // terminal outcome is sent while the sender drains them.
         let resolution = registration(ack_id, &pair.node_a).resolution(RemoteAckOutcome::Ack);
@@ -286,19 +345,57 @@ async fn a_receiver_admits_channel_turnover_beyond_its_watermark_budget() {
         drained.assured("the terminal outcome returns within the fixture deadline");
         assert_eq!(pair.transport_b.snapshot().relay_attempts, 0);
     }
-    let snapshot = pair.transport_b.snapshot();
-    assert_eq!(snapshot.relay_channel_watermarks, 2);
-    assert_eq!(snapshot.counters.relay_channel_watermarks_evicted, 4);
+    assert_eq!(pair.transport_b.snapshot().relay_channel_watermarks, 6);
+    assert_eq!(
+        pair.executor_b.snapshot().relay_memory.reserved_bytes,
+        6 * crate::connection::RelayChannelWatermarks::watermark_charge(),
+        "the receiver holds exactly the charge of the six watermarks it keeps"
+    );
 
-    let forgotten = RelayDelivery {
+    let first = RelayDelivery {
         channel_incarnation: [1; 16],
         sequence: 0,
     };
+    pair.transport_a
+        .send(
+            &pair.node_b,
+            Envelope::RelayPayload(turnover_payload(first, 1, &pair.node_a, timing)),
+        )
+        .await
+        .assured("a repeated request is answered from the channel's retained watermark");
+    assert_eq!(
+        pair.transport_a
+            .relay_admission_status(&pair.node_b, first, timing)
+            .await
+            .assured("the receiver answers the status of a retained channel"),
+        RelayAdmissionStatus::Admitted
+    );
+
+    timeout(Duration::from_secs(30), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let watermarks = pair.transport_b.snapshot().relay_channel_watermarks;
+            let reserved = pair.executor_b.snapshot().relay_memory.reserved_bytes;
+            // The six channels shared one retention, so one retired-channel floor stays charged.
+            if watermarks == 0
+                && reserved == crate::connection::RelayChannelWatermarks::floor_charge()
+            {
+                return;
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .assured(
+        "the receiver's sweep forgets every watermark once its two-second retention passes, \
+         keeping only the charge of the floor that refuses them",
+    );
+
     let repeated = pair
         .transport_a
         .send(
             &pair.node_b,
-            Envelope::RelayPayload(turnover_payload(forgotten, 1, &pair.node_a)),
+            Envelope::RelayPayload(turnover_payload(first, 1, &pair.node_a, timing)),
         )
         .await
         .expect_err("a forgotten channel is never granted again");
@@ -311,21 +408,21 @@ async fn a_receiver_admits_channel_turnover_beyond_its_watermark_budget() {
     );
     assert_eq!(
         pair.transport_a
-            .relay_admission_status(&pair.node_b, forgotten)
+            .relay_admission_status(&pair.node_b, first, timing)
             .await
             .assured("the receiver answers the status of a forgotten channel"),
         RelayAdmissionStatus::Retired
     );
     assert_eq!(
         pair.transport_a
-            .cancel_relay(&pair.node_b, forgotten)
+            .cancel_relay(&pair.node_b, first, timing)
             .await
             .assured("the receiver answers the cancellation of a forgotten channel"),
         RelayAdmissionStatus::Retired
     );
     assert!(
         pair.incoming_b.try_recv().is_err(),
-        "the forgotten channel never reaches the application again"
+        "a channel's batch never reaches the application twice"
     );
     pair.transport_a.shutdown().await;
     pair.transport_b.shutdown().await;

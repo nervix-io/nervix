@@ -4,8 +4,9 @@
 //! field is left out, and a sensitive field renders as the string `"<masked>"`, because its value
 //! never leaves the server. The row of a branched relay is prefixed with the concrete branch key,
 //! as `key=<object> payload=<object>`, the key object holding its fields in key order. Datetimes
-//! render in RFC 3339, bytes as padded standard base64, and floats as the shortest JSON number
-//! that reads back as the same value, a single-precision float widened to double precision first.
+//! render in RFC 3339, durations as a string in their Plexus literal form such as `"1h 30m"`, bytes
+//! as padded standard base64, and floats as the shortest JSON number that reads back as the same
+//! value, a single-precision float widened to double precision first.
 //!
 //! Every client that shows rows as text renders them here, so one batch reads the same in the CLI,
 //! the console and any other client built on this crate. Rendering writes JSON; it never parses
@@ -118,6 +119,7 @@ fn push_cell(output: &mut String, cell: CellView<'_>) {
             push_json_string(output, &encoded);
         }
         CellView::Datetime(value) => push_json_string(output, &value.as_datetime().to_rfc3339()),
+        CellView::Duration(value) => push_json_string(output, &value.to_string()),
         CellView::List(elements) => {
             output.push('[');
             for (index, element) in elements.iter().enumerate() {

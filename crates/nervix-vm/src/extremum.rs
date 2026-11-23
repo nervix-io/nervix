@@ -183,7 +183,7 @@ pub(crate) fn clamp(
         TypedArray::Int64(values) => numeric_clamp_comparisons(values, low, high)?,
         TypedArray::Float32(values) => float_clamp_comparisons(values, low, high)?,
         TypedArray::Float64(values) => float_clamp_comparisons(values, low, high)?,
-        TypedArray::Utf8(_) | TypedArray::Datetime(_) => {
+        TypedArray::Utf8(_) | TypedArray::Datetime(_) | TypedArray::Duration(_) => {
             let value: &dyn Array = value.as_array();
             ClampComparisons {
                 below_low: lt(&value, &low)?.values().clone(),

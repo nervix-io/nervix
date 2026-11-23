@@ -118,6 +118,8 @@ declare -A scenario_verdict_symptoms=(
     [graceful-stop]='duplicate-records missing-records changed-records unexpected-records
         negative-acknowledgements emitter-failures error-events stop-not-acknowledged
         stop-reported-cut silent-cut'
+    [alteration-handover]='duplicate-records missing-records changed-records unexpected-records
+        negative-acknowledgements emitter-failures error-events alteration-refused domain-rebuilt'
 )
 
 # Prints the symptoms the verdict of SCENARIO can name, one per line, or nothing.
@@ -230,7 +232,7 @@ while [[ "$#" -gt 0 ]]; do
             elif [[ "${scenario}" == lifetimes ]]; then
                 record_count=1000
                 overall_timeout=2700
-            elif [[ "${scenario}" == graceful-stop ]]; then
+            elif [[ "${scenario}" == graceful-stop || "${scenario}" == alteration-handover ]]; then
                 record_count=1000
                 overall_timeout=1800
             fi
@@ -496,7 +498,7 @@ if [[ "${scenario}" == binding-endpoints && -z "${binding_image_ref}" ]]; then
     setup_error 'binding-endpoints requires --binding-image'
 fi
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | graceful-stop) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | graceful-stop | alteration-handover) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 # An expected failure names symptoms of the scenario's own verdict; a scenario whose verdict names
@@ -539,7 +541,7 @@ case "${stateful_partitions}" in
     *) setup_error '--state-partitions must be 1 or 4' ;;
 esac
 case "${scenario}" in
-    stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop) recovery_scenario=true ;;
+    stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop | alteration-handover) recovery_scenario=true ;;
 esac
 # The backup scenarios install the backup form of the baseline graph, whose Kafka ingestor keeps
 # domain-owned offsets instead of a consumer group.
@@ -566,9 +568,9 @@ esac
 # Every scenario that injects a fault drives Pumba through the local Docker daemon.
 uses_pumba=true
 case "${scenario}" in
-    baseline | backup | backup-cycles | restore-fresh-cluster | restore-volume) uses_pumba=false ;;
+    baseline | backup | backup-cycles | restore-fresh-cluster | restore-volume | alteration-handover) uses_pumba=false ;;
 esac
-if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != endpoints && "${scenario}" != binding-endpoints && "${scenario}" != lifetimes && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != endpoints && "${scenario}" != binding-endpoints && "${scenario}" != lifetimes && "${scenario}" != domain-time && "${scenario}" != alteration-handover && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
 fi
 case "${scenario}" in
@@ -847,7 +849,7 @@ case "${scenario}" in
         # One record every two seconds keeps the bounded fixture flowing through all four cases.
         load_interval_ms=2000
         ;;
-    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop)
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop | alteration-handover)
         # One record a second keeps the bounded fixture flowing through the slowest case.
         load_interval_ms=1000
         ;;
@@ -1109,6 +1111,8 @@ elif [[ "${scenario}" == graceful-stop ]]; then
     compose_args+=(--profile events)
 elif [[ "${scenario}" == domain-time ]]; then
     compose_args+=(--profile paced)
+elif [[ "${scenario}" == alteration-handover ]]; then
+    compose_args+=(--profile events)
 fi
 # A three-node leader crash also qualifies the committed outward TLS policy through its failover.
 if [[ "${scenario}" == leader-crash && "${node_count}" == "3" ]]; then
@@ -1644,6 +1648,14 @@ finish() {
             if [[ "${inspect_state}" == true ]]; then
                 reproducer+=' --inspect-state'
             fi
+        elif [[ "${scenario}" == alteration-handover ]]; then
+            # An alteration handover takes no fault or outage, and an expected failure is part of
+            # its run.
+            reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}")"
+            if ((${#expected_failure_symptoms[@]} > 0)); then
+                reproducer+="$(printf ' --expect-failure %q' "$(IFS=,; printf '%s' "${expected_failure_symptoms[*]}")")"
+            fi
         elif [[ "${scenario}" == degraded-links ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --profile %q --load-interval-ms %q --baseline-seconds %q --degrade-seconds %q --drain-seconds %q --max-backlog %q --max-recovery-backlog %q --max-memory-bytes %q --max-pending %q --min-throughput-pct %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${degradation_profile}" "${load_interval_ms}" "${baseline_seconds}" "${degrade_seconds}" "${drain_seconds}" "${max_backlog}" "${max_recovery_backlog}" "${max_memory_bytes}" "${max_pending}" "${min_throughput_pct}")"
@@ -1810,7 +1822,7 @@ finish() {
                 fi
             done
             local case_directory
-            for case_directory in stale former-owner restart stateful endpoints lifetimes domain-time mixed graceful-stop; do
+            for case_directory in stale former-owner restart stateful endpoints lifetimes domain-time mixed graceful-stop alteration-handover; do
                 [[ -d "${artifact_dir}/${case_directory}" ]] || continue
                 while IFS= read -r evidence_path; do
                     evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
@@ -2593,6 +2605,8 @@ elif [[ "${scenario}" == domain-time ]]; then
     scenario_topics=(chaos_paced_input chaos_paced_output)
 elif [[ "${scenario}" == graceful-stop ]]; then
     scenario_topics=(chaos_stop_acked_input chaos_stop_unacked_input chaos_stop_output)
+elif [[ "${scenario}" == alteration-handover ]]; then
+    scenario_topics=(chaos_alter_acked_input chaos_alter_unacked_input chaos_alter_output)
 elif [[ "${backup_state_graph}" == true ]]; then
     scenario_topics=(chaos_unique_output chaos_window_output)
     if [[ -n "${restore_guest_bytes}" ]]; then
@@ -2959,6 +2973,10 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=graceful-stop-scenario.sh
         source "${script_dir}/graceful-stop-scenario.sh"
         run_graceful_stop
+    elif [[ "${scenario}" == alteration-handover ]]; then
+        # shellcheck source=alteration-handover-scenario.sh
+        source "${script_dir}/alteration-handover-scenario.sh"
+        run_alteration_handover
     elif [[ "${scenario}" == mixed-instability ]]; then
         # shellcheck source=mixed-scenario.sh
         source "${script_dir}/mixed-scenario.sh"
@@ -3062,10 +3080,10 @@ observed_count="$(wc -l <"${artifact_dir}/traffic/observed-output.ndjson")"
 
 phase "external ledger verification"
 ledger_args=()
-# A graceful stop touches only its own domain, so the baseline path it runs beside keeps the
-# baseline's strict ledger.
+# A graceful stop and an alteration handover touch only their own domain, so the baseline path
+# they run beside keeps the baseline's strict ledger.
 if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${backup_graph}" == true || "${recovery_scenario}" == true ]] \
-    && [[ "${scenario}" != graceful-stop ]]; then
+    && [[ "${scenario}" != graceful-stop && "${scenario}" != alteration-handover ]]; then
     ledger_args+=(--allow-replay-duplicates)
 fi
 "${script_dir}/verify-ledger.sh" \

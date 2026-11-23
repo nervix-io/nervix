@@ -207,7 +207,8 @@ and the branch key's fields.
 
 `Session.next_event` waits for the next event of any subscription the session holds. A `ROWS` event
 reads each column as Python values: an `int`, `float`, `bool`, `str` or `bytes`, the nanoseconds
-since the Unix epoch for a `DATETIME`, a `list` for a list, `None` for a null, and `REDACTED` for a
+since the Unix epoch for a `DATETIME`, the signed nanoseconds of a `DURATION` as an `int`, a `list`
+for a list, `None` for a null, and `REDACTED` for a
 value the server withheld because its field is sensitive. `states` tells the three apart, and the
 branch key is read from its own `Part`.
 
@@ -624,7 +625,7 @@ a copy.
 `Producer.submit` also takes Arrow data that exports itself through the interface, such as a pyarrow
 record batch or table, and `Batch.from_arrow` imports it for a schema. Arrow data must
 have the producer's field names in order, exactly its types, `timestamp[ns, tz=+00:00]` for a
-`DATETIME`, and no null in a required field or a list element; anything else raises
+`DATETIME`, `duration[ns]` for a `DURATION`, and no null in a required field or a list element; anything else raises
 `InvalidArgumentError` before a batch is sent (N-5).
 
 ```python

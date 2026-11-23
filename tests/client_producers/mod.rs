@@ -1368,6 +1368,32 @@ async fn then_producer_holds_batches(world: &mut ScenarioWorld, producer: String
     );
 }
 
+/// The largest batch the producer's grant lets one submission carry is the named bound, or that
+/// bound less the envelope of the frame that forwards a batch to another node, which is far smaller
+/// than a kibibyte.
+#[then(expr = "producer {string} is granted batches of just under {string}")]
+async fn then_producer_is_granted_batches_just_under(
+    world: &mut ScenarioWorld,
+    producer: String,
+    bound: String,
+) {
+    let bound = parse_byte_size(&bound);
+    let floor = bound
+        .checked_sub(1024)
+        .expect("the named bound is larger than a kibibyte");
+    let granted = world
+        .scenario_producer(&producer)
+        .description()
+        .grant
+        .max_batch_bytes
+        .get();
+    assert!(
+        floor < granted && granted <= bound,
+        "producer '{producer}' is granted batches of at most {granted} bytes, not just under \
+         {bound}"
+    );
+}
+
 #[then(expr = "producer {string} holds no batches")]
 async fn then_producer_holds_no_batches(world: &mut ScenarioWorld, producer: String) {
     let ScenarioProducer::Native(native) = world.scenario_producer(&producer) else {

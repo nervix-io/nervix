@@ -104,6 +104,7 @@ CREATE INFERENCER score_message
   FROM input_features
   USING RESOURCE inference VERSION 1
   FILE 'score.onnx'
+  WORKING MEMORY RELEASED
   INPUTS {
     "features" DENSE TENSOR<F32>[128] = input.features
   }

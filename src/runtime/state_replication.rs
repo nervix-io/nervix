@@ -2731,6 +2731,7 @@ impl Runtime {
         &self,
         placement: RuntimeStatePlacement,
         plan: &crate::registry::InferencerStatePlan,
+        executor: &Executor,
     ) -> error_stack::Result<Arc<ReplicatedInferencerState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
@@ -2749,9 +2750,7 @@ impl Runtime {
             None => match transferred {
                 None => None,
                 Some(snapshot) => {
-                    let charge = self
-                        .inner
-                        .executor
+                    let charge = executor
                         .reserve(nervix_execution::MemoryClass::Bulk, working_bytes)
                         .await
                         .change_context(RuntimePersistenceError::StorageAdmission)?;
@@ -2761,17 +2760,14 @@ impl Runtime {
             Some(store) => {
                 let store = store.clone();
                 let placement = placement.clone();
-                let charge = self
-                    .inner
-                    .executor
+                let charge = executor
                     .reserve(
                         nervix_execution::MemoryClass::Bulk,
                         RuntimeStateStore::bounded_snapshot_working_bytes(limit)?,
                     )
                     .await
                     .change_context(RuntimePersistenceError::StorageAdmission)?;
-                self.inner
-                    .executor
+                executor
                     .run_storage_with(
                         nervix_execution::StorageClass::Filesystem,
                         nervix_execution::QueueAdmission::WaitForPlace,
@@ -2793,7 +2789,7 @@ impl Runtime {
         };
         let catalog = self.branch_checkpoint_catalog(&placement);
         let state = Arc::new(
-            ReplicatedInferencerState::new(placement.clone(), initial, plan, &self.inner.executor)
+            ReplicatedInferencerState::new(placement.clone(), initial, plan, executor)
                 .await?
                 .cataloged(&catalog),
         );

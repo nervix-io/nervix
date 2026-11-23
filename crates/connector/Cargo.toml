@@ -51,9 +51,13 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 bolero = { workspace = true }
+# The shared HTTP client's tests serve HTTP/2 over TLS to it.
+h2 = { workspace = true }
+http = { workspace = true }
 nervix-model-harness = { workspace = true }
 # The physical-deadline tests advance a paused clock.
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 rcgen = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process"] }
+tokio-rustls = { workspace = true }

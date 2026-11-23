@@ -217,10 +217,16 @@ payload-group and bounded-encoding properties preserve the bytes through these r
 - A link carries a forwarded batch, and a stream a delivery chunk, as opaque bytes inside a frame.
   The frame targets generate arbitrary bytes for them; `client-producer-batches` and
   `client-emitter-deliveries` own the Arrow streams those bytes are in production.
-- A frame is bounded by the relay pool's payload limit, 32 MiB by default. The largest batch the
-  default session limits admit, 4 MiB less the submission envelope, and the largest chunk a stream
-  sends, 1 MiB, both fit it: `the_largest_batch_a_default_session_submits_fits_a_frame` and the
-  boundary frames hold those two relations.
+- A frame is bounded by the relay pool's payload limit, 32 MiB by default. A link grants no batch,
+  and a stream sends no chunk, larger than both nodes' relay bounds carry beside the frame's
+  envelope, which the frame's archived layout fixes:
+  `the_largest_batch_forwarded_within_a_bound_fits_a_frame_of_that_bound` and
+  `the_largest_chunk_sent_within_a_bound_fits_a_frame_of_that_bound` hold that relation through the
+  codec at every alignment of a narrowed bound, and pin the envelope to the archived frame and at
+  most one alignment more. The largest batch the default session limits admit, 4 MiB less the
+  submission envelope, and the largest chunk a stream sends, 1 MiB, both fit the default limit:
+  `the_largest_batch_a_default_session_submits_fits_a_frame` and the boundary frames hold those two
+  relations.
   `a_batch_past_the_payload_limit_is_refused_with_the_typed_encode_failure` and
   `a_chunk_past_the_payload_limit_is_refused_with_the_typed_encode_failure` narrow the limit to
   4 KiB and hold the codec to it byte by byte: every payload up to the largest one the limit

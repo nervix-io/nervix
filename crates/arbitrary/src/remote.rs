@@ -22,8 +22,9 @@ use crate::{Arbitrary, Entropy};
 
 impl Arbitrary<'_> {
     /// An absent key, or one to three distinct, canonically ordered fields. Values nest at most
-    /// twice with at most three elements per collection. Datetimes are valid RFC 3339 and every
-    /// float is finite, including signed zeros, so runtime branch validation can read every key.
+    /// twice with at most three elements per collection. Datetimes are valid RFC 3339, durations
+    /// take any signed count of nanoseconds, and every float is finite, including signed zeros, so
+    /// runtime branch validation can read every key.
     pub fn remote_branch_key(&mut self) -> nervix_models::RemoteBranchKey {
         if !self.entropy().flag() {
             return nervix_models::RemoteBranchKey::Unbranched;
@@ -71,6 +72,7 @@ impl Arbitrary<'_> {
             Element::Bool(v) => Value::Bool(v),
             Element::String(v) => Value::String(v),
             Element::Datetime(v) => Value::Datetime(v),
+            Element::Duration(v) => Value::Duration(v),
             Element::F32(v) => Value::F32(v),
             Element::F64(v) => Value::F64(v),
             Element::Array(v) => Value::Array(v),
@@ -79,7 +81,7 @@ impl Arbitrary<'_> {
     }
 
     fn remote_branch_element(&mut self, depth: u8) -> Element {
-        let variants = if depth == 0 { 13 } else { 15 };
+        let variants = if depth == 0 { 14 } else { 16 };
         match self.entropy().byte() % variants {
             0 => Element::U8(self.entropy().byte()),
             1 => Element::I8(i8::from_le_bytes([self.entropy().byte()])),
@@ -122,6 +124,7 @@ impl Arbitrary<'_> {
                     finite,
                 ]))
             }
+            13 => Element::Duration(self.entropy().any_i64()),
             variant => {
                 let below = depth
                     .checked_sub(1)
@@ -131,7 +134,7 @@ impl Arbitrary<'_> {
                 for _ in 0..count {
                     values.push(self.remote_branch_element(below));
                 }
-                if variant == 13 {
+                if variant == 14 {
                     Element::Array(values)
                 } else {
                     Element::Vec(values)

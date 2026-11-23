@@ -25,6 +25,19 @@ and as it is after a scope such as `input.`.
 
 These types are the values Nervix stores in runtime records and uses for subscription matching and processor logic. `BYTES` may be a deduplication or reordering key, ordered lexicographically by octet, but branch key schemas cannot contain `BYTES`, including nested `ARRAY` or `VEC` elements.
 
+`DURATION` holds a signed length of time with nanosecond precision, in an Arrow
+`Duration(Nanosecond)` column: up to 106,751 days, 23 hours, 47 minutes and a little over 16
+seconds either side of zero. An expression writes one as a
+[duration literal](filter-map-functions.md#literals) such as `30s`, `250ms` or `1h 30m`, compares
+two of them, and orders them by length; text, the CLI and the web console show one in that same
+literal form. A duration converts to and from no other type: no `AS` or `TRY_CAST` reads one from a
+number, text or `DATETIME`, or turns one into them. A `DURATION` field travels through relays and
+between nodes, into processor and materialized state, branch keys, backups and restores like any
+other field. No codec reads or writes one: a codec whose schema holds a `DURATION`, in a field or as
+the element of a list, is refused when it is created, with the field named, and so is a WASM
+processor whose guest would read or write one, a UDF that takes or returns one, and a database
+emitter that writes one into a column.
+
 `BYTES` holds arbitrary octets in an Arrow `Binary` column. It is distinct from `STRING`. Use
 `bytes_from_utf8` and `bytes_to_utf8` for explicit text conversion, or `hex_decode` and
 `base64_decode` for encoded text. A `CAST` never converts between `BYTES` and text.

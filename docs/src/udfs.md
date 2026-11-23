@@ -43,7 +43,10 @@ CREATE [IF NOT EXISTS] UDF <name>
 ```
 
 A declaration has between one and eight arguments. Argument and return types use the schema type
-grammar: all scalar types, `VEC<T>`, and `ARRAY<T, n>` are accepted. Code is bounded by the committed `UDF_CODE_BYTES` cluster parameter, 64 KiB by default.
+grammar: every scalar type but `DURATION`, `VEC<T>`, and `ARRAY<T, n>` are accepted. No column
+bridge reads or writes a `DURATION` yet, so `CREATE UDF` refuses a signature that names one, alone
+or as a list element, with an error naming the argument (`UDF 'f' in domain 'd' cannot take
+DURATION argument 'value'`) or the result (`UDF 'f' in domain 'd' cannot return a DURATION`). Code is bounded by the committed `UDF_CODE_BYTES` cluster parameter, 64 KiB by default.
 The declared signature must exactly match the named Roto entry function; implicit casts are never
 inserted.
 

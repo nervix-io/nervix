@@ -102,6 +102,7 @@ const _: () = assert!(MAX_COLLECTION_BYTES > 0);
 /// | STRING | String |
 /// | BYTES | Generic Binary |
 /// | DATETIME | Date, rounded down to whole Unix milliseconds |
+/// | DURATION | Rejected: no BSON type holds a DURATION losslessly |
 /// | ARRAY, VEC | Array, recursively following this table |
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -146,7 +147,15 @@ const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
     ],
-    driver_limits: &["A document above the declared BSON document limit is rejected."],
+    driver_limits: &[
+        "A document above the declared BSON document limit is rejected.",
+        "The driver sends a write, or the collection lookup at open, again by itself: once after \
+         a network error or a retryable server error, a write only on a replica set or sharded \
+         cluster, and up to twice with its own backoff after an error the server labels as \
+         overload. A resent write carries the same transaction number, so the server applies each \
+         document once. The connection string's retryWrites, retryReads and maxAdaptiveRetries \
+         change this, and RETRY POLICY retries what the driver leaves unresolved.",
+    ],
 };
 
 impl EmitterDeclaration for MongoDbCollectionEmitter {

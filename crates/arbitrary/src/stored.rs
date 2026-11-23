@@ -215,7 +215,6 @@ impl Arbitrary<'_> {
             request_quota: positive(),
             completion_quota: positive(),
             health_probes: positive(),
-            relay_watermarks: positive(),
             stream_window_bytes: u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
                 .verified("the generated value fits u32"),
             connection_window_bytes: u32::try_from(self.entropy.up_to(u64::from(u32::MAX)))
@@ -366,6 +365,8 @@ impl Arbitrary<'_> {
                 memory_bytes: memory,
                 receive,
                 listeners: self.listener_bounds(),
+                // Drawn last, so every value drawn before it keeps its place in the input.
+                database_volume_bytes: self.entropy.boundary_biased(0..=u64::MAX),
             },
         }
     }

@@ -11,15 +11,17 @@
 )]
 
 use arrow_array::{
-    Array, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, BinaryArray, BooleanArray, DurationNanosecondArray, FixedSizeListArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch,
+    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::DataType as ArrowDataType;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CellWriter, RowSchema, WireEncodeError};
-use nervix_models::{FieldName, ParametrizerName, ParseAsType, SchemaField, Timestamp};
+use nervix_models::{
+    DurationValue, FieldName, ParametrizerName, ParseAsType, SchemaField, Timestamp,
+};
 use thiserror::Error;
 
 use crate::runtime_schema::{RuntimeValue, RuntimeValueKind, parse_as_type_from_arrow};
@@ -113,6 +115,7 @@ enum ArrowColumn<'a> {
     String(&'a StringArray),
     Bytes(&'a BinaryArray),
     Datetime(&'a TimestampNanosecondArray),
+    Duration(&'a DurationNanosecondArray),
     FixedList {
         array: &'a FixedSizeListArray,
         element: Box<ArrowColumn<'a>>,
@@ -162,6 +165,7 @@ impl<'a> ArrowColumn<'a> {
             ParseAsType::String => Self::String(downcast(array)),
             ParseAsType::Bytes => Self::Bytes(downcast(array)),
             ParseAsType::Datetime => Self::Datetime(downcast(array)),
+            ParseAsType::Duration => Self::Duration(downcast(array)),
             ParseAsType::Array { element, .. } => {
                 let array: &FixedSizeListArray = downcast(array);
                 let element_nullable = match array.data_type() {
@@ -221,6 +225,7 @@ impl<'a> ArrowColumn<'a> {
             Self::String(array) => array.is_null(index),
             Self::Bytes(array) => array.is_null(index),
             Self::Datetime(array) => array.is_null(index),
+            Self::Duration(array) => array.is_null(index),
             Self::FixedList { array, .. } => array.is_null(index),
             Self::List { array, .. } => array.is_null(index),
         }
@@ -273,6 +278,9 @@ impl<'a> ArrowColumn<'a> {
             Self::Bytes(array) => writer.push_bytes(array.value(index)),
             Self::Datetime(array) => {
                 writer.push_datetime(Timestamp::from_unix_nanos(array.value(index)))
+            }
+            Self::Duration(array) => {
+                writer.push_duration(DurationValue::from_nanoseconds(array.value(index)))
             }
             Self::FixedList { array, element } => {
                 let start = usize::try_from(array.value_offset(index))
@@ -336,6 +344,7 @@ pub(crate) fn write_runtime_value(
             );
             writer.push_datetime(Timestamp::from_unix_nanos(unix_nanos))
         }
+        RuntimeValue::Duration(value) => writer.push_duration(*value),
         RuntimeValue::Array(values) | RuntimeValue::Vec(values) => writer.push_list(|writer| {
             for value in values {
                 write_runtime_value(value, writer)?;

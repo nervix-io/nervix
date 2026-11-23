@@ -181,9 +181,11 @@ async fn a_quota_beyond_the_database_volume_refuses_the_node_naming_the_setting(
     let parameters = settings
         .bootstrap_parameters()
         .assured("the bootstrap values have valid scalar bounds");
-    let Err(refused) =
-        super::validate_resource_volume(&parameters, checked.database_volume, &db_path)
-    else {
+    let Err(refused) = super::validate_resource_volume(
+        &parameters,
+        checked.capabilities.database_volume_bytes,
+        &db_path,
+    ) else {
         panic!("the chosen policy cannot fit this measured volume");
     };
 
@@ -209,6 +211,47 @@ async fn a_quota_beyond_the_database_volume_refuses_the_node_naming_the_setting(
             db_path.display()
         )
     );
+}
+
+#[nervix_primitives::test]
+async fn the_committed_claim_carries_the_database_volume_the_preflight_measured() {
+    let scratch = scratch();
+    let settings = NodeSettings::default();
+    let db_path = scratch.path().join("db");
+    let detection = supplied_properties();
+    let checked = Preflight {
+        settings: &settings,
+        db_path: &db_path,
+        temp_dir: scratch.path(),
+        dns: &DnsConfiguration::system(),
+        cpu_detection: crate::capacity::CpuDetection::Pending,
+        detection: &detection,
+    }
+    .run()
+    .await
+    .assured("a node with default settings on a scratch directory passes its preflight");
+
+    let measured = crate::capacity::volume_capacity(&db_path)
+        .assured("the preflight created the directory and read its volume");
+    assert_eq!(
+        checked.capabilities.database_volume_bytes,
+        measured.as_u64(),
+        "the claim peers validate quotas against is the size this preflight judged"
+    );
+
+    let fitting = NodeSettings {
+        resources: ResourceSettings::resolve(Some(measured), Some(measured), None)
+            .assured("the resource bounds declare no validation"),
+        ..NodeSettings::default()
+    }
+    .bootstrap_parameters()
+    .assured("the bootstrap values have valid scalar bounds");
+    super::validate_resource_volume(
+        &fitting,
+        checked.capabilities.database_volume_bytes,
+        &db_path,
+    )
+    .assured("quotas exactly as large as the measured volume fit it");
 }
 
 #[nervix_primitives::test]

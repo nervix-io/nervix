@@ -6001,6 +6001,21 @@ selections = [
 ]
 
 [[workload]]
+coverage = "A parameter change whose admitting leader moves under its durable admission, on three nodes: with the leader's own resumption held, the request's retry on the next leader meets the refused finalization, and a later retry records the outcome. The fault-injection holds and the leadership move are untracked."
+examples = 1
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.moved-finalization-refusal"
+invariant = "A finalization the next leader refuses after a leadership move leaves the parameter change's outcome unknown to its request, and a retry under the same reference commits the change once."
+invocation = "cluster-parameters"
+scenario = "A parameter change whose leader moves after admitting it still reports its refused finalization as unknown"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
 coverage = "An atomic cap refusal identifies the existing model."
 examples = 2
 feature = "tests/features/cluster/cluster_parameters.feature"
@@ -6083,6 +6098,21 @@ id = "parameters.header-cap"
 invariant = "A parameter transition cannot invalidate a model's known HTTP header names or their byte requirement."
 invocation = "cluster-parameters"
 scenario = "A lower HTTP header <parameter> cap refuses known names with dynamic values on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A raised resource quota is validated against the database volume each admitted node's committed claim carries, in the application pre-check and the replicated apply, and is refused naming the node on one and three nodes; the last node then restarts under the unchanged value. The check reads immutable claims and adds no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.resource-quota-volume"
+invariant = "A committed resource quota always fits the database volume of every admitted node."
+invocation = "cluster-parameters"
+scenario = "A resource quota above a node's database volume is refused, naming the node, on a cluster of <cluster_size>"
 selections = [
   "deloxide",
   "deloxide-order",

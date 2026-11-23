@@ -165,7 +165,6 @@ impl Runtime {
                 schedule_application: Mutex::new(ScheduleApplication::default()),
                 #[cfg(test)]
                 test_applied_schedule: ArcSwapOption::empty(),
-                applied_recovery_expansions: ArcSwapOption::empty(),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
                 domain_status_changed,
@@ -509,6 +508,19 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_standalone_transaction_if_armed(node, domain, boundary)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_start_placement_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::StartPlacementBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_start_placement_if_armed(node, domain, boundary)
             .await;
     }
 

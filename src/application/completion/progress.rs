@@ -145,6 +145,16 @@ impl ApplicationProgressState {
             .send_if_modified(|progress| progress.advance(phase, revision));
     }
 
+    /// Records that this incarnation failed to prepare runtime revision `revision`, for `reason`,
+    /// so the barriers waiting for that revision end with the failure instead of their deadline.
+    /// A failure of a revision this incarnation prepared since, or the failure it already
+    /// reports, changes nothing and wakes no one.
+    pub(in crate::application) fn fail_runtime(&self, revision: u64, reason: String) {
+        self.inner
+            .local
+            .send_if_modified(|progress| progress.fail_runtime(revision, reason));
+    }
+
     /// This incarnation's current progress.
     pub(in crate::application) fn local(&self) -> ApplicationProgress {
         self.inner.local.borrow().clone()

@@ -160,7 +160,13 @@ impl BranchInstanceTemplate {
             processor: processor.clone(),
         };
         let mut branch = self
-            .instantiate(runtime, domain, key.clone(), 1)
+            .instantiate(
+                runtime,
+                domain,
+                key.clone(),
+                1,
+                &RetainedStateOpening::RefusedWhenFull,
+            )
             .await
             .change_context_lazy(fresh)?
             .into_inner();
