@@ -23,21 +23,6 @@ Feature: Node settings
       | 1            | 4294967294s 601000000ns | 136years 1month 5days 19h 54m 38s 601ms       |
       | 3            | 4294967294s 601000000ns | 136years 1month 5days 19h 54m 38s 601ms       |
 
-  Scenario Outline: A node given a drain timeout its shutdown timeout cannot hold refuses to start on a cluster of <cluster_size>
-    Given a <cluster_size> node nervix cluster is started
-    And node "node-<cluster_size>" is stopped
-    And node-<cluster_size> starts with drain-timeout = 5m
-    When node "node-<cluster_size>" attempts to start
-    Then node "node-<cluster_size>" refused to start because "drain-timeout (300s) must not exceed shutdown-timeout (240s)"
-    Given node-<cluster_size> starts with drain-timeout = 1m
-    When node "node-<cluster_size>" is started
-    Then node "node-<cluster_size>" eventually observes a stable leader
-
-    Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
-
   Scenario Outline: A node given a heartbeat below the millisecond consensus runs timings at refuses to start on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And node "node-<cluster_size>" is stopped

@@ -676,8 +676,9 @@ current connection, retry and deadline limits.
   for cumulative totals and inspection-sampled wall rates, and the generated connector capability
   reference for each entity's declared events.
 - Every custom WASM guest is built for the current ABI, accepts
-  `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
-  declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
+  `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer,
+  defines at most one linear memory and one table, and declares positive `MAX FUEL`, then
+  `MAX MEMORY`, then `MAX TABLE ELEMENTS` covering its linked table, immediately after `FILE`. Its
   Rust `nervix-wasm-sdk` `Processor` callbacks return `error_stack::Result<_, GuestError>`;
   follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,

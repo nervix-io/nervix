@@ -103,8 +103,22 @@ impl OwnershipHandoffError {
     }
 
     /// The rejection a peer receives for `report`, carrying every context the report accumulated
-    /// instead of only its outermost one.
+    /// instead of only its outermost one. A terminating destination's refusal stays typed, so its
+    /// coordinator can plan the move onto another node.
     pub(crate) fn remote_rejection(report: &Report<Self>) -> OwnershipHandoffFailure {
+        if let Self::DestinationTerminating { node } = report.current_context() {
+            return OwnershipHandoffFailure::DestinationTerminating { node: node.clone() };
+        }
         OwnershipHandoffFailure::rejected(format!("{report:#}"))
+    }
+
+    /// The report of a rejection a peer answered with: the inverse of [`Self::remote_rejection`].
+    pub(crate) fn of_remote_rejection(failure: OwnershipHandoffFailure) -> Report<Self> {
+        match failure {
+            OwnershipHandoffFailure::DestinationTerminating { node } => {
+                Report::new(Self::DestinationTerminating { node })
+            }
+            OwnershipHandoffFailure::Rejected { reason } => Self::participant(reason),
+        }
     }
 }

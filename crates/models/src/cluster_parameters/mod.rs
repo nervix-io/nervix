@@ -108,9 +108,7 @@ pub enum ClusterParameterError {
          remote-relay-instantiation-wait"
     )]
     AckAdmissionWindow,
-    #[error(
-        "{parameter} ({requested:?}) exceeds node '{node}' drain/shutdown budget ({available:?})"
-    )]
+    #[error("{parameter} ({requested:?}) exceeds node '{node}' shutdown timeout ({available:?})")]
     NodeDeadline {
         parameter: ClusterParameterKey,
         node: crate::ClusterNodeName,
@@ -649,13 +647,15 @@ impl ClusterParameterValues {
         }))
     }
 
-    /// Apply the same admission contract before a node publishes its incarnation-bound claim.
+    /// Apply the same admission contract before a node publishes its incarnation-bound claim. A
+    /// stopping node moves its units through holds these parameters bound, within its shutdown
+    /// timeout, so neither may exceed that timeout.
     pub fn validate_runtime_budget(
         &self,
         node: &crate::ClusterNodeName,
         shutdown: crate::ShutdownCapabilities,
     ) -> Result<(), Report<ClusterParameterError>> {
-        let available = shutdown.drain_timeout.min(shutdown.shutdown_timeout);
+        let available = shutdown.shutdown_timeout;
         for (parameter, requested) in [
             (
                 ClusterParameterKey::DomainDrainTimeout,

@@ -131,6 +131,19 @@ impl PlannedHandoffRequestScope<'_> {
             reason,
         })
     }
+
+    /// The failure of this handoff's gate that `cause` produced, with `cause` kept beneath it.
+    fn failure_caused_by(
+        &self,
+        cause: Report<OwnershipHandoffError>,
+        reason: String,
+    ) -> Report<DomainAlterError> {
+        cause.change_context(DomainAlterError::EntityGate {
+            domain: self.domain.clone(),
+            operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+            reason,
+        })
+    }
 }
 
 struct ClusterOwnershipHandoffPreparations {
@@ -616,9 +629,7 @@ impl ForcedOwnershipRecoveryCoordinator<'_> {
                                         "forced-recovery preparation".to_owned(),
                                     ))
                                 })?;
-                            response.map_err(|failure| {
-                                OwnershipHandoffError::participant(failure.to_string())
-                            })
+                            response.map_err(OwnershipHandoffError::of_remote_rejection)
                         };
                         match nervix_primitives::time::timeout_at(deadline, preparation).await {
                             Ok(result) => result,
@@ -967,7 +978,7 @@ impl SessionServiceImpl {
                     "forced-recovery discard".to_owned(),
                 ))
             })?
-            .map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
+            .map_err(OwnershipHandoffError::of_remote_rejection)
     }
 
     pub(super) async fn discard_local_forced_ownership_recovery(
@@ -1515,10 +1526,13 @@ impl SessionServiceImpl {
                 impact.as_ref().map(|(impact, _)| *impact),
             )
             .await;
-            return Err(Report::new(DomainAlterError::EntityGate {
+            // The typed cause stays beneath the gate failure, so a coordinator that plans the
+            // move again can read a destination's terminating refusal from it.
+            let message = reason.to_string();
+            return Err(reason.change_context(DomainAlterError::EntityGate {
                 domain: domain.clone(),
                 operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
-                reason: reason.to_string(),
+                reason: message,
             }));
         }
         handoff.preparations.mark_publication_may_be_in_flight();
@@ -1662,7 +1676,7 @@ impl SessionServiceImpl {
             .request(&destination, request)
             .await
             .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
-        response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
+        response.map_err(OwnershipHandoffError::of_remote_rejection)
     }
 
     /// Confirms every prepared move of `handoff`, the moves at the same time. A confirmation only
@@ -1760,7 +1774,7 @@ impl SessionServiceImpl {
                 match self.inner.interconnect.request(node, request.clone()).await {
                     Ok(Ok(())) => return Ok(()),
                     Ok(Err(failure)) => {
-                        return Err(OwnershipHandoffError::participant(failure.to_string()));
+                        return Err(OwnershipHandoffError::of_remote_rejection(failure));
                     }
                     Err(error) => {
                         debug!(
@@ -1862,6 +1876,9 @@ impl SessionServiceImpl {
             return Ok(());
         }
         if local_node == &request.destination {
+            // A move prepared before this incarnation advertised that it is terminating still
+            // reaches it here, so the destination refuses it once more before the move commits.
+            self.refuse_handoff_destination_while_terminating().await?;
             Self::verify_ownership_handoff_node_incarnation(
                 &self.live_node_incarnations().await,
                 local_node,
@@ -2544,8 +2561,7 @@ impl SessionServiceImpl {
                     .request_with_timeout(&destination, request, remaining)
                     .await
                     .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
-                response
-                    .map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))?;
+                response.map_err(OwnershipHandoffError::of_remote_rejection)?;
             }
         }
         Ok(())

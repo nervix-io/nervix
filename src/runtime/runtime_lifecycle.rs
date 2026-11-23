@@ -165,11 +165,12 @@ impl Runtime {
                 compiled_wasm_modules: DashMap::default(),
                 schedule_application: Mutex::new(ScheduleApplication::default()),
                 #[cfg(test)]
-                test_applied_schedule: ArcSwapOption::empty(),
+                test_installed_schedule: Mutex::new(crate::registry::InstalledSchedule::default()),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
                 domain_status_changed,
                 local_intake: watch::channel(LocalIntake::Open).0,
+                node_save: watch::channel(NodeSave::Serving).0,
                 in_flight_by_domain: DashMap::default(),
                 in_flight_by_ingestor: DashMap::default(),
                 generator_activity_by_domain: DashMap::default(),
@@ -351,17 +352,12 @@ impl Runtime {
     /// When the emitters of a domain execution that stops now finish their emitters: the domain drain
     /// timeout from now, the same bound a stop command gives an emitter.
     pub(in crate::runtime) fn emitter_finish_deadline(&self) -> Instant {
-        self.emitter_finish_deadline_within(self.cluster_parameters().domain_drain_timeout())
-    }
-
-    /// When the emitters of a domain execution that stops now finish their emitters, no later than
-    /// `limit` from now.
-    fn emitter_finish_deadline_within(&self, limit: Duration) -> Instant {
-        let budget = limit.min(self.domain_drain_timeout());
-        Instant::now().checked_add(budget).assured(
-            "the domain drain timeout bounds the budget, and it is the sixty-second default or a \
-             scenario's own short drain, which end within the monotonic clock's range",
-        )
+        Instant::now()
+            .checked_add(self.domain_drain_timeout())
+            .assured(
+                "the domain drain timeout is the sixty-second default or a scenario's own short \
+                 drain, which end within the monotonic clock's range",
+            )
     }
 
     pub(crate) fn set_construction_parameters(
@@ -1072,11 +1068,13 @@ impl Runtime {
         }
     }
 
-    /// Stops every domain's execution and the runtime services behind them. `left` is the time the
-    /// node's shutdown leaves the runtime: an emitter finishes its emitter within it, and within the
-    /// domain drain timeout.
-    pub(crate) async fn shutdown(&self, left: Duration) {
-        let emitter_finish_deadline = self.emitter_finish_deadline_within(left);
+    /// Stops every domain execution this node still runs: it ends the client ingestor endpoints,
+    /// stops each domain's ingestors and then each execution, whose emitters finish by
+    /// `emitter_finish_deadline` and whose placements write their final checkpoints.
+    pub(in crate::runtime) async fn stop_domain_executions(
+        &self,
+        emitter_finish_deadline: Instant,
+    ) {
         self.end_client_ingestor_endpoints(ClientProducerEndReason::ShuttingDown)
             .await;
         let domains = self
@@ -1096,6 +1094,13 @@ impl Runtime {
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
+    }
+
+    /// Stops every domain's execution and the runtime services behind them. A node that saved what
+    /// it holds already stopped its executions; any other execution stops here as a completed
+    /// stop's teardown stops it, with its emitters finishing within the domain drain timeout.
+    pub(crate) async fn shutdown(&self) {
+        Box::pin(self.stop_domain_executions(self.emitter_finish_deadline())).await;
         // Every branch task has ended, in time or at a stop grace, and the snapshot task of each
         // deduplicator and window branch is writing what its branch published last. Those tasks
         // hold this runtime and its storage, so the runtime waits for each of them here, while

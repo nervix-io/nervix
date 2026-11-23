@@ -1,11 +1,11 @@
-//! Tests of what a planned handoff's destination checks before it prepares or activates the moved
-//! state.
+//! Tests of what a planned handoff's destination checks before it prepares the moved state, before
+//! it confirms a prepared move and before it activates one.
 //!
 //! Layer: test harness.
 //!
 //! - **Owns.** Coverage of a destination's refusal to become a new placement destination while its
-//!   own process incarnation is terminating, and of its refusal to activate a move prepared for an
-//!   earlier run of itself.
+//!   own process incarnation is terminating, at preparation and at confirmation, and of its refusal
+//!   to activate a move prepared for an earlier run of itself.
 //! - **Depends on.** The ownership handoff control plane and the server test fixture.
 //! - **Must not know.** Connector implementations or runtime execution details.
 
@@ -19,6 +19,7 @@ use std::time::Duration;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
+    ConfirmOwnershipHandoffStateRequest as RemoteConfirmOwnershipHandoffStateRequest,
     PrepareOwnershipHandoffStateRequest as RemotePrepareOwnershipHandoffStateRequest,
 };
 use nervix_models::{
@@ -80,6 +81,68 @@ async fn a_terminating_destination_refuses_to_prepare_a_planned_handoff() {
     service.inner.cluster.mark_local_terminating().await;
     let Err(refusal) = service.prepare_ownership_handoff_state(request).await else {
         panic!("a terminating destination must refuse the preparation");
+    };
+    let OwnershipHandoffError::DestinationTerminating { node } = refusal.current_context() else {
+        panic!("a terminating destination must refuse as one: {refusal:?}");
+    };
+    assert_eq!(node, &local_node);
+
+    drop(service);
+    drop(registry);
+    std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+}
+
+#[nervix_primitives::test]
+async fn a_destination_that_began_terminating_after_preparation_refuses_to_confirm_the_move() {
+    let TestService {
+        service,
+        registry,
+        path,
+    } = build_test_service(true).await;
+    let local_node = service.inner.consensus.local_node_id().clone();
+    let incarnation = service
+        .inner
+        .cluster
+        .local_node_identity()
+        .await
+        .incarnation();
+    let request = RemoteConfirmOwnershipHandoffStateRequest {
+        coordination: CoordinationIdentity::new(local_node.clone(), 1, 1),
+        operation_id: "terminating-destination".to_string(),
+        source: local_node.clone(),
+        destination: local_node.clone(),
+        source_incarnation: incarnation,
+        destination_incarnation: incarnation,
+        domain: DomainName::parse("default").assured("the test domain name is valid"),
+        entity: NodeRef::new(
+            ModelKind::Junction,
+            ModelName::parse("moved_route").assured("the test entity name is valid"),
+        ),
+        unit: nervix_models::Unit::SINGLE,
+        base_schedule_fingerprint: [1; 32],
+        target_schedule_fingerprint: [2; 32],
+        participant: nervix_interconnect::OwnershipHandoffParticipant::Destination,
+    };
+
+    // Before it terminates, the destination goes on to check its preparation and refuses the
+    // confirmation for what the request names: it prepared no such move.
+    let Err(before) = service
+        .confirm_local_ownership_handoff_state(request.clone())
+        .await
+    else {
+        panic!("a confirmation of a move nothing prepared must fail");
+    };
+    assert!(
+        !matches!(
+            before.current_context(),
+            OwnershipHandoffError::DestinationTerminating { .. }
+        ),
+        "a destination that is not terminating must not refuse as one: {before:?}"
+    );
+
+    service.inner.cluster.mark_local_terminating().await;
+    let Err(refusal) = service.confirm_local_ownership_handoff_state(request).await else {
+        panic!("a terminating destination must refuse to confirm the move");
     };
     let OwnershipHandoffError::DestinationTerminating { node } = refusal.current_context() else {
         panic!("a terminating destination must refuse as one: {refusal:?}");

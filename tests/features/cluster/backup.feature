@@ -649,6 +649,7 @@ Feature: Configuration backup into a public archive
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET value = value, tenant = tenant
@@ -782,6 +783,7 @@ Feature: Configuration backup into a public archive
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET value = value, tenant = tenant
@@ -885,6 +887,7 @@ Feature: Configuration backup into a public archive
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET value = value, tenant = tenant

@@ -784,7 +784,8 @@ Feature: NATS emission
   Scenario Outline: STOP sends the records a core NATS write left with its client
     Given NATS is running
     And a NATS endpoint the scenario controls is configured
-    And drain timeout is configured as "60s"
+    And schema change drain timeout is configured as "60s"
+    And entity gate deadline is configured as "60s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus statements

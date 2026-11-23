@@ -145,41 +145,21 @@ async fn a_stopping_execution_gives_each_emitter_its_finish_deadline_before_its_
 }
 
 #[nervix_primitives::test(start_paused = true)]
-async fn a_stopping_runtime_gives_its_emitters_only_the_time_its_shutdown_leaves() {
-    let runtime = Runtime::default();
-    let domain = domain("default");
-    let (execution, reported) = execution_with_deadline_reporting_emitter(&domain);
-    runtime.inner.executions.insert(domain.clone(), execution);
-    let left = Duration::from_secs(3);
-    let started = Instant::now();
-
-    runtime.shutdown(left).await;
-
-    assert_eq!(
-        reported
-            .await
-            .expect("the emitter task reports what it read"),
-        Some(started + left),
-        "a shutdown with less time left than the domain drain timeout bounds the finish by it"
-    );
-}
-
-#[nervix_primitives::test(start_paused = true)]
-async fn a_stopping_runtime_gives_its_emitters_no_more_than_the_domain_drain_timeout() {
+async fn a_stopping_runtime_gives_its_emitters_the_domain_drain_timeout() {
     let runtime = Runtime::default();
     let domain = domain("default");
     let (execution, reported) = execution_with_deadline_reporting_emitter(&domain);
     runtime.inner.executions.insert(domain.clone(), execution);
     let started = Instant::now();
 
-    runtime.shutdown(Duration::from_secs(3_600)).await;
+    runtime.shutdown().await;
 
     assert_eq!(
         reported
             .await
             .expect("the emitter task reports what it read"),
         Some(started + runtime.domain_drain_timeout()),
-        "a long shutdown deadline still gives an emitter's finish only the domain drain timeout"
+        "an emitter's finish has the domain drain timeout, as a stop command gives it"
     );
 }
 
@@ -430,10 +410,7 @@ async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gon
 
     let stopping = nervix_primitives::task::spawn({
         let runtime = runtime.clone();
-        async move {
-            let left = runtime.domain_drain_timeout();
-            runtime.shutdown(left).await
-        }
+        async move { runtime.shutdown().await }
     });
     let told_to_stop = runtime.inner.state_snapshot_tasks.stopping();
     timeout(REACHED_WITHIN, told_to_stop.cancelled())
@@ -475,12 +452,9 @@ async fn a_stopping_runtime_has_the_snapshot_task_of_a_silent_branch_write_and_e
         .expect("a persisting runtime starts a snapshot task");
     assert_eq!(window.persisted_revision(), None);
 
-    timeout(
-        REACHED_WITHIN,
-        runtime.shutdown(runtime.domain_drain_timeout()),
-    )
-    .await
-    .expect("the runtime stops without its branch's stop");
+    timeout(REACHED_WITHIN, runtime.shutdown())
+        .await
+        .expect("the runtime stops without its branch's stop");
 
     timeout(REACHED_WITHIN, snapshot_task)
         .await
