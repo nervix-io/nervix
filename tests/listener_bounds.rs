@@ -567,8 +567,12 @@ async fn grpc_send_window(world: &mut ScenarioWorld, node: String, expected: usi
         "http",
         "the probe speaks to the plaintext test listener"
     );
-    let host = endpoint.host_str().assured("the gRPC endpoint names a host");
-    let port = endpoint.port().assured("the test gRPC endpoint names a port");
+    let host = endpoint
+        .host_str()
+        .assured("the gRPC endpoint names a host");
+    let port = endpoint
+        .port()
+        .assured("the test gRPC endpoint names a port");
     let address = std::net::SocketAddr::new(
         host.parse()
             .assured("the test gRPC endpoint is a numeric address"),

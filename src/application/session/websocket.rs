@@ -42,7 +42,9 @@ use super::{
     InboundFrame, SessionTransport,
     outbound::{self, SessionFrames},
 };
-use crate::application::{listener_settings::ListenerSettings, session_service::SessionServiceImpl};
+use crate::application::{
+    listener_settings::ListenerSettings, session_service::SessionServiceImpl,
+};
 
 /// The WebSocket configuration of a console session: no message or frame larger than one session
 /// frame is buffered in either direction, and writes collect up to the declared write buffer.
@@ -57,7 +59,9 @@ pub(in crate::application) fn console_websocket_config(
             .assured("WebSocket size-setting validation checks usize representation"),
         max_write_buffer_size: settings
             .websocket_write_capacity(limits.frame_bytes())
-            .assured("listener resolution refuses a write buffer the largest session frame overflows"),
+            .assured(
+                "listener resolution refuses a write buffer the largest session frame overflows",
+            ),
         // RFC 6455 section 5.1: a server closes the connection on an unmasked client frame.
         accept_unmasked_frames: false,
         ..WebSocketConfig::default()

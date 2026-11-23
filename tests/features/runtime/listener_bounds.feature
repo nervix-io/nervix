@@ -268,6 +268,8 @@ Feature: Declared public listener bounds
       | 3            |
 
   Scenario Outline: A gRPC client sends no more than the declared <window> window ahead on <cluster_size> nodes
+    # A new connection's window starts at RFC 9113's 65,535 bytes, and the listener raises it at
+    # once only when that adds at least half of it, so the connection example declares 160 KiB.
     Given node-1 starts with <setting> = <declared>
     And a <cluster_size> node nervix cluster is started
     Then a gRPC client of node "node-1" may send <granted> bytes ahead on a new stream
@@ -276,8 +278,8 @@ Feature: Declared public listener bounds
       | cluster_size | window     | setting                      | declared | granted |
       | 1            | stream     | grpc-stream-window-bytes     | 96KiB    | 98304   |
       | 3            | stream     | grpc-stream-window-bytes     | 96KiB    | 98304   |
-      | 1            | connection | grpc-connection-window-bytes | 80KiB    | 81920   |
-      | 3            | connection | grpc-connection-window-bytes | 80KiB    | 81920   |
+      | 1            | connection | grpc-connection-window-bytes | 160KiB   | 163840  |
+      | 3            | connection | grpc-connection-window-bytes | 160KiB   | 163840  |
 
   Scenario Outline: A stalled gRPC TLS handshake ends at its declared deadline on <cluster_size> nodes
     Given client grpc transport is configured with mode "https"

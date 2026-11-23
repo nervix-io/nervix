@@ -157,11 +157,13 @@ impl SettingDefinition for MaxHeaders {
         )?;
         let limit = Self::limit(*header_bytes);
         if u64::from(*max_headers) > limit {
-            return Err(Report::new(ListenerSettingsError::HeadersBeyondHeaderBytes {
-                max_headers: *max_headers,
-                header_bytes: header_bytes.as_u64(),
-                limit,
-            }));
+            return Err(Report::new(
+                ListenerSettingsError::HeadersBeyondHeaderBytes {
+                    max_headers: *max_headers,
+                    header_bytes: header_bytes.as_u64(),
+                    limit,
+                },
+            ));
         }
         Ok(())
     }
@@ -454,6 +456,64 @@ definition!(
     |v: &u32| (1..=TCP_KEEPALIVE_MAX_RETRIES).contains(v)
 );
 
+/// The gRPC listener's own bounds: its request handlers and the HTTP/2 limits it advertises and
+/// enforces on every connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrpcListenerSettings {
+    pub header_bytes: Setting<GrpcHeaderBytes>,
+    pub concurrency: Setting<GrpcConcurrency>,
+    pub request_timeout: Setting<GrpcRequestTimeout>,
+    pub max_streams: Setting<GrpcMaxStreams>,
+    pub stream_window_bytes: Setting<GrpcStreamWindowBytes>,
+    pub connection_window_bytes: Setting<GrpcConnectionWindowBytes>,
+    pub send_buffer_bytes: Setting<GrpcSendBufferBytes>,
+    pub max_pending_reset_streams: Setting<GrpcMaxPendingResetStreams>,
+    pub max_error_reset_streams: Setting<GrpcMaxErrorResetStreams>,
+    pub keepalive_interval: Setting<GrpcKeepaliveInterval>,
+    pub keepalive_timeout: Setting<GrpcKeepaliveTimeout>,
+}
+impl GrpcListenerSettings {
+    fn resolve(inputs: &ListenerOverrides) -> Result<Self, Report<ListenerSettingsError>> {
+        Ok(Self {
+            header_bytes: Setting::<GrpcHeaderBytes>::resolve(inputs.grpc_header_bytes, &())?,
+            concurrency: Setting::<GrpcConcurrency>::resolve(inputs.grpc_concurrency, &())?,
+            request_timeout: Setting::<GrpcRequestTimeout>::resolve(
+                inputs.grpc_request_timeout,
+                &(),
+            )?,
+            max_streams: Setting::<GrpcMaxStreams>::resolve(inputs.grpc_max_streams, &())?,
+            stream_window_bytes: Setting::<GrpcStreamWindowBytes>::resolve(
+                inputs.grpc_stream_window_bytes,
+                &(),
+            )?,
+            connection_window_bytes: Setting::<GrpcConnectionWindowBytes>::resolve(
+                inputs.grpc_connection_window_bytes,
+                &(),
+            )?,
+            send_buffer_bytes: Setting::<GrpcSendBufferBytes>::resolve(
+                inputs.grpc_send_buffer_bytes,
+                &(),
+            )?,
+            max_pending_reset_streams: Setting::<GrpcMaxPendingResetStreams>::resolve(
+                inputs.grpc_max_pending_reset_streams,
+                &(),
+            )?,
+            max_error_reset_streams: Setting::<GrpcMaxErrorResetStreams>::resolve(
+                inputs.grpc_max_error_reset_streams,
+                &(),
+            )?,
+            keepalive_interval: Setting::<GrpcKeepaliveInterval>::resolve(
+                inputs.grpc_keepalive_interval,
+                &(),
+            )?,
+            keepalive_timeout: Setting::<GrpcKeepaliveTimeout>::resolve(
+                inputs.grpc_keepalive_timeout,
+                &(),
+            )?,
+        })
+    }
+}
+
 /// Validated settings, resolved once before listeners bind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ListenerSettings {
@@ -473,17 +533,7 @@ pub struct ListenerSettings {
     pub websocket_message_bytes: Setting<WebsocketMessageBytes>,
     pub websocket_frame_bytes: Setting<WebsocketFrameBytes>,
     pub websocket_write_buffer_bytes: Setting<WebsocketWriteBufferBytes>,
-    pub grpc_header_bytes: Setting<GrpcHeaderBytes>,
-    pub grpc_concurrency: Setting<GrpcConcurrency>,
-    pub grpc_request_timeout: Setting<GrpcRequestTimeout>,
-    pub grpc_max_streams: Setting<GrpcMaxStreams>,
-    pub grpc_stream_window_bytes: Setting<GrpcStreamWindowBytes>,
-    pub grpc_connection_window_bytes: Setting<GrpcConnectionWindowBytes>,
-    pub grpc_send_buffer_bytes: Setting<GrpcSendBufferBytes>,
-    pub grpc_max_pending_reset_streams: Setting<GrpcMaxPendingResetStreams>,
-    pub grpc_max_error_reset_streams: Setting<GrpcMaxErrorResetStreams>,
-    pub grpc_keepalive_interval: Setting<GrpcKeepaliveInterval>,
-    pub grpc_keepalive_timeout: Setting<GrpcKeepaliveTimeout>,
+    pub grpc: GrpcListenerSettings,
     pub tcp_keepalive_time: Setting<TcpKeepaliveTime>,
     pub tcp_keepalive_interval: Setting<TcpKeepaliveInterval>,
     pub tcp_keepalive_retries: Setting<TcpKeepaliveRetries>,
@@ -588,41 +638,7 @@ impl ListenerSettings {
                 inputs.websocket_write_buffer_bytes,
                 &(),
             )?,
-            grpc_header_bytes: Setting::<GrpcHeaderBytes>::resolve(inputs.grpc_header_bytes, &())?,
-            grpc_concurrency: Setting::<GrpcConcurrency>::resolve(inputs.grpc_concurrency, &())?,
-            grpc_request_timeout: Setting::<GrpcRequestTimeout>::resolve(
-                inputs.grpc_request_timeout,
-                &(),
-            )?,
-            grpc_max_streams: Setting::<GrpcMaxStreams>::resolve(inputs.grpc_max_streams, &())?,
-            grpc_stream_window_bytes: Setting::<GrpcStreamWindowBytes>::resolve(
-                inputs.grpc_stream_window_bytes,
-                &(),
-            )?,
-            grpc_connection_window_bytes: Setting::<GrpcConnectionWindowBytes>::resolve(
-                inputs.grpc_connection_window_bytes,
-                &(),
-            )?,
-            grpc_send_buffer_bytes: Setting::<GrpcSendBufferBytes>::resolve(
-                inputs.grpc_send_buffer_bytes,
-                &(),
-            )?,
-            grpc_max_pending_reset_streams: Setting::<GrpcMaxPendingResetStreams>::resolve(
-                inputs.grpc_max_pending_reset_streams,
-                &(),
-            )?,
-            grpc_max_error_reset_streams: Setting::<GrpcMaxErrorResetStreams>::resolve(
-                inputs.grpc_max_error_reset_streams,
-                &(),
-            )?,
-            grpc_keepalive_interval: Setting::<GrpcKeepaliveInterval>::resolve(
-                inputs.grpc_keepalive_interval,
-                &(),
-            )?,
-            grpc_keepalive_timeout: Setting::<GrpcKeepaliveTimeout>::resolve(
-                inputs.grpc_keepalive_timeout,
-                &(),
-            )?,
+            grpc: GrpcListenerSettings::resolve(&inputs)?,
             tcp_keepalive_time: Setting::<TcpKeepaliveTime>::resolve(
                 inputs.tcp_keepalive_time,
                 &(),
@@ -723,37 +739,37 @@ impl ListenerSettings {
             .assured("resolution refuses a write buffer the endpoint's largest message overflows")
     }
     pub fn grpc_header_bytes(&self) -> ByteUnit {
-        *self.grpc_header_bytes.value()
+        *self.grpc.header_bytes.value()
     }
     pub fn grpc_concurrency(&self) -> u32 {
-        *self.grpc_concurrency.value()
+        *self.grpc.concurrency.value()
     }
     pub fn grpc_request_timeout(&self) -> Duration {
-        *self.grpc_request_timeout.value()
+        *self.grpc.request_timeout.value()
     }
     pub fn grpc_max_streams(&self) -> u32 {
-        *self.grpc_max_streams.value()
+        *self.grpc.max_streams.value()
     }
     pub fn grpc_stream_window_bytes(&self) -> ByteUnit {
-        *self.grpc_stream_window_bytes.value()
+        *self.grpc.stream_window_bytes.value()
     }
     pub fn grpc_connection_window_bytes(&self) -> ByteUnit {
-        *self.grpc_connection_window_bytes.value()
+        *self.grpc.connection_window_bytes.value()
     }
     pub fn grpc_send_buffer_bytes(&self) -> ByteUnit {
-        *self.grpc_send_buffer_bytes.value()
+        *self.grpc.send_buffer_bytes.value()
     }
     pub fn grpc_max_pending_reset_streams(&self) -> u32 {
-        *self.grpc_max_pending_reset_streams.value()
+        *self.grpc.max_pending_reset_streams.value()
     }
     pub fn grpc_max_error_reset_streams(&self) -> u32 {
-        *self.grpc_max_error_reset_streams.value()
+        *self.grpc.max_error_reset_streams.value()
     }
     pub fn grpc_keepalive_interval(&self) -> Duration {
-        *self.grpc_keepalive_interval.value()
+        *self.grpc.keepalive_interval.value()
     }
     pub fn grpc_keepalive_timeout(&self) -> Duration {
-        *self.grpc_keepalive_timeout.value()
+        *self.grpc.keepalive_timeout.value()
     }
     pub fn tcp_keepalive_time(&self) -> Duration {
         *self.tcp_keepalive_time.value()
@@ -945,11 +961,17 @@ mod tests {
         let settings = ListenerSettings::default();
         assert_eq!(settings.max_headers(), 100);
         assert_eq!(settings.grpc_stream_window_bytes(), ByteUnit::Mebibyte(1));
-        assert_eq!(settings.grpc_connection_window_bytes(), ByteUnit::Mebibyte(1));
+        assert_eq!(
+            settings.grpc_connection_window_bytes(),
+            ByteUnit::Mebibyte(1)
+        );
         assert_eq!(settings.grpc_send_buffer_bytes(), ByteUnit::Kibibyte(400));
         assert_eq!(settings.grpc_max_pending_reset_streams(), 20);
         assert_eq!(settings.grpc_max_error_reset_streams(), 1024);
-        assert_eq!(settings.websocket_write_buffer_bytes(), ByteUnit::Kibibyte(128));
+        assert_eq!(
+            settings.websocket_write_buffer_bytes(),
+            ByteUnit::Kibibyte(128)
+        );
     }
 
     #[test]
@@ -1042,8 +1064,14 @@ mod tests {
             ..Default::default()
         })
         .assured("a 1 KiB write buffer and an 8 KiB message bound are valid");
-        assert_eq!(settings.endpoint_websocket_write_capacity(), 1024 + 8192 + 14);
-        assert_eq!(settings.websocket_write_capacity(4096), Some(1024 + 4096 + 14));
+        assert_eq!(
+            settings.endpoint_websocket_write_capacity(),
+            1024 + 8192 + 14
+        );
+        assert_eq!(
+            settings.websocket_write_capacity(4096),
+            Some(1024 + 4096 + 14)
+        );
         assert_eq!(settings.websocket_write_capacity(usize::MAX), None);
 
         let largest = u64::try_from(usize::MAX).assured("usize fits u64 on supported targets");
