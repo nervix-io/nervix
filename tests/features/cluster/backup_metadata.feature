@@ -74,6 +74,7 @@ Feature: Large native restore metadata
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET tenant = branch.tenant, note = coalesce(note, "even")
@@ -234,6 +235,7 @@ Feature: Large native restore metadata
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET tenant = branch.tenant, note = coalesce(note, "even")

@@ -17,13 +17,15 @@ use nervix_server::StartPlacementBoundary;
 use super::{ScenarioWorld, common::cluster::node_name, expand_placeholders};
 
 /// How long a START may take to reach an armed placement boundary. It reaches it after its
-/// admission, its first judgement of the domain's units and, for a deferral, a move whose
-/// ownership handoff could not begin, each of which a loaded host slows.
+/// admission, its first judgement of the domain's units and, for a move, publication or deferral,
+/// a move's ownership handoff that began or could not begin, each of which a loaded host slows.
 const START_PLACEMENT_BOUNDARY_BUDGET: Duration = Duration::from_secs(90);
 
 fn placement_boundary(boundary: &str) -> StartPlacementBoundary {
     match boundary {
         "wait" => StartPlacementBoundary::Waiting,
+        "move" => StartPlacementBoundary::Moving,
+        "publication" => StartPlacementBoundary::Publishing,
         "deferral" => StartPlacementBoundary::Deferred,
         _ => panic!("unknown START placement boundary '{boundary}'"),
     }

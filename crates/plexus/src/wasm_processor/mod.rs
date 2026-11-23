@@ -27,7 +27,7 @@ use crate::{
         into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies,
         message_error_policy, nonzero_u64_value, relay_in_role, resource_ref,
         resource_version_clause, set_or_where_route_construction, string_lit, suggest_from,
-        wasm_processor_name,
+        u64_value, wasm_processor_name,
     },
 };
 
@@ -48,12 +48,20 @@ fn wasm_processor_limits<'src>()
                 .ok_or_else(|| Rich::custom(span, "MAX MEMORY must be greater than zero"))
         });
 
+    // A guest without a table declares zero, so zero is a count here, not an absent limit.
+    let max_table_elements = kw_phrase3(Identifier::Max, Identifier::Table, Identifier::Elements)
+        .ignore_then(u64_value("max_table_elements"));
+
     max_fuel
         .then(max_memory_bytes)
-        .map(|(max_fuel, max_memory_bytes)| WasmProcessorLimits {
-            max_fuel,
-            max_memory_bytes,
-        })
+        .then(max_table_elements)
+        .map(
+            |((max_fuel, max_memory_bytes), max_table_elements)| WasmProcessorLimits {
+                max_fuel,
+                max_memory_bytes,
+                max_table_elements,
+            },
+        )
         .boxed()
 }
 
@@ -254,8 +262,9 @@ mod tests {
     fn input_acknowledgement_clause() {
         crate::conformance_support::assert_input_acknowledgement_clause(
             "CREATE WASM PROCESSOR tested FROM incoming",
-            "USING RESOURCE guest VERSION 1 FILE 'guest.wasm' MAX FUEL 100000 MAX MEMORY 1MiB \
-             UNBRANCHED TO outgoing SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG",
+            "USING RESOURCE guest VERSION 1 FILE 'guest.wasm' MAX FUEL 100000 MAX MEMORY 1MiB MAX \
+             TABLE ELEMENTS 4096 UNBRANCHED TO outgoing SET value = value ON MESSAGE ERROR LOG ON \
+             GLOBAL ERROR LOG",
         );
         crate::conformance_support::assert_offers_exactly(
             "CREATE WASM PROCESSOR tested FROM incoming DETACHED ",
@@ -280,6 +289,7 @@ mod tests {
             USING RESOURCE wasm_filters VERSION 2 FILE 'processors/filter_even.wasm'
             MAX FUEL 1000000
             MAX MEMORY 64MiB
+            MAX TABLE ELEMENTS 4096
             BRANCHED BY tenant_branch
             TO filtered_orders SET value = value ON MESSAGE ERROR LOG
             ON GLOBAL ERROR IGNORE;
@@ -292,6 +302,7 @@ mod tests {
         assert_eq!(parsed.file, "processors/filter_even.wasm");
         assert_eq!(parsed.limits.max_fuel, nonzero!(1_000_000u64));
         assert_eq!(parsed.limits.max_memory_bytes, nonzero!(67_108_864u64));
+        assert_eq!(parsed.limits.max_table_elements, 4_096);
         assert_eq!(parsed.from.from[0].as_str(), "raw_orders");
         assert_eq!(
             parsed
@@ -321,8 +332,8 @@ mod tests {
     #[test]
     fn parses_wasm_processor_bound_to_the_latest_resource_version() {
         let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION LATEST FILE 'p.wasm' \
-                     MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON \
-                     GLOBAL ERROR LOG;";
+                     MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON \
+                     MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
 
         let parsed = parse_create_wasm_processor(input).expect("parse should work");
 
@@ -332,7 +343,8 @@ mod tests {
     #[test]
     fn requires_a_resource_version() {
         let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r FILE 'p.wasm' MAX FUEL 1000 \
-                     MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON MESSAGE ERROR \
+                     LOG ON GLOBAL ERROR LOG;";
 
         assert!(parse_create_wasm_processor(input).is_err());
     }
@@ -354,24 +366,41 @@ mod tests {
     }
 
     #[test]
-    fn requires_max_fuel_and_max_memory() {
-        let missing_fuel = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
-                            'p.wasm' MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON \
-                            GLOBAL ERROR LOG;";
-        assert!(parse_create_wasm_processor_tokens(&to_tokens(missing_fuel)).is_err());
-
-        let missing_memory = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
-                              'p.wasm' MAX FUEL 1000 UNBRANCHED TO b ON MESSAGE ERROR LOG ON \
-                              GLOBAL ERROR LOG;";
-        assert!(parse_create_wasm_processor_tokens(&to_tokens(missing_memory)).is_err());
-
-        for zero_limit in [
-            "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL 0 \
-             MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;",
-            "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
-             1000 MAX MEMORY 0B UNBRANCHED TO b ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;",
+    fn requires_max_fuel_max_memory_and_max_table_elements_in_order() {
+        let statement = |limits: &str| {
+            format!(
+                "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' {limits} \
+                 UNBRANCHED TO b ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;"
+            )
+        };
+        for refused in [
+            "MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096",
+            "MAX FUEL 1000 MAX TABLE ELEMENTS 4096",
+            "MAX FUEL 1000 MAX MEMORY 64MiB",
+            "MAX FUEL 1000 MAX TABLE ELEMENTS 4096 MAX MEMORY 64MiB",
+            "MAX FUEL 0 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096",
+            "MAX FUEL 1000 MAX MEMORY 0B MAX TABLE ELEMENTS 4096",
+            "MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS -1",
+            "MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4KiB",
+            "MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 18446744073709551616",
         ] {
-            assert!(parse_create_wasm_processor_tokens(&to_tokens(zero_limit)).is_err());
+            assert!(
+                parse_create_wasm_processor_tokens(&to_tokens(&statement(refused))).is_err(),
+                "{refused}"
+            );
+        }
+
+        for (limits, elements) in [
+            ("MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 0", 0),
+            (
+                "MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 18446744073709551615",
+                u64::MAX,
+            ),
+            ("max fuel 1000 max memory 64MiB max table elements 7", 7),
+        ] {
+            let parsed = parse_create_wasm_processor_tokens(&to_tokens(&statement(limits)))
+                .expect("every limit is written in order");
+            assert_eq!(parsed.limits.max_table_elements, elements, "{limits}");
         }
     }
 
@@ -388,7 +417,27 @@ mod tests {
                              'p.wasm' MAX FUEL 1000 ";
         let memory_suggestions = suggest_create_wasm_processor(memory_prefix, memory_prefix.len());
         assert!(memory_suggestions.contains(&"MAX MEMORY".to_string()));
+        assert!(!memory_suggestions.contains(&"MAX TABLE ELEMENTS".to_string()));
         assert!(!memory_suggestions.contains(&"UNBRANCHED".to_string()));
+
+        let table_prefix = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
+                            'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB ";
+        let table_suggestions = suggest_create_wasm_processor(table_prefix, table_prefix.len());
+        assert!(table_suggestions.contains(&"MAX TABLE ELEMENTS".to_string()));
+        assert!(!table_suggestions.contains(&"UNBRANCHED".to_string()));
+        assert!(!table_suggestions.contains(&"BRANCHED BY".to_string()));
+
+        let count_prefix = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
+                            'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS ";
+        let count_suggestions = suggest_create_wasm_processor(count_prefix, count_prefix.len());
+        assert!(count_suggestions.contains(&"max_table_elements".to_string()));
+        assert!(!count_suggestions.contains(&"UNBRANCHED".to_string()));
+
+        let branch_prefix = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
+                             'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 0 ";
+        let branch_suggestions = suggest_create_wasm_processor(branch_prefix, branch_prefix.len());
+        assert!(branch_suggestions.contains(&"UNBRANCHED".to_string()));
+        assert!(!branch_suggestions.contains(&"MAX TABLE ELEMENTS".to_string()));
     }
 
     #[test]
@@ -397,7 +446,7 @@ mod tests {
             CREATE WASM PROCESSOR route_wasm
                 FROM incoming
                 USING RESOURCE wasm_resource VERSION 1 FILE 'processor.wasm'
-                MAX FUEL 1000000000 MAX MEMORY 64MiB
+                MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096
                 UNBRANCHED
                 TO accepted ON MESSAGE ERROR IGNORE
                 TO rejected ON MESSAGE ERROR LOG
@@ -419,8 +468,8 @@ mod tests {
     #[test]
     fn parses_the_rejected_state_policy_and_defaults_it_to_preserving_state() {
         let without_clause = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
-                              'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE \
-                              ERROR LOG ON GLOBAL ERROR LOG;";
+                              'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 \
+                              UNBRANCHED TO b ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         let parsed = parse_create_wasm_processor(without_clause).expect("parse should work");
         assert_eq!(
             parsed.rejected_state_policy,
@@ -436,8 +485,8 @@ mod tests {
         ] {
             let input = format!(
                 "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
-                 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG {clause} ON GLOBAL \
-                 ERROR LOG;"
+                 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON MESSAGE ERROR \
+                 LOG {clause} ON GLOBAL ERROR LOG;"
             );
             let parsed = parse_create_wasm_processor(&input).expect("parse should work");
             assert_eq!(parsed.rejected_state_policy, expected);
@@ -448,13 +497,14 @@ mod tests {
     fn rejects_a_rejected_state_policy_that_is_not_one_of_the_two_answers() {
         for input in [
             "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
-             1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE IGNORE \
-             ON GLOBAL ERROR LOG;",
+             1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON MESSAGE ERROR LOG \
+             ON REJECTED STATE IGNORE ON GLOBAL ERROR LOG;",
             "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
-             1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE ON \
-             GLOBAL ERROR LOG;",
+             1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON MESSAGE ERROR LOG \
+             ON REJECTED STATE ON GLOBAL ERROR LOG;",
             "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX FUEL \
-             1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE RESET;",
+             1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON MESSAGE ERROR LOG \
+             ON REJECTED STATE RESET;",
         ] {
             assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
         }
@@ -463,22 +513,23 @@ mod tests {
     #[test]
     fn completes_the_rejected_state_policy_beside_the_global_error_policy() {
         let prefix = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX \
-                      FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ";
+                      FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON \
+                      MESSAGE ERROR LOG ";
         let suggestions = suggest_create_wasm_processor(prefix, prefix.len());
         assert!(suggestions.contains(&"ON REJECTED STATE".to_string()));
         assert!(suggestions.contains(&"ON".to_string()));
 
         let policy_prefix = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
-                             'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE \
-                             ERROR LOG ON REJECTED STATE ";
+                             'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 \
+                             UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE ";
         let policy_suggestions = suggest_create_wasm_processor(policy_prefix, policy_prefix.len());
         assert!(policy_suggestions.contains(&"PRESERVE".to_string()));
         assert!(policy_suggestions.contains(&"RESET".to_string()));
         assert!(!policy_suggestions.contains(&"LOG".to_string()));
 
         let after_policy = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE \
-                            'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE \
-                            ERROR LOG ON REJECTED STATE RESET ";
+                            'p.wasm' MAX FUEL 1000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 \
+                            UNBRANCHED TO b ON MESSAGE ERROR LOG ON REJECTED STATE RESET ";
         let after_suggestions = suggest_create_wasm_processor(after_policy, after_policy.len());
         assert!(after_suggestions.contains(&"ON".to_string()));
         assert!(!after_suggestions.contains(&"ON REJECTED STATE".to_string()));
@@ -487,16 +538,17 @@ mod tests {
     #[test]
     fn rejects_values_block() {
         let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX \
-                     FUEL 1000000000 MAX MEMORY 64MiB BRANCHED BY tenant_branch VALUES { tenant = \
-                     input.tenant } TO b ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 BRANCHED BY \
+                     tenant_branch VALUES { tenant = input.tenant } TO b ON MESSAGE ERROR LOG ON \
+                     GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 
     #[test]
     fn rejects_flush_policy() {
         let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX \
-                     FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO b FLUSH IMMEDIATE ON MESSAGE \
-                     ERROR LOG ON GLOBAL ERROR LOG;";
+                     FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b \
+                     FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 
@@ -506,7 +558,7 @@ mod tests {
             CREATE WASM PROCESSOR filter_even
             FROM raw_orders FILTER WHERE input.value >= 0
             USING RESOURCE wasm_filters VERSION 1 FILE 'processors/filter_even.wasm'
-            MAX FUEL 1000000000 MAX MEMORY 64MiB
+            MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096
             UNBRANCHED
             TO even_orders SET value = value WHERE output.value = output.value ON MESSAGE ERROR LOG
             TO other_orders SET bucket = "fallback" ON MESSAGE ERROR LOG
@@ -530,8 +582,8 @@ mod tests {
     #[test]
     fn parses_unconditional_output_route() {
         let input = "CREATE WASM PROCESSOR p FROM a USING RESOURCE r VERSION 1 FILE 'p.wasm' MAX \
-                     FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO b ON MESSAGE ERROR LOG ON \
-                     GLOBAL ERROR LOG;";
+                     FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO b ON \
+                     MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         let tokens = to_tokens(input);
         let parsed =
             parse_create_wasm_processor_tokens(&tokens).expect("unconditional TO should parse");
@@ -546,8 +598,9 @@ mod tests {
     #[test]
     fn parses_output_route_with_set_but_no_where() {
         let input = "CREATE WASM PROCESSOR p FROM source USING RESOURCE r VERSION 1 FILE 'p.wasm' \
-                     MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO out1 SET name = \
-                     lower(name), surname = surname ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO \
+                     out1 SET name = lower(name), surname = surname ON MESSAGE ERROR LOG ON \
+                     GLOBAL ERROR LOG;";
         let tokens = to_tokens(input);
         let parsed = parse_create_wasm_processor_tokens(&tokens)
             .expect("TO with SET and no WHERE should parse");
@@ -563,8 +616,8 @@ mod tests {
     #[test]
     fn rejects_output_route_with_unset() {
         let input = "CREATE WASM PROCESSOR p FROM input USING RESOURCE r VERSION 1 FILE 'p.wasm' \
-                     MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO out1 UNSET legacy ON \
-                     MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
+                     MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO \
+                     out1 UNSET legacy ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;";
         assert!(parse_create_wasm_processor_tokens(&to_tokens(input)).is_err());
     }
 }

@@ -76,8 +76,10 @@ pub(in crate::runtime) struct RuntimeInner {
     /// starts and persisted ownership-handoff activation take the same lock so they observe a
     /// schedule that is not half applied.
     pub(in crate::runtime) schedule_application: Mutex<ScheduleApplication>,
+    /// The committed schedule each domain's execution runs, as the test-only application paths
+    /// record it in place of the control plane.
     #[cfg(test)]
-    pub(in crate::runtime) test_applied_schedule: ArcSwapOption<ClusterSchedule>,
+    pub(in crate::runtime) test_installed_schedule: Mutex<crate::registry::InstalledSchedule>,
     pub(in crate::runtime) domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
     pub(in crate::runtime) domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
     /// How many times this node has installed the committed domain states since it started. An

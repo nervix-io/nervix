@@ -2378,6 +2378,36 @@ budget. Starting a new silence window after an HTTP response would reject a vali
 collection or flush deadline elapsed while the harness awaited that response. The production
 owner's timing checks retain the independent branch-deadline assertions.
 
+Each lower bound such an assertion measures is an upper bound in the product. A route's flush, an
+input collection, a WASM guest's buffering, an ingestor's batch timeout and an emitter's retry
+backoff each hold a row no longer than their cadence, and anything that forces a flush sends it
+sooner. Every node applies a failover, a forced recovery, a move or an alteration as a newer
+runtime revision, and a node that applies one moving or replacing units of a domain force-flushes
+the whole domain. A loaded runner can make a node miss its health probes during a hold, so a
+three-node outline can meet such a failover while a node holds the row it measures. An outline
+whose lower bound a forced flush can cut short therefore records, with `the runtime revision each
+node applied is recorded`, what every node applied before it publishes, and its bound ends with
+`unless a node applied a newer runtime revision`. A row that arrives before such a bound passes
+only once a node shows, in the application progress it answers for its own incarnation, that it
+prepared or failed to prepare a revision newer than the one recorded for it, or that it answers
+under another incarnation. A node shows the revision only after the flush it forced, so the step
+waits for it for one status wait. Each look asks every node at once, a node that does not answer
+within one status request is left out of that look, and a step that sees no newer revision fails
+with what each node last answered. The input collection outline's count of junction batches takes
+the same suffix, since a forced flush splits a collection into more batches. A bound without the
+suffix still refuses every early row, as the window processor outlines' bounds do: a forced flush
+releases a window's route buffers but never closes a window before its width.
+
+`Each processor output owns its flush policy` reads its immediate and its delayed row with two
+publication-relative steps. A forced flush can send the delayed row first, so each of those steps
+keeps a row it reads past with the instant it read it, and the other step judges that row from
+that instant. `A forced recovery during the hold sends the delayed output's row early, which its
+lower bound accepts` makes that failover happen on demand. Node-1, cordoned, runs the junction and
+its delayed relay while node-3 runs the immediate relay; failing node-1's health probes to node-3,
+or stopping node-3, moves the immediate relay to node-2, and node-1 flushes the delayed row when it
+applies that recovery, well before the route's 40-second cadence. With the bound written without
+its suffix, the same outline fails on that early row.
+
 The WASM reset outline `Reset drains accepted buffered output once and cancels the old branch
 timer` starts a bounded receipt observation before posting the fresh alpha input. The observer
 owns the subscription session on a runtime worker and confirms its first poll before publication.
