@@ -631,8 +631,13 @@ Feature: Entity labels through faults and recovery
       RELOCATE RELAY labelled_events ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
     Given client "editor" is connected to node "{{leader}}"
+    # The verdict that marks the owner unavailable also starts failover, which moves the relay on
+    # the leader's next scheduling pass. The move is held once its destination is prepared, so the
+    # edits run while the owner is down without racing it.
+    And the first forced recovery publication is paused
     When node "{{owner}}" is stopped
     Then within "60s" node "{{leader}}" eventually reports status containing "raft member '{{owner}}' is marked unavailable"
+    And the first forced recovery publication reaches its pause
     When client "editor" executes these Plexus commands
       """
       SET LABELS ON SCHEMA labelled_event { 'owner' = 'Platform' };
@@ -655,6 +660,9 @@ Feature: Entity labels through faults and recovery
       """
       /labels = {"owner": "Platform", "unit": "kept"}
       """
+    # Placement changes through failover, never through the edits.
+    When the first forced recovery publication is released
+    Then within "60s" node "{{leader}}" eventually reports scheduled "relay" "labelled_events" owner different from placeholder "owner"
     When node "{{owner}}" is started
     Given client "returned" is connected to node "{{owner}}"
     When client "returned" executes these Plexus commands
