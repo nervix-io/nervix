@@ -1275,24 +1275,7 @@ impl RestoredMaterializedSnapshot {
         let metadata_bytes = layout.metadata_bytes.max(1);
         let share = match share {
             Some(share) => share,
-            None => {
-                let capacity = executor.memory(MemoryClass::StateRead).capacity_bytes;
-                match cursor.scanned_retained_bytes(header.groups, section_limit) {
-                    // A container in memory declares exactly what its sections keep, so its open
-                    // takes exactly that share and never runs again. A total past `u64` is past
-                    // the class too, so it takes the whole class.
-                    Some(sections) => match metadata_bytes.checked_add(sections) {
-                        Some(total) => total.min(capacity),
-                        None => capacity,
-                    },
-                    None => RetainedShare::first(
-                        metadata_bytes,
-                        cursor.remaining(),
-                        header.groups,
-                        capacity,
-                    ),
-                }
-            }
+            None => Self::first_share(executor, cursor, &header, metadata_bytes, section_limit),
         };
         let mut retained = RetainedShare::reserve(executor, share.max(metadata_bytes)).await?;
         // Admit the row views and uniqueness table before either grows. The columns become
@@ -1372,37 +1355,7 @@ impl RestoredMaterializedSnapshot {
                 )
             })?;
             cursor.give_back(scratch)?;
-            let batch = Arc::new(batch);
-            if identities.identities.len() != batch.batch().num_rows() {
-                return Err(Report::new(MaterializedSnapshotError::LengthMismatch {
-                    declared: identities.identities.len(),
-                    actual: batch.batch().num_rows(),
-                }));
-            }
-            let record_count = records
-                .len()
-                .checked_add(identities.identities.len())
-                .ok_or_else(|| {
-                    MaterializedSnapshotError::decoding(
-                        "materialized record count is unaddressable",
-                    )
-                })?;
-            if record_count > layout.records {
-                return Err(MaterializedSnapshotError::decoding(
-                    "materialized records exceed their declared count",
-                ));
-            }
-            for (row, identity) in identities.identities.into_iter().enumerate() {
-                let branch = BranchKey::from_remote_key(identity.branch).change_context(
-                    MaterializedSnapshotError::Decode {
-                        reason: "a record identity carries an invalid branch key".to_string(),
-                    },
-                )?;
-                let metadata = RuntimeRecordMetadata::from_remote(identity.watermarks);
-                let row = RuntimeRow::new(batch.clone(), row, metadata)
-                    .map_err(MaterializedSnapshotError::decoding)?;
-                records.push(RestoredMaterializedRecord { branch, row });
-            }
+            Self::append_group_records(&mut records, identities, Arc::new(batch), layout.records)?;
         }
         let restored: u64 = records.len().arch_into();
         if restored != header.records {
@@ -1422,6 +1375,69 @@ impl RestoredMaterializedSnapshot {
             _metadata_charge: Arc::new(metadata_charge),
             _columns_charge: Arc::new(column_charges),
         }))
+    }
+
+    /// The share a first attempt takes: exactly what a container in memory declares its sections
+    /// keep, or what the size of a container read from storage suggests, within the class.
+    fn first_share(
+        executor: &Executor,
+        cursor: &SealedSource<'_>,
+        header: &SealedSnapshotHeader,
+        metadata_bytes: u64,
+        section_limit: u64,
+    ) -> u64 {
+        let capacity = executor.memory(MemoryClass::StateRead).capacity_bytes;
+        match cursor.scanned_retained_bytes(header.groups, section_limit) {
+            // A container in memory declares exactly what its sections keep, so its open takes
+            // exactly that share and never runs again. A total past `u64` is past the class too, so
+            // it takes the whole class.
+            Some(sections) => match metadata_bytes.checked_add(sections) {
+                Some(total) => total.min(capacity),
+                None => capacity,
+            },
+            None => {
+                RetainedShare::first(metadata_bytes, cursor.remaining(), header.groups, capacity)
+            }
+        }
+    }
+
+    /// Append one group's records, each a row of `batch` under its identity's branch, refusing a
+    /// group whose identities and rows disagree or that passes the `declared` record count.
+    fn append_group_records(
+        records: &mut Vec<RestoredMaterializedRecord>,
+        identities: SealedRecordIdentities,
+        batch: Arc<RuntimeRecordBatch>,
+        declared: usize,
+    ) -> Result<(), Report<MaterializedSnapshotError>> {
+        if identities.identities.len() != batch.batch().num_rows() {
+            return Err(Report::new(MaterializedSnapshotError::LengthMismatch {
+                declared: identities.identities.len(),
+                actual: batch.batch().num_rows(),
+            }));
+        }
+        let record_count = records
+            .len()
+            .checked_add(identities.identities.len())
+            .ok_or_else(|| {
+                MaterializedSnapshotError::decoding("materialized record count is unaddressable")
+            })?;
+        if record_count > declared {
+            return Err(MaterializedSnapshotError::decoding(
+                "materialized records exceed their declared count",
+            ));
+        }
+        for (row, identity) in identities.identities.into_iter().enumerate() {
+            let branch = BranchKey::from_remote_key(identity.branch).change_context(
+                MaterializedSnapshotError::Decode {
+                    reason: "a record identity carries an invalid branch key".to_string(),
+                },
+            )?;
+            let metadata = RuntimeRecordMetadata::from_remote(identity.watermarks);
+            let row = RuntimeRow::new(batch.clone(), row, metadata)
+                .map_err(MaterializedSnapshotError::decoding)?;
+            records.push(RestoredMaterializedRecord { branch, row });
+        }
+        Ok(())
     }
 
     /// The most bulk scratch a decoder of a container of `length` bytes takes for one section:
