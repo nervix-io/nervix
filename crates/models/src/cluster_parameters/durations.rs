@@ -166,29 +166,36 @@ impl SettingDefinition for StateSnapshotInterval {
     }
 }
 
+/// How long compiling one Roto UDF and running its `test` blocks may take on the node that
+/// compiles it. This is cluster policy because exceeding it refuses the statement that declares the
+/// function; the verdict remains the compiling node's own wall-clock measurement.
+pub struct UdfCompileBudget;
+
+impl SettingDefinition for UdfCompileBudget {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ();
+    type Error = ClusterParameterError;
+
+    const NAME: &'static str = "udf-compile-budget";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(10)
+    }
+
+    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
+        ClusterParameterKey::UdfCompileBudget.validate_duration(*value)
+    }
+}
+
 impl DomainDrainTimeout {
     /// The compile-time source of this setting definition's default.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the setting definition owns this compile-time default, not an additional \
-                      policy input"
-        )
-    )]
     pub const DEFAULT: Duration = Duration::from_secs(30);
 }
 
 impl StateSnapshotInterval {
     /// The compile-time source of this setting definition's default.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the setting definition owns this compile-time default, not an additional \
-                      policy input"
-        )
-    )]
     pub const DEFAULT: Duration = Duration::from_secs(30);
 }
 

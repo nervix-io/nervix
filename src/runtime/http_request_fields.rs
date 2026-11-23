@@ -549,6 +549,7 @@ impl CompiledHttpRequestFields {
     pub(in crate::runtime) async fn prepare(
         &self,
         executor: &Executor,
+        ack_timing: &SharedRemoteAckTiming,
         emitter: &EmitterName,
         mut published: RelayRecordBatch,
         evaluation: HttpRequestEvaluation<'_>,
@@ -587,6 +588,7 @@ impl CompiledHttpRequestFields {
             ProgramRun {
                 executor,
                 now: execution_now,
+                ack_timing,
             },
             &self.program,
             FilterMapBatchInputs {
@@ -1208,6 +1210,7 @@ mod tests {
         let prepared = compiled
             .prepare(
                 &Executor::default(),
+                &SharedRemoteAckTiming::default(),
                 &named("deliver"),
                 batch,
                 HttpRequestEvaluation {
@@ -1404,6 +1407,7 @@ mod tests {
         let prepared = compiled
             .prepare(
                 &Executor::default(),
+                &SharedRemoteAckTiming::default(),
                 &named("deliver"),
                 published,
                 HttpRequestEvaluation {

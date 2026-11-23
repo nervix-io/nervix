@@ -15,8 +15,32 @@
 
 use nervix_primitives::sync::atomic::{AtomicU8, Ordering};
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed admission choice byte records a pending attempt as a value distinct \
+                  from admitted and cancelled"
+    )
+)]
 const PENDING: u8 = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed admission choice byte records runtime admission as a value distinct \
+                  from pending and cancelled"
+    )
+)]
 const ADMITTED: u8 = 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed admission choice byte records cancellation as a value distinct from \
+                  pending and admitted"
+    )
+)]
 const CANCELLED: u8 = 2;
 
 pub(super) struct AdmissionChoice {

@@ -144,6 +144,7 @@ impl Runtime {
                 interconnect_request_timeout,
                 connector_host: settings.connector_host,
                 vm_settings: settings.vm,
+                udf_settings: settings.udf,
                 inspection_instances: AtomicU64::new(0),
                 inspection_settings: settings.inspection,
                 dns,
@@ -508,6 +509,19 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_standalone_transaction_if_armed(node, domain, boundary)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_start_placement_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::StartPlacementBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_start_placement_if_armed(node, domain, boundary)
             .await;
     }
 

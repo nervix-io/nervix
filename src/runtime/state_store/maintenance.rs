@@ -20,8 +20,6 @@
 use super::{generation::*, *};
 use crate::metrics::RestoreStagingObservation;
 
-pub(crate) const DEFAULT_RESTORE_STAGING_MAX_BYTES: u64 = 128 * 1024 * 1024 * 1024;
-
 #[derive(Clone, Copy)]
 enum MaintenanceKeyspace {
     Latest,
@@ -448,8 +446,10 @@ mod staged_usage_properties;
 )]
 pub(in crate::runtime::state_store) mod tests {
     use nervix_interconnect::backup::RestoreStateInventory;
+    use nervix_models::SettingDefinition as _;
 
     use super::*;
+    use crate::runtime::RestoreStagingMaxBytes;
 
     pub(super) fn store(path: &std::path::Path, limit: u64) -> RuntimeStateStore {
         RuntimeStateStore::from_database(
@@ -514,7 +514,10 @@ pub(in crate::runtime::state_store) mod tests {
     #[test]
     fn quota_measures_all_checkpoint_keys_and_exact_retry_reuses_its_allowance() {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let mut store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let mut store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let checkpoint = placement("orders");
         let payload = vec![7; RESTORE_STATE_CHUNK_BYTES * 2 + 13];
         stage(&store, 19, &checkpoint, &payload);
@@ -559,7 +562,10 @@ pub(in crate::runtime::state_store) mod tests {
     fn partial_chunks_without_a_receipt_are_accounted_and_reclaimed_after_reopen() {
         let directory = tempfile::tempdir().assured("the test directory opens");
         let checkpoint = placement("orders");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let payload = vec![9; RESTORE_STATE_CHUNK_BYTES * 2];
         let Err(error) = store.stage_restored_checkpoint(
             &authority(19),
@@ -592,7 +598,10 @@ pub(in crate::runtime::state_store) mod tests {
             .persist(PersistMode::SyncAll)
             .assured("partial chunks are durable");
         drop(store);
-        let reopened = self::store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let reopened = self::store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         assert_eq!(observe(&reopened).staged_bytes, usage.staged_bytes);
         let swept = reopened
             .reclaim_restore_staging(|_, _| false, || Ok(()))
@@ -604,7 +613,10 @@ pub(in crate::runtime::state_store) mod tests {
     #[test]
     fn reclamation_preserves_publication_live_generations_and_snapshot_readers() {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let checkpoint = placement("orders");
         let initial = placement("another");
         store
@@ -684,7 +696,10 @@ pub(in crate::runtime::state_store) mod tests {
     #[test]
     fn interrupted_bounded_reclamation_resumes_from_remaining_keys_after_restart() {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let checkpoint = placement("orders");
         let key = StateNamespace::Restored(19)
             .key(&checkpoint)
@@ -729,7 +744,10 @@ pub(in crate::runtime::state_store) mod tests {
             .persist(PersistMode::SyncAll)
             .assured("partial deletion persists");
         drop(store);
-        let reopened = self::store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let reopened = self::store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let completed = reopened
             .reclaim_restore_staging(|_, _| false, || Ok(()))
             .assured("restart resumes bounded deletion");
@@ -741,7 +759,10 @@ pub(in crate::runtime::state_store) mod tests {
     #[test]
     fn cancelled_maintenance_and_unrepresentable_admission_preserve_the_store() {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let checkpoint = placement("orders");
         stage(&store, 19, &checkpoint, b"retained");
         let before = observe(&store);
@@ -813,11 +834,17 @@ pub(in crate::runtime::state_store) mod tests {
         let directory = tempfile::tempdir().assured("the test directory opens");
         let retained = placement("retained");
         let retained_payload = vec![3; RESTORE_STATE_CHUNK_BYTES * 32];
-        let staged = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let staged = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         stage(&staged, 19, &retained, &retained_payload);
         drop(staged);
         // A node that starts knows nothing yet of what its database holds unpublished.
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let retained_keys = 32 + 3;
 
         let mut first_units = 0_u64;
@@ -891,7 +918,10 @@ pub(in crate::runtime::state_store) mod tests {
     #[test]
     fn a_kept_measurement_stays_exact_through_retries_failures_publication_and_reclamation() {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let orders = placement("orders");
         let payload = vec![7; RESTORE_STATE_CHUNK_BYTES + 5];
         stage(&store, 19, &orders, &payload);
@@ -969,7 +999,10 @@ pub(in crate::runtime::state_store) mod tests {
     fn malformed_namespace_names_fail_accounting_with_their_typed_cause() {
         for byte in [b'!', 0xff, b'O'] {
             let directory = tempfile::tempdir().assured("the test directory opens");
-            let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+            let store = store(
+                directory.path(),
+                RestoreStagingMaxBytes::default_value(&()).as_u64(),
+            );
             let mut key = StateNamespace::Restored(19)
                 .key(&placement("orders"))
                 .assured("the current placement encodes");
@@ -1007,7 +1040,10 @@ pub(in crate::runtime::state_store) mod tests {
     #[test]
     fn maintenance_work_tracks_namespaces_in_a_published_store() {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let checkpoint = placement("orders");
         let payload = vec![7; RESTORE_STATE_CHUNK_BYTES * 256];
         stage(&store, 19, &checkpoint, &payload);

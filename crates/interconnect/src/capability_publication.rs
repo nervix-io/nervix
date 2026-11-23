@@ -104,6 +104,11 @@ mod tests {
                             nervix_arbitrary::Domain::Vocabulary,
                         )
                         .node_connector_host_capabilities(),
+                        membership: nervix_arbitrary::Arbitrary::new(
+                            &[],
+                            nervix_arbitrary::Domain::Vocabulary,
+                        )
+                        .node_membership_capabilities(),
                         listeners: nervix_arbitrary::Arbitrary::new(
                             &[],
                             nervix_arbitrary::Domain::Vocabulary,

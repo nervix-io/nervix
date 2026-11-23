@@ -145,8 +145,23 @@ enum Waited {
     Closed,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed watch state keeps its closed flag in the lowest bit"
+    )
+)]
 const CLOSED: usize = 1;
-const VERSION_STEP: usize = 2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the packed watch state counts versions in the bits above its closed flag, so a \
+                  send adds the lowest of them"
+    )
+)]
+const VERSION_STEP: usize = CLOSED << 1;
 
 impl State {
     fn load(&self) -> Snapshot {

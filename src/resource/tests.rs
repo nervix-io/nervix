@@ -758,3 +758,27 @@ fn resolve_content_path_rejects_parent_segments() {
         ResourceStoreError::InvalidResourcePath
     ));
 }
+
+/// A checksum's text for no bytes, for no bit set, every bit set, and every hexadecimal digit in
+/// both halves of a byte.
+#[test]
+fn encode_hex_writes_fixed_digests_as_lowercase_hexadecimal() {
+    let every_digit = [
+        0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+        0x32, 0x10, 0x0f, 0xf0, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96, 0xa5, 0xb4,
+        0xc3, 0xd2,
+    ];
+    assert_eq!(encode_hex(&[]), "");
+    assert_eq!(
+        encode_hex(&[0x00; 32]),
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    );
+    assert_eq!(
+        encode_hex(&[0xff; 32]),
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    );
+    assert_eq!(
+        encode_hex(&every_digit),
+        "000123456789abcdeffedcba98765432100ff01e2d3c4b5a69788796a5b4c3d2"
+    );
+}

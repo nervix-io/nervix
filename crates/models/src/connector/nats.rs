@@ -69,6 +69,14 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 };
 
 /// The longest queue group Nervix joins, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual publishes 1 to 255 bytes as the NATS queue-group rule \
+                  CREATE and ALTER apply"
+    )
+)]
 const NATS_QUEUE_GROUP_MAX: usize = 255;
 /// The longest stream or consumer name a JetStream server admits, in bytes.
 #[cfg_attr(

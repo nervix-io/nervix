@@ -145,9 +145,14 @@ pub enum ClientError {
     },
     #[error("retry-backoff must not exceed retry-max-backoff")]
     InvalidRetryBackoff,
+    #[error("restoration-backoff must not exceed restoration-max-backoff")]
+    InvalidRestorationBackoff,
     #[error("derived subscription retention must fit addressable memory")]
     InvalidSubscriptionRetention,
-    #[error("{count} configured seed servers exceeds the limit of 32")]
+    #[error(
+        "{count} configured seed servers exceeds the limit of {limit}",
+        limit = crate::connection::ConnectOptions::MAX_SEED_SERVERS
+    )]
     TooManySeedServers { count: usize },
     #[error("TLS is required but the server URI is not https")]
     TlsRequired,

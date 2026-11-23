@@ -41,6 +41,12 @@ pub(crate) struct ConnectionArgs {
     /// Ceiling for doubled reconnect and recovery delays.
     #[arg(long = client_caps::ClientRetryMaxBackoff::NAME, env = "NERVIX_CLI_RETRY_MAX_BACKOFF", global = true, default_value = humantime::format_duration(client_caps::ClientRetryMaxBackoff::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
     pub(crate) retry_max_backoff: Duration,
+    /// First wait before a restoration the new session refused is sent again on it.
+    #[arg(long = client_caps::ClientRestorationBackoff::NAME, env = "NERVIX_CLI_RESTORATION_BACKOFF", global = true, default_value = humantime::format_duration(client_caps::ClientRestorationBackoff::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
+    pub(crate) restoration_backoff: Duration,
+    /// Ceiling for doubled restoration waits.
+    #[arg(long = client_caps::ClientRestorationMaxBackoff::NAME, env = "NERVIX_CLI_RESTORATION_MAX_BACKOFF", global = true, default_value = humantime::format_duration(client_caps::ClientRestorationMaxBackoff::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
+    pub(crate) restoration_max_backoff: Duration,
     /// Events retained per subscription.
     #[arg(long = client_caps::ClientSubscriptionRecordCapacity::NAME, env = "NERVIX_CLI_SUBSCRIPTION_RECORD_CAPACITY", global = true, default_value = client_caps::ClientSubscriptionRecordCapacity::default_value(&()).to_string())]
     pub(crate) subscription_record_capacity: NonZeroUsize,
@@ -56,6 +62,16 @@ pub(crate) struct ConnectionArgs {
     /// Outbound restore frames queued before backpressure.
     #[arg(long = client_caps::ClientRestoreFrameCapacity::NAME, env = "NERVIX_CLI_RESTORE_FRAME_CAPACITY", global = true, default_value = client_caps::ClientRestoreFrameCapacity::default_value(&()).to_string())]
     pub(crate) restore_frame_capacity: NonZeroUsize,
+    /// Outbound request frames of one session queued before backpressure.
+    #[arg(long = client_caps::ClientRequestFrameCapacity::NAME, env = "NERVIX_CLI_REQUEST_FRAME_CAPACITY", global = true, default_value = client_caps::ClientRequestFrameCapacity::default_value(&()).to_string())]
+    pub(crate) request_frame_capacity: NonZeroUsize,
+    /// Server notices retained until they are read.
+    #[arg(long = client_caps::ClientNoticeCapacity::NAME, env = "NERVIX_CLI_NOTICE_CAPACITY", global = true, default_value = client_caps::ClientNoticeCapacity::default_value(&()).to_string())]
+    pub(crate) notice_capacity: NonZeroUsize,
+    /// Bytes of server notices retained until they are read, each notice charged its text and
+    /// in-memory header.
+    #[arg(long = client_caps::ClientNoticeBytes::NAME, env = "NERVIX_CLI_NOTICE_BYTES", global = true, default_value = client_caps::ClientNoticeBytes::default_value(&()).to_string())]
+    pub(crate) notice_bytes: NonZeroUsize,
     /// How long a connection with a call open may go without hearing from the node before it is
     /// pinged.
     #[arg(long = client_caps::ClientKeepaliveInterval::NAME, env = "NERVIX_CLI_KEEPALIVE_INTERVAL", global = true, default_value = humantime::format_duration(client_caps::ClientKeepaliveInterval::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
@@ -80,11 +96,16 @@ impl ConnectionArgs {
             backup_wait_timeout: self.backup_wait_timeout,
             retry_backoff: self.retry_backoff,
             retry_max_backoff: self.retry_max_backoff,
+            restoration_backoff: self.restoration_backoff,
+            restoration_max_backoff: self.restoration_max_backoff,
             subscription_record_capacity: self.subscription_record_capacity,
             subscription_retained_frames: self.subscription_retained_frames,
             subscriptions_retained_in_full: self.subscriptions_retained_in_full,
             upload_frame_capacity: self.upload_frame_capacity,
             restore_frame_capacity: self.restore_frame_capacity,
+            request_frame_capacity: self.request_frame_capacity,
+            notice_capacity: self.notice_capacity,
+            notice_bytes: self.notice_bytes,
             keepalive_interval: self.keepalive_interval,
             keepalive_timeout: self.keepalive_timeout,
             stream_window_bytes: self.stream_window_bytes,
@@ -122,6 +143,14 @@ impl ConnectionArgs {
                 humantime::format_duration(self.retry_max_backoff).to_string(),
             ),
             (
+                client_caps::ClientRestorationBackoff::NAME,
+                humantime::format_duration(self.restoration_backoff).to_string(),
+            ),
+            (
+                client_caps::ClientRestorationMaxBackoff::NAME,
+                humantime::format_duration(self.restoration_max_backoff).to_string(),
+            ),
+            (
                 client_caps::ClientSubscriptionRecordCapacity::NAME,
                 self.subscription_record_capacity.to_string(),
             ),
@@ -140,6 +169,18 @@ impl ConnectionArgs {
             (
                 client_caps::ClientRestoreFrameCapacity::NAME,
                 self.restore_frame_capacity.to_string(),
+            ),
+            (
+                client_caps::ClientRequestFrameCapacity::NAME,
+                self.request_frame_capacity.to_string(),
+            ),
+            (
+                client_caps::ClientNoticeCapacity::NAME,
+                self.notice_capacity.to_string(),
+            ),
+            (
+                client_caps::ClientNoticeBytes::NAME,
+                self.notice_bytes.to_string(),
             ),
             (
                 client_caps::ClientKeepaliveInterval::NAME,
@@ -193,6 +234,8 @@ mod tests {
         let backup_wait_timeout = duration();
         let retry_backoff = duration();
         let retry_max_backoff = duration().max(retry_backoff);
+        let restoration_backoff = duration();
+        let restoration_max_backoff = duration().max(restoration_backoff);
         let keepalive_interval = duration();
         let keepalive_timeout = duration();
         let mut capacity = || {
@@ -207,6 +250,16 @@ mod tests {
         let subscriptions_retained_in_full = capacity();
         let upload_frame_capacity = capacity();
         let restore_frame_capacity = capacity();
+        let request_frame_capacity = capacity();
+        let notice_capacity = capacity();
+        // Every positive notice byte bound is valid, so the bound reaches the largest usize.
+        let largest_bytes =
+            u64::try_from(usize::MAX).assured("supported targets address at most 64 bits");
+        let notice_bytes = NonZeroUsize::new(
+            usize::try_from(entropy.boundary_biased(1..=largest_bytes))
+                .verified("the drawn bound is at most usize::MAX"),
+        )
+        .assured("generated byte bounds are positive");
         // Every window from the smallest each takes through the HTTP/2 maximum is valid.
         let largest_window = u64::from(client_caps::LARGEST_RECEIVE_WINDOW_BYTES);
         let mut window = |smallest: u32| {
@@ -223,11 +276,16 @@ mod tests {
             backup_wait_timeout,
             retry_backoff,
             retry_max_backoff,
+            restoration_backoff,
+            restoration_max_backoff,
             subscription_record_capacity,
             subscription_retained_frames,
             subscriptions_retained_in_full,
             upload_frame_capacity,
             restore_frame_capacity,
+            request_frame_capacity,
+            notice_capacity,
+            notice_bytes,
             keepalive_interval,
             keepalive_timeout,
             stream_window_bytes,
@@ -248,6 +306,51 @@ mod tests {
         let actual = nervix_client_core::ClientCapabilities::from_options(&read.connect_options())
             .assured("parsed capabilities validate");
         assert_eq!(actual, expected);
+        // The projection carries every flag into its own capability.
+        assert_eq!(actual.connect_timeout(), connection.connect_timeout);
+        assert_eq!(actual.request_timeout(), connection.request_timeout);
+        assert_eq!(actual.retry_timeout(), connection.retry_timeout);
+        assert_eq!(actual.backup_wait_timeout(), connection.backup_wait_timeout);
+        assert_eq!(actual.retry_backoff(), connection.retry_backoff);
+        assert_eq!(actual.retry_max_backoff(), connection.retry_max_backoff);
+        assert_eq!(actual.restoration_backoff(), connection.restoration_backoff);
+        assert_eq!(
+            actual.restoration_max_backoff(),
+            connection.restoration_max_backoff
+        );
+        assert_eq!(
+            actual.subscription_record_capacity(),
+            connection.subscription_record_capacity
+        );
+        assert_eq!(
+            actual.subscription_retained_frames(),
+            connection.subscription_retained_frames
+        );
+        assert_eq!(
+            actual.subscriptions_retained_in_full(),
+            connection.subscriptions_retained_in_full
+        );
+        assert_eq!(
+            actual.upload_frame_capacity(),
+            connection.upload_frame_capacity
+        );
+        assert_eq!(
+            actual.restore_frame_capacity(),
+            connection.restore_frame_capacity
+        );
+        assert_eq!(
+            actual.request_frame_capacity(),
+            connection.request_frame_capacity
+        );
+        assert_eq!(actual.notice_capacity(), connection.notice_capacity);
+        assert_eq!(actual.notice_bytes(), connection.notice_bytes);
+        assert_eq!(actual.keepalive_interval(), connection.keepalive_interval);
+        assert_eq!(actual.keepalive_timeout(), connection.keepalive_timeout);
+        assert_eq!(actual.stream_window_bytes(), connection.stream_window_bytes);
+        assert_eq!(
+            actual.connection_window_bytes(),
+            connection.connection_window_bytes
+        );
     }
 
     #[test]
@@ -281,21 +384,31 @@ mod tests {
         for pair in arguments.as_chunks::<2>().0 {
             assert!(help.contains(&pair[0]), "help contains {}", pair[0]);
         }
-        let invalid = Options::try_parse_from([
-            "nervix-cli",
-            "--retry-backoff",
-            "2s",
-            "--retry-max-backoff",
-            "1s",
-        ])
-        .assured("both durations parse");
-        assert!(
-            nervix_client_core::ClientCapabilities::from_options(
-                &invalid.connection.connect_options()
-            )
-            .is_err()
-        );
-        assert!(Options::try_parse_from(["nervix-cli", "--upload-frame-capacity", "0"]).is_err());
+        for (base, ceiling) in [
+            ("--retry-backoff", "--retry-max-backoff"),
+            ("--restoration-backoff", "--restoration-max-backoff"),
+        ] {
+            let invalid = Options::try_parse_from(["nervix-cli", base, "2s", ceiling, "1s"])
+                .assured("both durations parse");
+            assert!(
+                nervix_client_core::ClientCapabilities::from_options(
+                    &invalid.connection.connect_options()
+                )
+                .is_err(),
+                "{base} above {ceiling} is refused"
+            );
+        }
+        for capacity in [
+            "--upload-frame-capacity",
+            "--request-frame-capacity",
+            "--notice-capacity",
+            "--notice-bytes",
+        ] {
+            assert!(
+                Options::try_parse_from(["nervix-cli", capacity, "0"]).is_err(),
+                "{capacity} refuses zero"
+            );
+        }
         assert!(Options::try_parse_from(["nervix-cli", "--stream-window-bytes", "0"]).is_err());
         let narrow = Options::try_parse_from(["nervix-cli", "--connection-window-bytes", "65534"])
             .assured("a positive window parses");
@@ -324,5 +437,18 @@ mod tests {
             defaults.connection_window_bytes,
             native.connection_window_bytes
         );
+    }
+
+    #[test]
+    fn new_capability_flags_default_to_their_definitions() {
+        let defaults = Options::try_parse_from(["nervix-cli"])
+            .assured("defaults parse")
+            .connection;
+        let options = defaults.connect_options();
+        assert_eq!(options.restoration_backoff, Duration::from_secs(1));
+        assert_eq!(options.restoration_max_backoff, Duration::from_secs(30));
+        assert_eq!(options.request_frame_capacity.get(), 32);
+        assert_eq!(options.notice_capacity.get(), 128);
+        assert_eq!(options.notice_bytes.get(), 1024 * 1024);
     }
 }

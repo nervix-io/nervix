@@ -19,9 +19,10 @@
 //!
 //! The driver is the only owner of the event loop. It classifies every publish before reading the
 //! next, then hands admitted bytes or a compact discard acknowledgement to the ingestor in packet
-//! order. In manual acknowledgement mode, queued QoS 0 outcomes own at most 64 permits alongside
-//! the complete Receive Maximum reserved for acknowledged outcomes. Refusing a QoS 0 permit drops
-//! that publish and records it through the host's overflow report without stopping polling.
+//! order. In manual acknowledgement mode, queued QoS 0 outcomes own at most the node's read-ahead
+//! headroom of permits alongside the complete Receive Maximum reserved for acknowledged outcomes.
+//! Refusing a QoS 0 permit drops that publish and records it through the host's overflow report
+//! without stopping polling.
 //! Automatic acknowledgement retains bounded backpressure. Every acknowledgement the
 //! event loop writes, a `PUBACK`, or a `PUBREC` for a publish at quality of service 2, raises the
 //! count the driver publishes; the loop yields such a write only after it flushed the requests that
@@ -60,7 +61,6 @@ use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::IngestorReadAheadOverflow;
-use nervix_models::MQTT_SOURCE_READ_AHEAD_HEADROOM;
 use nervix_primitives::{
     sync::{
         OwnedSemaphorePermit, Semaphore, StdArc, TryAcquireError,
@@ -180,12 +180,10 @@ enum ReadAheadAdmission {
 impl From<IngestorAcknowledgement> for DriverAcknowledgement {
     fn from(acknowledgement: IngestorAcknowledgement) -> Self {
         match acknowledgement {
-            IngestorAcknowledgement::OnReceipt => Self::OnReceipt,
-            IngestorAcknowledgement::Manual { .. } => Self::Manual {
-                qos_zero: StdArc::new(Semaphore::new(
-                    usize::try_from(MQTT_SOURCE_READ_AHEAD_HEADROOM)
-                        .assured("MQTT's read-ahead headroom fits every supported native target"),
-                )),
+            IngestorAcknowledgement::OnReceipt { .. } => Self::OnReceipt,
+            // The headroom's definition keeps it within the native permit bound.
+            IngestorAcknowledgement::Manual { headroom, .. } => Self::Manual {
+                qos_zero: StdArc::new(Semaphore::new(headroom.get())),
             },
         }
     }
@@ -198,7 +196,8 @@ impl DriverAcknowledgement {
             bounded,
             reason = "QoS 0 cannot consume the capacity reserved for broker-controlled packets",
             key = "one MQTT connection's QoS 0 read-ahead",
-            bound = "64 permits retained only by queued outcomes; acquisition never waits"
+            bound = "the node's mqtt-read-ahead-headroom permits, retained only by queued \
+                     outcomes; acquisition never waits"
         )
     )]
     fn admit(&self, publish: &Publish) -> ReadAheadAdmission {

@@ -464,10 +464,12 @@ impl SessionServiceImpl {
 
     /// Compiles the UDF family the batch would leave active. A UDF body is only usable once every
     /// sibling it may call compiles with it, so this takes the whole candidate set rather than the
-    /// changed members.
+    /// changed members. `parameters` is the record the batch was planned against: its UDF compile
+    /// budget bounds each function's compilation and `test` blocks.
     pub(in crate::application) async fn prepare_planned_domain_udfs(
         &self,
         planned: &crate::registry::PlannedMutations,
+        parameters: &nervix_models::ClusterParameterValues,
     ) -> error_stack::Result<Option<crate::runtime::CompiledDomainUdfs>, ModelBindingValidationError>
     {
         let changed_udfs = planned
@@ -492,7 +494,7 @@ impl SessionServiceImpl {
         let prepared = self
             .inner
             .runtime
-            .prepare_domain_udfs(domain_udfs)
+            .prepare_domain_udfs(domain_udfs, parameters.udf_compile_budget())
             .await
             .change_context(ModelBindingValidationError::UdfPreparation {
                 nodes: changed_udfs,

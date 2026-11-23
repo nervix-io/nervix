@@ -3,7 +3,10 @@
 //! Depends on: that owner, typed vocabulary and the primitive boundary.
 //! Must not know: product decisions beyond the behavior exercised by these tests.
 
+use nervix_models::SettingDefinition as _;
+
 use super::*;
+use crate::runtime::RestoreStagingMaxBytes;
 
 /// Called only after the diagnostic process installed its detector, covering the other writers
 /// and purges that select the same physical generation under the installation barrier.
@@ -51,7 +54,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should open");
         store
@@ -65,7 +68,7 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
     let store = RuntimeStateStore::from_database(
         db,
         Executor::default(),
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .expect("state store should reopen");
     let preparations = store
@@ -182,7 +185,7 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should open");
         store
@@ -203,7 +206,7 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should reopen");
         let activated = store
@@ -227,7 +230,7 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should reopen");
         let activated = store
@@ -290,7 +293,7 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should open");
         store
@@ -311,7 +314,7 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should reopen");
         let activated = store
@@ -335,7 +338,7 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should reopen");
         let transition = ForcedRuntimeStateRecoveryTransition {
@@ -401,7 +404,7 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should open");
         store
@@ -422,7 +425,7 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should reopen");
         let activated = store
@@ -446,7 +449,7 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let store = RuntimeStateStore::from_database(
             db,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should reopen");
         let transition = ForcedRuntimeStateRecoveryTransition {
@@ -510,7 +513,7 @@ pub(super) fn open_store_on(dir: &tempfile::TempDir, executor: Executor) -> Runt
     RuntimeStateStore::from_database(
         db,
         executor,
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .expect("state store should open")
 }

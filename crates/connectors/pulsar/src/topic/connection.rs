@@ -43,7 +43,7 @@ use pulsar::{
 use thiserror::Error;
 use url::Url;
 
-use super::PULSAR_OUTBOUND_CAPACITY;
+use super::outbound_capacity;
 
 const PULSAR: ConnectorKind = ConnectorKind::Pulsar;
 
@@ -171,7 +171,7 @@ impl PreparedPulsarClient {
             .with_operation_retry_options(PulsarClientConnection::operation_retry_options(
                 self.operation_timeout,
             ))
-            .with_outbound_channel_size(PULSAR_OUTBOUND_CAPACITY);
+            .with_outbound_channel_size(outbound_capacity());
         if let Some(auth) = &self.authentication {
             builder = builder.with_auth(auth.clone());
         }

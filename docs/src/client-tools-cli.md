@@ -78,11 +78,16 @@ name with underscores. The typed native client definitions supply both help and 
 | `--backup-wait-timeout` | 10 min | how long a backup may go, including recovery, without its answer or a server progress report |
 | `--retry-backoff` | 100 ms | initial reconnect/recovery delay |
 | `--retry-max-backoff` | 1 s | ceiling for doubled retry delays |
+| `--restoration-backoff` | 1 s | first wait before a subscription, clock, producer or consumer restoration the new session refused is sent again on it |
+| `--restoration-max-backoff` | 30 s | ceiling for doubled restoration waits |
 | `--subscription-record-capacity` | 32 | events retained per subscription |
 | `--subscription-retained-frames` | 1 | frame-limit units of bytes retained per subscription, including each event's header |
 | `--subscriptions-retained-in-full` | 4 | multiplier for the aggregate subscription record and byte bounds |
 | `--upload-frame-capacity` | 8 | queued outbound resource-upload frames |
 | `--restore-frame-capacity` | 8 | queued outbound restore frames |
+| `--request-frame-capacity` | 32 | queued outbound request frames of one session |
+| `--notice-capacity` | 128 | server notices retained until they are read |
+| `--notice-bytes` | 1048576 (1 MiB) | bytes of server notices retained until they are read, each notice charged its text and in-memory header |
 | `--keepalive-interval` | 30 s | how long a connection with a call open may go without hearing from the node before the CLI pings it |
 | `--keepalive-timeout` | 20 s | how long that ping may go unanswered before the connection is treated as lost and recovered |
 | `--stream-window-bytes` | 2097152 | bytes of one call the node may send before the CLI reads them |
@@ -95,13 +100,21 @@ domain's work in motion or a `START` that waits for another node to start the do
 therefore runs as long as it needs; the timeouts end only a wait in which neither the answer nor a
 report arrived.
 
-Durations accept one millisecond through 24 hours. The backoff base cannot exceed its ceiling.
-Capacities must be positive, fit the native channel bound and produce addressable aggregate byte and
-record limits. A stream window takes 1 through 2,147,483,647 bytes, and a connection window 65,535,
+Durations accept one millisecond through 24 hours. Neither backoff base, `--retry-backoff` or
+`--restoration-backoff`, can exceed its ceiling. Capacities must be positive, fit the native
+channel bound and produce addressable aggregate byte and record limits; the notice byte bound must
+be positive. A stream window takes 1 through 2,147,483,647 bytes, and a connection window 65,535,
 the window every HTTP/2 connection starts with, through 2,147,483,647 bytes. Validation happens
 before connection or credential prompting. Increasing a capacity or a window permits more retained
-memory; it does not change wire-frame limits or server policy. Overflow still ends only the affected
-subscription with `ConsumerOverflow`, preserving other events.
+memory; it does not change wire-frame limits or server policy. Overflow still ends only the
+affected subscription with `ConsumerOverflow`, preserving other events. A notice that does not fit
+the notice bounds drops the notices held, and the next read reports that gap.
+
+A call that is redirected or waits for an election is sent again at most as many times as its
+budget holds waits of `--retry-backoff`: the budget is `--retry-timeout`, or `--backup-wait-timeout`
+for a `BACKUP` command, which allows 1,200 attempts by default for any call other than a `BACKUP`.
+Every wait lasts at least `--retry-backoff`, so a shorter backoff schedule never runs out of
+attempts before the deadline of a call that has one.
 
 For a slow connection, for example:
 

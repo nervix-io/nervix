@@ -128,6 +128,7 @@ impl Failure {
             | ClientError::InvalidFrameCapacity { .. }
             | ClientError::InvalidReceiveWindow { .. }
             | ClientError::InvalidRetryBackoff
+            | ClientError::InvalidRestorationBackoff
             | ClientError::InvalidSubscriptionRetention
             | ClientError::TooManySeedServers { .. }
             | ClientError::NoActiveDomain
@@ -294,6 +295,7 @@ mod endpoint_recovery_tests {
                 capacity: usize::MAX,
             },
             ClientError::InvalidRetryBackoff,
+            ClientError::InvalidRestorationBackoff,
             ClientError::InvalidSubscriptionRetention,
             ClientError::InvalidReceiveWindow {
                 field: "connection-window-bytes",

@@ -24,9 +24,9 @@ Four rules hold throughout.
 
 - **Public observation only.** The runner reads the cluster through the packaged CLI over the
   session protocol, each node's own status route and `/readyz`, the observability metrics, the
-  `info`-level operator log lines a node writes, the Kafka topics and consumer groups, and Docker's
-  inspection and event stream. It never reads a node's storage, attaches a debugger, links product
-  code or adds a hook to the image.
+  operator log lines a node writes at `info` level and above with the exit report of a process that
+  ends, the Kafka topics and consumer groups, and Docker's inspection and event stream. It never
+  reads a node's storage, attaches a debugger, links product code or adds a hook to the image.
 - **A fault counts only once it is proven.** A verdict may depend on a fault only after the runner
   has verified that the fault took effect on the exact container or link the plan named. The runner
   also heals every fault, and verifies the healing, before it captures diagnostics.
@@ -84,7 +84,7 @@ Bolero obligation, and none of those discharges a suite.
 | `label-probe.sh` | The [label probe](#the-label-probe) of the restart, recovery and follower-partition scenarios: its owners, edits, reads through every node and verdict |
 | `node-faults.sh`, `network-faults.sh`, `link-degradation.sh`, `link-ping-helper.sh`, `link-rate-helper.sh` | The fault primitives: process faults through Pumba and Docker, and one netem effect on a container's egress toward chosen addresses; partition plans, rules, effect matrices, preflight and healing; link degradation and its ICMP and transfer probes |
 | `mixed-plan.sh`, `mixed-plan.jq` | Seeded plan generation, plan validation and default coverage |
-| `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, graceful-stop, outward TLS and diagnostic evidence |
+| `verify-*.sh` | The external verifiers: ledgers, the strict delivery verdict, load pacing, Docker events, and crash, pause, partition, degraded-link, recovery, restart, drain, state, clock, mixed, endpoint, lifetimes, graceful-stop, outward TLS, node-settings and diagnostic evidence |
 | `burst-load.sh`, `negative-outcomes.sh`, `events-observer.sh`, `observe-events.sh`, `expected-failure.sh` | The shared harness of [correctness reproductions](#correctness-reproductions): the burst load and its accepted-input ledger, the negative-outcome counters, the error-event observers that run inside containers of the image, and the expected failure of a red run |
 | `outward-tls.sh`, `tls-probe.py`, `tls-probe-openssl.cnf` | The three-node leader crash's outward TLS observations, the restricted TLS probe that runs inside the pinned Python image, and the probe's OpenSSL configuration |
 | `continuous-load.sh`, `observe-nodes.sh`, `observe-clock.sh` | The paced producer, the listener observer and the domain-clock observer, each running inside a container |
@@ -97,7 +97,8 @@ Bolero obligation, and none of those discharges a suite.
 | `sessions.sh` | The sessions in which a controller starts its runs and its verifier self-check, and the end of what such a session leaves |
 | `cleanup.sh` | Removal of one run's labeled resources, with optional evidence capture |
 | `suite.sh`, `suites.json`, `suite-report.jq` | The suites: catalog, shard budgets, runs, verdict records, summaries and suite cleanup |
-| `compose.yaml`, `compose.diagnostic.yaml`, `compose.outward-tls.yaml` | The deployment, its diagnostic overlay and the outward TLS overlay of a three-node leader crash |
+| `compose.yaml`, `compose.diagnostic.yaml`, `compose.outward-tls.yaml`, `compose.node-settings.yaml` | The deployment, its diagnostic overlay, the outward TLS overlay of a three-node leader crash and the [node-settings](#node-setting-changes) overlay |
+| `node-launch.sh` | The launcher a node-settings run starts every node through, which applies the settings the controller chose for that node's next process |
 | `compose.fresh-cluster.yaml`, `compose.fresh-cluster.diagnostic.yaml` | The second cluster that a [fresh-cluster restore](#restore-into-a-fresh-cluster) starts, and its diagnostic overlay |
 | `fixtures/` | The Plexus graphs, record generators, the WASM guest, the ONNX model and an explicit mixed plan |
 | `tests/` | The runner's self-tests |
@@ -279,8 +280,9 @@ A run needs a Linux Docker host with the following.
 - **Suite tools.** A suite also needs `setsid` from util-linux and a `tee` that takes `-p`, as GNU
   coreutils' does. Suite cleanup reads process state from `/proc` and `ps`.
 - **The local Docker socket.** `/var/run/docker.sock` must exist. Every scenario except
-  `baseline`, `backup`, `backup-cycles`, `restore-fresh-cluster` and `restore-volume` mounts it into
-  Pumba's container, after checking Pumba's version and its access with a dry run.
+  `baseline`, `backup`, `backup-cycles`, `restore-fresh-cluster`, `restore-volume` and
+  `parameter-live` mounts it into Pumba's container, after checking Pumba's version and its access
+  with a dry run.
 - **Network fault support.** The partition, degraded-link, former-owner, backup-fault,
   restore-fault and graceful-stop scenarios, the `owner-partition` and `voter-partition` faults and
   mixed instability need a kernel that offers the `prio`, `sfq` and `netem` queueing disciplines
@@ -363,11 +365,18 @@ inspection where a verdict depends on them:
 
 | Setting | Default deployment | Changed for |
 | --- | --- | --- |
-| Raft heartbeat, and the election window derived from it | 250 ms, so 1.5 to 3 seconds | 1.5 seconds, so 9 to 18 seconds, for `pause-resume`, `--fault owner-pause` and `--fault voter-pause` |
+| Raft heartbeat, and the election window derived from it | 250 ms, so 1.5 to 3 seconds | 1.5 seconds, so 9 to 18 seconds, for `pause-resume`, `--fault owner-pause` and `--fault voter-pause`; 1 second for the one refused process of `prerequisite-refusal` |
 | Node unavailability timeout | 10 seconds | 15 seconds for the same pause deployments |
 | Raft snapshot entry threshold, covered log entries retained | 10,000; 1,000 | 64; 16 for `stale-follower` |
 | State snapshot interval, replica count | 30 seconds; 0 | 1 second, and on three nodes one replica, for `stateful` and `lifetimes`; one replica for `restore-fault` and `restore-volume` |
 | Command retry validity | 15 minutes | 3 minutes for `restore-fault --fault reclamation-owner-crash` |
+| Interconnect relay receive bound | The executor's encoded relay limit | 8,192 bytes, node by node, for `capability-roll` |
+
+The [node-settings](#node-setting-changes) scenarios add `compose.node-settings.yaml`, which
+starts every node through `node-launch.sh` so the controller can choose the settings of each node's
+next process. A setting chosen that way is not in Docker inspection: those scenarios read what each
+process runs from its own public description and from the line the launcher logs for every setting
+it applies.
 
 ### Interconnect TLS
 
@@ -516,8 +525,10 @@ A run reads only public surfaces:
   `nervix_consensus_log_last_index`, `nervix_consensus_log_purged_index`,
   `nervix_consensus_log_snapshot_index`, `nervix_interconnect_requests_total` and interconnect
   pending work.
-- **`info`-level operator log lines.** Examples are the shutdown phases, the drain-support outcome,
-  `raft transition: state=Shutdown` and runtime admission after linearizable consensus catch-up.
+- **Operator log lines at `info` level and above, and a process's exit report.** Examples are the
+  shutdown phases, the drain-support outcome, `raft transition: state=Shutdown`, runtime admission
+  after linearizable consensus catch-up, an installed cluster parameter revision, and a refusal at
+  join with the exit report that names it.
 - **The Kafka topics and consumer groups.** These are read by the broker's own CLI inside the
   running broker, and by kcat.
 - **Docker inspection and the [live event recording](#the-live-docker-event-recording).**
@@ -941,6 +952,10 @@ trap ran exits on its own, 15 minutes after the run's bound.
 | `stale-follower` | 3 | An offline follower past log compaction | 1 s | 1,000, 1,800 s |
 | `former-owner-restart` | 3 | A former owner restarted behind peer-side isolation | 1 s | 1,000, 1,800 s |
 | `cluster-restart` | 1 or 3 | SIGKILL of every node | 1 s | 1,000, 1,800 s |
+| `capability-roll` | 3 | A graceful stop and restart of every node, leader first, each starting with a lower interconnect relay receive bound | 1 s | 1,000, 1,800 s |
+| `parameter-return` | 3 | A graceful stop of a follower while `ALTER CLUSTER SET` commits a change, a start refused for naming the parameter as its own setting, and its return | 1 s | 1,000, 1,800 s |
+| `parameter-live` | 3 | None; two `ALTER CLUSTER SET` changes applied live | 1 s | 1,000, 1,800 s |
+| `prerequisite-refusal` | 3 | A graceful stop of a follower, a start with a Raft heartbeat outside the compatibility bound, and its return | 1 s | 1,000, 1,800 s |
 | `stateful` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash, pause or partition of the state owner, or a cluster restart | 1 s, and `state-load` at 1 s | 1,000, 2,700 s |
 | `endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, or a crash or partition of the endpoint owner, or a cluster restart | 1 s, and HTTP endpoint intake at 250 ms | 1,000, 1,800 s |
 | `binding-endpoints` | 1 or 3; one node only with no fault or a cluster restart | None, graceful owner stop/restart, owner crash/restart, or cluster restart | 1 s, and typed package submissions at 250 ms | 1,000 baseline records plus 400 binding records, 1,800 s |
@@ -1853,6 +1868,202 @@ After its other checks, the cluster restart also judges a domain backup's label 
 adds no traffic of its own.
 The running graph's exact ledger, ownership and state checks show that dataflow and state continued
 beside the label edits. A label edit never adds a metric series, so the probe reads no metric.
+
+### Node Setting Changes
+
+```bash
+just chaos run capability-roll --image nervix:debian
+just chaos run parameter-return --image nervix:debian
+just chaos run parameter-live --image nervix:debian
+just chaos run prerequisite-refusal --image nervix:debian
+```
+
+These four scenarios qualify the [rolling changes](./node-settings.md#rolling-changes) of node
+settings with the packaged image, on three nodes, under the continuous load of one record a second.
+Between them they judge every class of setting: a node capability whose value the peers negotiate,
+a cluster parameter a returning node adopts, a cluster parameter applied live, and a prerequisite
+that refuses a node. [Node Settings](./node-settings.md) owns the contracts they verify.
+
+**The launcher.** The deployment adds `compose.node-settings.yaml`, and every node starts through
+`node-launch.sh` instead of the image's own command:
+
+- The launcher reads `node-launch/nervix-N/settings.env` of the run directory, which is mounted
+  read-only into that node alone.
+- Each line is one `NERVIX_NAME=VALUE` assignment that replaces the deployment's value of that
+  setting for the process that starts. An empty file starts the deployment's own settings, and a
+  malformed line ends the launch with status 2 before the server runs.
+- The launcher logs every assignment it applies, then executes the packaged server, which receives
+  the container's signals and gives the container its exit status.
+- The controller rewrites a node's file only while that node is stopped, and records each change in
+  `node-launch/changes.ndjson`.
+
+A node therefore changes its settings through a [graceful stop](#process-faults) and an explicit
+start of the same container. It keeps its image, named volume and address, and every restart and
+Docker event check applies to it unchanged. The exit trap empties every file before it starts a
+node that a case still held stopped, so neither a retained deployment nor its diagnostics keep a
+setting the cluster refuses.
+
+**What the four share.**
+
+- Every graceful stop must complete its drain, because both other nodes are live replacements.
+- After each start that rejoins the cluster, the run requires the recovery of a
+  [rolling restart](#rolling-restart): the node's listeners within 120 seconds, the observer's ready
+  report within 30, a settled and connected cluster within 150 and output progress within 90. A
+  start meant to be refused must instead end by itself within 120 seconds.
+- The ledger is strict. As in a rolling restart, a graceful stop hands its work over, and a
+  parameter change discards no payload, so a replay duplicate is a violation.
+- A product violation that leaves the run meaningful is a recovery finding: the run continues to
+  the final ledger before it exits nonzero.
+- `scripts/chaos/tests/node-settings-self-test.sh`, part of every verifier self-check, holds the
+  option rules, the launcher against a stand-in server, and every verdict below against passing and
+  contradicting descriptions, samples, logs and notice transcripts.
+
+#### Capability Roll
+
+The run rolls a lower interconnect relay receive bound across the cluster, starting each node with
+`NERVIX_INTERCONNECT_RELAY_BATCH_BYTES=8192`. Each node claims its receive bounds in its committed
+[node record](./node-settings.md#committed-node-capabilities), every sender adopts its receiver's
+claim, and the cluster-effective bound is the componentwise minimum of the live claims. For most of
+the roll the nodes therefore run two values of one negotiated bound. The deployment's own bound is
+the executor's encoded relay limit, 32 MiB. One baseline row encodes to far less than 8,192 bytes,
+so a batch above the lower bound slices into parts that fit and no row is refused. The run proceeds
+in order:
+
+1. Every node's own `DESCRIBE CLUSTER` must, within 60 seconds, name every live node with a
+   committed claim of its live incarnation at the deployment's bound, an adopted bound for each peer
+   equal to that peer's claim, all four bounds included, and the componentwise minimum as the
+   cluster-effective bound. A deployment bound not above 8,192 bytes is a setup error, because the
+   roll would change nothing.
+2. The run stops the observed leader first and then every other node once. Before each stop, the
+   process about to stop must have counted no interconnect connection refused over a prerequisite.
+   While the node is stopped, the survivors must agree on a caught-up leader within 90 seconds and
+   keep delivering.
+3. The node starts again with the lower bound. Once the cluster has settled, every node's own
+   description must, within 60 seconds, name the restarted node at a new incarnation with the lower
+   claim, every node already rolled with the lower claim, every other node with the deployment's,
+   every peer's live claim adopted and the cluster-effective bound at the minimum.
+4. After the last restart every node claims the lower bound and adopts it from every peer: the
+   change has taken full effect.
+
+At the end, no process may have counted a refusal in
+`nervix_interconnect_connection_failures_total{reason="prerequisite"}`, and no node's log since the
+roll began may report a refused join, handshake or run. Each node's Docker events must be exactly
+its signal-15 kill, its exit 0 and its explicit start. `capability-roll/` keeps every step's
+descriptions and claims verdict, the logs and the node events, and
+`results/capability-roll-progress.json` records the deployed and rolled bounds, the order, each
+step's incarnations and timings and the refusal counts.
+
+#### Parameter Return
+
+The run proceeds in order:
+
+1. On a settled cluster, every node must run one committed parameter record holding
+   `NODE_UNAVAILABILITY_TIMEOUT = 10s` and `STATE_SNAPSHOT_INTERVAL = 30s`, the harness's
+   [committed policy](#committed-parameter-policy-in-the-harness), and a control canary must be
+   acknowledged.
+2. The observed follower that owns execution stops gracefully. The survivors must agree on a
+   caught-up leader, and within 120 seconds neither may count the follower available: its
+   interconnect entry reads `unavailable` or has left, and gossip no longer reports it live.
+3. The survivor leader commits the change:
+
+   ```plexus
+   ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 20s;
+   ```
+
+   It must be acknowledged, and within 60 seconds both survivors must describe one later revision
+   that holds exactly the change and run it, with the interconnect liveness 15 seconds derives.
+4. The follower starts once with `NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s`, the previous value, as
+   its own setting. The process must end by itself with status 1 and refuse
+   `node-unavailability-timeout` as a first-bootstrap seed, so a node's own options never carry an
+   existing cluster's policy.
+5. The follower starts again with the deployment's settings, while a sampler reads its own
+   `SHOW CLUSTER STATUS` five times a second. Within 60 seconds of its listeners it must describe
+   the committed revision through its own route and run it, with the new liveness for every node.
+
+Three verdicts judge the return:
+
+- **Never the stale log.** Every answer of the returning node that reports a running record must
+  report the committed revision with the committed values, and at least one answer must. An answer
+  before its installation reports `cluster parameters running=not installed`, which runs no record.
+- **Its first installation.** The first `cluster parameters committed and installed` line its
+  process logs must name the committed revision, and no later line a lower one.
+- **No drift.** Once the cluster settles, every node's own description must name the same committed
+  revision, every node running it with the derived liveness.
+
+A canary through the returned follower must then be acknowledged, and both canaries must be visible
+through every node. The follower's Docker events must be exactly its signal-15 kill, its exit 0, the
+refused start, its exit 1 and its explicit start, and no other node may have any.
+`parameter-return/` keeps the change's answer, every description, the samples, the refused start's
+log and every verdict, and `results/parameter-return-progress.json` summarizes them.
+
+#### Live Parameter Change
+
+While one [error-event observer](#error-events) per node follows that node's server notices, the
+run commits two changes under load through the leader:
+
+```plexus
+ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 20s, REMOTE_ACK_ALIVE_INTERVAL = 200ms,
+  REMOTE_ACK_SILENCE_TIMEOUT = 20s;
+ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 10s, REMOTE_ACK_ALIVE_INTERVAL = 100ms,
+  REMOTE_ACK_SILENCE_TIMEOUT = 15s;
+```
+
+The first raises the budget the liveness of every established connection derives from, and widens
+the reporting window of every remote delivery. The second restores the deployment's values, which
+the record must hold before the first change.
+
+[Node Settings](./node-settings.md#committed-parameter-changes) applies a committed change live:
+the liveness of every established connection follows the installed unavailability timeout, and
+each remote delivery keeps the acknowledgement timings it started with while new deliveries take
+the new ones. Each change is judged in turn:
+
+- It must be acknowledged.
+- Within 60 seconds, every node's own description must name one later revision holding exactly the
+  change, every node running it, and every node's interconnect liveness derived from the new
+  timeout: `ping-interval=10s ping-timeout=5s probe-timeout=2s`, then
+  `ping-interval=5s ping-timeout=2s 500ms probe-timeout=1s`.
+- Within 30 seconds each observer must print its node's notice of the revision, and output must
+  advance. The second change starts once the first has been judged.
+
+Nothing else may change: no node lifecycle event, container restart or new incarnation, the same
+leader at the same Raft term, and the same ingestor, relay and emitter owners. Every observer must
+have followed the whole window and seen exactly one `cluster parameters` notice of each revision,
+in order, and no membership or leadership notice. After the final boundary the
+[strict verdict](#the-strict-verdict) judges the baseline path, with the
+[negative-outcome counters](#negative-acknowledgements) and the observers of the window as inputs:
+no duplicate, missing or changed record, no negative acknowledgement or emitter failure, and no
+error event. `parameter-live/` keeps each change's answer and descriptions, the notices verdict,
+the counters, the transcripts and `delivery.json`, and `results/parameter-live-progress.json`
+summarizes them.
+
+#### Prerequisite Refusal
+
+The run proceeds in order:
+
+1. On a settled cluster with an acknowledged canary, the observed follower that owns execution stops
+   gracefully, and the survivors agree on a caught-up leader.
+2. The follower starts with `NERVIX_RAFT_HEARTBEAT_INTERVAL=1s`, four times the deployment's 250 ms
+   and outside the factor of two within which the timings of two nodes may differ. Its process must
+   end by itself within 120 seconds, with status 1. Its log must report
+   `this node was refused at join and stops` with a refusal that names a survivor and exactly
+   `raft-heartbeat-interval is 1s on this node and 250ms on the peer, not within a factor of 2`, its
+   exit report must name the refusal, and it must never have admitted runtime execution.
+3. Only that node is refused:
+   - the survivors keep their Raft term and leader, agree on a caught-up leader and keep every voter
+   - output advances across the refused run, and a canary through the survivor leader is
+     acknowledged
+   - each survivor describes both survivors at the incarnations they had before the refusal
+   - at least one survivor's log reports refusing the node over `raft-heartbeat-interval`, at its
+     interconnect handshake or as the leader's verdict on the node's run
+4. The follower starts again with the deployment's heartbeat, and the cluster recovers. A canary
+   through it must be acknowledged, every acknowledged canary must be visible through every node,
+   and every node must describe `timing drift: none` and the follower's 250 ms heartbeat. The
+   follower's Docker events must be exactly its signal-15 kill, its exit 0, the refused start, its
+   exit 1 and its explicit start, and no other node may have any.
+
+`prerequisite-refusal/` keeps the refused run's log, inspections and verdict, the survivors' logs
+and descriptions, and the node events, and `results/prerequisite-refusal-progress.json` summarizes
+them.
 
 ### Stateful
 
@@ -2974,6 +3185,7 @@ A failed run keeps `results/finding.json` when it is one of these scenarios:
 - a crash, pause, partition or degraded-link run
 - a recovery, backup-fault or fresh-cluster restore run
 - a stateful, domain-time, mixed or graceful-stop run
+- a [node-settings](#node-setting-changes) run
 
 Every diagnostic failure keeps one too. It holds:
 
@@ -2996,8 +3208,8 @@ Two kinds of violation are handled differently:
   away from a healthy node, a missing effect, and a resource limit exceeded. Findings are written
   to one file per family of scenarios:
   - partitions: `results/partition-findings.ndjson`
-  - the recovery, backup-fault, fresh-cluster restore, stateful, domain-time, mixed and
-    graceful-stop scenarios: `results/recovery-findings.ndjson`
+  - the recovery, backup-fault, fresh-cluster restore, stateful, domain-time, mixed, graceful-stop
+    and node-settings scenarios: `results/recovery-findings.ndjson`
   - degraded links: `degraded/findings.ndjson`
 - **Stopping failures.** A failure that makes the later steps meaningless stops the run at once,
   after it records every node's own status. Examples are an ineffective or unremovable fault, no
@@ -3095,7 +3307,8 @@ Each run writes bounded evidence under `ARTIFACTS/RUN_ID/`, by default `target/c
 | `traffic/` | Accepted input, observed output, every Kafka end-offset read, the output-boundary polls, consumer groups, load timestamps and producer results |
 | `results/` | The verdicts: the scenario's result and progress, the ledger, the output boundary, load pacing, container images, a diagnostic run's evidence verdict, `finding.json`, and the symptoms of a scenario whose verdict names them, `symptoms.json`. Also the verifier self-check's output, `verifier-self-test.txt`, and in a run of a suite the record it adopted, `verifier-self-check.json` |
 | `diagnostics/` | The live event recording and its bounds, container inspection, Compose logs (a fresh-cluster restore adds `fresh-compose-ps.json` and `fresh-compose.log` for its second project), the image-package and startup-status records, preflight and healing records, cleanup output. Also `verifier-self-test/`, the evidence of a [verifier self-check](#the-verifier-self-check) that did not pass or left something behind |
-| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `stateful/`, `domain-time/`, `graceful-stop/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
+| `backup/`, `backup-cycles/`, `backup-fault/`, `restore-fresh/`, `restore-fault/`, `restore-volume/`, `restarts/`, `crash/`, `pauses/`, `partitions/`, `degraded/`, `stale/`, `former-owner/`, `restart/`, `capability-roll/`, `parameter-return/`, `parameter-live/`, `prerequisite-refusal/`, `stateful/`, `domain-time/`, `graceful-stop/`, `mixed/` | Each scenario's own evidence, in catalog order: `restarts/` belongs to rolling restarts and `restart/` to cluster restarts |
+| `node-launch/` | A node-settings run's launch settings: each node's `settings.env` and every change to them in `changes.ndjson` |
 | `deadlock/` | A diagnostic run's per-node evidence files, their inspections and qualifications, in `node-N/` for the run's nodes and `fresh-N/` for a fresh-cluster restore's |
 | `tls/` | The run's certificates. The private keys are removed when the run ends |
 
@@ -3265,7 +3478,7 @@ Each entry is one `just chaos run` command with its arguments, a budget in minut
 which is the unit one CI job runs. An entry may also carry a note. The suite's `ci_reserve_minutes`
 is 21.
 
-The `smoke` suite runs in six shards:
+The `smoke` suite runs in seven shards:
 
 | Shard | Entry | Command | Budget (min) |
 | ---: | --- | --- | ---: |
@@ -3282,6 +3495,16 @@ The `smoke` suite runs in six shards:
 | 5 | `binding-endpoints-1-cluster-restart` | `binding-endpoints --nodes 1 --fault cluster-restart` | 12 |
 | 6 | `ingestor-metrics-owner-crash` | `ingestor-owner-crash --connector-metrics --nodes 3 --records 3` | 10 |
 | 6 | `emitter-metrics-owner-crash` | `emitter-owner-crash --connector-metrics --nodes 3` | 10 |
+| 7 | `capability-roll` | `capability-roll` | 10 |
+| 7 | `parameter-return` | `parameter-return` | 9 |
+| 7 | `parameter-live` | `parameter-live` | 7 |
+| 7 | `prerequisite-refusal` | `prerequisite-refusal` | 10 |
+
+Shard 7 is the rolling-change qualification of [node settings](#node-setting-changes). Its budgets
+are estimates made before the first CI run, scaled from the measured `rolling-restart-3` and
+`stale-follower` entries whose graceful stops, starts and settlements they repeat; each entry's note
+says so. The first runs on the CI worker replace them with two and a half times the measured
+durations.
 
 The `intake-recovery` suite selects two existing recovery entries on one shard. It checks spread
 ingestor ownership after a node crash and persisted state after a single-node cluster restart.
@@ -3294,7 +3517,8 @@ as the larger suites. Select `intake-recovery` in a manual Chaos workflow run, o
 | 1 | `ingestor-instances-owner-crash` | `ingestor-instances-owner-crash` | 7 |
 | 1 | `stateful-1-cluster-restart` | `stateful --nodes 1 --fault cluster-restart` | 22 |
 
-The `soak` suite runs every delivered scenario, topology, case, profile and fault, in seventeen shards:
+The `soak` suite runs every delivered scenario, topology, case, profile and fault, in eighteen
+shards:
 
 | Shard | Entries, with budgets in minutes |
 | ---: | --- |
@@ -3315,6 +3539,7 @@ The `soak` suite runs every delivered scenario, topology, case, profile and faul
 | 15 | `stateful-partitions-3-owner-crash` 25 |
 | 16 | `binding-endpoints-1` 10; `binding-endpoints-3-owner-stop`, `binding-endpoints-3-owner-crash`, `binding-endpoints-1-cluster-restart` 12 each |
 | 17 | `ingestor-metrics-owner-crash`, `emitter-metrics-owner-crash` 10 each; `graceful-stop` 12 |
+| 18 | `capability-roll` 10; `parameter-return` 9; `parameter-live` 7; `prerequisite-refusal` 10 |
 
 A few soak entries need explanation:
 
@@ -3333,6 +3558,8 @@ A few soak entries need explanation:
   cut to rest once more and arrive, which an image whose stop is graceful does not need, so the
   budget holds either image with room to spare. The first runs on the CI worker against the image
   of the fix measure it again.
+- **Shard 18.** The [node-settings](#node-setting-changes) entries of smoke shard 7, with the same
+  estimated budgets, so the soak still runs every delivered scenario.
 
 ### Running A Suite
 
@@ -3665,6 +3892,17 @@ Its limits:
   milestone for them.
 - **The clock authority.** It is unobservable, so the domain-time verdict identifies it by the round
   whose fault stalled every surviving observer.
+- **Node settings.** A node-settings run starts every node through `node-launch.sh` instead of the
+  image's own command; the server binary, its image and its volume are unchanged. The capability
+  roll lowers a bound every baseline row fits. A batch above it slices into parts that fit, but no
+  public observation says whether a batch was sliced, so the roll establishes the adoption of mixed
+  receive bounds and delivery through them, not the slicing itself, which the relay-capability
+  Cucumber scenarios carry. The parameter scenarios change the unavailability timeout, the state
+  snapshot interval and the remote acknowledgement timings, each installed live; every other
+  parameter stays with its Cucumber scenarios. The refusal is that of a returning voter's Raft
+  heartbeat; identity, trust-root and newcomer refusals stay with the prerequisite Cucumber
+  scenarios. The return's sampler answers five times a second, so a stale installation shorter than
+  its interval would show only in the process's installation log line.
 - **Diagnostic images.** A diagnostic run proves nothing about untracked waits or an interleaving it
   did not take.
 - **Workers and timing.** The suite is qualified on the workers recorded below. Timings measured on
@@ -3717,6 +3955,7 @@ from the fixed source tree onto the same official image, and then requalified on
 | [Backup: Qualify restores through a leader crash, a partitioned coordinator, an owner restart and concurrent staging volume](https://app.clickup.com/t/86bckvq84) | Restores held in staging through a leader crash, an isolation of the coordinating leader from its peers and the client, a state owner's crash, and a state owner's crash while a failed restore awaits reclamation; the measured staging volume of three concurrent restores; and their entries in soak shards 10 and 11 |
 | [Typed Ratchet 10](https://app.clickup.com/t/86bc9etg7) | The [endpoints](#endpoints) and [lifetimes](#lifetimes) scenarios, which run the workloads that Typed Ratchet 04, 09, 11 and 12 handed to external qualification, and their smoke shards 2 and 3 and soak shards 12 to 14 |
 | [FIPS Prep 08](https://app.clickup.com/t/86bcwmb4r) | The outward TLS observations of the three-node [leader crash](#crash-scenarios): a policy change committed while the killed leader is down, judged by real handshakes on every node's console and fixed interconnect before the fault, during the outage, after the restart and after the `fips` policy returns |
+| [Settings 12](https://app.clickup.com/t/86bck6jqp) | The [node-settings](#node-setting-changes) scenarios, the rolling-change qualification of node settings: a relay receive bound rolled across every node, a parameter change a returning node adopts from the live cluster, two parameter changes applied live under load and a node refused over its Raft heartbeat, with their launcher, smoke shard 7 and soak shard 18 |
 
 **Product defects.** The suite found these product defects. Each was fixed through its own task
 and requalified with the scenario that found it:
@@ -3841,9 +4080,14 @@ the selected node's installed unavailability timeout against the experiment and 
 heartbeat in the Docker inspection. Domain-time and whole-cluster restart reports capture the
 installed policy after recovery. A mixed run records requested cluster parameters separately from
 node-local Raft prerequisites in its replay deployment. Restarts and later joins retain the
-committed record and pass no parameter seeds. Stateful checkpoint observations use the installed
-snapshot interval. [Node Settings](node-settings.md#committed-parameter-changes) owns the seed and
-parameter-change contract.
+committed record and pass no parameter seeds; the one exception is the deliberately refused start of
+[parameter return](#parameter-return), which names a parameter as its own setting. Stateful
+checkpoint observations use the installed snapshot interval. The
+[node-settings](#node-setting-changes) scenarios commit their changes through the same statement and
+judge every node's installation through its own `DESCRIBE CLUSTER`, the same committed and running
+lines.
+[Node Settings](node-settings.md#committed-parameter-changes) owns the seed and parameter-change
+contract.
 
 ## Spread Ingestor Owner Loss
 

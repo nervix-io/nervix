@@ -534,12 +534,19 @@ impl Runtime {
             .map(|execution| execution.udfs.clone())
     }
 
+    /// Compiles `programs` under this node's UDF watchdog, holding each function's compilation and
+    /// `test` blocks to `budget`, the committed UDF compile budget its caller validates against.
     pub(crate) async fn prepare_domain_udfs(
         &self,
         mut programs: Vec<UdfProgram>,
+        budget: Duration,
     ) -> error_stack::Result<CompiledDomainUdfs, nervix_roto::UdfError> {
         programs.sort_by(|left, right| left.name.cmp(&right.name));
-        let executor = UdfExecutor::compile(self.executor(), programs.clone()).await?;
+        let limits = nervix_roto::UdfCompileLimits {
+            settings: self.inner.udf_settings,
+            budget,
+        };
+        let executor = UdfExecutor::compile(self.executor(), programs.clone(), limits).await?;
         Ok(CompiledDomainUdfs { programs, executor })
     }
 
@@ -565,7 +572,9 @@ impl Runtime {
         {
             return Ok(cached.executor.clone());
         }
-        let prepared = self.prepare_domain_udfs(sorted_programs).await?;
+        // A domain installs under the parameter record this node installed last.
+        let budget = self.cluster_parameters().udf_compile_budget();
+        let prepared = self.prepare_domain_udfs(sorted_programs, budget).await?;
         let executor = prepared.executor.clone();
         self.install_prepared_domain_udfs(domain, prepared);
         Ok(executor)

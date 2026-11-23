@@ -168,6 +168,14 @@ pub struct ArchiveContents {
 }
 
 /// The largest `models.plexus` a reader holds in memory.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Backup And Restore Architecture bounds the model text a restore reads for each \
+                  domain at 64 MiB"
+    )
+)]
 const MAX_MODELS_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Reads and verifies the archive `reader` streams, and describes what it holds.

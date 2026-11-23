@@ -73,6 +73,8 @@ impl ConnectionOptions {
             backup_wait_timeout: self.backup_wait_timeout,
             retry_backoff: caps::ClientRetryBackoff::default_value(&()),
             retry_max_backoff: caps::ClientRetryMaxBackoff::default_value(&()),
+            restoration_backoff: caps::ClientRestorationBackoff::default_value(&()),
+            restoration_max_backoff: caps::ClientRestorationMaxBackoff::default_value(&()),
             subscription_record_capacity: caps::ClientSubscriptionRecordCapacity::default_value(&()),
             subscription_retained_frames: caps::ClientSubscriptionRetainedFrames::default_value(&()),
             subscriptions_retained_in_full: caps::ClientSubscriptionsRetainedInFull::default_value(
@@ -80,6 +82,9 @@ impl ConnectionOptions {
             ),
             upload_frame_capacity: caps::ClientUploadFrameCapacity::default_value(&()),
             restore_frame_capacity: caps::ClientRestoreFrameCapacity::default_value(&()),
+            request_frame_capacity: caps::ClientRequestFrameCapacity::default_value(&()),
+            notice_capacity: caps::ClientNoticeCapacity::default_value(&()),
+            notice_bytes: caps::ClientNoticeBytes::default_value(&()),
             keepalive_interval: self.keepalive_interval,
             keepalive_timeout: self.keepalive_timeout,
             stream_window_bytes: self.stream_window_bytes,
@@ -138,6 +143,11 @@ mod tests {
         let defaults = caps::ClientCapabilities::default();
         assert_eq!(native.retry_backoff, defaults.retry_backoff());
         assert_eq!(native.retry_max_backoff, defaults.retry_max_backoff());
+        assert_eq!(native.restoration_backoff, defaults.restoration_backoff());
+        assert_eq!(
+            native.restoration_max_backoff,
+            defaults.restoration_max_backoff()
+        );
         assert_eq!(
             native.subscription_record_capacity,
             defaults.subscription_record_capacity()
@@ -158,6 +168,12 @@ mod tests {
             native.restore_frame_capacity,
             defaults.restore_frame_capacity()
         );
+        assert_eq!(
+            native.request_frame_capacity,
+            defaults.request_frame_capacity()
+        );
+        assert_eq!(native.notice_capacity, defaults.notice_capacity());
+        assert_eq!(native.notice_bytes, defaults.notice_bytes());
         assert!(
             std::mem::size_of::<crate::handles::Value>() < std::mem::size_of::<ConnectOptions>()
         );

@@ -2,17 +2,41 @@
 //! public shutdown scenarios.
 //!
 //! Layer: test harness, outside the product layer order.
-//! - **Owns.** The node-scoped pause a stopping node takes before it asks for its work to move, and
-//!   the domain-scoped pause a coordinator takes between committing a planned handoff and asking
-//!   its destination to activate.
+//! - **Owns.** Whether a stopping node drains its admitted work at all, the node-scoped pause a
+//!   stopping node takes before it asks for its work to move, and the domain-scoped pause a
+//!   coordinator takes between committing a planned handoff and asking its destination to
+//!   activate.
 //! - **Depends on.** The shared one-shot pause owner and vocabulary identities.
 //! - **Must not know.** Plexus syntax, drain planning or handoff policy.
 
 use nervix_models::{ClusterNodeName, DomainName};
+use nervix_primitives::sync::atomic::Ordering;
 
 use super::{CommandPausePoint, FaultInjection};
 
 impl FaultInjection {
+    /// Makes every node that starts from now on skip draining its admitted work when it shuts
+    /// down, until [`Self::run_shutdown_drain`]. The scenario harness skips the drain unless a
+    /// scenario enables graceful shutdown drain.
+    pub fn skip_shutdown_drain(&self) {
+        self.inner
+            .shutdown_drain_skipped
+            .store(true, Ordering::Release);
+    }
+
+    /// Makes every node that starts from now on drain its admitted work when it shuts down, as a
+    /// node does unless a test asked it to skip the drain.
+    pub fn run_shutdown_drain(&self) {
+        self.inner
+            .shutdown_drain_skipped
+            .store(false, Ordering::Release);
+    }
+
+    /// Whether a node starting now drains its admitted work when it shuts down.
+    pub(crate) fn runs_shutdown_drain(&self) -> bool {
+        !self.inner.shutdown_drain_skipped.load(Ordering::Acquire)
+    }
+
     /// Holds the next graceful drain of `node_id`, once, after the node advertised that it is
     /// terminating and closed its intake but before it asks for its work to move.
     pub fn pause_graceful_drain_on(&self, node_id: ClusterNodeName) {

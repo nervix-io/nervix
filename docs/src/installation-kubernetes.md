@@ -79,18 +79,15 @@ spec:
     key: password
   storage: 20Gi
   resources:
+    cpuRequest: 250m
+    memoryRequest: 512Mi
     memoryLimit: 3Gi
 ```
 
+The example spells out the operator's defaults for each node's volume and container resources.
 Each node checks its volume and its memory before it starts, and refuses to start when they cannot
-hold its configuration: its volume must be at least as large as each resource quota, 16 GiB for
-extracted resources by default, and its memory limit must hold all derived execution and client
-credit budgets. The default derivations on a 1 GiB node total 491 MiB; leave further headroom for
-graph state, engine allocations and stacks (see [Execution Capabilities](node-settings.md#execution-capabilities)). The
-example spells out the operator's defaults, a 20 GiB volume and a 3 GiB memory limit, which meet
-both checks. A volume below its quotas, or a memory limit below its complete resolved budget,
-refuses each affected pod's startup.
-[Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
+hold its configuration; [Node Sizing](#node-sizing) explains what a node derives from these values
+and what the defaults hold.
 
 Apply it and watch the cluster become ready:
 
@@ -107,6 +104,37 @@ kubectl --namespace nervix get pods,services,persistentvolumeclaims
 
 One operator can manage multiple Nervix clusters. Create each cluster as a separate
 `NervixCluster`, usually in a separate namespace or with a distinct name in the same namespace.
+
+## Node Sizing
+
+The operator gives each node's container the CPU and memory requests `spec.resources.cpuRequest`
+and `spec.resources.memoryRequest`, `250m` and `512Mi` by default, and the memory limit
+`spec.resources.memoryLimit`, `3Gi` by default. It sets no CPU limit. A node sizes itself from the
+limits of its container, as [Sizing A Node](sizing.md#the-two-inputs) describes:
+
+- Its memory limit is `memoryLimit`. Every memory budget, its client credit and its
+  memory-pressure watermarks derive from it; the memory request, which Kubernetes schedules the
+  pod by, does not change them.
+- Its CPU count is every CPU the pod may run on, normally all of the Kubernetes node's CPUs, because
+  a request sets no CPU quota. A CPU limit, from a LimitRange for example, becomes the node's CPU
+  count, rounded down to whole CPUs and at least one.
+
+The operator's startup command passes only each node's identity, addresses, interconnect TLS files,
+database path and bootstrap options, plus the log filter `spec.logFilter` gives as `RUST_LOG`, and
+`NervixCluster` has no field for any node setting. Every node therefore runs with the defaults its
+settings declare and the capacity it detects.
+`DESCRIBE CLUSTER` and `SHOW NODES` report each node's committed CPU count and memory.
+
+With the default 3 GiB limit, a node derives 1,435 MiB of execution budgets, 192 MiB of client
+credit and 64 MiB of database caches, 1,691 MiB that its startup check requires the limit to hold,
+and pauses its ingestors at 2,688 MiB of allocated memory. These are ceilings rather than
+allocations; leave room beside them for graph state, engine allocations and stacks. A memory limit
+that cannot hold a node's budgets refuses that pod's start.
+
+The volume, `spec.storage`, must be at least as large as each resource quota, 4 GiB for a resource
+archive and 16 GiB for its extracted files by default, and the node's restore-staging quota follows
+the volume. The default 20 GiB holds both, and a volume below a quota refuses the pod's start.
+[Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
 
 ## Cluster Parameters
 
@@ -143,6 +171,8 @@ with the refusal, while the cluster initializes; `Committed` once the request is
 for a cluster without `initialDefaultUserPasswordSecretRef`, which the operator does not initialize.
 The operator never changes an initialized cluster's parameters. Change them with `ALTER CLUSTER SET`,
 which `DESCRIBE CLUSTER` then reports with each node's running values.
+[Cluster Parameters](sizing.md#cluster-parameters) lists every parameter with its default and
+bounds.
 
 ## Interconnect Certificates
 
@@ -196,16 +226,45 @@ operator sets `terminationGracePeriodSeconds: 60` so the kubelet waits longer th
 that cannot finish exits on its own rather than being killed partway through its drain. If you raise
 `NERVIX_SHUTDOWN_TIMEOUT`, raise the grace period with it.
 
-Note that `/readyz` reports whether the node currently knows a Raft leader; it does not turn
-negative when a node begins terminating. A draining node is therefore not removed from Service
-endpoints by readiness alone. It stops accepting new client connections itself in the first
-shutdown phase, and it keeps serving already-admitted work until its drain finishes.
+Note that `/readyz` reports whether the node has finished initializing and currently knows a Raft
+leader; it does not turn negative when a node begins terminating. A draining node is therefore not
+removed from Service endpoints by readiness alone. It stops accepting new client connections itself
+in the first shutdown phase, and it keeps serving already-admitted work until its drain finishes.
 
 A terminating node moves its scheduled work to a live peer when one is available, and otherwise
 completes everything it has admitted in place. Rolling one pod at a time keeps a peer available to
 receive that work, so ownership moves instead of waiting for the pod to come back. See
 [Shutdown And Recovery](shutdown.md) for the phases, the drain guarantees, and what each ending
 preserves.
+
+## Rolling Updates
+
+A change to `spec.image` or `spec.resources` changes the pods' template, and Kubernetes rolls the
+StatefulSet: it restarts one pod at a time, from the highest ordinal, and waits for each restarted
+pod to be ready before the next. A pod is ready when its `/readyz` answers 200, once its node has
+installed the cluster's committed parameters and knows a leader, so the roll moves on only after
+the restarted node has rejoined. [Rolling Changes](sizing.md#rolling-changes) gives the guarantees,
+and [Reading DESCRIBE CLUSTER During A Roll](sizing.md#reading-describe-cluster-during-a-roll) shows
+how to follow each step.
+
+- **Cluster parameters.** The pods carry no option that seeds a parameter, so a roll changes no
+  parameter, and every restarted node installs the committed record before it becomes ready. Run
+  `ALTER CLUSTER SET` at any time, during a roll included.
+- **Node capabilities.** A new `memoryLimit` gives each restarted node a new memory claim and new
+  budgets, while the pods not yet restarted keep theirs; nodes run correctly with different claims,
+  and `DESCRIBE CLUSTER` shows each claim committed for its node's new incarnation. Before lowering
+  `memoryLimit`, check that the smaller limit still holds a node's budgets: a pod that cannot hold
+  them refuses to start, and the roll waits on it.
+- **Prerequisites.** Every pod keeps the default Raft heartbeat, gossip interval and clock-skew
+  tolerance, the cluster identity `spec.clusterId` gives, or the resource's name without it, and the
+  operator's certificate authority, so a roll moves no prerequisite that a node setting gives. The
+  node-to-node wire contract, the consensus floors and the durability promise come from the build.
+  When a new image differs from the running one in any of them, the first restarted pod is refused
+  as it joins its peers, which still run the old image, and exits with status `1`. Kubernetes
+  restarts it without it becoming ready, so the roll stops there while the other pods keep running.
+  Revert `spec.image`, then delete that pod so the StatefulSet recreates it from the reverted
+  template, as Kubernetes describes for a
+  [forced rollback](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#forced-rollback).
 
 ## Production Considerations
 
