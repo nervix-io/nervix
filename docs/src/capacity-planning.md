@@ -186,8 +186,14 @@ cannot hold it:
   and both node client-credit capacities once each, plus the configured node and consensus database
   caches (32 MiB each by default). A 1 GiB node can start with the default
   derivations; explicit oversized totals refuse startup. Leave headroom for graph state, engine
-  allocations and stacks. Omitted high and low memory-pressure watermarks derive as 7/8 and 3/4
-  of known memory, while an explicitly supplied pair keeps its exact thresholds.
+  allocations and stacks. The databases' memtables are such engine memory, which the check does
+  not count and Nervix does not limit: each of the 15 keyspaces, 11 in the node database and 4 in
+  the consensus database, collects new writes in a memtable that grows to 64 MiB before it is
+  written to disk, and a keyspace whose writes outpace those disk writes keeps up to four full
+  memtables waiting before its writers pause. Most keyspaces hold far less; the Raft log and the
+  runtime state are the ones a write-heavy node fills. Omitted high and low memory-pressure
+  watermarks derive as 7/8 and 3/4 of known memory, while an explicitly supplied pair keeps its
+  exact thresholds.
 - **Volume.** The volume that holds the node's database directory must be at least as large as
   each of its quotas. The restore-staging quota, `--restore-staging-max-bytes`, follows the volume
   when it is not given: the node takes the smaller of 128 GiB and the volume's total size, and a
@@ -314,5 +320,7 @@ An inferencer with `STATE` retains one immutable native F32 generation per concr
 
 Transport, DNS and consensus local capacities are described in
 [Node Settings](node-settings.md#transport-resolver-and-database-capacities). The startup memory
-check includes both configured database caches alongside the execution budgets. Database workers
-derive from the resolved CPU count, capped at four per database unless explicitly overridden.
+check includes both configured database caches alongside the execution budgets; the databases'
+memtables stay outside it. Database workers derive from the resolved CPU count, capped at four per
+database unless explicitly overridden. Each database keeps at most its configured number of table
+files open, 900 by default on Linux.

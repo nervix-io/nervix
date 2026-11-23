@@ -393,7 +393,8 @@ configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`
 administration outside the transaction. Plan restore capacity for independently admitted archive
 metadata and streamed checkpoint I/O, following the backup guidance in `references/configuring-nervix.md`.
 Size node memory for every execution pool, including active snapshots and optional retained materialized-source reads;
-the default startup requirement is 2,787 MiB, including both database caches. Read [Node Settings](https://docs.nervix.io/node-settings.html)
+the default startup requirement is 2,787 MiB, including both database caches but not their memtables, which need
+headroom of their own ([Capacity Planning](https://docs.nervix.io/capacity-planning.html)). Read [Node Settings](https://docs.nervix.io/node-settings.html)
 for the complete prerequisite checks.
 For Nervix transport, DNS, database or consensus sizing, read
 [Node Settings → Transport, Resolver And Database Capacities](../../../docs/src/node-settings.md#transport-resolver-and-database-capacities).

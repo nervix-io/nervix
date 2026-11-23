@@ -255,12 +255,16 @@ impl Arbitrary<'_> {
             journal_bytes: self.entropy.any_u64(),
             workers: NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
                 .assured("generated workers are positive"),
+            max_open_files: NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+                .assured("generated open-file limits are positive"),
         };
         let consensus_database = nervix_models::DatabaseCapabilities {
             cache_bytes: self.entropy.any_u64(),
             journal_bytes: self.entropy.any_u64(),
             workers: NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
                 .assured("generated workers are positive"),
+            max_open_files: NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
+                .assured("generated open-file limits are positive"),
         };
         let dns = nervix_models::DnsCapabilities {
             cache_entries: self.entropy.any_u64(),

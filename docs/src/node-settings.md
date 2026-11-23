@@ -241,13 +241,26 @@ without adding a prerequisite or changing graph acceptance.
 | `--database-cache-bytes` | 32 MiB | Node database cache |
 | `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
 | `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
+| `--database-max-open-files` | Derived | Table files the node database keeps open, at least 10: 900, or 400 on Windows and 150 on macOS |
 | `--raft-database-cache-bytes` | 32 MiB | Dedicated consensus database cache |
 | `--raft-database-journal-bytes` | 512 MiB | Consensus database journal capacity, at least 64 MiB |
 | `--raft-database-workers` | Derived | Same CPU derivation, independently overridable |
+| `--raft-database-max-open-files` | Derived | Same platform derivation, independently overridable |
 
 Counts, receive windows and deadlines must be positive and fit their engines. HTTP/2 windows
 are at most 2³¹−1 bytes. The options are validated before opening stores or binding listeners.
 Database cache capacities count alongside executor budgets in the startup memory check.
+
+Each database keeps at most its `max-open-files` table files open. When it needs another, it closes
+the one it used least recently, and a later read opens that file again. Every keyspace of both
+databases writes through a fixed 64 MiB memtable, the in-memory buffer that collects new writes. A
+memtable starts empty and grows with each write until it reaches 64 MiB; the engine then seals it,
+writes it to disk as a table in the background and starts an empty one. This size is not a
+setting: the engine records it when it creates a keyspace and reuses the recorded size on every
+later open, so a different value would reach only new databases. The engine sets no total
+memtable cap, and Nervix does not limit the databases at runtime. Memtable memory is therefore
+outside the startup memory check; [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start)
+describes the headroom it needs.
 
 Connection capacity derives from both directions of every pool: twelve connections per declared
 peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
@@ -908,7 +921,8 @@ It refuses to start at the first check that fails, exiting with status `1` and
    settings, client byte credit, omitted receive limits and memory-pressure watermarks from these
    capacities. Every memory pool counts once, including independent active state reads and retained
    state-read cache. Their total plus producer and consumer node credit and the configured node and
-   consensus database caches must fit known memory.
+   consensus database caches must fit known memory. The databases' memtables are not part of this
+   total.
    A failed detector leaves capacity unknown and uses the declared capacity-independent defaults.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each

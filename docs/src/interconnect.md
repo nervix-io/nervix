@@ -533,8 +533,9 @@ The current fingerprint includes the conditional orphaned model-pause recovery c
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 It also covers the node record announcement: the `consensus.announce_node_record` request and the
 Raft command that commit a node's capacity claim, detected properties and tags as one record.
-That claim carries the size of the volume holding the node's database directory, and a parameter
-conflict can carry the typed refusal of a resource quota above an admitted node's volume.
+That claim carries the size of the volume holding the node's database directory and the open-file
+limit of each of the node's databases, and a parameter conflict can carry the typed refusal of a
+resource quota above an admitted node's volume.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup. The fingerprint also covers
 the opening of a client consumer stream with the largest delivery chunk its serving node announces.

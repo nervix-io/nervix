@@ -399,8 +399,8 @@ fn infrastructure_lines(record: &NodeCapabilityRecord) -> Vec<String> {
         ("raft database", claim.consensus_database),
     ] {
         lines.push(format!(
-            "  {name}: cache-bytes={} journal-bytes={} workers={}",
-            database.cache_bytes, database.journal_bytes, database.workers
+            "  {name}: cache-bytes={} journal-bytes={} workers={} max-open-files={}",
+            database.cache_bytes, database.journal_bytes, database.workers, database.max_open_files
         ));
     }
     let consensus = claim.consensus;
