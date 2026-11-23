@@ -241,6 +241,26 @@ These checks do not claim a FIPS-qualified deployment. The shared engine has no 
 or concurrent state machine, so Cucumber and concurrency-model execution belong to its later
 integration owners.
 
+## Production Smoke Test
+
+`tests/features/licensing/production_smoke.feature` checks that a Nervix cluster accepts a license
+from the production licensing service, `licensing.nervix.io`, as a customer's cluster does. No step
+starts the in-repo test service, so one- and three-node clusters use the compiled production address
+and trust bundle. Each cluster activates the production smoke-test account's license as ephemeral,
+shows `capability licensing.dummy: enabled` in `DESCRIBE LICENSE`, and releases the license.
+
+The account's plan grants nothing beyond the free policy except `licensing.dummy`, which changes
+nothing, so a leaked key is worth nothing. Its plan allows only ephemeral activations, four at a
+time, each for at most an hour, so a run that never releases frees its slots by itself.
+
+`just test-licensing-production-smoke` runs the scenarios. It needs the account's license key in
+`NERVIX_LICENSING_SMOKE_KEY`, which no step writes to the scenario text, its output or its logs.
+Ordinary scenario runs exclude the scenarios by their `@production_licensing` tag. In CI, the
+Licensing Smoke workflow runs them nightly on `main`, on demand, and for a pull request labeled
+`licensing-smoke`, with the key from the repository secret of the same name. Never on every pull
+request: a fork's pull request receives no secrets, and an outage of the production service must
+not block unrelated work.
+
 ## Notification Payloads
 
 `notifications` owns the current typed `sync`, `decision` and `trust` payloads and their JSON
