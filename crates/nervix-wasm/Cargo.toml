@@ -27,6 +27,7 @@ nonzero_ext = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 wasmtime = { workspace = true }
+wat = { workspace = true }
 
 [dev-dependencies]
 arrow-array = { workspace = true }
