@@ -770,8 +770,10 @@ its session delivers, and says where it left something out:
   256 KiB. Walking back to the oldest command kept says that earlier commands were omitted, and a
   command larger than the whole history says that it cannot be recalled.
 - While the console connects or waits to reconnect, at most 64 requests of its controls wait for
-  the session, carrying at most 4 MiB of statements, completion input, and search text. Once
-  connected, controls can admit at most 256 outstanding requests carrying at most 16 MiB.
+  the session, carrying at most one session frame of statements, completion input, and search
+  text: the frame limit the node announced in the last session opening, or before the first one
+  the default 4 MiB. Once connected, controls can admit at most 256 outstanding requests carrying
+  at most four session frames, 16 MiB at the default `--session-frame-bytes`.
   Connection setup also restores the retained tabs, selected domain and clock, and transaction,
   so a full control backlog cannot prevent its own recovery.
   Every request shares the session's 64-place request window, including completion, choice lookup,
@@ -790,8 +792,8 @@ its session delivers, and says where it left something out:
   another domain replaces it with that domain's snapshot, which the server sends at once.
 - A backup's download moves each 256 KiB chunk of the archive into the browser's own blob storage
   as it arrives, and the page holds one chunk at a time. A restore reads its archive file one slice
-  at a time, at most 4 MiB while it digests the file and 256 KiB while it streams it, and keeps at
-  most 1 MiB queued on its connection.
+  at a time, at most 4 MiB while it digests the file and, while it streams it, the smaller of
+  256 KiB and half the announced session frame, and keeps at most 1 MiB queued on its connection.
 
 ## Entity Labels
 
@@ -949,6 +951,11 @@ the summary, and only then hands it to the browser as a download, saved under th
 the file the statement names; the browser chooses the directory. A partial or altered archive never
 reaches the browser's downloads. The first download whose last frame the leader queued releases
 the archive on the leader.
+
+The console hands the browser the archive at an object URL, which it releases 60 seconds after the
+download starts. The browser resolves that URL when the download starts, and releasing it refuses
+only later uses, so the release never cuts a download short: the 60 seconds only bound how long the
+browser keeps the archive's memory for the page after handing it over.
 
 A download that fails in transport, stalls, or ends early starts again from the first byte after a
 one-second pause, for up to eight attempts and redirects in all, while the leader retains the

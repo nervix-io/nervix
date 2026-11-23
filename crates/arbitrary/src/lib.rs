@@ -501,7 +501,7 @@ mod tests {
         }
         for bound in [
             1,
-            nervix_models::DEFAULT_CLIENT_PRODUCER_SESSION_BYTES,
+            nervix_models::ClientProducerSessionBytes::DEFAULT,
             u64::MAX,
         ] {
             assert!(producer_bytes.contains(&bound), "{bound} producer bytes");
@@ -514,7 +514,7 @@ mod tests {
         }
         for bound in [
             1,
-            nervix_models::DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+            nervix_models::ClientConsumerSessionBytes::DEFAULT,
             u64::MAX,
         ] {
             assert!(consumer_bytes.contains(&bound), "{bound} consumer bytes");

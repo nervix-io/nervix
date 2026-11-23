@@ -20,10 +20,25 @@ use crate::{
 
 /// The most list levels one field may nest before its scalar: far more than any schema declares,
 /// and few enough that every recursion over the type stays shallow.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client host bindings chapter lets a host-built field type nest at most 32 \
+                  list levels"
+    )
+)]
 const MAX_LIST_LEVELS: usize = 32;
 
 /// The largest element count of a fixed-size list: an Arrow fixed-size list counts its elements
 /// in an `i32`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an Arrow fixed-size list declares its element count as an i32"
+    )
+)]
 const MAX_FIXED_LIST_LENGTH: u32 = i32::MAX.cast_unsigned();
 
 /// A field list a host is building.

@@ -35,8 +35,8 @@ use rumqttc::{
 
 use super::{AcknowledgementRequests, ConnectionEvents, IngestorPacket, MqttConnection};
 use crate::topic::ingestor::{
-    IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
-    PublishRead as _, overflow_fixture::ReadAheadOverflowFixture,
+    IngestorAcknowledgement, MqttReadAheadSettings, MqttTopicIngestor, MqttTopicIngestorError,
+    MqttTopicIngestorPosition, PublishRead as _, overflow_fixture::ReadAheadOverflowFixture,
 };
 
 /// The largest complete publish a client that leaves `max_packet_size` out admits.
@@ -48,6 +48,11 @@ fn default_admission() -> NonZeroU32 {
     MqttClientConfig::parse(&client)
         .assured("an address alone is a valid MQTT client configuration")
         .max_packet_size()
+}
+
+/// The read-ahead headroom a node runs with when it is not given one.
+fn default_headroom() -> NonZeroUsize {
+    MqttReadAheadSettings::default().headroom()
 }
 
 /// The event loop of a connection whose broker stopped reading it: it writes nothing and yields
@@ -77,6 +82,7 @@ async fn an_acknowledgement_its_connection_cannot_write_fails_after_one_keep_ali
         StalledEventLoop,
         IngestorAcknowledgement::Manual {
             receive_maximum: NonZeroU16::MIN,
+            headroom: default_headroom(),
         },
         Some(keep_alive),
         default_admission(),
@@ -246,6 +252,7 @@ async fn a_cancelled_discard_keeps_its_acknowledgement_progress_and_original_dea
             OnePublishEventLoop(Some(publish)),
             IngestorAcknowledgement::Manual {
                 receive_maximum: NonZeroU16::MIN,
+                headroom: default_headroom(),
             },
             Some(keep_alive),
             default_admission(),
@@ -324,6 +331,7 @@ async fn a_discard_whose_connection_ends_preserves_the_acknowledgement_failure_c
         ClosingEventLoop(Some(publish)),
         IngestorAcknowledgement::Manual {
             receive_maximum: NonZeroU16::MIN,
+            headroom: default_headroom(),
         },
         None,
         default_admission(),
@@ -390,6 +398,7 @@ async fn a_discard_deadline_starts_after_the_host_settles_its_ordinary_prefix() 
         events,
         IngestorAcknowledgement::Manual {
             receive_maximum: NonZeroU16::new(2).assured("two is nonzero"),
+            headroom: default_headroom(),
         },
         Some(keep_alive),
         default_admission(),
@@ -467,6 +476,7 @@ async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() 
         events,
         IngestorAcknowledgement::Manual {
             receive_maximum: NonZeroU16::new(65).assured("the sequential window includes headroom"),
+            headroom: default_headroom(),
         },
         Some(Duration::from_secs(10)),
         default_admission(),
@@ -544,4 +554,87 @@ async fn qos_zero_overflow_keeps_polling_and_preserves_acknowledged_publishes() 
         .assured("QoS 0 admission resumes after draining");
     assert!(matches!(next, super::PublishReadOutcome::Message(publish) if *publish == resumed));
     assert_eq!(overflow.dropped(), 64);
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_configured_headroom_is_the_qos_zero_quota_beside_the_receive_maximum() {
+    let overflow = ReadAheadOverflowFixture::new();
+    let (packets, incoming) = mpsc::unbounded_channel();
+    let (requests, queued) = mpsc::channel(4);
+    let (pinged, mut pings) = mpsc::channel(1);
+    let events = OverflowEventLoop {
+        packets: incoming,
+        requests: queued,
+        pinged,
+    };
+    let headroom = NonZeroUsize::new(3).assured("three is nonzero");
+    let mut connection = MqttConnection::start(
+        RecordingClient(requests),
+        events,
+        IngestorAcknowledgement::Manual {
+            receive_maximum: NonZeroU16::new(4)
+                .assured("the sequential window and the configured headroom are nonzero"),
+            headroom,
+        },
+        Some(Duration::from_secs(10)),
+        default_admission(),
+        overflow.report(),
+    );
+    assert_eq!(
+        connection.read_ahead_capacity.get(),
+        7,
+        "the read-ahead holds the advertised window and the configured QoS 0 quota"
+    );
+
+    for value in 0..8_u8 {
+        packets
+            .send(Event::Incoming(Incoming::Publish(Publish::new(
+                "events",
+                QoS::AtMostOnce,
+                vec![value],
+                None,
+            ))))
+            .assured("the driver keeps polling the incoming flood");
+    }
+    packets
+        .send(Event::Outgoing(Outgoing::PingReq))
+        .assured("the loop emits a ping after reading the flood");
+    nervix_primitives::time::timeout(Duration::from_secs(10), pings.recv())
+        .await
+        .assured("QoS 0 overflow beyond the configured quota must not stop polling")
+        .assured("the driver sends its progress witness");
+    assert_eq!(
+        overflow.dropped(),
+        5,
+        "every QoS 0 publish beyond the configured headroom is dropped and counted"
+    );
+    for value in 0..3_u8 {
+        let next = connection
+            .next_publish()
+            .await
+            .assured("the configured quota's prefix is retained");
+        let expected = Publish::new("events", QoS::AtMostOnce, vec![value], None);
+        assert!(
+            matches!(next, super::PublishReadOutcome::Message(publish) if *publish == expected)
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn a_connection_that_acknowledges_on_receipt_reads_its_configured_headroom_ahead() {
+    let connection = MqttConnection::start(
+        QueueingClient,
+        StalledEventLoop,
+        IngestorAcknowledgement::OnReceipt {
+            headroom: NonZeroUsize::new(3).assured("three is nonzero"),
+        },
+        None,
+        default_admission(),
+        ReadAheadOverflowFixture::new().report(),
+    );
+    assert_eq!(
+        connection.read_ahead_capacity.get(),
+        3,
+        "NO ACK reads exactly the configured headroom ahead"
+    );
 }

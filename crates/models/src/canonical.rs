@@ -67,6 +67,14 @@ use crate::{
 pub const PLEXUS_LANGUAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Width of one canonical indentation level.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "SHOW CREATE and the formatter print canonical Plexus indented two spaces a \
+                  level, and window model digests hash that text"
+    )
+)]
 const INDENT: usize = 2;
 
 /// A clause in the canonical layout of a statement.
@@ -200,13 +208,78 @@ fn block_statement(header: impl Into<String>, items: Vec<String>) -> String {
 ///
 /// These mirror the parser's precedence ladder exactly. Rendering consults them so that an
 /// expression carries only the parentheses its structure actually requires.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and OR binds loosest"
+    )
+)]
 const PRECEDENCE_OR: u8 = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and AND binds one level tighter than OR"
+    )
+)]
 const PRECEDENCE_AND: u8 = 1;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and comparisons, IN and BETWEEN bind one level tighter than AND"
+    )
+)]
 const PRECEDENCE_COMPARISON: u8 = 2;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and + and - bind one level tighter than comparisons"
+    )
+)]
 const PRECEDENCE_ADDITIVE: u8 = 3;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and *, / and % bind one level tighter than + and -"
+    )
+)]
 const PRECEDENCE_MULTIPLICATIVE: u8 = 4;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and unary - and NOT bind one level tighter than *, / and %"
+    )
+)]
 const PRECEDENCE_UNARY: u8 = 5;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and AS binds one level tighter than unary - and NOT"
+    )
+)]
 const PRECEDENCE_CAST: u8 = 6;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the renderer ranks the Expression Functions precedence levels loosest first \
+                  from zero, and literals, fields, calls and parentheses bind tightest, one level \
+                  tighter than AS"
+    )
+)]
 const PRECEDENCE_ATOM: u8 = 7;
 
 fn binary_precedence(operator: &BinaryOperator) -> u8 {

@@ -310,6 +310,30 @@ pub const REFUSED: &[Refusal] = &[
         diagnostic: "cannot weaken",
     },
     Refusal {
+        name: "tunables_definitions",
+        diagnostic: "nervix::hidden_tunable",
+    },
+    Refusal {
+        name: "tunables_invalid",
+        diagnostic: "Nervix exceptions require a reason_bearing expect",
+    },
+    Refusal {
+        name: "tunables_rejected",
+        diagnostic: "nervix::hidden_tunable",
+    },
+    Refusal {
+        name: "tunables_resolution",
+        diagnostic: "nervix::hidden_tunable",
+    },
+    Refusal {
+        name: "tunables_unfulfilled",
+        diagnostic: "expectation is unfulfilled",
+    },
+    Refusal {
+        name: "tunables_wide",
+        diagnostic: "covers 2 distinct operations",
+    },
+    Refusal {
         name: "undocumented_expectation",
         diagnostic: "reason-bearing expect",
     },
@@ -396,4 +420,6 @@ pub const ALLOWED: &[&str] = &[
     "lifecycle_lock",
     "lifecycle_task_body",
     "stable_contracts",
+    "tunables_allowed",
+    "tunables_expected",
 ];

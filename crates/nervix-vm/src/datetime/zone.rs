@@ -37,11 +37,26 @@ use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::program::Disambiguation;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "a minute is sixty seconds")
+)]
 const SECONDS_PER_MINUTE: u32 = 60;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "an hour is sixty minutes")
+)]
 const SECONDS_PER_HOUR: u32 = 60 * SECONDS_PER_MINUTE;
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 
 /// The largest hour a written fixed offset may name, so offsets run from `-23:59` to `+23:59`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter accepts fixed UTC offsets from -23:59 to +23:59"
+    )
+)]
 const LARGEST_FIXED_OFFSET_HOUR: u32 = 23;
 
 /// A time zone a calendar builtin reads local dates and times in.

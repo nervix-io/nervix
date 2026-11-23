@@ -40,9 +40,39 @@ use crate::{
     text_column::TextColumnBuilder,
 };
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits one split result to 65,536 parts"
+    )
+)]
 const MAX_SPLIT_PARTS: usize = 65_536;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits a contains_any set to 128 non-null \
+                  patterns"
+    )
+)]
 const MAX_PATTERNS: usize = 128;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits a contains_any set to 65,536 bytes of \
+                  pattern text"
+    )
+)]
 const MAX_PATTERN_BYTES: usize = 64 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits a LIKE pattern to 4,096 bytes"
+    )
+)]
 const LIKE_PATTERN_BYTES_LIMIT: usize = 4 * 1024;
 
 /// A borrowed cache query over one Arrow list. Hashing matches `Vec<String>` exactly, including

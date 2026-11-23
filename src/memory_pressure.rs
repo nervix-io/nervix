@@ -39,8 +39,17 @@ pub use settings::{
     MemoryPressureResumeJitter, MemoryPressureSettings,
 };
 
-pub const DEFAULT_MEMORY_PRESSURE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
-pub const DEFAULT_MEMORY_PRESSURE_RESUME_JITTER: Duration = Duration::from_secs(1);
+/// The shortest delay, in milliseconds, before a paused ingestor tries to resume: none, so the
+/// jittered delays spread from an immediate resume up to the configured jitter.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the resume jitter setting is the most a paused ingestor waits, so the delays it \
+                  draws start at none"
+    )
+)]
+const SHORTEST_RESUME_DELAY_MILLIS: u64 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TypedBuilder)]
 pub struct MemoryPressureConfig {
@@ -48,9 +57,9 @@ pub struct MemoryPressureConfig {
     pub high_watermark: ByteUnit,
     #[builder(setter(into))]
     pub low_watermark: ByteUnit,
-    #[builder(default = DEFAULT_MEMORY_PRESSURE_CHECK_INTERVAL)]
+    #[builder(default = <MemoryPressureCheckInterval as nervix_models::SettingDefinition>::default_value(&()))]
     pub check_interval: Duration,
-    #[builder(default = DEFAULT_MEMORY_PRESSURE_RESUME_JITTER)]
+    #[builder(default = <MemoryPressureResumeJitter as nervix_models::SettingDefinition>::default_value(&()))]
     pub resume_jitter: Duration,
 }
 
@@ -262,7 +271,7 @@ impl MemoryPressureController {
         if jitter_millis == 0 {
             Duration::ZERO
         } else {
-            Duration::from_millis(fastrand::u64(0..=jitter_millis))
+            Duration::from_millis(fastrand::u64(SHORTEST_RESUME_DELAY_MILLIS..=jitter_millis))
         }
     }
 }

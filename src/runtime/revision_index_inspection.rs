@@ -22,11 +22,11 @@ use std::path::Path;
 
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::Executor;
-use nervix_models::DomainName;
+use nervix_models::{DomainName, SettingDefinition as _};
 use thiserror::Error;
 
 pub use super::state_store::StoredRevisionIndex;
-use super::state_store::{DEFAULT_RESTORE_STAGING_MAX_BYTES, RuntimeStateStore};
+use super::{RestoreStagingMaxBytes, state_store::RuntimeStateStore};
 
 /// Why a stopped node's runtime state store could not be counted.
 #[derive(Debug, Error)]
@@ -52,7 +52,7 @@ pub fn read_stored_revision_index(
     let store = RuntimeStateStore::from_database(
         database,
         Executor::default(),
-        DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .change_context(RevisionIndexInspectionError::OpenStore)?;
     store

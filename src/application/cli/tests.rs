@@ -22,13 +22,14 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 19] = [
+const SETTINGS_HEADINGS: [&str; 21] = [
     "Databases",
     "Consensus capacities",
     "DNS",
     "Interconnect",
     "Connector host",
     "Expression engine",
+    "First-bootstrap cluster parameters",
     "Consensus",
     "Membership",
     "Scheduling",
@@ -40,12 +41,13 @@ const SETTINGS_HEADINGS: [&str; 19] = [
     "Resources",
     "Capacity",
     "Execution",
+    "Operational node capabilities",
     "Listeners",
     "Trace export",
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 181] = [
+const SETTING_NAMES: [&str; 254] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -77,12 +79,14 @@ const SETTING_NAMES: [&str; 181] = [
     "partition-topology-poll-interval",
     "syslog-intake-queue-capacity",
     "syslog-read-chunk-bytes",
+    "mqtt-read-ahead-headroom",
     "wasm-stack-bytes",
     "wasm-memory-reservation-bytes",
     "vm-inline-row-limit",
     "vm-regex-search-cache-bytes",
     "vm-dynamic-pattern-cache-capacity",
     "vm-pattern-sets-per-batch",
+    "udf-watchdog",
     "database-cache-bytes",
     "database-journal-bytes",
     "database-workers",
@@ -133,6 +137,8 @@ const SETTING_NAMES: [&str; 181] = [
     "node-unavailability-timeout",
     "gossip-interval",
     "clock-skew-tolerance",
+    "gossip-receive-queue-capacity",
+    "gossip-tombstone-grace-period",
     "replica-count",
     "state-snapshot-interval",
     "inspection-max-rows",
@@ -222,6 +228,75 @@ const SETTING_NAMES: [&str; 181] = [
     "listener-tcp-keepalive-time",
     "listener-tcp-keepalive-interval",
     "listener-tcp-keepalive-retries",
+    "payload-unfold-limit",
+    "forced-recovery-budget",
+    "ownership-handoff-poll-interval",
+    "entity-gate-poll-interval",
+    "domain-drain-poll-interval",
+    "runtime-readiness-propagation-bound",
+    "tls-cipher-suites",
+    "tls-key-exchange-groups",
+    "password-iterations",
+    "licensing-request-timeout",
+    "licensing-retry-backoff-max",
+    "licensing-stream-idle-timeout",
+    "domain-drain-timeout",
+    "entity-gate-deadline",
+    "remote-ack-alive-interval",
+    "remote-ack-dispatch-timeout",
+    "remote-ack-silence-timeout",
+    "remote-ack-sweep-interval",
+    "remote-relay-total-timeout",
+    "remote-relay-instantiation-wait",
+    "max-batch-messages",
+    "client-producer-session-bytes",
+    "client-consumer-session-bytes",
+    "udf-code-bytes",
+    "udf-compile-budget",
+    "entity-labels-max-count",
+    "entity-labels-max-key-bytes",
+    "entity-labels-max-value-bytes",
+    "entity-labels-max-bytes",
+    "http-header-bytes",
+    "http-header-fields",
+    "client-batch-rows",
+    "control-plane-membership-interval",
+    "control-plane-scheduling-interval",
+    "control-plane-resource-replication-interval",
+    "control-plane-health-probe-interval",
+    "control-plane-leadership-sync-retry",
+    "control-plane-runtime-state-retry-interval",
+    "control-plane-transaction-sweep-interval",
+    "control-plane-restore-staging-sweep-interval",
+    "control-plane-transaction-recovery-concurrency",
+    "control-plane-resource-replication-concurrency",
+    "control-plane-entity-gate-release-retry-interval",
+    "control-plane-entity-gate-engagement-retry-interval",
+    "control-plane-transaction-application-retry-interval",
+    "control-plane-domain-clock-progress-retry-interval",
+    "control-plane-backup-retry-interval",
+    "control-plane-restore-admission-wait",
+    "control-plane-restore-admission-retry-interval",
+    "control-plane-model-inspection-timeout",
+    "control-plane-kafka-partition-watch-interval",
+    "interconnect-tls-reload-interval",
+    "authentication-attempts-per-second",
+    "session-frame-bytes",
+    "session-transfer-bytes",
+    "session-nesting-depth",
+    "session-collection-entries",
+    "session-string-bytes",
+    "session-queue-memory-bytes",
+    "session-subscription-rows-per-frame",
+    "session-notice-capacity",
+    "session-leadership-check-interval",
+    "session-snapshot-interval",
+    "client-link-heartbeat-interval",
+    "client-link-producer-open-timeout",
+    "client-link-consumer-open-timeout",
+    "client-link-producer-answer-capacity",
+    "client-link-consumer-answer-capacity",
+    "client-link-consumer-writer-capacity",
     "otel-trace-sample-ratio",
     "otel-trace-export-timeout",
     "otel-trace-export-interval",
@@ -660,6 +735,128 @@ fn a_gossip_interval_below_one_millisecond_refuses_the_node() {
 }
 
 #[test]
+fn gossip_and_mqtt_read_ahead_capabilities_read_back_as_configured() {
+    let settings = NodeSettings::default()
+        .with_overrides(&[
+            override_of("gossip-receive-queue-capacity", "512"),
+            override_of("gossip-tombstone-grace-period", "90s"),
+            override_of("mqtt-read-ahead-headroom", "32"),
+        ])
+        .assured("positive capacities within their channel bounds and a positive grace are valid");
+
+    let read = settings
+        .with_overrides(&[])
+        .assured("rendered settings read back");
+    assert_eq!(read, settings);
+    assert_ne!(settings, NodeSettings::default());
+    assert_eq!(
+        settings.membership.gossip_receive_queue_capacity().get(),
+        512
+    );
+    assert_eq!(
+        settings.membership.gossip_tombstone_grace_period(),
+        Duration::from_secs(90)
+    );
+    assert_eq!(settings.runtime.connector_host.mqtt.headroom().get(), 32);
+    let defaults = NodeSettings::default();
+    assert_eq!(
+        defaults.membership.gossip_receive_queue_capacity().get(),
+        1024
+    );
+    assert_eq!(
+        defaults.membership.gossip_tombstone_grace_period(),
+        Duration::from_secs(60)
+    );
+    assert_eq!(defaults.runtime.connector_host.mqtt.headroom().get(), 64);
+}
+
+#[test]
+fn gossip_and_mqtt_read_ahead_capabilities_outside_their_bounds_refuse_the_node() {
+    struct Refusal {
+        name: &'static str,
+        value: String,
+        membership: bool,
+    }
+
+    let beyond_channel = nervix_primitives::sync::Semaphore::MAX_PERMITS
+        .checked_add(1)
+        .assured("the channel bound leaves its three high bits free")
+        .to_string();
+    let refusals = [
+        Refusal {
+            name: "gossip-receive-queue-capacity",
+            value: beyond_channel.clone(),
+            membership: true,
+        },
+        Refusal {
+            name: "gossip-tombstone-grace-period",
+            value: "0s".to_string(),
+            membership: true,
+        },
+        Refusal {
+            name: "gossip-tombstone-grace-period",
+            value: "4294967296s".to_string(),
+            membership: true,
+        },
+        Refusal {
+            name: "mqtt-read-ahead-headroom",
+            value: beyond_channel,
+            membership: false,
+        },
+    ];
+    for refusal in refusals {
+        let refused = NodeSettings::default()
+            .with_overrides(&[override_of(refusal.name, &refusal.value)])
+            .err()
+            .assured("a value outside the capability's bounds is refused before startup");
+        if refusal.membership {
+            assert!(
+                matches!(
+                    refused.current_context(),
+                    AppError::InvalidMembershipSettings
+                ),
+                "{}={}: {refused:#}",
+                refusal.name,
+                refusal.value
+            );
+            assert!(refused.contains::<crate::cluster::MembershipSettingsError>());
+        } else {
+            assert!(
+                matches!(
+                    refused.current_context(),
+                    AppError::InvalidConnectorHostSettings
+                ),
+                "{}={}: {refused:#}",
+                refusal.name,
+                refusal.value
+            );
+            assert!(refused.contains::<nervix_connector_mqtt::MqttReadAheadSettingsError>());
+        }
+        assert!(
+            format!("{refused:#}").contains(refusal.name),
+            "the refusal names {}: {refused:#}",
+            refusal.name
+        );
+    }
+}
+
+#[test]
+fn a_zero_gossip_queue_or_mqtt_headroom_cannot_be_read() {
+    for name in ["gossip-receive-queue-capacity", "mqtt-read-ahead-headroom"] {
+        let refused = NodeSettings::default()
+            .with_overrides(&[override_of(name, "0")])
+            .err()
+            .assured("a capacity of no items is refused before startup");
+        assert!(matches!(refused.current_context(), AppError::ReadSettings));
+        let kind = refused
+            .downcast_ref::<clap::Error>()
+            .assured("the command line refuses the value it cannot read")
+            .kind();
+        assert_eq!(kind, clap::error::ErrorKind::ValueValidation, "{name}");
+    }
+}
+
+#[test]
 fn a_named_setting_that_breaks_a_relationship_is_refused_like_an_option() {
     let refused = NodeSettings::default()
         .with_overrides(&[override_of("drain-timeout", "2m")])
@@ -670,6 +867,74 @@ fn a_named_setting_that_breaks_a_relationship_is_refused_like_an_option() {
         refused.current_context(),
         AppError::InvalidShutdownTimeouts
     ));
+}
+
+#[test]
+fn a_udf_watchdog_reaches_the_runtime_and_its_capability_claim() {
+    assert_eq!(
+        NodeSettings::default().runtime.udf.watchdog(),
+        Duration::from_secs(5)
+    );
+    let settings = NodeSettings::default()
+        .with_overrides(&[override_of("udf-watchdog", "250ms")])
+        .assured("a positive watchdog is a valid capability");
+    assert_eq!(settings.runtime.udf.watchdog(), Duration::from_millis(250));
+    assert_eq!(
+        settings.runtime.engine_capabilities().udf_watchdog,
+        Duration::from_millis(250)
+    );
+    let read = settings
+        .with_overrides(&[])
+        .assured("rendered settings read back");
+    assert_eq!(read, settings);
+}
+
+#[test]
+fn a_zero_udf_watchdog_refuses_the_node_before_startup() {
+    let refused = NodeSettings::default()
+        .with_overrides(&[override_of("udf-watchdog", "0s")])
+        .err()
+        .assured("no call returns within a zero watchdog");
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidUdfSettings
+    ));
+    assert!(
+        format!("{refused:#}").contains("udf-watchdog must be positive"),
+        "{refused:#}"
+    );
+}
+
+#[test]
+fn a_udf_compile_budget_seed_reads_back_and_refuses_a_zero_budget() {
+    let settings = NodeSettings::default()
+        .with_overrides(&[override_of("udf-compile-budget", "30s")])
+        .assured("a positive budget is a valid first-bootstrap seed");
+    assert_eq!(
+        settings.parameter_seeds.udf_compile_budget,
+        Some(Duration::from_secs(30))
+    );
+    let read = settings
+        .with_overrides(&[])
+        .assured("rendered seeds read back");
+    assert_eq!(read, settings);
+    assert_eq!(
+        NodeSettings::default().parameter_seeds.udf_compile_budget,
+        None
+    );
+
+    let refused = NodeSettings::default()
+        .with_overrides(&[override_of("udf-compile-budget", "0s")])
+        .err()
+        .assured("a zero budget would refuse every UDF");
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidClusterParameters
+    ));
+    assert!(
+        format!("{refused:#}").contains("udf-compile-budget must be greater than zero"),
+        "{refused:#}"
+    );
 }
 
 #[test]

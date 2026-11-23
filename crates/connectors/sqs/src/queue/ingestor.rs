@@ -54,8 +54,25 @@ use crate::queue::connection::{SqsClientConfig, SqsRequest, SqsServiceClient};
 const SQS: &str = "sqs";
 /// How long one receive request waits for a message before the service answers empty, in the whole
 /// seconds the request carries.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long a receive should long-poll depends on the queue's traffic and the \
+                  drain latency its workload needs; it stays fixed until its repair task declares \
+                  it on the SQS QUEUE ingestor's Plexus surface https://app.clickup.com/t/86bd5vvdg"
+    )
+)]
 const LONG_POLL_SECONDS: i32 = 1;
 /// The long poll as a duration.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "the long poll's duration follows its retained seconds until their repair task \
+                  declares them https://app.clickup.com/t/86bd5vvdg"
+    )
+)]
 const LONG_POLL: Duration =
     match Duration::from_secs(1).checked_mul(LONG_POLL_SECONDS.unsigned_abs()) {
         Some(long_poll) => long_poll,
@@ -64,9 +81,27 @@ const LONG_POLL: Duration =
 const _: () = assert!(LONG_POLL_SECONDS > 0, "every receive long-polls");
 /// How long the service may take beyond the long poll to answer a receive: the request's and the
 /// answer's round trip on a loaded service.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long the service takes to answer a receive depends on its latency and load; \
+                  the allowance stays fixed until its repair task declares it in the SQS QUEUE \
+                  ingestor's bounds https://app.clickup.com/t/86bd5vvdg"
+    )
+)]
 const RECEIVE_ANSWER_ALLOWANCE: Duration = Duration::from_secs(9);
 /// How long a read the host cancelled still waits for its receive in flight: the rest of the
 /// receive's long poll and its answer. A service that has not answered by then is not answering.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "the cancelled receive's budget follows the retained long poll and answer \
+                  allowance until their repair task declares them \
+                  https://app.clickup.com/t/86bd5vvdg"
+    )
+)]
 const CANCELLED_RECEIVE_BUDGET: Duration = match LONG_POLL.checked_add(RECEIVE_ANSWER_ALLOWANCE) {
     Some(budget) => budget,
     None => panic!("a long poll and its answer allowance of a few seconds fit a duration"),

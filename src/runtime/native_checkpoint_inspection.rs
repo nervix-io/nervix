@@ -18,12 +18,13 @@ use std::path::Path;
 
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::Executor;
-use nervix_models::{DomainName, ModelKind, ModelName};
+use nervix_models::{DomainName, ModelKind, ModelName, SettingDefinition as _};
 
 pub use super::backup_state::{BackupBranchLifecycleEntry, BackupStateCaptureError};
 use super::{
+    RestoreStagingMaxBytes,
     backup_state::{decode_backup_branch_lifecycle, decode_backup_kafka_offsets},
-    state_store::{DEFAULT_RESTORE_STAGING_MAX_BYTES, RuntimeStateKind, RuntimeStateStore},
+    state_store::{RuntimeStateKind, RuntimeStateStore},
 };
 
 /// Decoded metadata from one checkpoint in the selected complete generation.
@@ -54,7 +55,7 @@ pub fn read_native_checkpoint_values(
     let store = RuntimeStateStore::from_database(
         database,
         Executor::default(),
-        DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .change_context(BackupStateCaptureError::Storage)?;
     let entries = store

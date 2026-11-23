@@ -13,6 +13,7 @@ shuttle = ["nervix-primitives/shuttle"]
 turmoil = ["nervix-primitives/turmoil"]
 
 [dependencies]
+bytecheck = "0.8.3"
 error-stack = "0.6"
 futures-core = "0.3"
 indexmap = "2"

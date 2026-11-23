@@ -18,10 +18,15 @@ use crate::{
 
 /// The archive format major version this crate writes and reads. A reader refuses any other: a
 /// new major is a format this reader cannot interpret.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the manifest's format major identifies the one archive format readers accept, \
+                  as Backup And Restore's archive format states"
+    )
+)]
 pub const ARCHIVE_FORMAT_MAJOR: u16 = 9;
-
-/// The manifest record's format version.
-const MANIFEST_VERSION: u16 = 5;
 
 /// What an archive is and every section it holds, in the order the archive holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,10 +148,7 @@ impl SectionDigest {
 /// A digest reads as lowercase hexadecimal, the form `b3sum` prints.
 impl fmt::Display for SectionDigest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        formatter.write_str(&faster_hex::hex_string(&self.0))
     }
 }
 
@@ -173,7 +175,14 @@ impl BackupManifest {
 
 impl ArchiveRecord for BackupManifest {
     const KIND: RecordKind = RecordKind::Manifest;
-    const VERSION: u16 = MANIFEST_VERSION;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the record header fences the one supported manifest record shape"
+        )
+    )]
+    const VERSION: u16 = 5;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         if !is_cluster_uid(self.cluster_uid) {
@@ -403,5 +412,36 @@ impl From<ResourcesWire> for BackupResources {
             ResourcesWire::Included => Self::Included,
             ResourcesWire::Omitted => Self::Omitted,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No bit set, every bit set, and every hexadecimal digit in both halves of a byte.
+    #[test]
+    fn section_digests_read_as_lowercase_hexadecimal() {
+        let every_digit = SectionDigest::from_bytes([
+            0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76,
+            0x54, 0x32, 0x10, 0x0f, 0xf0, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96,
+            0xa5, 0xb4, 0xc3, 0xd2,
+        ]);
+        assert_eq!(
+            SectionDigest::from_bytes([0x00; 32]).to_string(),
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            SectionDigest::from_bytes([0xff; 32]).to_string(),
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
+        assert_eq!(
+            every_digit.to_string(),
+            "000123456789abcdeffedcba98765432100ff01e2d3c4b5a69788796a5b4c3d2"
+        );
+        assert_eq!(
+            format!("{every_digit:?}"),
+            "SectionDigest(000123456789abcdeffedcba98765432100ff01e2d3c4b5a69788796a5b4c3d2)"
+        );
     }
 }

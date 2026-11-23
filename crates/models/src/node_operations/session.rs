@@ -63,13 +63,6 @@ fn default_scalar(value: usize) -> NonZeroU64 {
 
 pub struct SessionFrameBytes;
 impl SessionFrameBytes {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "this definition owns the single session frame default"
-        )
-    )]
     pub const DEFAULT: usize = 4 * 1024 * 1024;
     #[cfg_attr(
         nervix_lint,
@@ -114,13 +107,6 @@ impl SettingDefinition for SessionFrameBytes {
 
 pub struct SessionTransferBytes;
 impl SessionTransferBytes {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "this definition owns the single session transfer default"
-        )
-    )]
     pub const DEFAULT: usize = 64 * 1024 * 1024;
 }
 impl SettingDefinition for SessionTransferBytes {
@@ -149,13 +135,6 @@ impl SettingDefinition for SessionTransferBytes {
 
 pub struct SessionNestingDepth;
 impl SessionNestingDepth {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "this definition owns the single session nesting default"
-        )
-    )]
     pub const DEFAULT: usize = 64;
     #[cfg_attr(
         nervix_lint,
@@ -200,13 +179,6 @@ impl SettingDefinition for SessionNestingDepth {
 
 pub struct SessionCollectionEntries;
 impl SessionCollectionEntries {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "this definition owns the single session vector-entry default"
-        )
-    )]
     pub const DEFAULT: usize = 1 << 18;
 }
 impl SettingDefinition for SessionCollectionEntries {
