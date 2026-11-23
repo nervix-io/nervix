@@ -823,17 +823,19 @@ fn shuttle_a_received_body_waiting_for_a_place_ends_with_its_exchange_or_takes_t
         ReceivedBody { bytes, decoding }
     }
 
+    /// What a decoding reports: the decoded answer, nothing when the exchange ended first, or the
+    /// transport's failure.
+    type DecodingOutcome = Result<
+        Option<super::Decoded<crate::request::ResponseEnvelope>>,
+        error_stack::Report<crate::TransportError>,
+    >;
+
     fn decoding(
         executor: &Executor,
         body: ReceivedBody,
     ) -> (
         nervix_primitives::sync::oneshot::Sender<()>,
-        nervix_primitives::task::JoinHandle<
-            Result<
-                Option<super::Decoded<crate::request::ResponseEnvelope>>,
-                error_stack::Report<crate::TransportError>,
-            >,
-        >,
+        nervix_primitives::task::JoinHandle<DecodingOutcome>,
     ) {
         let (end, ended) = nervix_primitives::sync::oneshot::channel::<()>();
         let executor = executor.clone();

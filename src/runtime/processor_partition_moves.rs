@@ -140,10 +140,11 @@ pub(super) enum ClaimProgress {
         result: error_stack::Result<(), PartitionClaimError>,
     },
     /// The branch an install asked for, whose build waited for capacity and went on beside the
-    /// unit's commands, was built, or why it could not be.
+    /// unit's commands, was built, or why it could not be. The build is boxed: a prepared branch is
+    /// far larger than every other report, which the unit's commands carry too.
     Built {
         install: ClaimedBranchInstall,
-        built: ClaimedBranchBuild,
+        built: Box<ClaimedBranchBuild>,
     },
 }
 
@@ -563,7 +564,7 @@ impl ProcessorPartitionMoves {
                 }
             }
             ClaimProgress::Built { install, built } => {
-                released = self.finish_install(context, template, instances, install, built);
+                released = self.finish_install(context, template, instances, install, *built);
             }
             ClaimProgress::Forgotten { result: Ok(()), .. } => {}
             ClaimProgress::Forgotten {
@@ -743,7 +744,7 @@ impl ProcessorPartitionMoves {
                 commands
                     .send(ProcessorNodeCommand::PartitionClaim(ClaimProgress::Built {
                         install,
-                        built,
+                        built: Box::new(built),
                     }))
                     .await
                     .means_shutdown("processor unit awaiting a claimed branch's build");

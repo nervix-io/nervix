@@ -76,7 +76,7 @@ impl CheckpointReader {
             } => {
                 *offset = 0;
                 *buffer = Cursor::new(Vec::new());
-                *hasher = Box::new(blake3::Hasher::new());
+                **hasher = blake3::Hasher::new();
             }
         }
     }

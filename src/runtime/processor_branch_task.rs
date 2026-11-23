@@ -427,8 +427,9 @@ pub(super) async fn run_processor_node_runtime(
 
     /// What the task woke for while a key's first branch waits to be built.
     enum BesideBuild<E> {
-        /// The build ended, or the runtime ended it as it shut down.
-        Built(Option<NewBranchBuild>),
+        /// The build ended, or the runtime ended it as it shut down. Boxed, since a prepared
+        /// branch is far larger than an event.
+        Built(Option<Box<NewBranchBuild>>),
         /// The unit's relays or commands delivered an event.
         Event(E),
     }
@@ -675,7 +676,7 @@ pub(super) async fn run_processor_node_runtime(
                         nervix::lifecycle_call,
                         "a key's first batch waits for the build of its branch once",
                         pending.ended()
-                    ) => BesideBuild::Built(built),
+                    ) => BesideBuild::Built(built.map(Box::new)),
                     next = interaction.next_with_input(wake, false) => BesideBuild::Event(next),
                 };
                 match woke {
@@ -692,7 +693,7 @@ pub(super) async fn run_processor_node_runtime(
                         nervix_primitives::expect_lint!(
                             nervix::lifecycle_call,
                             "a key's first batch installs the branch built for it once",
-                            pending.finish(&dispatch, &mut instances, built)
+                            pending.finish(&dispatch, &mut instances, built.map(|built| *built))
                         )
                         .await;
                         None
