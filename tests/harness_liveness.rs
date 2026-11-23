@@ -4202,7 +4202,7 @@ mod tests {
         assert_eq!(
             still_stopping.to_string(),
             "node 'restored-1' stop: still stopping 300s after its stop request, at the end of \
-             its 300s watchdog, in shutdown phase TerminalTeardown, past its own shutdown deadline"
+             its 300s watchdog, in shutdown phase TerminalTeardown, past its own shutdown timeout"
         );
 
         let kept = NodeStopRecord {
