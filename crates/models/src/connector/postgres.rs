@@ -329,6 +329,13 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
         "timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout \
          maximum.",
         "Without timeout_ms, catalog queries and inserts have no Nervix response deadline.",
+        "The pool tries again to open a connection the server refuses, by refusing the TCP \
+         connection or answering SQLSTATE 53300 (too_many_connections) or 57P03 \
+         (cannot_connect_now), after 10 ms and then twice as long each time, at most a fifth of \
+         what remained of pool_acquire_timeout_ms at its first try, and stops when \
+         pool_acquire_timeout_ms has passed since the checkout or the pool's opening began. Any \
+         other failure to connect ends that checkout or opening at once. A publish whose checkout \
+         ends without a connection fails, and RETRY POLICY decides the next attempt.",
     ],
 };
 
