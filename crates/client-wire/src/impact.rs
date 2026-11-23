@@ -12,16 +12,16 @@ use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
     CanonicalImpactSet, ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact,
-    ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
-    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
-    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
-    ImpactTopologyEdge, ModelChangeAspect, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, ParametrizerName, PauseRequirement, PlannedExecutionStepImpact,
-    QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName,
-    RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
-    ResourceName, StatePurge, StateResetImpact, TransactionImpactReport, TransactionOperation,
-    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
+    ConfigurationTransition, DomainName, ExecutionStepImpactReport, ExecutionStepOutcome,
+    ForceFlushImpact, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind,
+    ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage, ImpactPlanningBasis,
+    ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge, ModelChangeAspect,
+    OperationImpactReason, OperationImpactReport, OwnershipMoveImpact, ParametrizerName,
+    PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome,
+    RebuildImpact, RebuildReason, RelayName, RequestedResourceVersion, ResourceBindingImpact,
+    ResourceCatalogAction, ResourceCatalogImpact, ResourceName, StatePurge, StateResetImpact,
+    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition,
 };
 
 use crate::{
@@ -55,11 +55,6 @@ wire_enum!(ALL_IMPACT_EDGE_KINDS: ImpactEdgeKind => wire::ImpactEdgeKind {
 wire_enum!(ALL_RESOURCE_CATALOG_ACTIONS: ResourceCatalogAction => wire::ResourceCatalogAction {
     Create,
     EditLabels,
-});
-
-wire_enum!(ALL_DOMAIN_LIFECYCLE_ACTIONS: DomainLifecycleAction => wire::DomainLifecycleAction {
-    Start,
-    Stop,
 });
 
 wire_enum!(ALL_ACTIVATION_ACTIONS: ActivationAction => wire::ActivationAction {
@@ -579,11 +574,6 @@ fn encode_effects<'fbb>(
         effects.ownership_moves.as_slice(),
         encode_ownership_move,
     )?;
-    let lifecycle = encoder.table_vector(
-        "ImpactEffects.lifecycle",
-        effects.lifecycle.as_slice(),
-        encode_lifecycle_impact,
-    )?;
     let activations = encoder.table_vector(
         "ImpactEffects.activations",
         effects.activations.as_slice(),
@@ -620,7 +610,6 @@ fn encode_effects<'fbb>(
             changed_configuration: Some(changed_configuration),
             topology: Some(topology),
             ownership_moves: Some(ownership_moves),
-            lifecycle: Some(lifecycle),
             activations: Some(activations),
             rebuilds: Some(rebuilds),
             state_resets: Some(state_resets),
@@ -647,12 +636,6 @@ fn decode_effects(
         "ImpactEffects.ownership_moves",
         effects.ownership_moves(),
         |impact| decode_ownership_move(decoder, impact),
-    )?;
-    let lifecycle = decode_set(
-        decoder,
-        "ImpactEffects.lifecycle",
-        effects.lifecycle(),
-        |impact| decode_lifecycle_impact(decoder, impact),
     )?;
     let activations = decode_set(
         decoder,
@@ -694,7 +677,6 @@ fn decode_effects(
         changed_configuration,
         topology,
         ownership_moves,
-        lifecycle,
         activations,
         rebuilds,
         state_resets,
@@ -929,44 +911,6 @@ fn decode_ownership_move(
         unit,
         source,
         destination,
-        attribution,
-    })
-}
-
-fn encode_lifecycle_impact<'fbb>(
-    impact: &DomainLifecycleImpact,
-    encoder: &mut Encoder<'fbb>,
-) -> Result<WIPOffset<wire::DomainLifecycleImpact<'fbb>>, Report<WireEncodeError>> {
-    let domain = encoder.text("DomainLifecycleImpact.domain", impact.domain.as_str())?;
-    let operations = encode_attribution(
-        encoder,
-        "DomainLifecycleImpact.operations",
-        &impact.attribution,
-    )?;
-    Ok(wire::DomainLifecycleImpact::create(
-        encoder.fbb(),
-        &wire::DomainLifecycleImpactArgs {
-            domain: Some(domain),
-            action: Some(impact.action.into()),
-            operations: Some(operations),
-        },
-    ))
-}
-
-fn decode_lifecycle_impact(
-    decoder: Decoder<'_>,
-    impact: wire::DomainLifecycleImpact<'_>,
-) -> Result<DomainLifecycleImpact, Report<WireDecodeError>> {
-    let domain = decoder.name("DomainLifecycleImpact.domain", impact.domain())?;
-    let action = decoder.required_enumeration("DomainLifecycleImpact.action", impact.action())?;
-    let attribution = decode_attribution(
-        decoder,
-        "DomainLifecycleImpact.operations",
-        impact.operations(),
-    )?;
-    Ok(DomainLifecycleImpact {
-        domain,
-        action,
         attribution,
     })
 }
@@ -1248,26 +1192,6 @@ fn encode_transaction_operation(
                 operation,
             )
         }
-        TransactionOperation::StartDomain { domain } => {
-            let domain = encoder.text("StartDomainOperation.domain", domain.as_str())?;
-            let operation = wire::StartDomainOperation::create(
-                encoder.fbb(),
-                &wire::StartDomainOperationArgs {
-                    domain: Some(domain),
-                },
-            );
-            EncodedUnion::new(wire::TransactionOperation::StartDomainOperation, operation)
-        }
-        TransactionOperation::StopDomain { domain } => {
-            let domain = encoder.text("StopDomainOperation.domain", domain.as_str())?;
-            let operation = wire::StopDomainOperation::create(
-                encoder.fbb(),
-                &wire::StopDomainOperationArgs {
-                    domain: Some(domain),
-                },
-            );
-            EncodedUnion::new(wire::TransactionOperation::StopDomainOperation, operation)
-        }
         TransactionOperation::CreateResource { domain, resource } => {
             let domain = encoder.text("CreateResourceOperation.domain", domain.as_str())?;
             let resource = encoder.text("CreateResourceOperation.resource", resource.as_str())?;
@@ -1380,16 +1304,6 @@ fn decode_transaction_operation(
             node: decode_node_ref(decoder, operation.node())?,
         });
     }
-    if let Some(operation) = report.operation_as_start_domain_operation() {
-        return Ok(TransactionOperation::StartDomain {
-            domain: decoder.name("StartDomainOperation.domain", operation.domain())?,
-        });
-    }
-    if let Some(operation) = report.operation_as_stop_domain_operation() {
-        return Ok(TransactionOperation::StopDomain {
-            domain: decoder.name("StopDomainOperation.domain", operation.domain())?,
-        });
-    }
     if let Some(operation) = report.operation_as_create_resource_operation() {
         return Ok(TransactionOperation::CreateResource {
             domain: decoder.name("CreateResourceOperation.domain", operation.domain())?,
@@ -1452,14 +1366,6 @@ fn encode_reason<'fbb>(
                 configuration,
             )
         }
-        OperationImpactReason::DomainStart => EncodedUnion::new(
-            wire::OperationImpactReason::DomainStartReason,
-            wire::DomainStartReason::create(encoder.fbb(), &wire::DomainStartReasonArgs {}),
-        ),
-        OperationImpactReason::DomainStop => EncodedUnion::new(
-            wire::OperationImpactReason::DomainStopReason,
-            wire::DomainStopReason::create(encoder.fbb(), &wire::DomainStopReasonArgs {}),
-        ),
         OperationImpactReason::ResourceCatalog { resource } => {
             let resource = encoder.text("ResourceCatalogReason.resource", resource.as_str())?;
             let catalog = wire::ResourceCatalogReason::create(
@@ -1539,11 +1445,7 @@ fn decode_reason(
             node: decode_node_ref(decoder, reset.node())?,
         });
     }
-    match reason.reason_type() {
-        wire::OperationImpactReason::DomainStartReason => Ok(OperationImpactReason::DomainStart),
-        wire::OperationImpactReason::DomainStopReason => Ok(OperationImpactReason::DomainStop),
-        undeclared => Err(decoder.unknown_union("OperationReason.reason", undeclared.0)),
-    }
+    Err(decoder.unknown_union("OperationReason.reason", reason.reason_type().0))
 }
 
 /// The union slots a pause requirement is read from, which differ between the tables that hold

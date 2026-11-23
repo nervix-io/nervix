@@ -755,9 +755,9 @@ While the gate is closed:
   that holds a domain paused when the gate closes still completes, and its pause ends in the
   licensing stop's request instead of a resume. A domain another operation holds begins its
   licensing stop once that operation releases it, still forced at the same instant.
-- Planning refuses `START`, a transactional `START` and `RESTORE ... RESUME` with
-  `licensing stopped processing`. Consensus refuses every other change that would make a domain
-  run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
+- `START` and `RESTORE ... RESUME` are refused with `licensing stopped processing`, and consensus
+  checks the gate again in the write that starts a domain. Consensus refuses every other change
+  that would make a domain run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
   while it applied leaves its domains stopped with the licensing cause, and its report shows them
   stopped by licensing.
 - Sessions, `DESCRIBE`, `SHOW`, `BACKUP`, `ALTER`, `UPLOAD RESOURCE`, `CREATE USER` and the

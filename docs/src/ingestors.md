@@ -3659,7 +3659,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
-| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>one data frame read while the host holds the ingestor's loop, which keeps the connection answering pings: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |
+| Buffers | accepted signaling frames retained for ingestor reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>one data frame read while the host holds the ingestor's loop, which keeps the connection answering pings: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy<br>outgoing frames the transport has not written yet: signaling messages, pings, pong replies and the Close: set by write_buffer_size bytes (default 131072), plus max_message_size bytes (default 67108864) or 125, whichever is larger, plus 14 bytes of frame header; when full, holds back what fills it |
 | Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame, including one catch-up response window after a missed client ping: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |
 | Driver limits | The opening upgrade response carries at most 124 header fields, and at most 64 KiB arrives before its head ends; a larger response fails that connection attempt.<br>The response head arrives within 512 reads that, after the 64th, average at least 128 bytes; a peer that trickles it fails that connection attempt. |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |
@@ -3744,13 +3744,14 @@ The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive key
 | `ping_interval_ms` | Positive whole milliseconds between client pings after signaling completes; omitted means only answering peer pings. |
 | `idle_timeout_ms` | Positive whole milliseconds without an inbound frame before reconnecting, also bounding the response window of one catch-up ping after a missed client interval. When omitted, three configured ping intervals apply, or 30000 without configured pings. |
 | `handshake_buffer_capacity` | Accepted signaling messages retained before readiness: 1–65535, default 16. A full queue backpressures the connection within the signaling `TIMEOUT`. |
-| `max_message_size` | Positive whole bytes per incoming message, including fragmented messages: at most 4294967295, default 67108864 (64 MiB). |
+| `max_message_size` | Positive whole bytes per message, in each direction: an incoming message, fragmented messages included, and each signaling message the client sends. At most 4294967295, default 67108864 (64 MiB). |
 | `max_frame_size` | Positive whole bytes per incoming frame: at most 4294967295, default 16777216 (16 MiB). |
+| `write_buffer_size` | Whole bytes of outgoing frames the transport collects before it writes them: 0–4294967295, default 131072 (128 KiB); `0` writes each frame at once. It also sizes the outgoing buffer described below. |
 | `tls_ca_file` | Optional PEM CA file holding at least one certificate; only with a `wss://` endpoint. Its certificates are trusted beside the bundled WebPKI roots and the platform's native roots, never instead of them. |
 | `tls_cert_file`, `tls_key_file` | Optional client identity files, supplied together; only with a `wss://` endpoint. |
 
 The client's declared key schema refuses unknown, repeated or mistyped keys and TLS file keys with
-`ws://`, and supplies the three declared defaults that `DESCRIBE CLIENT` shows. The WebSocket
+`ws://`, and supplies the four declared defaults that `DESCRIBE CLIENT` shows. The WebSocket
 configuration then refuses an endpoint with a fragment or user information, a count above its
 maximum and three ping intervals beyond the schedulable bound. Durations obey the shared
 schedulable physical-duration bound. Resource mounts and configuration templates keep their shared
@@ -3816,17 +3817,33 @@ with the idle deadline, Nervix waits neither to write the frame nor for the peer
 Close never delays the reconnect. A connection whose TCP has already ended or failed is released
 without a Close.
 
+What the client sends is bounded too. While it connects it sends the messages of its signaling
+protocol's `SEND JAQ` programs; after that it sends only control frames: its pings, the pong that
+answers each of the peer's pings, and the Close. A control frame carries at most 125 bytes (RFC 6455
+section 5.5). The transport collects outgoing frames until it holds more than `write_buffer_size`
+bytes, and every frame the client sends is written out at once. Beyond the write buffer, the
+transport holds at most one frame of the largest message the client sends, which is
+`max_message_size` bytes or 125 bytes, whichever is larger, and 14 bytes of frame header. A peer
+that stops reading therefore holds the client back instead of growing its buffer. Each of the
+client's own frames waits for room within its own budget: one second for a ping or a Close, the
+signaling `TIMEOUT` for a signaling message. A pong that does not fit waits as the one reply to the
+peer's latest ping, which RFC 6455 allows. A signaling message larger than `max_message_size` is
+never written; it fails the handshake as described below.
+
 A signaling handshake that fails ends its connection the same way, and the ingestor reports the
 failure with its cause. A read that fails while signaling earns the status of the read failure
 above. A frame a `FAIL JAQ` guard rejects earns status `1008` (policy violation), and the
 protocol's `TIMEOUT` earns `1001` (going away), as the idle deadline does. A failure of the
 client's own programs earns `1011` (internal error): a `SEND JAQ` program that does not produce
-exactly one value, an output the protocol's format cannot encode, or a `CAPTURE` program that
-fails or produces no object. A handshake whose TCP has already ended, or whose own write failed, is released without a
-Close.
+exactly one value, an output the protocol's format cannot encode, an output whose message is larger
+than `max_message_size`, or a `CAPTURE` program that fails or produces no object. The ingestor
+reports an oversized output with its program and size, for example `SEND JAQ program #1 encodes 19
+bytes, above max_message_size 16`. A handshake whose TCP has already ended, or whose own write
+failed, is released without a Close.
 
-When the peer sends a Close during signaling, Nervix flushes the queued reply before releasing the
-connection, within the same one-second control-frame budget used after readiness. The reply echoes
+When the peer sends a Close during signaling, Nervix writes out what the transport already holds
+and then the queued reply before releasing the connection, within the same one-second
+control-frame budget used after readiness. The reply echoes
 the peer's status and reason, and the transient resume failure retains both as typed values. A
 Close without a status remains distinct from a stream that ended without one. The failed attempt
 still discards its accepted payloads, and the host reconnects on its policy.
@@ -3853,7 +3870,8 @@ A stop-reading mode is unavailable because it would starve protocol maintenance 
 disconnect.
 
 When the host suspends or closes the ingestor, it sends a Close frame and waits up to one second for
-the peer's reply, including the time needed to send the frame, before releasing the connection.
+the peer's reply, including the time needed to write what the transport already holds and the
+frame, before releasing the connection.
 A peer that does not answer cannot hold shutdown indefinitely. Suspension retains queued payloads
 from successful signaling and delivers them before opening a replacement connection. Terminal
 close clears that queue even if the Close exchange fails or times out.

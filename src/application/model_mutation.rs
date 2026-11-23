@@ -52,10 +52,7 @@ use super::{
         transaction_planning_error_message,
     },
 };
-use crate::{
-    registry::{EntityGatePlan, RegistryError, RegistryMutation, ScheduleDelta},
-    runtime::RuntimeError,
-};
+use crate::registry::{EntityGatePlan, RegistryError, RegistryMutation, ScheduleDelta};
 
 struct TransactionModelDecision {
     planned: crate::registry::PlannedMutations,
@@ -1691,11 +1688,7 @@ impl SessionServiceImpl {
                             }
                             if let Some(error) = activation_error {
                                 if transaction_application_failure.is_none()
-                                    && matches!(
-                                        error.current_context(),
-                                        RuntimeError::RuntimeRevisionPreparation { .. }
-                                            | RuntimeError::RuntimeRevisionReadiness { .. }
-                                    )
+                                    && error.current_context().waits_for_readiness()
                                 {
                                     transaction_application_deferred = true;
                                 } else if transaction_application_failure.is_none() {

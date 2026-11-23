@@ -776,9 +776,8 @@ refused: its outcome stays unknown, the answer names the new leader, and the sta
 there under the same execution reference, which a client that follows the session protocol does on
 its own, waits on. When that node shuts down instead, `START` stops waiting and fails, saying that
 the node is shutting down; the domain stays stopped, and repeating the statement under the same
-execution reference returns that refusal. Nothing starts until every unit can be placed. A `START`
-in the same transaction as a node-rule change that would leave a breach is refused; commit the
-change first, then `START`.
+execution reference returns that refusal. Nothing starts until every unit can be placed. `START`
+never runs inside a transaction, so it always places against the node rules already committed.
 
 The cluster can still change under an accepted rule:
 
