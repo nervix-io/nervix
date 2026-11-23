@@ -10,7 +10,7 @@
     nervix::layer(edge, reason = "owns Java connection arguments")
 )]
 
-use std::time::Duration;
+use std::{num::NonZeroU32, time::Duration};
 
 use nervix_client_core::{ConnectDns, ConnectOptions, TlsRequirement, capabilities as caps};
 use nervix_models::SettingDefinition as _;
@@ -29,6 +29,10 @@ pub(crate) struct ConnectionOptions {
     pub(crate) request_timeout: Duration,
     pub(crate) retry_timeout: Duration,
     pub(crate) backup_wait_timeout: Duration,
+    pub(crate) keepalive_interval: Duration,
+    pub(crate) keepalive_timeout: Duration,
+    pub(crate) stream_window_bytes: NonZeroU32,
+    pub(crate) connection_window_bytes: NonZeroU32,
 }
 
 impl Default for ConnectionOptions {
@@ -45,6 +49,10 @@ impl Default for ConnectionOptions {
             request_timeout: options.request_timeout,
             retry_timeout: options.retry_timeout,
             backup_wait_timeout: options.backup_wait_timeout,
+            keepalive_interval: options.keepalive_interval,
+            keepalive_timeout: options.keepalive_timeout,
+            stream_window_bytes: options.stream_window_bytes,
+            connection_window_bytes: options.connection_window_bytes,
         }
     }
 }
@@ -72,13 +80,17 @@ impl ConnectionOptions {
             ),
             upload_frame_capacity: caps::ClientUploadFrameCapacity::default_value(&()),
             restore_frame_capacity: caps::ClientRestoreFrameCapacity::default_value(&()),
+            keepalive_interval: self.keepalive_interval,
+            keepalive_timeout: self.keepalive_timeout,
+            stream_window_bytes: self.stream_window_bytes,
+            connection_window_bytes: self.connection_window_bytes,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
 
@@ -94,6 +106,10 @@ mod tests {
             request_timeout: Duration::from_millis(2_250),
             retry_timeout: Duration::from_millis(3_375),
             backup_wait_timeout: Duration::from_millis(4_500),
+            keepalive_interval: Duration::from_millis(5_625),
+            keepalive_timeout: Duration::from_millis(6_750),
+            stream_window_bytes: NonZeroU32::new(1_000).assured("a positive window"),
+            connection_window_bytes: NonZeroU32::new(300_000).assured("a positive window"),
             ..ConnectionOptions::default()
         };
         let native = draft.clone().into_native();
@@ -106,6 +122,13 @@ mod tests {
         assert_eq!(native.request_timeout, draft.request_timeout);
         assert_eq!(native.retry_timeout, draft.retry_timeout);
         assert_eq!(native.backup_wait_timeout, draft.backup_wait_timeout);
+        assert_eq!(native.keepalive_interval, draft.keepalive_interval);
+        assert_eq!(native.keepalive_timeout, draft.keepalive_timeout);
+        assert_eq!(native.stream_window_bytes, draft.stream_window_bytes);
+        assert_eq!(
+            native.connection_window_bytes,
+            draft.connection_window_bytes
+        );
         match (&native.dns, &draft.dns) {
             (ConnectDns::Configuration(left), ConnectDns::Configuration(right)) => {
                 assert_eq!(left, right)

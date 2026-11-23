@@ -134,6 +134,15 @@ pub enum ClientError {
         field: &'static str,
         capacity: usize,
     },
+    #[error(
+        "{field} {bytes} must be between {smallest} and {} bytes, the HTTP/2 maximum",
+        crate::capabilities::LARGEST_RECEIVE_WINDOW_BYTES
+    )]
+    InvalidReceiveWindow {
+        field: &'static str,
+        bytes: u32,
+        smallest: u32,
+    },
     #[error("retry-backoff must not exceed retry-max-backoff")]
     InvalidRetryBackoff,
     #[error("derived subscription retention must fit addressable memory")]

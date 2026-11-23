@@ -1,9 +1,10 @@
 //! A session a host holds, and the commands it prepares.
 //!
-//! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, sharing it
-//!   with the producers, consumers and deliveries opened on it, running a blocking call on the
-//!   host's thread, preparing and executing commands, waiting for subscription and domain clock
-//!   events and for server notices, and reading the clock of a domain the session follows.
+//! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, the receive
+//!   windows a host passes for it, sharing it with the producers, consumers and deliveries opened
+//!   on it, running a blocking call on the host's thread, preparing and executing commands,
+//!   waiting for subscription and domain clock events and for server notices, and reading the
+//!   clock of a domain the session follows.
 //! - **Depends on.** The Rust session client, cancellation, and the outcomes, events, clock
 //!   events, notices and domain clocks it returns.
 //! - **Must not know.** Which host is calling, or how it schedules its threads.
@@ -14,7 +15,7 @@
 //! delivery opened on it, in whichever order, because each of them keeps the runtime its own
 //! calls block on.
 
-use std::future::Future;
+use std::{future::Future, num::NonZeroU32};
 
 use meticulous::OptionExt as _;
 use nervix_client_core::{
@@ -64,6 +65,26 @@ impl Execution {
 }
 
 impl Session {
+    /// The receive window a host passed in bytes, as a session's options take it. A window no
+    /// `u32` holds, zero included, is refused here as `argument`; one outside its HTTP/2 bounds is
+    /// refused when the session connects, as every other option is.
+    pub fn receive_window(
+        argument: &'static str,
+        bytes: impl TryInto<u32>,
+    ) -> Result<NonZeroU32, Failure> {
+        let window = match bytes.try_into() {
+            Ok(bytes) => NonZeroU32::new(bytes),
+            Err(_) => None,
+        };
+        let Some(window) = window else {
+            return Err(Failure::invalid_argument(
+                argument,
+                "must be a positive number of bytes that fits 32 bits",
+            ));
+        };
+        Ok(window)
+    }
+
     /// Opens a session on `server` with the Rust client's `options`, blocking the calling thread
     /// until it is open.
     pub fn connect(
@@ -280,5 +301,37 @@ impl Drop for SessionRuntime {
         drop(client);
         drop(entered);
         runtime.shutdown_background();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FailureKind;
+
+    /// Every host's receive window reaches the options unchanged when a `u32` holds it, and is
+    /// refused under the host's own argument name otherwise; the HTTP/2 bounds are left to connect.
+    #[test]
+    fn a_receive_window_is_kept_or_refused_under_the_hosts_argument() {
+        for bytes in [1_i64, 65_534, i64::from(u32::MAX)] {
+            let window = Session::receive_window("stream_window_bytes", bytes)
+                .unwrap_or_else(|failure| panic!("{bytes} fits a window: {}", failure.message()));
+            assert_eq!(i64::from(window.get()), bytes);
+        }
+        for bytes in [0_i64, -1, i64::from(u32::MAX) + 1] {
+            let Err(failure) = Session::receive_window("connection_window_bytes", bytes) else {
+                panic!("{bytes} is refused as a window");
+            };
+            assert_eq!(failure.kind(), FailureKind::InvalidArgument);
+            assert!(
+                failure.message().contains("connection_window_bytes"),
+                "the refusal names the host's argument: {}",
+                failure.message()
+            );
+        }
+        let Err(failure) = Session::receive_window("bytes", u64::MAX) else {
+            panic!("a C host's largest value is refused as a window");
+        };
+        assert_eq!(failure.kind(), FailureKind::InvalidArgument);
     }
 }

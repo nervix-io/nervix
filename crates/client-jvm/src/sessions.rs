@@ -18,7 +18,7 @@ use nervix_client_host as host;
 use nervix_primitives::sync::Arc;
 use url::Url;
 
-use crate::{connection_options::ConnectionOptions, error::Error, handles::Value, marshal};
+use crate::{error::Error, handles::Value, marshal};
 
 fn seconds(value: f64, name: &'static str) -> Result<Duration, Error> {
     Duration::try_from_secs_f64(value).map_err(|error| {
@@ -35,7 +35,7 @@ fn options_new<'local>(
     _env: &mut jni::Env<'local>,
     _class: jni::objects::JClass<'local>,
 ) -> Result<jlong, crate::error::Error> {
-    Ok(Value::Options(ConnectionOptions::default()).into_handle())
+    Ok(Value::Options(Box::default()).into_handle())
 }
 
 native!(options_auth(handle: long, username: JString, password: JString) -> ());
@@ -129,11 +129,36 @@ fn options_timeout<'local>(
         2 => options.request_timeout = duration,
         3 => options.retry_timeout = duration,
         4 => options.backup_wait_timeout = duration,
+        5 => options.keepalive_interval = duration,
+        6 => options.keepalive_timeout = duration,
         _ => {
             return Err(Error::argument(
                 "timeout",
                 "does not name a connection timeout",
             ));
+        }
+    }
+    Ok(())
+}
+
+native!(options_window(handle: long, kind: int, bytes: long) -> ());
+
+/// Sets the stream (`1`) or connection (`2`) receive window. A window no `u32` holds, zero and
+/// negatives included, is refused here; one outside its HTTP/2 bounds is refused at connect.
+fn options_window<'local>(
+    _env: &mut jni::Env<'local>,
+    _class: jni::objects::JClass<'local>,
+    handle: jlong,
+    kind: jint,
+    bytes: jlong,
+) -> Result<(), crate::error::Error> {
+    let window = host::Session::receive_window("bytes", bytes)?;
+    let options = mutable!(handle).options_mut()?;
+    match kind {
+        1 => options.stream_window_bytes = window,
+        2 => options.connection_window_bytes = window,
+        _ => {
+            return Err(Error::argument("window", "does not name a receive window"));
         }
     }
     Ok(())
@@ -426,6 +451,7 @@ pub(crate) const METHODS: &[jni::NativeMethod] = &[
     options_ca::METHOD,
     options_seeds::METHOD,
     options_timeout::METHOD,
+    options_window::METHOD,
     cancel_new::METHOD,
     cancel_deadline::METHOD,
     cancel_trigger::METHOD,

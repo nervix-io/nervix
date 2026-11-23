@@ -26,7 +26,8 @@ macro_rules! objects {
             Schema(host::Schema),
             Fields(host::Fields),
             Builder(host::BatchBuilder),
-            Options(ConnectionOptions),
+            /// Boxed, so a connection draft does not size every other handle.
+            Options(Box<ConnectionOptions>),
         }
 
         impl Value {

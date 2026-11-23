@@ -31,6 +31,8 @@ mod restoration;
 #[cfg(not(feature = "shuttle"))]
 mod session;
 mod subscription_retention;
+#[cfg(not(feature = "shuttle"))]
+mod transport_settings;
 
 // The producer tests poll the client's own state against the wall clock, which a Shuttle build's
 // models do not keep outside a Shuttle test.

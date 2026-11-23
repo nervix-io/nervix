@@ -390,6 +390,10 @@ class Session:
         request_timeout: float | None = None,
         retry_timeout: float | None = None,
         backup_wait_timeout: float | None = None,
+        keepalive_interval: float | None = None,
+        keepalive_timeout: float | None = None,
+        stream_window_bytes: int | None = None,
+        connection_window_bytes: int | None = None,
         cancel: Cancel | None = None,
     ) -> None: ...
     def __enter__(self) -> Self: ...

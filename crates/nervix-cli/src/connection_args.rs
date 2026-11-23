@@ -10,7 +10,10 @@
     nervix::layer(edge, reason = "owns client capability arguments")
 )]
 
-use std::{num::NonZeroUsize, time::Duration};
+use std::{
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 use nervix_client_core::{ConnectOptions, capabilities as client_caps};
 use nervix_models::SettingDefinition as _;
@@ -53,6 +56,19 @@ pub(crate) struct ConnectionArgs {
     /// Outbound restore frames queued before backpressure.
     #[arg(long = client_caps::ClientRestoreFrameCapacity::NAME, env = "NERVIX_CLI_RESTORE_FRAME_CAPACITY", global = true, default_value = client_caps::ClientRestoreFrameCapacity::default_value(&()).to_string())]
     pub(crate) restore_frame_capacity: NonZeroUsize,
+    /// How long a connection with a call open may go without hearing from the node before it is
+    /// pinged.
+    #[arg(long = client_caps::ClientKeepaliveInterval::NAME, env = "NERVIX_CLI_KEEPALIVE_INTERVAL", global = true, default_value = humantime::format_duration(client_caps::ClientKeepaliveInterval::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
+    pub(crate) keepalive_interval: Duration,
+    /// How long that ping may go unanswered before the connection is lost and recovered.
+    #[arg(long = client_caps::ClientKeepaliveTimeout::NAME, env = "NERVIX_CLI_KEEPALIVE_TIMEOUT", global = true, default_value = humantime::format_duration(client_caps::ClientKeepaliveTimeout::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
+    pub(crate) keepalive_timeout: Duration,
+    /// Bytes of one call the node may send before they are read.
+    #[arg(long = client_caps::ClientStreamWindowBytes::NAME, env = "NERVIX_CLI_STREAM_WINDOW_BYTES", global = true, default_value = client_caps::ClientStreamWindowBytes::default_value(&()).to_string())]
+    pub(crate) stream_window_bytes: NonZeroU32,
+    /// Bytes of all calls on one connection the node may send before they are read.
+    #[arg(long = client_caps::ClientConnectionWindowBytes::NAME, env = "NERVIX_CLI_CONNECTION_WINDOW_BYTES", global = true, default_value = client_caps::ClientConnectionWindowBytes::default_value(&()).to_string())]
+    pub(crate) connection_window_bytes: NonZeroU32,
 }
 
 impl ConnectionArgs {
@@ -69,6 +85,10 @@ impl ConnectionArgs {
             subscriptions_retained_in_full: self.subscriptions_retained_in_full,
             upload_frame_capacity: self.upload_frame_capacity,
             restore_frame_capacity: self.restore_frame_capacity,
+            keepalive_interval: self.keepalive_interval,
+            keepalive_timeout: self.keepalive_timeout,
+            stream_window_bytes: self.stream_window_bytes,
+            connection_window_bytes: self.connection_window_bytes,
             ..ConnectOptions::default()
         }
     }
@@ -121,6 +141,22 @@ impl ConnectionArgs {
                 client_caps::ClientRestoreFrameCapacity::NAME,
                 self.restore_frame_capacity.to_string(),
             ),
+            (
+                client_caps::ClientKeepaliveInterval::NAME,
+                humantime::format_duration(self.keepalive_interval).to_string(),
+            ),
+            (
+                client_caps::ClientKeepaliveTimeout::NAME,
+                humantime::format_duration(self.keepalive_timeout).to_string(),
+            ),
+            (
+                client_caps::ClientStreamWindowBytes::NAME,
+                self.stream_window_bytes.to_string(),
+            ),
+            (
+                client_caps::ClientConnectionWindowBytes::NAME,
+                self.connection_window_bytes.to_string(),
+            ),
         ] {
             arguments.push(format!("--{name}"));
             arguments.push(value);
@@ -157,6 +193,8 @@ mod tests {
         let backup_wait_timeout = duration();
         let retry_backoff = duration();
         let retry_max_backoff = duration().max(retry_backoff);
+        let keepalive_interval = duration();
+        let keepalive_timeout = duration();
         let mut capacity = || {
             NonZeroUsize::new(
                 usize::try_from(entropy.boundary_biased(1..=128))
@@ -164,6 +202,20 @@ mod tests {
             )
             .assured("generated capacities are positive")
         };
+        let subscription_record_capacity = capacity();
+        let subscription_retained_frames = capacity();
+        let subscriptions_retained_in_full = capacity();
+        let upload_frame_capacity = capacity();
+        let restore_frame_capacity = capacity();
+        // Every window from the smallest each takes through the HTTP/2 maximum is valid.
+        let largest_window = u64::from(client_caps::LARGEST_RECEIVE_WINDOW_BYTES);
+        let mut window = |smallest: u32| {
+            let bytes = entropy.boundary_biased(u64::from(smallest)..=largest_window);
+            NonZeroU32::new(u32::try_from(bytes).assured("the bounded window fits u32"))
+                .assured("every generated window is at least one byte")
+        };
+        let stream_window_bytes = window(NonZeroU32::MIN.get());
+        let connection_window_bytes = window(client_caps::INITIAL_CONNECTION_WINDOW_BYTES);
         ConnectionArgs {
             connect_timeout,
             request_timeout,
@@ -171,11 +223,15 @@ mod tests {
             backup_wait_timeout,
             retry_backoff,
             retry_max_backoff,
-            subscription_record_capacity: capacity(),
-            subscription_retained_frames: capacity(),
-            subscriptions_retained_in_full: capacity(),
-            upload_frame_capacity: capacity(),
-            restore_frame_capacity: capacity(),
+            subscription_record_capacity,
+            subscription_retained_frames,
+            subscriptions_retained_in_full,
+            upload_frame_capacity,
+            restore_frame_capacity,
+            keepalive_interval,
+            keepalive_timeout,
+            stream_window_bytes,
+            connection_window_bytes,
         }
     }
 
@@ -240,5 +296,33 @@ mod tests {
             .is_err()
         );
         assert!(Options::try_parse_from(["nervix-cli", "--upload-frame-capacity", "0"]).is_err());
+        assert!(Options::try_parse_from(["nervix-cli", "--stream-window-bytes", "0"]).is_err());
+        let narrow = Options::try_parse_from(["nervix-cli", "--connection-window-bytes", "65534"])
+            .assured("a positive window parses");
+        assert!(
+            nervix_client_core::ClientCapabilities::from_options(
+                &narrow.connection.connect_options()
+            )
+            .is_err(),
+            "a connection window below the initial HTTP/2 window is refused before connecting"
+        );
+    }
+
+    /// Without flags the CLI takes the native client's keepalive and windows, so it pings a silent
+    /// node like every other client.
+    #[test]
+    fn the_transport_defaults_are_the_native_clients() {
+        let defaults = Options::try_parse_from(["nervix-cli"])
+            .assured("defaults parse")
+            .connection
+            .connect_options();
+        let native = ConnectOptions::default();
+        assert_eq!(defaults.keepalive_interval, native.keepalive_interval);
+        assert_eq!(defaults.keepalive_timeout, native.keepalive_timeout);
+        assert_eq!(defaults.stream_window_bytes, native.stream_window_bytes);
+        assert_eq!(
+            defaults.connection_window_bytes,
+            native.connection_window_bytes
+        );
     }
 }
