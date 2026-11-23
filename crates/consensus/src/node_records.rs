@@ -395,6 +395,57 @@ mod tests {
     }
 
     #[test]
+    fn announcement_refuses_a_run_whose_health_probes_cannot_observe_within_the_committed_timeout()
+    {
+        let probing_every = |interval: Duration| {
+            let control_plane = nervix_models::ControlPlaneCapabilities::resolve(
+                nervix_models::ControlPlaneCapabilityValues {
+                    health_probe_interval: Some(interval),
+                    ..Default::default()
+                },
+            )
+            .expect("the fixture interval is positive and within the setting's bound");
+            nervix_primitives::sync::StdArc::new(nervix_models::NodeOperationalCapabilities {
+                control_plane,
+                ..Default::default()
+            })
+        };
+        let mut candidate = record(7);
+        let mut state = admitted_state(&candidate);
+        state.parameters = Some(ClusterParameterRecord {
+            revision: std::num::NonZeroU64::MIN,
+            values: ClusterParameterValues::default(),
+        });
+        candidate.claim.operational = probing_every(Duration::from_secs(9));
+        let unchanged = state.clone();
+        let ConsensusResponse::Conflict(ConsensusConflict::InvalidClusterParameter { issue }) =
+            announce(&mut state, &candidate).response
+        else {
+            panic!("nine-second rounds and a one-second probe fill the ten-second timeout");
+        };
+        assert_eq!(
+            issue,
+            nervix_models::ClusterParameterError::NodeHealthProbeInterval {
+                node: candidate.identity().node_id().clone(),
+                timeout: Duration::from_secs(10),
+                health_probe_interval: Duration::from_secs(9),
+                probe_timeout: Duration::from_secs(1),
+            }
+        );
+        assert_eq!(state, unchanged, "a refused announcement publishes nothing");
+
+        candidate.claim.operational = probing_every(Duration::from_secs(8));
+        assert_eq!(
+            announce(&mut state, &candidate).response,
+            ConsensusResponse::Applied
+        );
+        assert_eq!(
+            committed(&state, &candidate).map(|record| &record.record),
+            Some(&candidate)
+        );
+    }
+
+    #[test]
     fn announcement_is_idempotent_fenced_and_retained_through_departure() {
         let first = record(7);
         let mut state = admitted_state(&first);

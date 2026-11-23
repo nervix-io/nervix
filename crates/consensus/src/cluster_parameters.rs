@@ -483,6 +483,127 @@ mod tests {
         );
     }
 
+    /// Operational capabilities that start a health round every `interval`.
+    fn probing_every(
+        interval: Duration,
+    ) -> nervix_primitives::sync::StdArc<nervix_models::NodeOperationalCapabilities> {
+        let control_plane = nervix_models::ControlPlaneCapabilities::resolve(
+            nervix_models::ControlPlaneCapabilityValues {
+                health_probe_interval: Some(interval),
+                ..Default::default()
+            },
+        )
+        .assured("the fixture interval is positive and within the setting's bound");
+        nervix_primitives::sync::StdArc::new(nervix_models::NodeOperationalCapabilities {
+            control_plane,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_timeout_an_admitted_node_cannot_probe_within_refuses_the_entire_parameter_publication() {
+        let mut state = seeded();
+        let node = ClusterNodeName::parse("slow-probes").assured("fixture node");
+        let mut record =
+            nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_capability_record();
+        record.identity =
+            nervix_models::ClusterNodeIdentity::new(node.clone(), ClusterNodeIncarnation::new(3));
+        record.capabilities.shutdown = nervix_models::ShutdownSettings::default().capabilities();
+        record.capabilities.database_volume_bytes = u64::MAX;
+        let interval = Duration::from_secs(2);
+        record.operational = probing_every(interval);
+        state
+            .node_records
+            .insert(node.clone(), committed_capability(record));
+        let nodes = BTreeMap::from([(node.clone(), BasicNode::new("localhost:9000"))]);
+        let membership = openraft::Membership::new(vec![nodes.keys().cloned().collect()], nodes)
+            .assured("one admitted member");
+        state.last_membership = Arc::new(StoredMembership::new(None, membership));
+
+        // Two seconds hold the two-second round but not its 200ms probe.
+        let beyond = admit(&mut state, "timeout.1", 2);
+        let captured = inputs(&state).assured("the cluster is seeded");
+        let before = state.parameters;
+        assert_eq!(
+            apply(&mut state, &beyond, &captured).response,
+            ConsensusResponse::Conflict(ConsensusConflict::InvalidClusterParameter {
+                issue: nervix_models::ClusterParameterError::NodeHealthProbeInterval {
+                    node,
+                    timeout: Duration::from_secs(2),
+                    health_probe_interval: interval,
+                    probe_timeout: Duration::from_millis(200),
+                },
+            })
+        );
+        assert_eq!(
+            state.parameters, before,
+            "a refused change publishes nothing"
+        );
+        assert!(matches!(
+            state
+                .command_executions
+                .get(&beyond)
+                .and_then(CommandExecution::effect),
+            Some(CommandExecutionEffect::AlterCluster { applied: None, .. })
+        ));
+
+        let fitting = admit(&mut state, "timeout.2", 3);
+        let captured = inputs(&state).assured("the cluster is seeded");
+        assert_eq!(
+            apply(&mut state, &fitting, &captured).response,
+            ConsensusResponse::Applied
+        );
+        assert_eq!(
+            state
+                .parameters
+                .assured("the publication exists")
+                .values
+                .node_unavailability_timeout(),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn runtime_capabilities_name_the_first_admitted_node_whose_health_probes_cannot_fit() {
+        let claim = |node: &str, interval: Duration| {
+            let mut record =
+                nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                    .node_capability_record();
+            record.identity = nervix_models::ClusterNodeIdentity::new(
+                ClusterNodeName::parse(node).assured("fixture node"),
+                ClusterNodeIncarnation::new(1),
+            );
+            record.capabilities.shutdown =
+                nervix_models::ShutdownSettings::default().capabilities();
+            record.capabilities.database_volume_bytes = u64::MAX;
+            record.operational = probing_every(interval);
+            record
+        };
+        let values = ClusterParameterValues::default();
+        let prompt = claim("node-1", Duration::from_secs(1));
+        let slow = claim("node-2", Duration::from_secs(9));
+        let slower = claim("node-3", Duration::from_secs(30));
+
+        values
+            .validate_runtime_capabilities([&prompt])
+            .assured("one-second rounds fit the default timeout");
+        let refused = values
+            .validate_runtime_capabilities([&prompt, &slow, &slower])
+            .err()
+            .assured("a node whose rounds fill the timeout refuses the policy");
+        let nervix_models::ClusterParameterError::NodeHealthProbeInterval {
+            node,
+            health_probe_interval,
+            ..
+        } = refused.current_context()
+        else {
+            panic!("a round longer than the timeout refuses as one: {refused:?}");
+        };
+        assert_eq!(node.as_str(), "node-2");
+        assert_eq!(*health_probe_interval, Duration::from_secs(9));
+    }
+
     #[test]
     fn a_parameter_publication_invalidates_captured_model_inputs() {
         let mut state = seeded();
