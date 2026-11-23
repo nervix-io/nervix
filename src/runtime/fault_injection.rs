@@ -227,6 +227,13 @@ impl ConfiguredFaultInjection {
         None
     }
 
+    pub(in crate::runtime) fn native_metadata_capture_streamed(
+        &self,
+        _domain: &DomainName,
+        _entity: &ModelName,
+    ) {
+    }
+
     pub(in crate::runtime) fn guest_save_capture_interruption(
         &self,
         _domain: &DomainName,
