@@ -397,6 +397,24 @@ impl State {
     fn pending(&mut self, domain: &DomainName) -> &mut PendingClockEvents {
         self.pending.entry(domain.clone()).or_default()
     }
+
+    /// Takes the earliest event a caller has not read.
+    fn take_event(&mut self) -> Option<DomainClockEvent> {
+        let (domain, pending) = self.pending.get_index_mut(0)?;
+        let domain = domain.clone();
+        let event = pending.take(&domain);
+        if pending.is_empty() {
+            self.pending
+                .shift_remove_index(0)
+                .discarded("the entry removed is the one the event was just taken from");
+        }
+        event
+    }
+
+    /// Whether any followed clock waits to be restored on a new exchange.
+    fn awaits_restoration(&self) -> bool {
+        self.followed.values().any(|followed| followed.interrupted)
+    }
 }
 
 struct Inner {
@@ -419,6 +437,16 @@ pub(crate) enum ClockRestorationScope {
     Followed,
     /// Only a clock that waits to be attached again because the exchange holding it ended.
     Interrupted,
+}
+
+/// What a caller waiting for clock events does next.
+pub(crate) enum ClockReadStep {
+    /// Return the earliest event the caller has not read.
+    Report(DomainClockEvent),
+    /// Nothing is unread, and a followed clock waits to be attached again on a new exchange.
+    Restore,
+    /// Nothing is unread and nothing waits to be restored: wait for the next change.
+    Wait,
 }
 
 /// What a restoration does next about one followed clock.
@@ -505,8 +533,7 @@ impl DomainClockAttachments {
 
     /// Whether any followed clock waits to be restored on a new exchange.
     pub(crate) fn awaits_restoration(&self) -> bool {
-        let state = self.inner.state.lock();
-        state.followed.values().any(|followed| followed.interrupted)
+        self.inner.state.lock().awaits_restoration()
     }
 
     /// Decides whether a restoration sends the attach of the clock of `domain` within `scope`.
@@ -599,17 +626,19 @@ impl DomainClockAttachments {
 
     /// Takes the earliest event a caller has not read.
     pub(crate) fn take_event(&self) -> Option<DomainClockEvent> {
-        let mut state = self.inner.state.lock();
-        let (domain, pending) = state.pending.get_index_mut(0)?;
-        let domain = domain.clone();
-        let event = pending.take(&domain);
-        if pending.is_empty() {
-            state
-                .pending
-                .shift_remove_index(0)
-                .discarded("the entry removed is the one the event was just taken from");
+        self.inner.state.lock().take_event()
+    }
+
+    /// Decides what a caller waiting for clock events does next: return the earliest unread
+    /// event, restore a clock that waits to be attached again, or wait for the next change.
+    pub(crate) fn read_step(&self) -> ClockReadStep {
+        if let Some(event) = self.take_event() {
+            return ClockReadStep::Report(event);
         }
-        event
+        if self.awaits_restoration() {
+            return ClockReadStep::Restore;
+        }
+        ClockReadStep::Wait
     }
 
     /// Applies an attach reply the exchange of `generation` received.
@@ -807,7 +836,7 @@ impl DomainClockAttachments {
             pending.interrupted = true;
         }
         // Bounded by the domains the client follows.
-        let awaiting_restoration = state.followed.values().any(|followed| followed.interrupted);
+        let awaiting_restoration = state.awaits_restoration();
         drop(state);
         if !awaiting_restoration {
             return;
