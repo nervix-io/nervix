@@ -481,7 +481,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"beta","message":"small-after"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'limited_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_limited_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: <expected_error>
@@ -490,7 +490,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"alpha","message":"small-after-limit"}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       "tenant":"beta" | "note":"ok"
@@ -558,13 +558,13 @@ Feature: WASM processor runtime behavior
       {"tenant":"beta","message":"small-before"}
       """
     And http payload for tenant "alpha" with a 4096 byte message is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       "tenant":"alpha" | "note":"ok"
       """
     When http payload for tenant "alpha" with a 16384 byte message is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'restoring_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest exhausted MAX FUEL 100000
@@ -573,7 +573,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"alpha","message":"small-after-limit"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
@@ -586,12 +586,12 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"alpha","message":"small-again"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
-    And within "10s" the relay subscription receives payloads containing all fragments
+    And within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       """

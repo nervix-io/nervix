@@ -283,6 +283,30 @@ Feature: Committed cluster parameters
       | 1            |
       | 3            |
 
+  # Health observations stay fresh for the unavailability timeout, and each node probes every peer
+  # once per health-probe interval with a probe timeout of a tenth of that timeout. A timeout that
+  # does not exceed both together leaves every observation stale before the next one arrives.
+  @node_unavailability_health_probes
+  Scenario Outline: An unavailability timeout a node's health probes cannot observe within is refused, naming the node, on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    When these Plexus statements fail with "node-unavailability-timeout (1s) must exceed node 'node-1' control-plane-health-probe-interval (1s) plus probe-timeout (100ms), a tenth of node-unavailability-timeout"
+      """
+      ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 1s;
+      """
+    Then node "node-1" eventually reports status containing "node-unavailability-timeout committed=10s revision=1"
+    Given node "node-<cluster_size>" is stopped
+    And node-<cluster_size> starts with control-plane-health-probe-interval = 9s
+    When node "node-<cluster_size>" attempts to start
+    Then node "node-<cluster_size>" refused to start because "node-unavailability-timeout (10s) must exceed node 'node-<cluster_size>' control-plane-health-probe-interval (9s) plus probe-timeout (1s), a tenth of node-unavailability-timeout"
+    Given node-<cluster_size> starts with control-plane-health-probe-interval = 1s
+    When node "node-<cluster_size>" is started
+    Then node "node-<cluster_size>" eventually reports status containing "node=node-<cluster_size> node-unavailability-timeout running=10s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A parameter change refuses a nonpositive snapshot interval on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     When these Plexus statements fail with "state-snapshot-interval must be greater than zero"
