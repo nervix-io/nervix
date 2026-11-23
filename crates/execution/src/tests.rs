@@ -692,6 +692,9 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
 
 /// A job that writes `input` into a budgeted buffer under its charge, and reports the charge it
 /// needs when its class has no room for the growth, as every growing writer does.
+// Its users are the growing job's ordinary check and its Shuttle check; a Turmoil build without
+// Shuttle compiles neither.
+#[cfg(any(not(feature = "turmoil"), feature = "shuttle"))]
 fn write_growing(
     input: Vec<u8>,
     charge: crate::Reservation,
