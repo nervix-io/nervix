@@ -50,7 +50,7 @@ use crate::{
     connection::{
         ConnectOptions, EndpointValidationError, GrpcConnector, ServerDirectory, TlsRequirement,
     },
-    domain_clock::{AttachedDomainClock, DomainClockEvent},
+    domain_clock::{AttachedDomainClock, ClockReadStep, DomainClockEvent},
     error::{ClientError, EventStreamKind, RequestKind},
     events::{ServerEvent, SubscriptionEvent, SubscriptionRequest},
     exchange::{EventQueueError, Exchange, ExchangeRequests, RequestSilence, SessionEvents},
@@ -1711,21 +1711,22 @@ impl Client {
         loop {
             nervix_primitives::task::consume_budget().await;
             let mut changed = clocks.watch();
-            if let Some(event) = clocks.take_event() {
-                return Ok(event);
-            }
-            if clocks.awaits_restoration() {
-                let exchange = self.inner.exchange.lock().await.requests();
-                let open = exchange.pending.lock().is_open();
-                if !open {
-                    let recovered = self
-                        .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
-                        .await?;
-                    if let SessionRecovery::Unavailable = recovered {
-                        return Err(Report::new(ClientError::SessionClosed));
+            match clocks.read_step() {
+                ClockReadStep::Report(event) => return Ok(event),
+                ClockReadStep::Restore => {
+                    let exchange = self.inner.exchange.lock().await.requests();
+                    let open = exchange.pending.lock().is_open();
+                    if !open {
+                        let recovered = self
+                            .recover_session(RecoveryMode::IfClosed, RecoveryDeadline::RetryBudget)
+                            .await?;
+                        if let SessionRecovery::Unavailable = recovered {
+                            return Err(Report::new(ClientError::SessionClosed));
+                        }
+                        continue;
                     }
-                    continue;
                 }
+                ClockReadStep::Wait => {}
             }
             changed
                 .changed()

@@ -504,7 +504,10 @@ the attachment with reason `DomainRemoved`.
 Any request timeout that closes the native client's request registry wakes the exchange reader,
 including while a refused clock restoration waits before another attempt. The reader ends its
 frame routing before it reports the clock's interruption. A waiting clock reader can then restore
-on a new session without waiting for the transport or the preceding restoration delay.
+on a new session without waiting for the transport or the preceding restoration delay. The reader
+takes the interruption first: it decides between an unread event and a restoration under one lock,
+so an interruption reported while it decides is returned before it opens another session, and a
+reader learns of the gap even while no server can be reached.
 
 A detach and a restoration of the same clock never cross. The Rust client registers a detach
 before it sends it, and no restoration decides to attach the clock while a detach of it is in
