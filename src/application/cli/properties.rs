@@ -570,6 +570,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
             ),
             header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            // The fewest header lines the smallest generated head holds.
+            max_headers: Some(
+                u32::try_from(self.entropy.between(1..=2730)).verified("bounded header count"),
+            ),
             buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             header_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             tls_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
@@ -582,6 +586,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
             http_refusal_drain_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             websocket_message_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             websocket_frame_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
+            websocket_write_buffer_bytes: Some(ByteUnit::Byte(self.entropy.between(1..=67108864))),
             grpc_header_bytes: Some(ByteUnit::Byte(self.entropy.between(8192..=67108864))),
             grpc_concurrency: Some(
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
@@ -589,6 +594,22 @@ impl<'bytes> GeneratedSettings<'bytes> {
             grpc_request_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),
             grpc_max_streams: Some(
                 u32::try_from(self.entropy.between(1..=1024)).verified("bounded listener count"),
+            ),
+            // Every window HTTP/2 can advertise; a connection's starts at RFC 9113's 65,535.
+            grpc_stream_window_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(1..=2_147_483_647),
+            )),
+            grpc_connection_window_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(65_535..=2_147_483_647),
+            )),
+            grpc_send_buffer_bytes: Some(ByteUnit::Byte(
+                self.entropy.boundary_biased(1..=u64::from(u32::MAX)),
+            )),
+            grpc_max_pending_reset_streams: Some(
+                u32::try_from(self.entropy.between(1..=1024)).verified("bounded reset count"),
+            ),
+            grpc_max_error_reset_streams: Some(
+                u32::try_from(self.entropy.between(1..=65536)).verified("bounded reset count"),
             ),
             grpc_keepalive_interval: Some(Duration::from_secs(self.entropy.between(1..=120))),
             grpc_keepalive_timeout: Some(Duration::from_secs(self.entropy.between(1..=120))),

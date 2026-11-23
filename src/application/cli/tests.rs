@@ -47,7 +47,7 @@ const SETTINGS_HEADINGS: [&str; 21] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 253] = [
+const SETTING_NAMES: [&str; 260] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -206,6 +206,7 @@ const SETTING_NAMES: [&str; 253] = [
     "client-consumer-node-bytes",
     "listener-max-connections",
     "listener-header-bytes",
+    "listener-max-headers",
     "listener-buffer-bytes",
     "listener-header-timeout",
     "listener-tls-timeout",
@@ -218,10 +219,16 @@ const SETTING_NAMES: [&str; 253] = [
     "http-refusal-drain-timeout",
     "websocket-message-bytes",
     "websocket-frame-bytes",
+    "websocket-write-buffer-bytes",
     "grpc-header-bytes",
     "grpc-concurrency",
     "grpc-request-timeout",
     "grpc-max-streams",
+    "grpc-stream-window-bytes",
+    "grpc-connection-window-bytes",
+    "grpc-send-buffer-bytes",
+    "grpc-max-pending-reset-streams",
+    "grpc-max-error-reset-streams",
     "grpc-keepalive-interval",
     "grpc-keepalive-timeout",
     "listener-tcp-keepalive-time",

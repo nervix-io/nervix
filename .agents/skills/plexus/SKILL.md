@@ -1072,7 +1072,8 @@ Use its class and live-change rules before suggesting server options or an `ALTE
 statement. Related remote acknowledgement timings must form one valid committed group.
 Preserve the distinction between omitted disk-quota defaults and explicit capacity requests.
 
-For Nervix public listener connection, HTTP body, WebSocket frame, TLS/header/idle and gRPC
-keepalive limits, read [Node Settings → Listener Bounds](../../../docs/src/node-settings.md#listener-bounds)
+For Nervix public listener connection, HTTP body and header-count, WebSocket frame and write
+buffer, TLS/header/idle, and gRPC keepalive, receive window, send buffer and reset limits, read
+[Node Settings → Listener Bounds](../../../docs/src/node-settings.md#listener-bounds)
 and the HTTP endpoint section of Ingestors. Consult the committed per-node capability claims
 before suggesting local tuning or diagnosing a 413, 408, 431 or 503 response.
