@@ -502,6 +502,9 @@ selected domain. Read `Domains And Time` → `Duration Literals` for duration sp
 bounds, existing-model cap refusals, live installation and committed-versus-running inspection.
 A resource byte quota above any admitted node's committed `database-volume-bytes` (shown by
 `DESCRIBE CLUSTER`) is refused, naming the node; grow that volume and restart the node first.
+`NODE_UNAVAILABILITY_TIMEOUT` must exceed every admitted node's
+`control-plane-health-probe-interval` plus a tenth of itself, or it is refused, naming the node;
+raise the timeout before lengthening a node's interval.
 Seed flags belong only to the first bootstrap, including when their value equals the default.
 Later starts, including the returning bootstrap node, omit them.
 `HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
