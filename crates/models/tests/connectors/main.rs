@@ -702,12 +702,22 @@ fn endpoints_declare_the_node_settings_that_bound_their_input() {
         capacity: BufferCapacity::NodeSetting("listener-header-bytes"),
         overflow: BufferOverflow::RefuseOversized,
     };
+    let header_lines = BufferBound::Bounded {
+        capacity: BufferCapacity::NodeSetting("listener-max-headers"),
+        overflow: BufferOverflow::RefuseOversized,
+    };
     for bounds in [http, websocket] {
         assert!(
             bounds
                 .buffers
                 .iter()
                 .any(|buffer| buffer.bound == request_head)
+        );
+        assert!(
+            bounds
+                .buffers
+                .iter()
+                .any(|buffer| buffer.bound == header_lines)
         );
         assert!(bounds.waits.iter().any(|wait| matches!(
             wait.bound,
@@ -727,6 +737,17 @@ fn endpoints_declare_the_node_settings_that_bound_their_input() {
             "{setting} must close only the session that sent the oversized input"
         );
     }
+    let write_buffer = BufferBound::Bounded {
+        capacity: BufferCapacity::NodeSetting("websocket-write-buffer-bytes"),
+        overflow: BufferOverflow::Backpressure,
+    };
+    assert!(
+        websocket
+            .buffers
+            .iter()
+            .any(|buffer| buffer.bound == write_buffer),
+        "a peer that stops reading holds its session back rather than growing its write buffer"
+    );
     assert!(websocket.waits.iter().any(|wait| {
         wait.wait == "reading the next frame"
             && matches!(

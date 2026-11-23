@@ -166,6 +166,11 @@ impl Arbitrary<'_> {
                 .assured("the listener generator restricts this quantity to a positive range"),
             header_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
                 .assured("the listener generator restricts this quantity to a positive range"),
+            max_headers: std::num::NonZeroU32::new(
+                u32::try_from(self.entropy.between(1..=4096))
+                    .assured("the listener generator restricts header counts to 1..=4096"),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
             header_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
             tls_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
             idle_timeout: std::time::Duration::from_secs(self.entropy.between(1..=120)),
@@ -185,6 +190,10 @@ impl Arbitrary<'_> {
             .assured("the listener generator restricts this quantity to a positive range"),
             websocket_frame_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
                 .assured("the listener generator restricts this quantity to a positive range"),
+            websocket_write_buffer_bytes: std::num::NonZeroU64::new(
+                self.entropy.between(1..=67108864),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
             grpc_header_bytes: std::num::NonZeroU64::new(self.entropy.between(8192..=67108864))
                 .assured("the listener generator restricts this quantity to a positive range"),
             grpc_concurrency: std::num::NonZeroU32::new(
@@ -198,6 +207,29 @@ impl Arbitrary<'_> {
                 u32::try_from(self.entropy.between(1..=1024)).assured(
                     "the listener generator restricts counts to 1..=1024 or retries to 1..=127",
                 ),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            // Every window HTTP/2 can advertise; a connection's starts at RFC 9113's 65,535.
+            grpc_stream_window_bytes: std::num::NonZeroU64::new(
+                self.entropy.boundary_biased(1..=2_147_483_647),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_connection_window_bytes: std::num::NonZeroU64::new(
+                self.entropy.boundary_biased(65_535..=2_147_483_647),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_send_buffer_bytes: std::num::NonZeroU64::new(
+                self.entropy.boundary_biased(1..=u64::from(u32::MAX)),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_max_pending_reset_streams: std::num::NonZeroU32::new(
+                u32::try_from(self.entropy.between(1..=1024))
+                    .assured("the listener generator restricts reset counts to 1..=1024"),
+            )
+            .assured("the listener generator restricts this quantity to a positive range"),
+            grpc_max_error_reset_streams: std::num::NonZeroU32::new(
+                u32::try_from(self.entropy.between(1..=65536))
+                    .assured("the listener generator restricts reset counts to 1..=65536"),
             )
             .assured("the listener generator restricts this quantity to a positive range"),
             grpc_keepalive_interval: std::time::Duration::from_secs(self.entropy.between(1..=120)),
