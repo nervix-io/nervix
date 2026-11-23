@@ -173,10 +173,13 @@ Because a CPU job's body is one scheduling step, a CPU job never waits for anoth
 build: a job that blocked until a test released it would stop the only thread that release can run
 on, and the suite would spend its whole budget on that test. The unit tests of `nervix-execution`
 run in this build as the `execution` invocation of `just test-turmoil`, apart from the ordinary
-drain regressions of `workers::dispatch_checks`. A check that needs a class's worker occupied, such
-as the capacity-wait checks, therefore holds it with the pool's test-only owner hold, `HeldWorker`,
-which marks the worker active without parking a thread and gives it back through the same transition
-as a job that ends. A storage job may still block, since it keeps its real blocking thread.
+drain regressions of `workers::dispatch_checks` and
+`tests::a_growing_job_that_ran_short_gives_back_its_charge_waits_and_runs_again`, whose job under
+test pauses inside its own first attempt until a charge queues behind it. A check that needs a
+class's worker occupied, such as the capacity-wait checks and the full CPU queue check, therefore
+holds it with the pool's test-only owner hold, `HeldWorker`, which marks the worker active without
+parking a thread and gives it back through the same transition as a job that ends. A storage job
+may still block, since it keeps its real blocking thread.
 
 ### Time
 

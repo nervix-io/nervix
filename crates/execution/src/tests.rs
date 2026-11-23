@@ -1108,40 +1108,15 @@ async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
 }
 
 /// The same for a CPU class: a job that finds the class's one worker busy and its one queue place
-/// taken waits for a place and runs once one frees.
-// The occupying job parks its worker's thread on a blocking channel until the test releases it.
-// Turmoil's simulated CPU strategy runs every job on the one simulated host thread, which that park
-// would stop, so this check runs in the ordinary build only; `workers::queue_admission_checks`
-// holds a worker without parking a thread and checks the same admission under Turmoil.
-#[cfg(not(feature = "turmoil"))]
+/// taken waits for a place and runs once one frees. The pool's owner hold keeps the worker busy
+/// without parking a thread, so the check also completes on Turmoil's simulated scheduler.
 #[nervix_primitives::test]
 async fn a_full_cpu_queue_holds_every_job_until_a_place_frees() {
     let executor = small_executor();
-    let (started, has_started) = nervix_primitives::sync::oneshot::channel();
-    let (release, released) = nervix_primitives::sync::blocking::mpsc::channel::<()>();
-    let occupying = executor
-        .try_reserve(MemoryClass::Relay, 1)
-        .expect("the untouched relay class has room");
-    let occupied = executor.clone();
-    let running = nervix_primitives::task::spawn(async move {
-        occupied
-            .run_cpu(crate::CpuClass::Data, occupying, move |_charge, _| {
-                started
-                    .send(())
-                    .expect("the test waits for the occupying job");
-                released
-                    .recv()
-                    .expect_err("dropping the sender is how the test releases the worker");
-            })
-            .await
-            .expect("the occupying job runs");
-    });
-    has_started
-        .await
-        .expect("the occupying job reports once it holds the one worker");
+    let held = crate::workers::HeldWorker::new(executor.cpu_pool(crate::CpuClass::Data));
     let queued_charge = executor
         .try_reserve(MemoryClass::Relay, 1)
-        .expect("the relay class has room for the queued job");
+        .expect("the untouched relay class has room for the queued job");
     let queue_holder = executor.clone();
     let queued = nervix_primitives::task::spawn(async move {
         queue_holder
@@ -1166,9 +1141,8 @@ async fn a_full_cpu_queue_holds_every_job_until_a_place_frees() {
         first_poll.is_pending(),
         "a full wait queue holds the job instead of refusing it"
     );
-    drop(release);
+    drop(held);
 
-    running.await.expect("the occupying job is joined");
     queued
         .await
         .expect("the queued job is joined")
@@ -1178,7 +1152,10 @@ async fn a_full_cpu_queue_holds_every_job_until_a_place_frees() {
         .expect("a job that found the queue full runs once a place frees");
     assert_eq!(value, 7);
     let snapshot = executor.snapshot();
-    assert_eq!(snapshot.data_cpu.completed, 3);
+    assert_eq!(
+        snapshot.data_cpu.completed, 2,
+        "the queued and the waiting job ran; the owner hold is no job"
+    );
     assert_eq!(snapshot.data_cpu.pending, 0);
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }
