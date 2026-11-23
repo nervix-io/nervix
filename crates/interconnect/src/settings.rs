@@ -3,7 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Peer receive setting definitions and their executor-relative limits, and the
-//!   HTTP/2 bound that window and the connection window derived from it must fit.
+//!   HTTP/2 window bounds: the largest window, which the bulk window and the connection window
+//!   derived from it must fit, and the initial window of every connection, below which a
+//!   connection window bounds nothing.
 //! - **Depends on.** The vocabulary's setting classes and byte quantities, and the bulk pool's
 //!   stream partition.
 //! - **Must not know.** Command-line parsing, or the memory budget that backs each window.
@@ -196,6 +198,20 @@ impl Default for PeerReceiveSettings {
     )
 )]
 pub const MAX_HTTP2_WINDOW_BYTES: u64 = 2_147_483_647;
+
+/// The flow-control window RFC 9113 gives every new HTTP/2 connection before any WINDOW_UPDATE.
+///
+/// A connection window only grows from it, so a smaller declared window would bound nothing. The
+/// interconnect's connection receive window starts from it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 9113 section 6.9.2 starts every connection flow-control window at 65,535 \
+                  octets, and the receiver can only raise it"
+    )
+)]
+pub const HTTP2_INITIAL_CONNECTION_WINDOW_BYTES: u64 = 65_535;
 
 /// Why a bulk receive window cannot be advertised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]

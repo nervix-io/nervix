@@ -15,7 +15,7 @@ use std::time::Duration;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 pub use nervix_interconnect::AcceptRetryDelay;
-use nervix_interconnect::MAX_HTTP2_WINDOW_BYTES;
+use nervix_interconnect::{HTTP2_INITIAL_CONNECTION_WINDOW_BYTES, MAX_HTTP2_WINDOW_BYTES};
 use nervix_models::{
     ListenerBounds, NodeCapabilities, SessionFrameBytes, Setting, SettingDefinition,
 };
@@ -302,19 +302,6 @@ definition!(GrpcMaxStreams, "grpc-max-streams", u32, 256, |v: &u32| *v
     > 0
     && usize::try_from(*v).is_ok_and(|n| n <= Semaphore::MAX_PERMITS)
     && *v <= i32::MAX.unsigned_abs());
-
-/// The flow-control window RFC 9113 gives every new HTTP/2 connection before any WINDOW_UPDATE.
-///
-/// A connection window only grows from it, so a smaller declared window would bound nothing.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "RFC 9113 section 6.9.2 starts every connection flow-control window at 65,535 \
-                  octets, and the receiver can only raise it"
-    )
-)]
-const HTTP2_INITIAL_CONNECTION_WINDOW_BYTES: u64 = 65_535;
 
 /// Refuses a window HTTP/2 cannot advertise or that does not bound what it declares.
 fn http2_window(
