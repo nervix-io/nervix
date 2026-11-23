@@ -492,9 +492,10 @@ new session answers the attach while the previous session still holds the attach
 leader redirect, the attachment moves without an interruption: a clock that stays paced in the
 same generation keeps its newest tick, so the clock a caller reads is never older than a tick event
 it has already taken, and a tick of the new session is reported only when it is newer. A
-restoration the new session refuses is reported and sent again on that session after one second, a
-wait that doubles with each refusal up to thirty seconds, for as long as the client follows the
-clock and the session stays open; each new session starts again from one second. A restoration
+restoration the new session refuses is reported and sent again on that session after the client's
+`restoration_backoff`, one second by default, a wait that doubles with each refusal up to its
+`restoration_max_backoff`, thirty seconds by default, for as long as the client follows the clock
+and the session stays open; each new session starts again from the first wait. A restoration
 left unanswered past the client's request timeout ends that session instead, like any request
 that outlives the timeout, and the next session attaches the clock again; a caller already waiting
 for the next clock event is woken and opens that session. A restoration refused as not found ends
@@ -776,7 +777,8 @@ wins. HTTP request deadlines and `Retry-After` therefore stay physical, flush ca
 domain clock, and no check establishes progress by waiting.
 
 An emitter's partial buffer and connector-staged acknowledged work keep their ingestor alive on a
-100-millisecond physical beat, even when another input is waiting for materialized state. New input
+physical beat of the committed `REMOTE_ACK_ALIVE_INTERVAL`, 100 milliseconds by default, which each
+beat reads as it is armed, even when another input is waiting for materialized state. New input
 does not postpone it, an active retry owns its existing beat, and no beat remains after all held work
 is released. This liveness deadline neither advances logical flush cadence nor confirms delivery.
 

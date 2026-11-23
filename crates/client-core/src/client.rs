@@ -16,7 +16,7 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU32, path::PathBuf, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -248,6 +248,17 @@ impl StatementRoute {
         }
     }
 
+    /// How many times this route's call is sent while it is redirected or waits for an election:
+    /// as many waits of the first retry backoff as the deadline
+    /// [`wait_timeout`](Self::wait_timeout) gives the call holds.
+    fn routing_attempts(&self, connector: &GrpcConnector) -> NonZeroU32 {
+        let capabilities = connector.capabilities();
+        match self {
+            Self::Backup(_) => capabilities.backup_routing_attempts(),
+            _ => capabilities.routing_attempts(),
+        }
+    }
+
     /// When a session recovery made for this route's call, which ends at `call` unless a progress
     /// report restarts it, gives up. A backup's wait is one deadline that every redirect and
     /// reconnect of the backup shares; any other call recovers within the retry budget, which is
@@ -338,8 +349,6 @@ pub struct Client {
 }
 
 impl Client {
-    pub(crate) const MAX_LEADER_ROUTING_ATTEMPTS: usize = 1200;
-
     pub async fn connect(
         server: impl AsRef<str>,
         domain: Option<DomainName>,
@@ -819,7 +828,8 @@ impl Client {
         let inspected =
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
                 let _command_guard = self.inner.command_lock.lock().await;
-                for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+                for attempt in 0..routing_attempts.get() {
                     nervix_primitives::task::consume_budget().await;
                     let request = ClientRequest::InspectTransaction(InspectTransactionRequest {
                         target: target.clone(),
@@ -851,11 +861,14 @@ impl Client {
                         }
                     };
                     match Routing::for_inspection(&outcome) {
-                        Routing::Redirect(leader) if Self::retries_remain(attempt) => {
+                        Routing::Redirect(leader)
+                            if Self::retries_remain(attempt, routing_attempts) =>
+                        {
                             self.follow_leader(leader, RecoveryDeadline::RetryBudget)
                                 .await?;
                         }
-                        Routing::AwaitElection if self.await_retry(attempt).await => {}
+                        Routing::AwaitElection
+                            if self.await_retry(attempt, routing_attempts).await => {}
                         _ => {
                             if let InspectionOutcome::Inspected(inspection) = &outcome {
                                 let preview = TransactionPreviewIdentity {
@@ -891,7 +904,8 @@ impl Client {
         cancellation: CallCancellation<'_>,
         attempts: &mut CommandAttempts,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
-        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+        let routing_attempts = execution.route.routing_attempts(&self.inner.connector);
+        for attempt in 0..routing_attempts.get() {
             nervix_primitives::task::consume_budget().await;
             // A call cancelled after an attempt sends nothing more. Its first attempt still goes
             // out, so the server's answer to the cancellation decides what became of it.
@@ -933,7 +947,7 @@ impl Client {
                     cancellation.unless_requested(following).await??;
                 }
                 Routing::AwaitElection | Routing::AwaitOutcome => {
-                    let retrying = std::pin::pin!(self.await_retry(attempt));
+                    let retrying = std::pin::pin!(self.await_retry(attempt, routing_attempts));
                     let waited = cancellation.unless_requested(retrying).await?;
                     if !waited {
                         return Ok(outcome);
@@ -1267,7 +1281,8 @@ impl Client {
         &self,
         transaction_id: &str,
     ) -> error_stack::Result<nervix_client_wire::AttachOutcome, ClientError> {
-        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+        let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+        for attempt in 0..routing_attempts.get() {
             nervix_primitives::task::consume_budget().await;
             let request = ClientRequest::AttachTransaction(AttachTransactionRequest {
                 transaction_id: transaction_id.to_string(),
@@ -1297,7 +1312,7 @@ impl Client {
                 }
             };
             match Routing::for_attach(&outcome) {
-                Routing::Redirect(leader) if Self::retries_remain(attempt) => {
+                Routing::Redirect(leader) if Self::retries_remain(attempt, routing_attempts) => {
                     self.inner
                         .connector
                         .validate_server(leader)
@@ -1305,7 +1320,7 @@ impl Client {
                     self.inner.servers.lock().await.remember(leader);
                     self.reconnect(leader).await?;
                 }
-                Routing::AwaitElection if self.await_retry(attempt).await => {}
+                Routing::AwaitElection if self.await_retry(attempt, routing_attempts).await => {}
                 _ => return Ok(outcome),
             }
         }
@@ -1383,7 +1398,8 @@ impl Client {
             None => wait,
         };
         let progress = ProgressInterval::within(reported_wait);
-        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+        let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+        for attempt in 0..routing_attempts.get() {
             nervix_primitives::task::consume_budget().await;
             let exchange = match &captured {
                 Some(exchange) => exchange.clone(),
@@ -1474,7 +1490,7 @@ impl Client {
                         return Err(report);
                     }
                     let allowed = read_only_call
-                        .bound(self.await_retry(attempt))
+                        .bound(self.await_retry(attempt, routing_attempts))
                         .await
                         .map_err(|_| Report::new(ClientError::RetryDeadline))?;
                     if !allowed {
@@ -1726,7 +1742,8 @@ impl Client {
     ) -> error_stack::Result<ReplyBody, ClientError> {
         let answered =
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
-                for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+                for _ in 0..routing_attempts.get() {
                     nervix_primitives::task::consume_budget().await;
                     match self.clock_request_once(&request).await {
                         Ok(body) => return Ok(body),
@@ -1852,17 +1869,19 @@ impl Client {
         self.inner.exchange.lock().await.channel.clone()
     }
 
-    /// Whether a routed request may be sent again after `attempt`, counting from zero.
-    pub(crate) fn retries_remain(attempt: usize) -> bool {
+    /// Whether a routed request may be sent again after `attempt`, counting from zero, when its
+    /// call makes at most `routing_attempts`.
+    pub(crate) fn retries_remain(attempt: u32, routing_attempts: NonZeroU32) -> bool {
         let Some(next) = attempt.checked_add(1) else {
             return false;
         };
-        next < Self::MAX_LEADER_ROUTING_ATTEMPTS
+        next < routing_attempts.get()
     }
 
-    /// Waits before the request is sent again, and says whether it may be.
-    pub(crate) async fn await_retry(&self, attempt: usize) -> bool {
-        if !Self::retries_remain(attempt) {
+    /// Waits before the request is sent again, and says whether it may be when its call makes at
+    /// most `routing_attempts`.
+    pub(crate) async fn await_retry(&self, attempt: u32, routing_attempts: NonZeroU32) -> bool {
+        if !Self::retries_remain(attempt, routing_attempts) {
             return false;
         }
         sleep(self.inner.connector.capabilities().retry_delay(attempt)).await;
@@ -1920,7 +1939,7 @@ impl Client {
     /// Every restoration request is sent before this returns, so a transaction the caller
     /// attaches afterwards follows them: a session that holds a transaction refuses both.
     pub(crate) async fn install(&self, exchange: Exchange) {
-        let mut restoration = Restoration::new(&exchange, self.inner.connector.request_timeout());
+        let mut restoration = Restoration::new(&exchange, self.inner.connector.capabilities());
         restoration.attach_followed_clocks().await;
         let previous = std::mem::replace(&mut *self.inner.exchange.lock().await, exchange);
         restoration.published();
@@ -1939,7 +1958,7 @@ impl Client {
         let _reconnect_guard = self.inner.reconnect_lock.lock().await;
         let mut restoration = {
             let exchange = self.inner.exchange.lock().await;
-            Restoration::new(&exchange, self.inner.connector.request_timeout())
+            Restoration::new(&exchange, self.inner.connector.capabilities())
         };
         restoration.open_producers().await;
         restoration.open_consumers().await;

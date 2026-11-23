@@ -15,7 +15,7 @@ use nervix_models::{
     RestoreStep,
 };
 
-use super::{DomainResumeBoundary, StandaloneTransactionBoundary};
+use super::{DomainResumeBoundary, StandaloneTransactionBoundary, StartPlacementBoundary};
 
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -37,6 +37,11 @@ pub(super) enum CommandPausePoint {
         node: ClusterNodeName,
         domain: DomainName,
         boundary: DomainResumeBoundary,
+    },
+    StartPlacement {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: StartPlacementBoundary,
     },
     Admission(ClusterNodeName),
     ClientInspectionAdmission(DomainName),

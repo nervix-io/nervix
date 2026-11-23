@@ -3808,11 +3808,13 @@ driver and interrupted compiler keep distinct diagnoses.
 [Architecture enforcement](architecture-enforcement.md) owns the matrix, shared admission protocol
 and cache evidence that produce these tooling reports.
 
-The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
+The isolated architecture compiler emits nineteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`; the four failure diagnostics above; the six architecture diagnostics
+`nervix::invalid_contract`; the five failure diagnostics above; the six architecture diagnostics
 [Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries) describes;
-and `nervix::clamped_arithmetic` and `nervix::combinator_control_flow`. The
+`nervix::clamped_arithmetic` and `nervix::combinator_control_flow`; `nervix::branch_inversion`; and
+`nervix::hidden_tunable`, which [Hidden Tunables](./architecture-enforcement.md#hidden-tunables)
+describes. The
 [architecture rule matrix](./architecture-enforcement.md#rule-contracts) lists them by family.
 Source contracts and narrow reason-bearing expectations own the architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with

@@ -21,6 +21,8 @@ struct IngestTaskDependencies {
     clock: domain_clock::DomainClockLifecycle,
     trackers: IngestorAckRootTrackers,
     metrics: BranchMetricsMark,
+    /// The node's installed remote acknowledgement timing, kept from the ingestor's start.
+    remote_ack_timing: SharedRemoteAckTiming,
 }
 
 impl IngestTaskHandles {
@@ -41,6 +43,12 @@ impl IngestTaskHandles {
         self.inner.metrics.mark();
     }
 
+    /// The timing the acknowledgements of the ingestor's groups are reported alive by while work
+    /// on them waits.
+    pub(super) fn remote_ack_timing(&self) -> &SharedRemoteAckTiming {
+        &self.inner.remote_ack_timing
+    }
+
     #[cfg(test)]
     pub(super) fn detached(domain: &DomainName) -> Self {
         let clock = domain_clock::DomainClockLifecycle::new(domain.clone());
@@ -53,6 +61,7 @@ impl IngestTaskHandles {
                 clock,
                 trackers: IngestorAckRootTrackers::detached(),
                 metrics: BranchMetricsMark::default(),
+                remote_ack_timing: SharedRemoteAckTiming::default(),
             }),
         }
     }
@@ -74,6 +83,7 @@ impl Runtime {
                     domain,
                     &NodeUnitRef::new(NodeRef::new(ModelKind::Ingestor, ingestor), unit),
                 ),
+                remote_ack_timing: self.remote_ack_timing().clone(),
             }),
         })
     }

@@ -32,7 +32,23 @@ use crate::{
     records::Records,
 };
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored commit plan headers sit under this record-family tag byte in the \
+                  persisted consensus state keyspace"
+    )
+)]
 const COMMIT_PLAN_HEADER_TAG: u8 = b'P';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored commit plan steps sit under this record-family tag byte in the persisted \
+                  consensus state keyspace"
+    )
+)]
 const COMMIT_PLAN_STEP_TAG: u8 = b'p';
 
 /// Volatile node liveness and incarnation inputs consumed by the admitted schedule decisions.

@@ -404,20 +404,19 @@ impl CompiledEnvelope {
         })
     }
 
-    /// The envelope of every row `published` holds, evaluated with the execution time and
-    /// materialized-state snapshot its route used.
+    /// The envelope of every row `published` holds, evaluated through `run` at the execution time
+    /// its route used, with that route's materialized-state snapshot.
     ///
     /// Fails only when the envelope cannot be evaluated over the batch at all. A row whose own
     /// envelope cannot be evaluated keeps its reason, and the emitter rejects that row when it
     /// publishes it.
     pub(in crate::runtime) async fn evaluate(
         &self,
-        executor: &Executor,
+        run: ProgramRun<'_>,
         source_relay: &RelayName,
         published: &mut RelayRecordBatch,
         input: EnvelopeInput<'_>,
         side_inputs: &HashMap<String, RuntimeValue>,
-        execution_now: Timestamp,
     ) -> Result<RowEnvelopes, PlannedGeneralFailure> {
         let (computed, partitioning) = match &self.computed {
             None => (None, None),
@@ -491,10 +490,7 @@ impl CompiledEnvelope {
             ],
         };
         let executed = execute_filter_map_program_on_batch(
-            ProgramRun {
-                executor,
-                now: execution_now,
-            },
+            run,
             &computed.program,
             FilterMapBatchInputs {
                 carrier: &published.batch,

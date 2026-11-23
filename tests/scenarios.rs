@@ -283,6 +283,7 @@ mod session_protocol;
 mod session_settings;
 mod session_tls;
 mod standalone_transaction;
+mod start_placement;
 mod subscription_restoration;
 mod wasm_state_inspection;
 mod web_console_command_retry;
@@ -17137,10 +17138,16 @@ async fn when_emitter_connector_stalls_after_resolving(
         .stall_emitter_connector_after_resolving_on_all_nodes(&emitter, resolved);
 }
 
+/// How often an ingestor in fault mode rechecks whether it may run again, which its
+/// `DESCRIBE INGESTOR` reports as the reconnect backoff.
+const INGESTOR_FAULT_RECHECK: Duration = Duration::from_millis(250);
+
 #[when(expr = "ingestor {string} enters fault mode")]
 async fn when_ingestor_enters_fault_mode(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = expand_placeholders(world, &ingestor);
-    world.cluster().fail_ingestor_on_all_nodes(&ingestor);
+    world
+        .cluster()
+        .fail_ingestor_on_all_nodes(&ingestor, INGESTOR_FAULT_RECHECK);
 }
 
 #[when(expr = "ingestor {string} leaves fault mode")]
@@ -18987,6 +18994,54 @@ async fn then_background_command_request_reports_leadership_lost(world: &mut Sce
         result.message
     );
     session_protocol::assert_reports_moved_leadership(&result.message);
+}
+
+/// Like the step above, for a command that was still applying when its node stopped leading: the
+/// node answered with a redirect to `node_id`, so the answer names that leader in its message and
+/// in its diagnostic. A command whose own outcome was refused on the way, and whose recording then
+/// met the lost leadership, is reported as being finalized instead, without the redirect.
+#[then(
+    expr = "the background command request reports that leadership moved to node {string} while \
+            it was applying"
+)]
+async fn then_background_command_request_reports_leadership_moved_while_applying(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert_eq!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        ),
+        "background command request did not report that leadership moved: {}",
+        result.message
+    );
+    let moved = format!("leadership moved to node '{node_id}' while command execution reference '");
+    assert!(
+        result.message.starts_with(&moved) && result.message.contains("' was applying;"),
+        "background command request must report that leadership moved to node '{node_id}' while \
+         it was applying: {}",
+        result.message
+    );
+    let redirect = format!("retry this command on leader '{node_id}'");
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == redirect),
+        "background command request must carry the redirect to node '{node_id}': {:?}",
+        result.diagnostics
+    );
 }
 
 #[then("the last command request reports an execution reference content conflict")]

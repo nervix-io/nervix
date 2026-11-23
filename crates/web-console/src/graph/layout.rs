@@ -16,26 +16,140 @@ use meticulous::{OptionExt as _, ResultExt as _};
 /// Vertical clearance between two items in the same column, wide enough for two rate badges to
 /// sit above one another without touching. Where a branch group's region begins or ends between
 /// the two items, the gap grows to hold the region's padding and header as well.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed clearance between two items of a column, wide enough for \
+                  two stacked rate badges"
+    )
+)]
 const ROW_GAP: i32 = 36;
 /// Vertical clearance between a branch group's region and anything outside it in one column.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed clearance around a branch group's region in a column, so \
+                  regions of different branches never touch, as the web console chapter states"
+    )
+)]
 const GROUP_CLEARANCE: i32 = 12;
 /// Smallest vertical distance between two ports on the same item.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed spacing of one item's attachment points, so a node with \
+                  several edges fans them out visibly"
+    )
+)]
 const PORT_PITCH: i32 = 20;
 /// Horizontal run every edge makes on leaving its source before it may turn.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed straight run of an edge out of its source before it turns"
+    )
+)]
 const SOURCE_PLUG: i32 = 20;
 /// Horizontal run every edge makes into its target, kept clear of vertical traffic.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed straight run of an edge into its target, kept clear of \
+                  vertical traffic"
+    )
+)]
 const TARGET_PLUG: i32 = 20;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed spacing of the vertical lanes in a gutter, each turning \
+                  edge on a line of its own"
+    )
+)]
 const LANE_PITCH: i32 = 16;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed rate badge width, which every gutter reserves"
+    )
+)]
 const BADGE_WIDTH: i32 = 64;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "the layout's designed rate badge height")
+)]
 const BADGE_HEIGHT: i32 = 16;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed clearance on each side of a rate badge in its gutter"
+    )
+)]
 const BADGE_GAP: i32 = 8;
 /// The band reserved above a branch group's first column for its header.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed header band above a branch group's first column"
+    )
+)]
 const GROUP_HEADER_HEIGHT: i32 = 24;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed padding between a branch group's region and its members"
+    )
+)]
 const GROUP_PADDING: i32 = 8;
-const CANVAS_PADDING: i32 = 48;
+/// The margin between a graph's drawing and the edges of its canvas.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed margin between a graph's drawing and its canvas edges"
+    )
+)]
+pub(crate) const CANVAS_PADDING: i32 = 48;
 /// Vertical clearance between two disconnected parts of the graph.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed clearance that stacks disconnected parts of a graph as \
+                  separate bands, as the web console chapter states"
+    )
+)]
 const BAND_GAP: i32 = 72;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the layout's designed spacing of the return paths drawn above the items they \
+                  span"
+    )
+)]
 const FEEDBACK_PITCH: i32 = 20;
+/// How many barycenter sweeps the ordering phase runs, alternating a downward and an upward pass
+/// over the columns.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the ordering phase's designed number of barycenter sweeps, four downward \
+                  alternating with four upward: a parameter of the layout algorithm, which no \
+                  cluster, network or workload changes"
+    )
+)]
 const ORDERING_SWEEPS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -443,33 +557,40 @@ where
         remaining.sort_by(|left, right| self.items[*left].id.cmp(&self.items[*right].id));
         starts.extend(remaining);
 
-        const WHITE: u8 = 0;
-        const GRAY: u8 = 1;
-        const BLACK: u8 = 2;
-        let mut color = vec![WHITE; self.items.len()];
+        /// Where the depth-first walk stands with one item.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Visit {
+            /// The walk has not reached the item.
+            Unvisited,
+            /// The item is on the walk's current path, so an edge into it closes a cycle.
+            OnPath,
+            /// The walk has followed every edge out of the item.
+            Finished,
+        }
+        let mut visits = vec![Visit::Unvisited; self.items.len()];
         let mut back = BTreeSet::new();
         for start in starts {
-            if color[start] != WHITE {
+            if visits[start] != Visit::Unvisited {
                 continue;
             }
             let mut stack = vec![(start, 0_usize)];
-            color[start] = GRAY;
+            visits[start] = Visit::OnPath;
             while let Some((node, cursor)) = stack.pop() {
                 if cursor >= adjacency[node].len() {
-                    color[node] = BLACK;
+                    visits[node] = Visit::Finished;
                     continue;
                 }
                 stack.push((node, cursor + 1));
                 let (target, edge) = adjacency[node][cursor];
-                match color[target] {
-                    GRAY => {
+                match visits[target] {
+                    Visit::OnPath => {
                         back.insert(edge);
                     }
-                    WHITE => {
-                        color[target] = GRAY;
+                    Visit::Unvisited => {
+                        visits[target] = Visit::OnPath;
                         stack.push((target, 0));
                     }
-                    _ => {}
+                    Visit::Finished => {}
                 }
             }
         }

@@ -19,7 +19,10 @@ pub(in super::super) fn segmented_replacement_reclaims_incomplete_revisions_in_e
         checkpoint.state = RuntimeState::MaterializedRelay {
             schema: nervix_models::SchemaFingerprint::from_digest([7; 32]).materialized_at(37),
         };
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let previous = vec![7; RESTORE_STATE_CHUNK_BYTES * 3 + 13];
         if namespace == StateNamespace::Initial {
             publish_periodic(&store, &checkpoint, 3, &previous);
@@ -95,7 +98,10 @@ pub(in super::super) fn segmented_replacement_reclaims_incomplete_revisions_in_e
         drop(reader);
         drop(writer);
         drop(store);
-        let reopened = super::store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let reopened = super::store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         assert_eq!(
             reopened
                 .reclaim_restore_staging(|_, _| true, || Ok(()))
@@ -162,7 +168,10 @@ fn publish_periodic(
 pub(in super::super) fn selected_segmented_revisions_are_retained_while_other_chunk_sets_are_reclaimed()
  {
     let directory = tempfile::tempdir().assured("the test directory opens");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let checkpoint = placement("orders");
     let mut other = checkpoint.clone();
     other.identifier = ModelName::parse("another").assured("the test model name is valid");
@@ -235,7 +244,10 @@ pub(in super::super) fn selected_segmented_revisions_are_retained_while_other_ch
 #[test]
 pub(in super::super) fn large_inline_replacement_needs_no_large_caller_owned_header_copy() {
     let directory = tempfile::tempdir().assured("the test directory opens");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let checkpoint = placement("orders");
     publish(&store, &checkpoint, b"restored");
     let current = vec![9; RESTORE_STATE_CHUNK_BYTES * 64];
@@ -268,7 +280,10 @@ pub(in super::super) fn large_inline_replacement_needs_no_large_caller_owned_hea
 pub(in super::super) fn malformed_active_chunks_and_headers_fail_before_deletion() {
     for malformed_header in [false, true] {
         let directory = tempfile::tempdir().assured("the test directory opens");
-        let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let store = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         let checkpoint = placement("orders");
         publish(&store, &checkpoint, b"selected");
         let key = StateNamespace::Restored(19)

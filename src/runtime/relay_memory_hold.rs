@@ -25,7 +25,7 @@ use std::future::Future;
 
 use nervix_execution::{AdmissionError, MemoryClass, Reservation};
 
-use super::*;
+use super::{entity_gate::SHORTEST_WAIT, *};
 
 /// How long held work waits before it reads the relay budget again.
 ///
@@ -71,8 +71,8 @@ impl RelayMemoryHold {
         executor: &Executor,
         cancelled: impl Future<Output = ()>,
     ) -> Result<RelayMemoryHolding, Report<AdmissionError>> {
-        let recheck_interval = (self.deadline.saturating_duration_since(Instant::now()) / 30_000)
-            .max(Duration::from_nanos(1));
+        let recheck_interval =
+            (self.deadline.saturating_duration_since(Instant::now()) / 30_000).max(SHORTEST_WAIT);
         let mut cancelled = std::pin::pin!(cancelled);
         loop {
             nervix_primitives::task::consume_budget().await;

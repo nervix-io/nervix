@@ -208,7 +208,8 @@ semantic value, name, one default, optional derivation and validation against ty
 typed validation report on failure, and provides no mutable access around that boundary.
 `Prerequisites`, `ClusterParameters` and `NodeCapabilities` classify the fields; omitting the
 class is a compile-time error. [Node Settings](node-settings.md) owns their operational meaning,
-carriers, defaults, change procedures and source ratchet.
+carriers, defaults, change procedures and the compiler rule that refuses numeric policy outside
+them.
 
 `NodeCapabilities` also holds resolved optional positive CPU/memory measurements and positive
 `PeerReceiveBounds`. `NodeCapabilityRecord` binds those values to the shared `ClusterNodeIdentity`,
@@ -383,7 +384,7 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_lifecycle_` keyspaces and `ClusterState`
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_` keyspaces and `ClusterState`
 metadata encoding 52 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
 inferencer working memory, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, the database volume size each node record's capacity claim carries, interconnect capabilities

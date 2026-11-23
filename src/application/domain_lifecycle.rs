@@ -147,22 +147,12 @@ pub(in crate::application) struct ResolvedDomainStart {
     pub(in crate::application) clock: DomainClockState,
 }
 
-/// The retained log cap, in bytes, a test build's saturated-log refusal reports.
-#[cfg(feature = "testing")]
-const REFUSED_WRITE_LOG_CAP_BYTES: u64 = 64 * 1024 * 1024;
-
-/// The retained log a test build's saturated-log refusal reports: one byte past its cap.
-#[cfg(feature = "testing")]
-const REFUSED_WRITE_RETAINED_LOG_BYTES: u64 = REFUSED_WRITE_LOG_CAP_BYTES + 1;
-
-/// The wait for reclamation a test build's saturated-log refusal reports.
-#[cfg(feature = "testing")]
-const REFUSED_WRITE_RECLAMATION_WAIT: Duration = Duration::from_secs(5);
-
 impl SessionServiceImpl {
     /// The error this leader's consensus refuses a write with, before appending it, when a test
     /// build armed a model publication refusal of this kind. A lapsed lease is observed against the
-    /// node's current tenure, as a refusal Raft returned would be.
+    /// node's current tenure, as a refusal Raft returned would be. A saturated log is the node's own
+    /// retained log cap exceeded by one byte once its retention admission wait has passed, which a
+    /// test arms only on a node whose cap a log can exceed.
     #[cfg(feature = "testing")]
     pub(in crate::application) fn refused_write(
         &self,
@@ -173,10 +163,18 @@ impl SessionServiceImpl {
                 self.inner.consensus.lapsed_lease_refusal()
             }
             crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog => {
+                use meticulous::OptionExt as _;
+
+                let retention = self.inner.consensus.raft_retention_policy();
+                let cap = retention.retained_log_cap_bytes;
+                let retained = cap.checked_add(1).assured(
+                    "a test arms a saturated-log refusal only on a node whose retained log cap a \
+                     log can exceed",
+                );
                 ConsensusError::LogRetentionSaturated {
-                    retained: REFUSED_WRITE_RETAINED_LOG_BYTES,
-                    cap: REFUSED_WRITE_LOG_CAP_BYTES,
-                    waited: REFUSED_WRITE_RECLAMATION_WAIT,
+                    retained,
+                    cap,
+                    waited: retention.retention_admission_timeout,
                 }
             }
         }
@@ -1011,6 +1009,40 @@ mod tests {
         super::test_fixtures::{TestService, build_test_service},
         *,
     };
+
+    /// A test build refuses a write for a saturated log as this node's consensus would: one byte
+    /// past the retained log cap the node resolved, once its retention admission wait has passed.
+    /// The fixture's consensus runs the default retention settings.
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn an_injected_saturated_log_refusal_reports_the_nodes_retention_policy() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let policy = nervix_consensus::RaftRetentionSettings::default()
+            .policy(&nervix_consensus::RaftOperationSettings::default());
+
+        let refusal = service
+            .refused_write(crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog);
+
+        let ConsensusError::LogRetentionSaturated {
+            retained,
+            cap,
+            waited,
+        } = refusal
+        else {
+            panic!("a saturated log refuses the write as a saturated log: {refusal:?}");
+        };
+        assert_eq!(cap, policy.retained_log_cap_bytes);
+        assert_eq!(Some(retained), cap.checked_add(1));
+        assert_eq!(waited, policy.retention_admission_timeout);
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
 
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]

@@ -92,6 +92,7 @@ impl Arbitrary<'_> {
             client_producer_session_bytes: Some(entropy.boundary_biased(1..=u64::MAX)),
             client_consumer_session_bytes: Some(entropy.boundary_biased(1..=u64::MAX)),
             udf_code_bytes: Some(entropy.boundary_biased(1..=u64::MAX)),
+            udf_compile_budget: Some(parameter_duration(entropy)),
             entity_labels_max_count: Some(entropy.boundary_biased(0..=u64::MAX)),
             entity_labels_max_key_bytes: Some(entropy.boundary_biased(0..=u64::MAX)),
             entity_labels_max_value_bytes: Some(entropy.boundary_biased(0..=u64::MAX)),

@@ -68,11 +68,22 @@ pub struct ConnectOptions {
     pub backup_wait_timeout: Duration,
     pub retry_backoff: Duration,
     pub retry_max_backoff: Duration,
+    /// The first wait before a restoration its new session refused is sent again on that session.
+    pub restoration_backoff: Duration,
+    /// The ceiling the waits between refused restorations on one session double up to.
+    pub restoration_max_backoff: Duration,
     pub subscription_record_capacity: NonZeroUsize,
     pub subscription_retained_frames: NonZeroUsize,
     pub subscriptions_retained_in_full: NonZeroUsize,
     pub upload_frame_capacity: NonZeroUsize,
     pub restore_frame_capacity: NonZeroUsize,
+    /// Request frames one session queues before a caller sending another waits for the transport.
+    pub request_frame_capacity: NonZeroUsize,
+    /// Server notices one session retains for a caller that has not read them.
+    pub notice_capacity: NonZeroUsize,
+    /// Bytes of unread server notices one session retains, each notice charged its text and its
+    /// in-memory header.
+    pub notice_bytes: NonZeroUsize,
 }
 
 impl Default for ConnectOptions {
@@ -91,11 +102,16 @@ impl Default for ConnectOptions {
             backup_wait_timeout: capabilities.backup_wait_timeout(),
             retry_backoff: capabilities.retry_backoff(),
             retry_max_backoff: capabilities.retry_max_backoff(),
+            restoration_backoff: capabilities.restoration_backoff(),
+            restoration_max_backoff: capabilities.restoration_max_backoff(),
             subscription_record_capacity: capabilities.subscription_record_capacity(),
             subscription_retained_frames: capabilities.subscription_retained_frames(),
             subscriptions_retained_in_full: capabilities.subscriptions_retained_in_full(),
             upload_frame_capacity: capabilities.upload_frame_capacity(),
             restore_frame_capacity: capabilities.restore_frame_capacity(),
+            request_frame_capacity: capabilities.request_frame_capacity(),
+            notice_capacity: capabilities.notice_capacity(),
+            notice_bytes: capabilities.notice_bytes(),
         }
     }
 }
@@ -111,6 +127,14 @@ pub enum ConnectDns {
 
 impl ConnectOptions {
     /// The per-list bound for configured seeds and learned endpoints in a client's directory.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the client session protocol has the Rust client reconnect through at most \
+                      32 endpoints it learned, and its configured seed list shares that bound"
+        )
+    )]
     pub const MAX_SEED_SERVERS: usize = 32;
 
     pub fn with_basic_auth(

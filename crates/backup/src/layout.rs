@@ -23,8 +23,17 @@ use crate::{
     section::{ArchiveRecord as _, SectionDigester},
 };
 
-/// The size of one tar block. Every header and every padded entry is a whole number of blocks.
-const BLOCK_BYTES: usize = 512;
+/// The size of one tar block, which one tar header fills exactly. Every header and every padded
+/// entry is a whole number of blocks.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a tar archive is a sequence of 512-byte blocks, and one tar header fills \
+                  exactly one"
+    )
+)]
+const BLOCK_BYTES: usize = size_of::<Header>();
 
 /// The zeroes that pad an entry to a block boundary.
 static ZERO_BLOCK: [u8; BLOCK_BYTES] = [0; BLOCK_BYTES];
@@ -36,6 +45,14 @@ static END_OF_ARCHIVE: [u8; 2 * BLOCK_BYTES] = [0; 2 * BLOCK_BYTES];
 const GNU_LONG_NAME: &str = "././@LongLink";
 
 /// The mode every entry is written with: the archive is sensitive as a whole.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Backup And Restore makes every section entry of the archive owner-only, and \
+                  POSIX mode 0600 is the owner's read and write permission with nothing else"
+    )
+)]
 const ENTRY_MODE: u32 = 0o600;
 
 /// An archive laid out: its manifest, and every piece of the tar stream in order.

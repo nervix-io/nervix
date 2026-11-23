@@ -253,6 +253,17 @@ struct ProgressLine {
 }
 
 impl ProgressLine {
+    /// How often the progress line is drawn again while the archive streams.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the restore progress line's redraw cadence is display design: it samples a \
+                      local byte counter and never paces the transfer"
+        )
+    )]
+    const REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
     /// Starts drawing the progress of streaming the archive `source` names.
     fn start(source: &str) -> Self {
         let state = Arc::new(ProgressState {
@@ -264,8 +275,7 @@ impl ProgressLine {
             let state = state.clone();
             let source = source.to_string();
             drawing = Some(nervix_primitives::task::spawn(async move {
-                let mut interval =
-                    nervix_primitives::time::interval(std::time::Duration::from_millis(200));
+                let mut interval = nervix_primitives::time::interval(Self::REDRAW_INTERVAL);
                 loop {
                     interval.tick().await;
                     if state.finished.load(Ordering::Relaxed) {

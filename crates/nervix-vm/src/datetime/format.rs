@@ -41,6 +41,14 @@ pub(crate) use write::{FormattedColumn, format_datetimes};
 /// The longest value, in bytes, a format may describe. A format is rejected when a value it writes
 /// or reads could be longer, so a column of formatted values never holds more than this many bytes
 /// per row.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits every value a datetime format describes \
+                  to 256 bytes"
+    )
+)]
 pub(crate) const LONGEST_FORMATTED_VALUE: usize = 256;
 
 /// A format `format_datetime` writes DATETIME values in.

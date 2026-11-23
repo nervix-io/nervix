@@ -175,9 +175,25 @@ const LIBRDKAFKA_TOPIC_PREFIX: crate::ClientConfigStrippedPrefix =
     };
 
 /// The longest topic Kafka admits, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a Kafka broker refuses a topic name longer than 249 characters, the rule the \
+                  Ingestors manual publishes for KAFKA TOPIC"
+    )
+)]
 const KAFKA_TOPIC_MAX: usize = 249;
 /// The longest consumer group Nervix joins, in bytes. Kafka bounds a group only by the length of
 /// its protocol string, so this bound is Nervix's own.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual publishes 1 to 255 bytes as the consumer-group rule CREATE \
+                  and ALTER apply, a bound Kafka leaves to its protocol string"
+    )
+)]
 const KAFKA_CONSUMER_GROUP_MAX: usize = 255;
 
 external_names! {
@@ -230,6 +246,20 @@ pub struct KafkaTopicIngestor {
     pub rate_limits: crate::RateLimits,
     pub quiesce: IngestQuiesceMode,
 }
+
+/// How long a KAFKA TOPIC ingestor's consumer-group commit waits for its coordinator's answer
+/// before the commit fails. The ingestor's group commits and this entity's declared wait both read
+/// it.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long a group coordinator takes to answer a commit depends on the Kafka \
+                  cluster; the wait stays fixed until its repair task declares it on the KAFKA \
+                  TOPIC ingestor's Plexus surface https://app.clickup.com/t/86bd5vvd3"
+    )
+)]
+pub const KAFKA_COMMIT_ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 
 /// What the connector of a KAFKA TOPIC ingestor holds and how long it waits.
 const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
@@ -289,7 +319,7 @@ const KAFKA_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
         DeclaredWait {
             wait: "a consumer-group offset commit",
-            bound: WaitBound::Fixed(Duration::from_secs(30)),
+            bound: WaitBound::Fixed(KAFKA_COMMIT_ANSWER_DEADLINE),
         },
         DeclaredWait {
             wait: "metadata, partition inspection, offset lookups, watermarks and seeks including \

@@ -34,8 +34,24 @@ use crate::{
 /// How long recording a finding may take before the process ends without it. Rendering a bounded
 /// description and writing one bounded file normally take milliseconds; the budget matters only
 /// when standard error or the evidence directory has stopped accepting writes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter ends a diagnostic process with status 4 when \
+                  a recording operation exceeds its ten-second budget"
+    )
+)]
 const RECORDING_BUDGET: Duration = Duration::from_secs(10);
 /// Repeated source changes must also fit an explicit process output budget.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter gives a diagnostic process's finding \
+                  descriptions a 128 MiB budget"
+    )
+)]
 const CONSOLE_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 
 const RECORDING_DEADLINE_THREAD: &str = "nervix-deadlock-recording-deadline";

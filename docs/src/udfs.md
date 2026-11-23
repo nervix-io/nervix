@@ -105,6 +105,26 @@ blocks verbatim. It renders the completed Model as canonical Plexus and shows **
 after compilation and all Roto tests succeed. A rejected test leaves the entered declaration and
 source in the form for correction.
 
+## Compile budget
+
+Compiling one UDF and running its `test` blocks must take no longer than the committed
+`UDF_COMPILE_BUDGET` [cluster parameter](sizing.md#model-and-session-limits), 10 seconds by
+default. Change it with `ALTER CLUSTER SET UDF_COMPILE_BUDGET = 30s;`. A function that takes longer
+refuses `CREATE UDF` with
+`Roto compile and test budget udf-compile-budget (<budget>) was exceeded`, and the UDF is not
+persisted. The budget is a cluster parameter because exceeding it refuses the statement. Every
+compilation is held to the committed value: the one that validates `CREATE UDF`, and the one each
+node runs when it activates or rebuilds the UDF's domain.
+
+The budget is measured on the wall clock of the node that compiles, once compilation and the tests
+have finished, so its verdict depends on that node's speed and load: a slower or busier node can
+refuse a function that a faster one accepts. It cannot stop a test that never ends. A change
+rechecks no committed UDF. A node keeps the functions it compiled while it runs their domain and
+their source is unchanged, so a lowered budget judges only the compilations that start after it: a
+new or changed UDF, and a node that compiles the domain again after the node restarts or the domain
+stops and starts. A function that no longer fits fails that node's installation of its domain until
+the budget is raised again.
+
 ## Nulls, errors, and volatility
 
 `OPTIONAL` controls boundary nullability; it does not change the Roto column type.
@@ -117,6 +137,13 @@ source in the form for correction.
 - Checked column operations and `reject_where_s` add per-row errors to the same channel used by
   builtins, so the owning route's `ON MESSAGE ERROR` policy applies.
 - A Roto trap, invalid result type or row count, or watchdog expiry is a whole-batch error.
+
+Every call of a compiled UDF has a watchdog, the node capability `--udf-watchdog`
+(`NERVIX_UDF_WATCHDOG`), 5 seconds by default. A call whose native code returns later than the
+watchdog fails its whole batch with `watchdog expired after <watchdog>`, a
+[whole-batch failure](errors-and-diagnostics.md#whole-batch-and-node-failures) of the node that
+runs the call. Each node judges the calls it runs by its own value, which `DESCRIBE CLUSTER` shows
+as `udf-watchdog=` in that node's capability claim; changing it requires restarting the node.
 
 The watchdog detects an overrun after native code returns; Roto provides no in-process
 preemption. A non-terminating UDF occupies one extension worker permanently. The watchdog converts

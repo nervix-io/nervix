@@ -78,6 +78,14 @@ where
 
 /// The widest supported integer type has 64 bits, so a shift by 64 moves every bit of every
 /// supported value out, and every larger count shifts exactly as 64 does.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the widest integer a shift reads, I64 or U64, has 64 bits, so every larger \
+                  count shifts as 64 does"
+    )
+)]
 const WIDEST_SHIFT: u8 = 64;
 
 /// One lane's shift count.

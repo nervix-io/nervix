@@ -27,7 +27,6 @@ use nervix_execution::Reservation;
 use nervix_models::RemoteAckTiming;
 use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
-    publication::ArcSwap,
     sync::{
         Notify,
         atomic::{AtomicUsize, Ordering},
@@ -76,7 +75,7 @@ pub(super) struct RemoteDispatchRegistry {
     next_admission: AtomicUsize,
     delivery_capacity: usize,
     executor: Executor,
-    timing: ArcSwap<RemoteAckTiming>,
+    timing: SharedRemoteAckTiming,
     changed: Notify,
     sweep_epoch: Instant,
     next_sweep: Mutex<Option<Instant>>,
@@ -138,6 +137,16 @@ enum DeliveryRow {
     Policy { timing: SweepPolicy, next: Instant },
     Record(Option<PendingRemoteAck>),
 }
+/// The rows a delivery keeps ahead of its records: its sweep-policy cohort.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a delivery's rows open with exactly one sweep-policy row, so its record at \
+                  index n lives in row n plus one"
+    )
+)]
+const COHORT_ROWS: usize = 1;
 const _: () =
     assert!(std::mem::size_of::<DeliveryRow>() <= std::mem::size_of::<Option<PendingRemoteAck>>());
 
@@ -193,7 +202,7 @@ impl DeliveryRows {
     ) -> Self {
         let mut rows = Vec::with_capacity(
             capacity
-                .checked_add(1)
+                .checked_add(COHORT_ROWS)
                 .assured("wire row count leaves room for its cohort"),
         );
         rows.push(DeliveryRow::Policy {
@@ -206,7 +215,7 @@ impl DeliveryRows {
         self.0.push(DeliveryRow::Record(row));
     }
     fn get_mut(&mut self, index: usize) -> Option<&mut Option<PendingRemoteAck>> {
-        match self.0.get_mut(index.checked_add(1)?)? {
+        match self.0.get_mut(index.checked_add(COHORT_ROWS)?)? {
             DeliveryRow::Record(row) => Some(row),
             DeliveryRow::Policy { .. } => None,
         }
@@ -218,10 +227,13 @@ impl DeliveryRows {
         }
     }
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut Option<PendingRemoteAck>> {
-        self.0.iter_mut().skip(1).map(|entry| match entry {
-            DeliveryRow::Record(row) => row,
-            DeliveryRow::Policy { .. } => unreachable!("cohort precedes every record"),
-        })
+        self.0
+            .iter_mut()
+            .skip(COHORT_ROWS)
+            .map(|entry| match entry {
+                DeliveryRow::Record(row) => row,
+                DeliveryRow::Policy { .. } => unreachable!("cohort precedes every record"),
+            })
     }
     fn into_records(self) -> impl Iterator<Item = PendingRemoteAck> {
         self.0.into_iter().filter_map(|entry| match entry {
@@ -316,10 +328,15 @@ impl PendingRemoteAck {
 
 impl RemoteDispatchRegistry {
     pub(super) fn timing(&self) -> RemoteAckTiming {
-        **self.timing.load()
+        self.timing.load()
     }
     pub(super) fn install_timing(&self, timing: RemoteAckTiming) {
-        self.timing.store(StdArc::new(timing));
+        self.timing.install(timing);
+    }
+    /// The publication this registry installs the node's timing into, which every owner of held
+    /// work keeps from its creation.
+    pub(super) fn ack_timing(&self) -> &SharedRemoteAckTiming {
+        &self.timing
     }
 
     pub(super) fn new(executor: Executor, capacity: usize) -> Self {
@@ -355,7 +372,7 @@ impl RemoteDispatchRegistry {
             next_delivery: AtomicUsize::new(0),
             next_admission: AtomicUsize::new(0),
             delivery_capacity: capacity,
-            timing: ArcSwap::from_pointee(RemoteAckTiming::default()),
+            timing: SharedRemoteAckTiming::default(),
             changed: Notify::new(),
             sweep_epoch: Instant::now(),
             next_sweep: Mutex::new(None),

@@ -32,13 +32,17 @@ pub struct MemoryPressureArgs {
     #[arg(
         long = MemoryHighWatermark::NAME,
         env = "NERVIX_MEMORY_HIGH_WATERMARK",
-        help = "Allocated jemalloc bytes that pause all ingestors"
+        help = super::settings::derived_capability_help::<MemoryHighWatermark>(
+            "Allocated jemalloc bytes that pause all ingestors"
+        )
     )]
     pub memory_high_watermark: Option<HumanBytes>,
     #[arg(
         long = MemoryLowWatermark::NAME,
         env = "NERVIX_MEMORY_LOW_WATERMARK",
-        help = "Allocated jemalloc bytes that allow paused ingestors to resume"
+        help = super::settings::derived_capability_help::<MemoryLowWatermark>(
+            "Allocated jemalloc bytes that allow paused ingestors to resume"
+        )
     )]
     pub memory_low_watermark: Option<HumanBytes>,
     #[arg(

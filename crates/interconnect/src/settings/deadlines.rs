@@ -12,6 +12,18 @@ use std::time::Duration;
 
 use meticulous::OptionExt as _;
 
+/// The shortest positive duration. A deadline or delay projected from a positive budget is never
+/// shorter, so a budget too short to divide still projects one that has not already passed.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest positive \
+                  duration"
+    )
+)]
+pub(crate) const SHORTEST_POSITIVE_DURATION: Duration = Duration::from_nanos(1);
+
 /// An operation's relationship to the configured request budget, never another local timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestDeadline {
@@ -30,9 +42,9 @@ impl RequestDeadline {
     pub fn resolve(self, request: Duration, liveness: super::InterconnectLiveness) -> Duration {
         match self {
             Self::Liveness => liveness.probe_timeout(),
-            Self::Control => (request / 10).max(Duration::from_nanos(1)),
-            Self::Coordination => (request / 5).max(Duration::from_nanos(1)),
-            Self::Setup => (request / 2).max(Duration::from_nanos(1)),
+            Self::Control => (request / 10).max(SHORTEST_POSITIVE_DURATION),
+            Self::Coordination => (request / 5).max(SHORTEST_POSITIVE_DURATION),
+            Self::Setup => (request / 2).max(SHORTEST_POSITIVE_DURATION),
             Self::Request => request,
             Self::Snapshot => request
                 .checked_mul(3)

@@ -381,6 +381,7 @@ fn validate_level(cx: &LateContext<'_>, node: HirId, written: &LevelAttribute<'_
     let mut warnings = false;
     let mut governed = false;
     let mut only_branch_inversion = true;
+    let mut only_hidden_tunable = true;
     for check in written.checks {
         let name = check.lint_name.name.as_str();
         match check.lint_name.tool {
@@ -388,11 +389,13 @@ fn validate_level(cx: &LateContext<'_>, node: HirId, written: &LevelAttribute<'_
                 let nervix = tool.as_str() == "nervix";
                 governed |= nervix;
                 only_branch_inversion &= nervix && name == "branch_inversion";
+                only_hidden_tunable &= nervix && name == "hidden_tunable";
             }
             None => {
                 warnings |= name == "warnings";
                 governed |= name == "nervix";
                 only_branch_inversion = false;
+                only_hidden_tunable = false;
             }
         }
     }
@@ -408,7 +411,22 @@ fn validate_level(cx: &LateContext<'_>, node: HirId, written: &LevelAttribute<'_
     // function/module-wide suppression.
     let branch_declaration =
         matches!(cx.tcx.hir_node(node), rustc_hir::Node::Field(_)) && only_branch_inversion;
+    // A retained hidden tunable is one constant declaration, named with its debt.
+    let tunable_declaration = matches!(
+        cx.tcx.hir_node(node),
+        rustc_hir::Node::Item(rustc_hir::Item {
+            kind: rustc_hir::ItemKind::Const(..),
+            ..
+        }) | rustc_hir::Node::ImplItem(rustc_hir::ImplItem {
+            kind: rustc_hir::ImplItemKind::Const(..),
+            ..
+        }) | rustc_hir::Node::TraitItem(rustc_hir::TraitItem {
+            kind: rustc_hir::TraitItemKind::Const(..),
+            ..
+        })
+    ) && only_hidden_tunable;
     let narrow = branch_declaration
+        || tunable_declaration
         || matches!(
             cx.tcx.hir_node(node),
             rustc_hir::Node::Expr(_) | rustc_hir::Node::LetStmt(_) | rustc_hir::Node::Stmt(_)
