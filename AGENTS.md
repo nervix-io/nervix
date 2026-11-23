@@ -729,6 +729,13 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   require a flush policy, and Iceberg also requires an explicit commit cadence and maximum commit
   size. Window processors use `WIDTH` and `STEP` instead of `FLUSH`. WASM processors are not
   flush-based: guest output and guest-requested timeouts own their emission cadence.
+- A route's flush is an upper bound on how long it holds a row, and an unguaranteed one, never a
+  promise to hold the row that long. `FLUSH EACH <duration>` sends what the route holds about
+  `<duration>` after the batch opened, or sooner when it reaches `MAX BATCH SIZE`. Anything that
+  forces a flush sends it early, for example a failover, forced recovery, move or alteration
+  anywhere in the domain, an entity gate, a drain, a stop or a backup. On an overloaded machine it
+  may leave slightly after the bound. Early delivery is perfectly fine and correct behavior, never
+  a defect to repair or report, and sending early or late never by itself loses or repeats a row.
 - Message errors are structured and carry a stable reference, code, operation, affected fields,
   timestamp and non-sensitive message. Error handlers may inspect the original eligible input, the
   exact captured materialized-state snapshot and an all-optional `partial_output` view.
@@ -1565,10 +1572,14 @@ miss-heavy keys; a lower count or a shorter function is not a speedup.
   its owner, and remove a timing assumption the scenario does not need instead of weighing it away.
 - Assert a delay, not a silence: a "not yet" window races a cadence that started at the previous
   event, and load at the step boundary consumes the margin, so record when the triggering event
-  happened and require output at least the cadence later. A "never arrives" window is only for
-  output that must never arrive. An exact batch-count assertion needs a flush window much wider than
-  the spread of the messages it groups, and a unit test comparing wall-clock instants anchors its
-  bound to an instant observed after the value under test was computed.
+  happened and require output at least the cadence later. A flush cadence is such a delay only
+  while nothing forces a flush ([Flush and route errors](#flush-and-route-errors)): a scenario that
+  moves, alters, fails over, drains, stops or gates anything in the domain while a route holds rows
+  asserts that they arrive within the cadence plus room for load, never that they waited for it. A
+  "never arrives" window is only for output that must never arrive. An exact batch-count assertion
+  needs a flush window much wider than the spread of the messages it groups, and a unit test
+  comparing wall-clock instants anchors its bound to an instant observed after the value under test
+  was computed.
 - The scenario suite and harness regressions are the `nervix-scenarios` package rooted at `tests/`,
   with only test targets and dev-dependencies, so the server is never linked twice and its `testing`
   feature stays out of ordinary builds.

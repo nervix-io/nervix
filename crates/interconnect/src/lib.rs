@@ -119,10 +119,10 @@ pub use settings::{
     ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline,
     HTTP2_INITIAL_CONNECTION_WINDOW_BYTES, IncomingQueueCapacity, InterconnectLiveness,
     MAX_HTTP2_WINDOW_BYTES, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides,
-    PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout, ProbeTimeout,
-    ProgressTimeout, ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes,
-    RelayChannelRetention, RelayDecodedBytes, RequestDeadline, RequestQuota, RequestTimeout,
-    StreamReceiveWindow, TransportSettingValues, TransportSettings, TransportSettingsError,
+    PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout, ProgressTimeout,
+    ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
+    RelayDecodedBytes, RequestDeadline, RequestQuota, RequestTimeout, StreamReceiveWindow,
+    TransportSettingValues, TransportSettings, TransportSettingsError,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,

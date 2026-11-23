@@ -284,7 +284,11 @@ one tenth. At `4s`, `DESCRIBE CLUSTER` shows `ping-interval=2s ping-timeout=1s
 probe-timeout=400ms`. Installing a revision updates established HTTP/2 connections as well as
 future probes. A policy update adjusts an outstanding ping's deadline while retaining that ping.
 The per-node line derives from its published running revision, so an unapplied commit is not
-presented as installed.
+presented as installed. Each node probes every peer once per
+`--control-plane-health-probe-interval` round and waits at most the probe timeout for each answer,
+while an observation stays fresh for the timeout itself, so the timeout must exceed every admitted
+node's interval plus the probe timeout; [Committed Parameter Changes](#committed-parameter-changes)
+gives the refusals.
 
 Relay reconciliation keeps each retained attempt and outbound correlation for twice the
 `REMOTE_RELAY_TOTAL_TIMEOUT` its delivery captured, each channel watermark for twice the longest one
@@ -370,7 +374,10 @@ topology observer polls a domain's Kafka partition sources every
 `--control-plane-kafka-partition-watch-interval` and its other sources every
 `--partition-topology-poll-interval`. `--control-plane-model-inspection-timeout` bounds the
 inspection of an inferencer's model while its binding is validated. Values and relationships
-are validated before I/O. In particular, the session transfer holds a frame, its string bound fits
+are validated before I/O. The application-health round must also fit the committed
+`NODE_UNAVAILABILITY_TIMEOUT`, which a node checks against its bootstrap seeds or the live
+committed policy before readiness, as [Committed Parameter Changes](#committed-parameter-changes)
+describes. In particular, the session transfer holds a frame, its string bound fits
 the transfer, and its queue memory holds at least one maximum-sized frame on each lane.
 Each lane's depth is `queue_memory_bytes / (2 * frame_bytes)`, giving 16 frames by default.
 The queue budget bounds queued frame bytes; transport buffers, executing requests, clock slots
@@ -978,7 +985,10 @@ smaller refuses to start with the same refusal and exit status. Provision a larg
 smaller quotas on a new cluster, or change an existing cluster's committed quotas through
 `ALTER CLUSTER SET` before joining it. The measured size of the database volume also enters the
 node's committed claim, so `ALTER CLUSTER SET` cannot raise a quota above it while the node stays
-admitted. A node that passes the preflight logs
+admitted. Against the same policy, after the volume, the node also checks that its drain and
+shutdown budgets hold the domain drain and gate budgets, and that `NODE_UNAVAILABILITY_TIMEOUT`
+exceeds its `--control-plane-health-probe-interval` plus the probe timeout, a tenth of the timeout.
+Either refusal stops the start with the same exit status. A node that passes the preflight logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
 volumes, the restore-staging quota it resolved and the properties it detected.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
@@ -1471,6 +1481,21 @@ a node whose new claim carries a volume the committed quotas do not fit has its 
 refused, and its startup preflight already refuses it, naming the volume's directory. Each claim
 records the size its run measured at start, so grow a node's volume and restart that node before
 raising a quota above its old size.
+
+`NODE_UNAVAILABILITY_TIMEOUT` must exceed every admitted node's
+`--control-plane-health-probe-interval` plus the probe timeout, a tenth of the timeout. A health
+observation stays fresh for the timeout, and a node observes each peer again at most one interval
+plus one probe timeout after its last observation of it. A shorter timeout leaves every
+observation stale before the next one arrives: stale observations no longer keep a peer available
+through a short gossip lapse, and a failing peer's run of failures restarts with each probe, so it
+is never declared unavailable. A transition to such a timeout is refused before anything commits,
+naming the node and the three durations: `node-unavailability-timeout (1s) must exceed node
+'node-1' control-plane-health-probe-interval (1s) plus probe-timeout (100ms), a tenth of
+node-unavailability-timeout`. A departed node's retained claim does not count. The check shares
+the commit fence with node announcements: a node whose new claim carries an interval the committed
+timeout does not fit has its announcement refused, and the node refuses its bootstrap seeds or the
+live committed policy before readiness with the same refusal, naming itself. Raise the timeout
+before lengthening a node's interval, and shorten the interval before lowering the timeout.
 
 Validation and publication share a commit fence. A concurrent model change or parameter change
 invalidates a captured transition before it applies, and validation runs again against the

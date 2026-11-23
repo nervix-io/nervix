@@ -100,15 +100,20 @@ failure instead, and follows the emitter's existing retry policy and general-err
 
 A Postgres client's `pool_acquire_timeout_ms`, 30 seconds by default, bounds each checkout: the wait
 for the pool, then opening or testing the connection it hands over, with name resolution, TLS and
-authentication. A refused connection is tried again within that bound, and the bound is independent
-of how long an accepted query then runs. A checkout that runs out of it reports `checking out a
-Postgres connection did not finish within pool_acquire_timeout_ms` with the bound, then the emitter
-retries on its policy. Opening the pool takes the same bound to establish `MIN` connections and
-another for its first checkout, which opens one where `MIN` is zero. Its separate optional
-`timeout_ms` bounds every catalog query and INSERT response after checkout, with the same bound
-installed as PostgreSQL's `statement_timeout`. Each isolated INSERT has its own budget; a local
-timeout closes the interrupted connection instead of returning a pending response to the pool.
-See the [Postgres emitter contract](emitters.md#postgres) for its range and retry semantics.
+authentication. The pool tries again by itself to open a connection the server refuses, by refusing
+the TCP connection or answering SQLSTATE `53300` (`too_many_connections`) or `57P03`
+(`cannot_connect_now`): after 10 ms, then twice as long each time, at most a fifth of what remained
+of the bound at its first try, until the bound has passed. Any other failure to connect ends the
+checkout at once. A refused open wrote no request, so the retry resends nothing. The bound is
+independent of how long an accepted query then runs. A checkout that runs out of it reports
+`checking out a Postgres connection did not finish within pool_acquire_timeout_ms` with the bound,
+then the emitter retries on its policy. Opening the pool takes the same bound to establish `MIN`
+connections, retrying a refused open the same way, and another for its first checkout, which opens
+one where `MIN` is zero. Its separate optional `timeout_ms` bounds every catalog query and INSERT
+response after checkout, with the same bound installed as PostgreSQL's `statement_timeout`. Each
+isolated INSERT has its own budget; a local timeout closes the interrupted connection instead of
+returning a pending response to the pool. See the [Postgres emitter contract](emitters.md#postgres)
+for its range and retry semantics.
 
 Returning a healthy Postgres connection starts a separate driver health probe, which keeps the
 pool permit until the peer answers. That probe has no deadline; neither `pool_test_before_acquire`
