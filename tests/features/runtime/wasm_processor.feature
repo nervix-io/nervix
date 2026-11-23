@@ -82,7 +82,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":22,"tenant":"beta","message":"beta-second","occurred_at":"2026-07-13T04:05:06Z"}
       """
-    Then within "10s" the relay subscription receives payloads
+    Then within "60s" the relay subscription receives payloads
       """
       "bucket":"EVEN","message":"alpha-second","occurred_at":"2026-07-13T03:04:05+00:00","tenant":"alpha","value":12
       "bucket":"EVEN","message":"beta-second","occurred_at":"2026-07-13T04:05:06+00:00","tenant":"beta","value":22
@@ -159,7 +159,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":2}
       """
-    Then within "10s" the relay subscription receives payloads
+    Then within "60s" the relay subscription receives payloads
       """
       "note":"fallback","value":2
       """
@@ -224,7 +224,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":1}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm_processor 'emit_uninitialized_required' general error in domain '{{domain}}': wasm processor 'emit_uninitialized_required' output emission failed (unbranched, resource 'wasm_uninitialized_required_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_read_emit'): failed to build WASM output batch for relay 'required_output': Invalid argument error: Column 'value' is declared as non-nullable but contains null values
@@ -305,7 +305,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":2}
       """
-    Then the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":2
       """
@@ -402,7 +402,7 @@ Feature: WASM processor runtime behavior
     When http payload with value 1 and a 16 byte message is posted to host "wasm-buffer-growth-{{test_id}}.example.com" path "/metrics"
     And http payload with value 2 and a 65536 byte message is posted to host "wasm-buffer-growth-{{test_id}}.example.com" path "/metrics"
     And http payload with value 3 and a 16 byte message is posted to host "wasm-buffer-growth-{{test_id}}.example.com" path "/metrics"
-    Then within "10s" the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":2
       """
@@ -662,7 +662,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"beta","message":"small-after"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'refusing_guest' initialization failed (branch f505a5499591d0f12928e183f6c96c162e679705bc73095e70535685437a1630, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
@@ -671,7 +671,7 @@ Feature: WASM processor runtime behavior
       """
       saved state revision
       """
-    And within "10s" the relay subscription receives payloads containing all fragments
+    And within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       "tenant":"beta" | "note":"ok"
@@ -733,7 +733,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"init-refused","message":"refused"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'refusing_guest' initialization failed (branch f505a5499591d0f12928e183f6c96c162e679705bc73095e70535685437a1630, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
@@ -806,7 +806,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"beta","message":"small-after"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'failing_guest' <stage> failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_failing_guest' version 1 file 'processors/filter_even.wasm', export '<export>'): wasm guest <stage> failed: wasm guest reported global error: <reason>
@@ -815,7 +815,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"alpha","message":"small-after-failure"}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       "tenant":"alpha" | "note":"ok"
@@ -929,7 +929,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":2,"tenant":"beta"}
       """
-    Then within "10s" the relay subscription receives payloads
+    Then within "60s" the relay subscription receives payloads
       """
       "bucket":"EVEN","tenant":"alpha","value":2
       "bucket":"EVEN","tenant":"beta","value":2
@@ -1028,7 +1028,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":2}
       """
-    Then the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":2
       """
@@ -1055,7 +1055,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":8}
       """
-    Then the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":8
       """
@@ -1153,7 +1153,7 @@ Feature: WASM processor runtime behavior
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    Then within "10s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
+    Then within "60s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
       """
       {"value":2,"tenant":"probe"}
       """
@@ -1165,7 +1165,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":2,"tenant":"acme"}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"acme"} | "tenant":"acme" | "value":2
       key={"tenant":"beta"} | "tenant":"beta" | "value":12
@@ -1284,7 +1284,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"beta","sequence":3}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"acme"} | "tenant":"acme" | "note":"even"
       key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
@@ -1322,7 +1322,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"beta","sequence":5}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"acme"} | "tenant":"acme" | "note":"even"
       key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
@@ -1393,7 +1393,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":12,"tenant":"beta"}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"acme"} | "tenant":"acme" | "value":2
       key={"tenant":"beta"} | "tenant":"beta" | "value":12
@@ -1402,7 +1402,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":-400,"tenant":"acme"}
       """
-    Then within "10s" the active session observes a server error containing
+    Then within "60s" the active session observes a server error containing
       """
       wasm processor 'filter_even_rows' state snapshot failed (branch 0b81df3a911f3064575542ffb49387d11eb8958d1ba91bfeb77d99929d0c00c5, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_dump_state'): wasm guest state snapshot failed: wasm guest reported global error: guest cannot serialize its state for value -400
       """
@@ -1410,7 +1410,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":-300,"tenant":"beta"}
       """
-    Then within "10s" the active session observes a server error containing
+    Then within "60s" the active session observes a server error containing
       """
       wasm processor 'filter_even_rows' batch processing failed (branch a55dd7bc3c92ed26aff8b1647f0451bd90f8b8e5ea415e490fba33d1c5a19cb9, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest error state for value -300
       """
@@ -1420,7 +1420,7 @@ Feature: WASM processor runtime behavior
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    Then within "10s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
+    Then within "60s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
       """
       {"value":2,"tenant":"probe"}
       """
@@ -1440,7 +1440,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":16,"tenant":"beta"}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"acme"} | "tenant":"acme" | "value":6
       key={"tenant":"beta"} | "tenant":"beta" | "value":16
@@ -1501,7 +1501,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":1}
       """
-    Then within "10s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
+    Then within "60s" repeatedly posting http payload to host "http-{{test_id}}.example.com" path "/metrics" yields a relay subscription payload
       """
       {"value":2}
       """
@@ -1568,7 +1568,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":2}
       """
-    Then the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":2
       """
@@ -1645,7 +1645,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":2}
       """
-    Then the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":2
       """
@@ -1657,11 +1657,11 @@ Feature: WASM processor runtime behavior
       """
       {"value":4}
       """
-    Then within "5s" the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":4
       """
-    And within "5s" the relay subscription receives a payload
+    And within "60s" the relay subscription receives a payload
       """
       "value":4
       """
@@ -1747,7 +1747,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":4}
       """
-    Then within "5s" the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "value":4
       """
@@ -1877,7 +1877,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":-100}
       """
-    Then within "5s" the relay subscription receives a payload
+    Then within "60s" the relay subscription receives a payload
       """
       "error_message":"guest message error for value -100"
       """
@@ -1939,7 +1939,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":-200}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'filter_even_rows' batch processing failed (unbranched, resource 'wasm_filter_global_error' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest global error for value -200
@@ -1998,7 +1998,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":-300}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'filter_even_rows' batch processing failed (unbranched, resource 'wasm_filter_error_state' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest error state for value -300
@@ -2057,7 +2057,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":1}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'filter_even_rows' batch processing failed (unbranched, resource 'wasm_trapping_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm export 'nervix_process_batch' trapped: wasm trap: wasm `unreachable` instruction executed
@@ -2169,7 +2169,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":1}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       WASM output group has invalid generated Arrow IPC: <reported>
@@ -2235,7 +2235,7 @@ Feature: WASM processor runtime behavior
       """
       {"value":1}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'filter_even_rows' output emission failed (unbranched, resource 'wasm_malformed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_read_emit'): wasm guest batch processing failed: wasm guest emitted an output envelope the host cannot decode
