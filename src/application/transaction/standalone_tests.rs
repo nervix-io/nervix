@@ -220,7 +220,7 @@ async fn a_coordinator_recovers_the_command_another_coordinator_committed(
                 .unwrap_or_else(|result| panic!(
                     "an active alteration keeps its refusal: {result:?}"
                 )),
-            super::StandalonePauseRecovery::RetainRefusal
+            crate::application::domain_lifecycle::PausedDomainRecovery::RetainRefusal
         );
         assert_eq!(
             service

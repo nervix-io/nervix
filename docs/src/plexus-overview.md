@@ -359,9 +359,11 @@ COMMIT;
 and every queued statement must select that same domain. `BEGIN` inside an
 active transaction is an error. `COMMIT` and `REVERT` also require an active
 transaction. Queueable content is limited to that domain's model mutations,
-including `REBIND RESOURCE`, domain configuration and lifecycle, and `CREATE RESOURCE`. `CREATE DOMAIN`,
-`CREATE USER`, most read-only statements, subscriptions, resource uploads, and node
-administration are not valid inside a transaction and must be sent separately.
+including `REBIND RESOURCE`, domain configuration, and `CREATE RESOURCE`. `CREATE DOMAIN`,
+`CREATE USER`, `START`, `STOP`, most read-only statements, subscriptions, resource uploads, and
+node administration are not valid inside a transaction and must be sent separately. `START` and
+`STOP` switch the domain's processing on and off rather than change its configuration; queuing one
+is refused at once and the transaction keeps what it holds, so run them after `COMMIT`.
 `SHOW TRANSACTIONS;` and `DESCRIBE TRANSACTION` run separately beside an attached
 transaction without entering its queue or changing its binding. Use `SHOW TRANSACTIONS;`
 to inspect live transactions and retained outcomes. See
@@ -512,6 +514,14 @@ Every `TO` destination on a flush-based node requires `FLUSH EACH <duration> MAX
 buffer and deadline. `FLUSH EACH` measures its duration on the domain clock, beginning when data
 first enters an empty buffer. Window processors use `WIDTH` and `STEP`, and WASM processors use
 guest-owned output cadence instead of `FLUSH`.
+
+A route's flush deadline is an upper bound on how long the route holds rows, and an unguaranteed
+one: it never promises that rows wait that long. Anything that forces a flush sends what a route
+holds before its deadline: a failover, forced recovery, move or alteration anywhere in the domain,
+an entity gate, a drain, a domain stop or a backup; see
+[Incremental Changes And Rebuilds](execution-plans.md#incremental-changes-and-rebuilds).
+Early delivery is correct behavior. On an overloaded host a route can also send slightly after its
+deadline. Sending early or late does not by itself lose or repeat a row.
 
 This is the authoritative `FLUSH IMMEDIATE` timing rule.
 During normal processing, `FLUSH IMMEDIATE` starts a system-owned physical 100 µs minimum batching
@@ -1007,8 +1017,8 @@ node: node-1 (leader)
   interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0
   membership: gossip-receive-queue-capacity=1024 gossip-tombstone-grace-period=1m
   dns: cache-entries=4096 positive-max-ttl=1h negative-max-ttl=30s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=64
-  database: cache-bytes=33554432 journal-bytes=536870912 workers=4
-  raft database: cache-bytes=33554432 journal-bytes=536870912 workers=4
+  database: cache-bytes=33554432 journal-bytes=536870912 workers=4 max-open-files=900
+  raft database: cache-bytes=33554432 journal-bytes=536870912 workers=4 max-open-files=900
   consensus events: capacity=256
   consensus: append-batch-entries=256 outstanding-append-batches=16 outstanding-append-bytes=16777216 append-idle-bound=5s snapshot-transfer-timeout=30s membership-mutation-timeout=10s retention-interval=5s retention-admission-timeout=30s retention-admission-poll=50ms purge-batch-entries=1 api-channel-capacity=65536 notification-channel-capacity=65536 state-machine-channel-capacity=1024 api-batch-capacity=4096 snapshot-chunk-bytes=65536 replication-backoff=200ms replication-backoff-maximum=1s membership-step-down-delay=150ms replication-lag-threshold=20000
   interconnect liveness: ping-interval=5s ping-timeout=2s 500ms probe-timeout=1s

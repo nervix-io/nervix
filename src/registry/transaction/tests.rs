@@ -276,7 +276,7 @@ fn reset_is_an_ordered_effect_and_replanning_the_same_identity_keeps_its_generat
     let PlannedTransactionStepKind::ResetWasmState { schedule, .. } = &step.kind else {
         panic!("the reset must stay an effect even when no Model changes");
     };
-    captured.schedule = Some(schedule.clone());
+    captured.schedule = Some(DomainSchedule::clone(schedule));
     let repeated = Registry::plan_transaction(captured, &[statement], 0, false, preserve_schedule)
         .assured("the same request can be planned again after publication");
     let repeated_step = repeated
@@ -661,11 +661,7 @@ fn stopped_schedule_move_keeps_the_execution_gate_without_reporting_a_pause() {
 
     let ownership_transition_ids =
         BTreeMap::from([(step.impact.operations().first(), "transition-1".to_string())]);
-    let commit = plan.commit_plan(
-        "tx".to_string(),
-        &ownership_transition_ids,
-        &BTreeMap::new(),
-    );
+    let commit = plan.commit_plan("tx".to_string(), &ownership_transition_ids);
     let TransactionCommitStepKind::Models { schedule, .. } = &commit.steps[0].kind else {
         unreachable!("the relay alteration commits one model step");
     };
@@ -1228,34 +1224,6 @@ fn drop_recreate_retains_both_sides_of_a_rewired_graph() {
             .as_slice()
             .iter()
             .any(|node| { node.coverage.node == old_output })
-    );
-}
-
-#[test]
-fn lifecycle_steps_change_the_effective_pause_of_later_model_runs() {
-    let plan = Registry::plan_transaction(
-        snapshot(DomainStatus::Stopped, [schema("events")]),
-        &[
-            add_note(),
-            Statement::StartDomain(nervix_models::StartDomain {
-                start: DomainStartPoint::Resume,
-            }),
-            drop_note(),
-        ],
-        0,
-        false,
-        preserve_schedule,
-    )
-    .assured("the ordered lifecycle and model runs are valid");
-
-    assert_eq!(plan.steps().len(), 3);
-    assert_eq!(
-        plan.steps()[0].impact.planned().pause.level(),
-        QuiesceLevel::Dynamic
-    );
-    assert_eq!(
-        plan.steps()[2].impact.planned().pause.level(),
-        QuiesceLevel::DomainPause
     );
 }
 

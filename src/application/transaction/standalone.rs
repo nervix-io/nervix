@@ -19,10 +19,10 @@
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    ConsensusConflict, ConsensusError, ConsensusTransactionError, DomainMutationLease,
-    OrphanedPauseRecovery, ReplicatedTransaction, TransactionMutationError, TransactionOutcome,
-    TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest, TransactionState,
-    TransactionStatement, TransactionStatementRequest,
+    ConsensusError, ConsensusTransactionError, DomainMutationLease, ReplicatedTransaction,
+    TransactionMutationError, TransactionOutcome, TransactionQueueAdmission,
+    TransactionQueueLimits, TransactionQueueRequest, TransactionState, TransactionStatement,
+    TransactionStatementRequest,
 };
 use nervix_models::{DomainName, UserName};
 
@@ -31,6 +31,7 @@ use super::{
         command_result::{
             CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause,
         },
+        domain_lifecycle::PausedDomainRecovery,
         model_mutation::command_error,
         session_service::SessionServiceImpl,
     },
@@ -109,12 +110,6 @@ impl StandaloneRefusal {
             Self::Outcome(result) => result,
         }
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum StandalonePauseRecovery {
-    Replan,
-    RetainRefusal,
 }
 
 impl StandaloneSetback {
@@ -312,7 +307,7 @@ impl SessionServiceImpl {
             }
             if let StandaloneRefusal::Preflight(report) = &refusal
                 && self.recover_standalone_pause(command, report).await?
-                    == StandalonePauseRecovery::Replan
+                    == PausedDomainRecovery::Replan
             {
                 continue;
             }
@@ -479,13 +474,6 @@ impl SessionServiceImpl {
         command: &StandaloneCommand<'_>,
         admitted: ReplicatedTransaction,
     ) -> Result<ReplicatedTransaction, Box<CommandResult>> {
-        // A START of a stopped domain first places every unit its node rules constrain, and waits,
-        // holding the command's mutation lease, while some unit has no node they admit.
-        if let TransactionState::Open(_) = &admitted.state
-            && let Err(error) = self.place_units_for_start(&admitted).await
-        {
-            return Err(Box::new(self.start_placement_refusal(error).await));
-        }
         let mut current = admitted;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -503,7 +491,7 @@ impl SessionServiceImpl {
                         continue;
                     }
                     if self.recover_standalone_pause(command, &refusal).await?
-                        == StandalonePauseRecovery::Replan
+                        == PausedDomainRecovery::Replan
                     {
                         continue;
                     }
@@ -572,76 +560,23 @@ impl SessionServiceImpl {
         }
     }
 
-    /// Recover only a typed paused-domain refusal after the caller rechecked durable progress.
-    /// The local observation filters attempts; consensus checks ownership and adoption atomically.
+    /// Recover only a typed paused-domain refusal of the command's own domain, after the caller
+    /// rechecked durable progress. The local observation filters attempts; consensus checks
+    /// ownership and adoption atomically.
     async fn recover_standalone_pause<C: error_stack::Context>(
         &self,
         command: &StandaloneCommand<'_>,
         refusal: &Report<C>,
-    ) -> Result<StandalonePauseRecovery, Box<CommandResult>> {
+    ) -> Result<PausedDomainRecovery, Box<CommandResult>> {
         let Some(crate::registry::TransactionPlanningError::DomainPaused { domain }) =
             refusal.downcast_ref::<crate::registry::TransactionPlanningError>()
         else {
-            return Ok(StandalonePauseRecovery::RetainRefusal);
+            return Ok(PausedDomainRecovery::RetainRefusal);
         };
-        if domain != command.domain || self.inner.runtime.domain_alter_is_active(domain) {
-            return Ok(StandalonePauseRecovery::RetainRefusal);
+        if domain != command.domain {
+            return Ok(PausedDomainRecovery::RetainRefusal);
         }
-        let Some(mutation) = command.mutation else {
-            return Ok(StandalonePauseRecovery::RetainRefusal);
-        };
-        let recovered = self
-            .inner
-            .consensus
-            .recover_orphaned_model_pause(domain.clone(), mutation)
-            .await;
-        match recovered {
-            Ok(OrphanedPauseRecovery::Resumed) => {
-                tracing::info!(domain = domain.as_str(), "resumed orphaned ALTER pause");
-                if let Err(error) = self.apply_current_cluster_state().await {
-                    return Err(Box::new(CommandResult::new(
-                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
-                        format!(
-                            "orphaned pause recovery is committed but runtime application is \
-                             incomplete: {error:#}; retry with the same execution reference"
-                        ),
-                    )));
-                }
-                Ok(StandalonePauseRecovery::Replan)
-            }
-            Ok(OrphanedPauseRecovery::Unchanged) => Ok(StandalonePauseRecovery::Replan),
-            Ok(OrphanedPauseRecovery::TransactionActive { transaction }) => {
-                Err(Box::new(CommandResult::new(
-                    CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
-                    format!(
-                        "transaction '{transaction}' owns the domain pause; retry with the same \
-                         execution reference"
-                    ),
-                )))
-            }
-            Err(error) => {
-                // Neither gate lets the pause resume; the command keeps its paused-domain refusal.
-                if let ConsensusError::Conflict(
-                    ConsensusConflict::RestoreInstallation { .. }
-                    | ConsensusConflict::LicensingStop { .. },
-                ) = error.current_context()
-                {
-                    return Ok(StandalonePauseRecovery::RetainRefusal);
-                }
-                let mut response = self
-                    .consensus_error_response(error.current_context(), format!("{error:#}"))
-                    .await;
-                if let CommandDisposition::Failed = response.disposition {
-                    response.disposition =
-                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying);
-                    response.message.push_str(
-                        "; orphaned pause recovery was not confirmed; retry with the same \
-                         execution reference",
-                    );
-                }
-                Err(Box::new(response))
-            }
-        }
+        self.recover_paused_domain(domain, command.mutation).await
     }
 
     /// The command's outcome when its commit planning is refused against a transaction that has

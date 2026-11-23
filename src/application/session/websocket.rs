@@ -23,7 +23,7 @@ use std::{borrow::Cow, future::ready};
 use bytes::Bytes;
 use error_stack::Report;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _, stream};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     FrameRoot, SessionLimits, VerifiedFrame,
     websocket::{ServerWebSocketCodec, WebSocketCodec, WebSocketData, WebSocketError},
@@ -42,14 +42,28 @@ use super::{
     InboundFrame, SessionTransport,
     outbound::{self, SessionFrames},
 };
-use crate::application::session_service::SessionServiceImpl;
+use crate::application::{
+    listener_settings::ListenerSettings, session_service::SessionServiceImpl,
+};
 
 /// The WebSocket configuration of a console session: no message or frame larger than one session
-/// frame is buffered.
-pub(in crate::application) fn console_websocket_config(limits: &SessionLimits) -> WebSocketConfig {
+/// frame is buffered in either direction, and writes collect up to the declared write buffer.
+pub(in crate::application) fn console_websocket_config(
+    limits: &SessionLimits,
+    settings: &ListenerSettings,
+) -> WebSocketConfig {
     WebSocketConfig {
         max_message_size: Some(limits.frame_bytes()),
         max_frame_size: Some(limits.frame_bytes()),
+        write_buffer_size: usize::try_from(settings.websocket_write_buffer_bytes().as_u64())
+            .assured("WebSocket size-setting validation checks usize representation"),
+        max_write_buffer_size: settings
+            .websocket_write_capacity(limits.frame_bytes())
+            .assured(
+                "listener resolution refuses a write buffer the largest session frame overflows",
+            ),
+        // RFC 6455 section 5.1: a server closes the connection on an unmasked client frame.
+        accept_unmasked_frames: false,
         ..WebSocketConfig::default()
     }
 }

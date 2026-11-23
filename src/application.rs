@@ -164,6 +164,7 @@ mod configured_choices;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
+mod domain_start;
 mod domain_stop;
 mod entity_gate;
 mod entity_labels;
@@ -695,18 +696,13 @@ impl Application {
         };
         if allow_bootstrap
             && consensus.observer().cluster_parameters().is_none()
-            && let Err(error) = preflight::validate_resource_volume(
+            && let Err(error) = preflight::validate_selected_policy(
                 &parameter_seeds,
-                capabilities.database_volume_bytes,
+                &node_id,
+                &capabilities,
+                &settings.operational,
                 &db_path,
             )
-            .and_then(|()| {
-                preflight::validate_runtime_budget(
-                    &parameter_seeds,
-                    &node_id,
-                    capabilities.shutdown,
-                )
-            })
         {
             startup.consensus = Some(consensus);
             startup.terminate().await;
@@ -1245,14 +1241,14 @@ impl Application {
                 consensus.observer().cluster_parameters()
             };
             if let Some(record) = record {
-                preflight::validate_resource_volume(
+                preflight::validate_selected_policy(
                     &record.values,
-                    capabilities.database_volume_bytes,
+                    &node_id,
+                    &capabilities,
+                    &settings.operational,
                     &db_path,
                 )
                 .change_context(AppError::Preflight)?;
-                preflight::validate_runtime_budget(&record.values, &node_id, capabilities.shutdown)
-                    .change_context(AppError::Preflight)?;
                 break record;
             }
             sleep(settings.membership.gossip_interval()).await;

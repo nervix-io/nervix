@@ -6,11 +6,10 @@ use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ActualExecutionStepImpact, ClusterNodeIdentity, CommandExecutionReference, DomainClockState,
-    DomainName, DomainSchedule, DomainStartPoint, ExecutionStepImpactReport, ExecutionStepOutcome,
-    ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement, Timestamp,
-    TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPreviewIdentity, UserName,
+    ActualExecutionStepImpact, CommandExecutionReference, DomainName, DomainSchedule,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ImpactDiagnostic, ImpactDiagnosticKind,
+    ResourceName, Statement, Timestamp, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPreviewIdentity, UserName,
 };
 pub use nervix_models::{
     TransactionCommitPlan, TransactionCommitPlanHeader, TransactionCommitPlanStep,
@@ -287,6 +286,23 @@ pub(crate) fn test_commit_plan(
             planning_basis: nervix_models::ImpactPlanningBasis::new([1; 32]),
         },
         steps,
+    }
+}
+
+/// A model step that publishes `schedule` and gates nothing, for a test transaction whose one
+/// step changes its domain's schedule.
+#[cfg(test)]
+pub(crate) fn test_schedule_step(schedule: &DomainSchedule) -> TransactionCommitStepKind {
+    let no_gate = || TransactionEntityGatePlan {
+        targets: nervix_models::EntityGateTargets::default(),
+        relays: Vec::new(),
+    };
+    TransactionCommitStepKind::Models {
+        transitions: Vec::new(),
+        schedule: Some(Box::new(schedule.clone())),
+        no_op_operations: Vec::new(),
+        model_gate: no_gate(),
+        ownership_gate: no_gate(),
     }
 }
 
@@ -1294,18 +1310,6 @@ pub enum TransactionStepEffect {
         inputs: Box<DomainPlanningInputs>,
         schedule: Option<Box<DomainSchedule>>,
     },
-    StartDomain {
-        inputs: Box<DomainPlanningInputs>,
-        start: DomainStartPoint,
-        clock: Option<DomainClockState>,
-        authority: Option<ClusterNodeIdentity>,
-    },
-    /// A `STOP` step's request, which begins the stop of the domain its transaction holds. The
-    /// step stays applying until the stop it requested ends.
-    StopDomain {
-        inputs: Box<DomainPlanningInputs>,
-        request: Box<nervix_models::OperatorStopRequest>,
-    },
     CreateResourceCatalog {
         inputs: Box<DomainPlanningInputs>,
         identifier: ResourceName,
@@ -1328,8 +1332,6 @@ impl TransactionStepEffect {
     pub fn inputs(&self) -> &DomainPlanningInputs {
         match self {
             Self::ReplaceDomainSchedule { inputs, .. }
-            | Self::StartDomain { inputs, .. }
-            | Self::StopDomain { inputs, .. }
             | Self::CreateResourceCatalog { inputs, .. }
             | Self::EditResourceLabels { inputs, .. } => inputs,
             Self::ResetWasmState { inputs, .. } => inputs,
@@ -1490,11 +1492,6 @@ pub enum TransactionMutationError {
     EffectMismatch { id: String },
     #[error("transaction '{id}' commit step conflicted with replicated state: {reason}")]
     StepConflict { id: String, reason: String },
-    #[error("transaction '{id}' cannot start its domain: licensing stopped processing: {reason}")]
-    LicensingStop {
-        id: String,
-        reason: nervix_models::LicensingStopReason,
-    },
     #[error("transaction '{id}' cannot mutate domain '{domain}' while it is owned by {owner}")]
     DomainMutationConflict {
         id: String,

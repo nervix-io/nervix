@@ -305,6 +305,13 @@ const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
+            holds: "the header lines of a request head",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-max-headers"),
+                overflow: BufferOverflow::RefuseOversized,
+            },
+        },
+        DeclaredBuffer {
             holds: "a request body",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("http-body-bytes"),
@@ -1015,16 +1022,23 @@ mod tests {
     #[test]
     fn an_endpoint_declares_the_node_settings_that_bound_each_request() {
         let bounds = HttpEndpointIngestor::CAPABILITIES.bounds;
-        let [head, body, intake, unresolved, retained] = bounds.buffers else {
+        let [head, header_lines, body, intake, unresolved, retained] = bounds.buffers else {
             panic!(
-                "an HTTP endpoint declares head, body and intake bounds, the ACK window and the \
-                 pause buffer"
+                "an HTTP endpoint declares head, header-line, body and intake bounds, the ACK \
+                 window and the pause buffer"
             );
         };
         assert_eq!(
             head.bound,
             BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("listener-header-bytes"),
+                overflow: BufferOverflow::RefuseOversized,
+            }
+        );
+        assert_eq!(
+            header_lines.bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-max-headers"),
                 overflow: BufferOverflow::RefuseOversized,
             }
         );

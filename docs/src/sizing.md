@@ -141,7 +141,14 @@ credits another 1/16, so a node's budgets come to a little over half of its memo
 
 These are ceilings that admission charges work against, not memory allocated at startup. Graph
 state, engines and thread stacks need memory beside them; the 8 MiB `--runtime-thread-stack-size`
-of each runtime thread, for example, is not part of any pool.
+of each runtime thread, for example, is not part of any pool. Neither are the public listeners'
+transport buffers, which their [listener bounds](node-settings.md#listener-bounds) cap instead:
+gRPC clients hold at most `--listener-max-connections` times `--grpc-connection-window-bytes` of
+input on a node, 1 GiB at the defaults. Nor are the databases' memtables, the buffers that collect
+new writes before they reach disk. Each of the 15 keyspaces, 11 in the node database and 4 in the
+consensus database, fills one up to 64 MiB, and a keyspace whose writes outpace its disk writes
+keeps up to four full ones waiting before its writers pause. Nervix does not limit them, so a
+write-heavy node leaves headroom for them beside its checked total.
 
 ## What A Node Needs To Start
 
@@ -213,6 +220,18 @@ precision. The tables give the other bounds.
 | `NODE_UNAVAILABILITY_TIMEOUT` | `10s` | | How long a member may go unobserved before the cluster treats it as unavailable. Node-to-node connections ping every half of it, wait a quarter of it for the answer, and give an application health probe a tenth of it |
 | `REPLICA_COUNT` | `0` | 0 to 4,294,967,295 | How many nodes besides its owner hold a replica of each piece of runtime state |
 | `STATE_SNAPSHOT_INTERVAL` | `30s` | | How often the owner of runtime state publishes a snapshot of it to its replicas |
+
+`NODE_UNAVAILABILITY_TIMEOUT` must exceed every admitted node's
+`--control-plane-health-probe-interval`, 1 second by default, plus the probe timeout, a tenth of
+the timeout. A node observes each peer again at most one interval plus one probe timeout after its
+last observation, and an observation stays fresh only for the timeout. A shorter timeout leaves
+every observation stale before the next one arrives, so the cluster stops detecting members that
+fail. `ALTER CLUSTER SET` refuses such a timeout before anything commits, naming the first
+admitted node, in name order, whose interval does not fit:
+
+```text
+node-unavailability-timeout (1s) must exceed node 'node-1' control-plane-health-probe-interval (1s) plus probe-timeout (100ms), a tenth of node-unavailability-timeout
+```
 
 ### Domain Lifecycle And Coordination
 
@@ -383,12 +402,15 @@ current shape. [Rolling Changes](node-settings.md#rolling-changes) owns these gu
 
 A restarting or joining node also holds itself to the committed parameters before it reports ready,
 and stops with status `1` when its database volume cannot hold `RESOURCE_MAX_ARCHIVE_BYTES` or
-`RESOURCE_MAX_EXTRACTED_BYTES`, or when its drain budget is shorter than `DOMAIN_DRAIN_TIMEOUT` or
-`ENTITY_GATE_DEADLINE`. Order a change that crosses the two classes accordingly. To raise
-`DOMAIN_DRAIN_TIMEOUT`, first roll every node to a drain budget that holds the new value, then
-commit it; to give a node a shorter drain budget, lower the parameter first. In the same way, lower
-the resource quotas before a node restarts on a smaller volume, and grow every volume and restart
-its node before raising them.
+`RESOURCE_MAX_EXTRACTED_BYTES`, when its drain budget is shorter than `DOMAIN_DRAIN_TIMEOUT` or
+`ENTITY_GATE_DEADLINE`, or when its `--control-plane-health-probe-interval` plus a tenth of
+`NODE_UNAVAILABILITY_TIMEOUT` is not shorter than that timeout. Order a change that crosses the two
+classes accordingly. To raise `DOMAIN_DRAIN_TIMEOUT`, first roll every node to a drain budget that
+holds the new value, then commit it; to give a node a shorter drain budget, lower the parameter
+first. In the same way, lower the resource quotas before a node restarts on a smaller volume, and
+grow every volume and restart its node before raising them. Raise `NODE_UNAVAILABILITY_TIMEOUT`
+before rolling a node to a longer health-probe interval, and shorten the intervals before lowering
+the timeout.
 
 ## Reading DESCRIBE CLUSTER During A Roll
 
