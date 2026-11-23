@@ -110,6 +110,7 @@ mod runtime_installation;
 mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
+mod start_placement;
 mod subscription_opening;
 mod subscription_response;
 #[cfg(test)]
@@ -154,6 +155,7 @@ use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
 use runtime_installation::RuntimeInstallationRefusals;
 use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
+pub use start_placement::StartPlacementBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 pub use wasm_state_page_reply::WasmStatePageOverflow;
 
