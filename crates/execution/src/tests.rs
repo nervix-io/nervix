@@ -690,8 +690,6 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
     );
 }
 
-/// A full wait queue is backpressure: a storage job that finds the class's one worker busy and its
-/// one queue place taken waits for a place, whatever the job does, and runs once one frees.
 /// A job that writes `input` into a budgeted buffer under its charge, and reports the charge it
 /// needs when its class has no room for the growth, as every growing writer does.
 fn write_growing(
@@ -1019,6 +1017,8 @@ async fn a_growing_charge_counts_its_own_bytes_and_keeps_its_starting_room() {
     assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
+/// A full wait queue is backpressure: a storage job that finds the class's one worker busy and its
+/// one queue place taken waits for a place, whatever the job does, and runs once one frees.
 #[nervix_primitives::test]
 async fn a_full_storage_queue_holds_every_job_until_a_place_frees() {
     let executor = small_executor();
