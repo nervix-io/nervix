@@ -20,9 +20,8 @@ use fjall::Keyspace;
 #[cfg(test)]
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, DomainName, DomainStatus, TransactionCommitPlan,
-    TransactionCommitPlanStep, TransactionCommitStepKind, TransactionOperationNumber,
-    TransactionPreviewIdentity,
+    ClusterNodeIdentity, ClusterNodeName, DomainName, TransactionCommitPlan,
+    TransactionCommitPlanStep, TransactionCommitStepKind, TransactionPreviewIdentity,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,23 @@ use crate::{
     records::Records,
 };
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored commit plan headers sit under this record-family tag byte in the \
+                  persisted consensus state keyspace"
+    )
+)]
 const COMMIT_PLAN_HEADER_TAG: u8 = b'P';
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored commit plan steps sit under this record-family tag byte in the persisted \
+                  consensus state keyspace"
+    )
+)]
 const COMMIT_PLAN_STEP_TAG: u8 = b'p';
 
 /// Volatile node liveness and incarnation inputs consumed by the admitted schedule decisions.
@@ -102,7 +117,7 @@ impl TransactionCommitAdmissionPlan {
         let mut inputs = Vec::with_capacity(decision.steps.len());
         for step in &decision.steps {
             inputs.push(expected.clone());
-            expected = Self::after_step(expected, step)?;
+            expected = Self::after_step(expected, step);
         }
         Ok(Self {
             decision,
@@ -126,40 +141,10 @@ impl TransactionCommitAdmissionPlan {
     fn after_step(
         inputs: DomainPlanningInputs,
         step: &TransactionCommitPlanStep,
-    ) -> error_stack::Result<DomainPlanningInputs, TransactionCommitPlanBuildError> {
+    ) -> DomainPlanningInputs {
         match &step.kind {
             TransactionCommitStepKind::Models { schedule, .. } => {
-                Ok(inputs.after_schedule(schedule.as_deref().cloned()))
-            }
-            TransactionCommitStepKind::StartDomain { resolved } => {
-                let operation = step.impact.operations().first();
-                let mut domain = inputs.state().cloned().ok_or_else(|| {
-                    Report::new(TransactionCommitPlanBuildError::MissingDomainState { operation })
-                })?;
-                domain.status = DomainStatus::Running;
-                domain.start_version = domain.start_version.checked_add(1).ok_or_else(|| {
-                    Report::new(
-                        TransactionCommitPlanBuildError::DomainStartGenerationOverflow {
-                            operation,
-                        },
-                    )
-                })?;
-                domain.last_start = resolved.start.clone();
-                domain.clock = resolved.clock.clone();
-                let schedule = inputs.schedule().cloned();
-                Ok(inputs.after_domain_update(domain, schedule))
-            }
-            TransactionCommitStepKind::StopDomain => {
-                let operation = step.impact.operations().first();
-                let mut domain = inputs.state().cloned().ok_or_else(|| {
-                    Report::new(TransactionCommitPlanBuildError::MissingDomainState { operation })
-                })?;
-                // A transaction's STOP step leaves the domain stopped once its stop ends; how it
-                // ended is no planning input.
-                domain.status = DomainStatus::Stopped;
-                domain.clock = None;
-                let schedule = inputs.schedule().cloned();
-                Ok(inputs.after_domain_update(domain, schedule))
+                inputs.after_schedule(schedule.as_deref().cloned())
             }
             TransactionCommitStepKind::CreateResource {
                 resource,
@@ -167,16 +152,16 @@ impl TransactionCommitAdmissionPlan {
                 already_existed,
             } => {
                 if *already_existed {
-                    Ok(inputs)
+                    inputs
                 } else {
-                    Ok(inputs.after_resource_catalog(resource.clone(), labels.clone()))
+                    inputs.after_resource_catalog(resource.clone(), labels.clone())
                 }
             }
             TransactionCommitStepKind::EditResourceLabels { resource, labels } => {
-                Ok(inputs.after_resource_catalog(resource.clone(), labels.clone()))
+                inputs.after_resource_catalog(resource.clone(), labels.clone())
             }
             TransactionCommitStepKind::ResetWasmState { schedule, .. } => {
-                Ok(inputs.after_schedule(Some((**schedule).clone())))
+                inputs.after_schedule(Some((**schedule).clone()))
             }
         }
     }
@@ -198,14 +183,6 @@ impl TransactionCommitAdmissionPlan {
 pub enum TransactionCommitPlanBuildError {
     #[error("transaction plan inputs and schedule eligibility belong to different domains")]
     DomainMismatch,
-    #[error("transaction operation {operation} requires captured domain state")]
-    MissingDomainState {
-        operation: TransactionOperationNumber,
-    },
-    #[error("transaction operation {operation} overflows the domain start generation")]
-    DomainStartGenerationOverflow {
-        operation: TransactionOperationNumber,
-    },
 }
 
 /// One recovered step with every value execution may consume.
@@ -252,24 +229,6 @@ impl FrozenTransactionCommitStep {
                     schedule: applied,
                 }),
             ) => **inputs == expected_inputs && applied.as_deref() == schedule.as_deref(),
-            (
-                TransactionCommitStepKind::StartDomain { resolved },
-                Some(TransactionStepEffect::StartDomain {
-                    inputs,
-                    start,
-                    clock,
-                    authority,
-                }),
-            ) => {
-                **inputs == expected_inputs
-                    && start == &resolved.start
-                    && clock == &resolved.clock
-                    && authority == &resolved.authority
-            }
-            (
-                TransactionCommitStepKind::StopDomain,
-                Some(TransactionStepEffect::StopDomain { inputs, .. }),
-            ) => **inputs == expected_inputs,
             (
                 TransactionCommitStepKind::CreateResource {
                     resource,
@@ -574,7 +533,6 @@ pub(crate) fn assert_count_archives(count: usize) {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::OptionExt as _;
     use nervix_models::{DomainName, ResourceName};
 
     use super::*;
@@ -654,103 +612,6 @@ mod tests {
         assert_eq!(
             error.current_context(),
             &TransactionCommitPlanReadError::MissingHeader
-        );
-    }
-
-    /// Each step's admitted inputs must equal what the steps before it commit, or the step is
-    /// refused at commit as changed planning inputs. A STOP step commits the operator's cause and
-    /// the START after it clears it again.
-    #[test]
-    fn planned_stop_and_start_steps_expect_the_domain_record_their_commits_leave() {
-        let domain =
-            DomainName::parse("tenant").assured("the test domain is an identifier-shaped literal");
-        let mut committed = StateMachineData::default();
-        committed
-            .domains
-            .insert(domain.clone(), crate::tests::running_domain_state("tenant"));
-        let mut decision = test_commit_plan("tx", 2);
-        let resolved = nervix_models::TransactionResolvedDomainStart {
-            start: nervix_models::DomainStartPoint::Resume,
-            clock: None,
-            authority: None,
-        };
-        decision.steps[0].kind = TransactionCommitStepKind::StopDomain;
-        decision.steps[1].kind = TransactionCommitStepKind::StartDomain {
-            resolved: resolved.clone(),
-        };
-
-        let after_stop = TransactionCommitAdmissionPlan::after_step(
-            committed.domain_planning_inputs(&domain),
-            &decision.steps[0],
-        )
-        .assured("the running test domain has a record to stop");
-        // The step's stop begins, waits for the work in motion and ends: the record it leaves is
-        // stopped with the operator's ending, which no step after it plans against.
-        let reference = nervix_models::CommandExecutionReference::parse("tx-stop")
-            .assured("the fixture reference is a valid literal");
-        assert!(
-            committed
-                .request_domain_stop(
-                    &domain,
-                    &nervix_models::StopRequest::Operator {
-                        reference,
-                        request: nervix_models::OperatorStopRequest {
-                            requested_at: nervix_models::Timestamp::from_unix_nanos(1),
-                            limit: None,
-                        },
-                    },
-                    None,
-                )
-                .assured("the running test domain no execution holds begins its stop")
-        );
-        let began_at_revision = committed
-            .domains
-            .get(&domain)
-            .and_then(|state| state.stopping())
-            .map(|stopping| stopping.began_at_revision)
-            .assured("the request above began the stop");
-        assert!(
-            committed
-                .end_domain_stop(
-                    &domain,
-                    began_at_revision,
-                    &nervix_models::StopEnding::Completed
-                )
-                .assured("the stop that began above is the one that ends")
-        );
-        assert_eq!(after_stop, committed.domain_planning_inputs(&domain));
-        assert_eq!(
-            after_stop
-                .state()
-                .assured("the stopped test domain keeps its record")
-                .stop,
-            None,
-            "how a stop ended is no planning input"
-        );
-        assert_eq!(
-            committed
-                .domains
-                .get(&domain)
-                .and_then(|state| state.stop_cause()),
-            Some(nervix_models::DomainStopCause::Operator)
-        );
-
-        let after_start =
-            TransactionCommitAdmissionPlan::after_step(after_stop, &decision.steps[1])
-                .assured("the stopped test domain has a record to start");
-        assert!(committed.commit_domain_start(
-            &domain,
-            &resolved.start,
-            &resolved.clock,
-            &resolved.authority
-        ));
-        assert_eq!(after_start, committed.domain_planning_inputs(&domain));
-        assert_eq!(
-            after_start
-                .state()
-                .assured("the started test domain keeps its record")
-                .stop,
-            None
         );
     }
 }

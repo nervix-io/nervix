@@ -17,6 +17,14 @@
 use super::{ExternalNameError, refuse_whitespace};
 use crate::connector::external_name::require_length;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual publishes 1,024 bytes as Nervix's own NATS subject bound, \
+                  a restriction nats-server does not impose"
+    )
+)]
 const MAX_SUBJECT_BYTES: usize = 1024;
 
 /// A validated subscription pattern. Its text remains borrowed and in the operator's spelling.

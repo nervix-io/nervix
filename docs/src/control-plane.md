@@ -130,8 +130,15 @@ Only the bound domain's replicated configuration effects may be queued:
 
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
-- `START` and `STOP`;
 - `CREATE RESOURCE`, `SET LABELS ON RESOURCE`, and `RESET WASM PROCESSOR ... STATE`.
+
+`START` and `STOP` switch the domain's processing on and off and change none of its configuration,
+so they never run inside a transaction. Queuing either is refused at once with
+`START cannot be queued in a transaction; START and STOP run on their own, after COMMIT` (or the
+same for `STOP`); the refusal consumes no operation number and the open transaction keeps every
+statement it already holds. Each runs on its own as a lifecycle command under its own execution
+reference: `STOP` as described in [Stopping A Domain](#stopping-a-domain), and `START` as described
+in [Starting A Domain](#starting-a-domain).
 
 Completion on the bound session resolves identifiers against the configuration the queued
 statements produce, applied in written order, so a client is offered the models and resources its
@@ -248,7 +255,7 @@ exposing an invalid intermediate graph.
 Other eligible statements apply individually. `COMMIT` records authoritative effect progress and
 completed application separately and stops at the first definitive failure. A transaction remains
 `COMMITTING` after a step's authoritative state is durable while runtime activation, ingestor
-readiness, remote stopping, ownership handoff, or gate release is outstanding. It becomes
+readiness, ownership handoff, or gate release is outstanding. It becomes
 `COMMITTED` only after the final step is usable on the current live-node set and its outcome is
 authoritatively visible. Its successful output is only the highest quiesce level actually executed
 across the transaction; it does not repeat the individual command outputs.
@@ -463,10 +470,10 @@ stickiness merge keeps a live assignment whose owner no longer qualifies, report
 On a running domain, a candidate schedule that would put an executing unit on a node its rules do
 not admit, or leave a unit with no admitted node, refuses the change that produced it, naming the
 rule and the unit; a breach the schedule already held does not refuse an unrelated change. On a
-stopped domain a node rule is accepted, and the `START` step places every unit on an admitted node
-before the transaction prepares, moving a misplaced unit with its state through the planned
-ownership handoff. While a unit has no admitted node, `START` waits under the domain's mutation
-lease and checks again every scheduling interval. See
+stopped domain a node rule is accepted, and `START` places every unit on an admitted node before
+it commits the start, moving a misplaced unit with its state through the planned ownership handoff.
+While a unit has no admitted node, `START` waits under the domain's mutation lease and checks again
+every scheduling interval. See
 [Placement Policies](placement.md#node-rules).
 
 Hard colocation groups constrain every scheduler. A newly effective require group is consolidated
@@ -612,6 +619,39 @@ operation serves every trigger: the `RESET WASM PROCESSOR ... STATE` statement, 
 records as an ordered effect rather than a model mutation, a guest's request for a new lifetime of
 its own branch, and `ON REJECTED STATE RESET`. See
 [Coordinated Reset](./wasm-state.md#coordinated-reset).
+
+## Starting A Domain
+
+`START` is a lifecycle command of its own, never a transaction. Its admission records the
+statement under the command's execution reference and takes the domain's mutation lease, which it
+holds until the command answers, so the domain's other changes are refused meanwhile. Its execution
+runs these steps:
+
+1. **Checks.** It refuses a domain that is already running, stopping, or paused by a model
+   alteration, one whose restore has not finished installing its state, every domain while the
+   licensing stop gate is closed, and a start generation that would overflow. A domain left paused
+   by an alteration whose command no longer exists is resumed through the orphaned-pause recovery
+   under the command's lease, and is then refused as already running.
+2. **Placement.** It places every unit on a node its node rules admit, moving a misplaced unit with
+   its state through the planned ownership handoff, and waits while some unit has no admitted node
+   ([Placement Policies](placement.md#node-rules)).
+3. **Resolution.** It captures the domain's planning inputs, selects a live voter as the clock
+   authority of a paced domain, and resolves the start point and paced mapping
+   ([Domain Clock](domain-clock.md)).
+4. **Commit.** One consensus command starts the domain under the command's exact mutation lease. It
+   checks the restore gate, the licensing gate and the captured planning inputs again, marks the
+   domain running at its next start version with the resolved start, and records its own applied
+   revision in the command's execution. When the planning inputs changed meanwhile, the refusal is
+   typed and `START` goes back to its checks and placement.
+5. **Readiness.** It waits until every live node runs the domain at that revision. A failure to
+   reconcile the runtime right after the commit is reported to the attached sessions as a
+   control-plane notice. A node that is not ready by the readiness deadline keeps it waiting: the
+   revision is applied again and the wait goes on. Nothing undoes the commit; any other activation
+   failure answers failed with the domain running.
+
+The answer is `starting domain '<domain>'`. A leader that takes over an applying `START` resumes it
+from its execution record: with a recorded start revision it only waits for readiness, so the
+domain never starts twice, and without one it begins again at the checks.
 
 ## Stopping A Domain
 

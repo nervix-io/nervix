@@ -917,8 +917,9 @@ The inferencer checkpoint transport scenario (`transport::materialized::inferenc
 ## Declared Window And Deadline Regression
 
 `transport::infrastructure::declared_windows_and_rpc_deadlines_survive_latency_loss_and_repair`
-uses committed seed 141. Two production transports advertise 4 KiB stream and 16 KiB connection
-receive windows, a two-second request budget and a four-request local reserve. A 128 KiB echo
+uses committed seed 141. Two production transports advertise 4 KiB stream and 65,535-byte
+connection receive windows, the smallest connection window HTTP/2 can bound, a two-second request
+budget and a four-request local reserve. A 128 KiB echo
 crosses both windows under 5–10ms message latency and the harness's normal TCP buffering. Holding all bytes
 must end the next RPC at its configured deadline. A partition then prevents success, and repair
 must restore exact payload delivery and return transport reservations on shutdown.

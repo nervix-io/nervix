@@ -51,6 +51,7 @@ fn supplied_values_convert_once_and_omitted_counts_take_their_declared_defaults(
     assert_eq!(defaults.handshake_buffer_capacity(), 16);
     assert_eq!(defaults.max_message_size(), 64 * 1024 * 1024);
     assert_eq!(defaults.max_frame_size(), 16 * 1024 * 1024);
+    assert_eq!(defaults.write_buffer_size(), 128 * 1024);
 
     // Inspection shows the same declared defaults; the idle deadline depends on the ping interval,
     // so it has none.
@@ -66,6 +67,7 @@ fn supplied_values_convert_once_and_omitted_counts_take_their_declared_defaults(
             ("handshake_buffer_capacity", "16"),
             ("max_frame_size", "16777216"),
             ("max_message_size", "67108864"),
+            ("write_buffer_size", "131072"),
         ]
     );
 }
@@ -159,6 +161,18 @@ fn the_declared_schema_refuses_what_the_client_cannot_read_and_never_prints_valu
             ));
         }
     }
+    for value in ["", "-1", "+1", "1.5", "1MiB", "18446744073709551616"] {
+        cases.push((
+            config(&[
+                ("endpoint", "ws://example.test"),
+                ("write_buffer_size", value),
+            ]),
+            ClientConfigSchemaError::InvalidValue {
+                key: "write_buffer_size".to_string(),
+                expected: "unsigned integer",
+            },
+        ));
+    }
     for (entries, expected) in cases {
         let Err(report) = WebsocketsClientConfig::parse(&entries) else {
             panic!("the supplied configuration breaks a declared key rule");
@@ -218,6 +232,7 @@ fn the_typed_configuration_refuses_what_the_schema_cannot_state() {
         ("handshake_buffer_capacity", "65535", "65536", 65_535),
         ("max_message_size", "4294967295", "4294967296", u32::MAX),
         ("max_frame_size", "4294967295", "4294967296", u32::MAX),
+        ("write_buffer_size", "4294967295", "4294967296", u32::MAX),
     ] {
         WebsocketsClientConfig::parse(&config(&[("endpoint", "ws://peer.test"), (key, largest)]))
             .assured("the largest count the representation holds is accepted");
@@ -260,7 +275,7 @@ fn the_typed_configuration_refuses_what_the_schema_cannot_state() {
 
 #[test]
 fn bolero_client_config_preserves_every_valid_connection_setting() {
-    bolero::check!().with_type::<[u16; 8]>().for_each(|input| {
+    bolero::check!().with_type::<[u16; 9]>().for_each(|input| {
         let secure = input[0].is_multiple_of(2);
         let scheme = if secure { "wss" } else { "ws" };
         let endpoint = format!(
@@ -273,6 +288,8 @@ fn bolero_client_config_preserves_every_valid_connection_setting() {
         let capacity = input[5].max(1);
         let message_size = u32::from(input[6]) + 1;
         let frame_size = u32::from(input[7]) + 1;
+        // Zero is a write buffer that writes each frame at once.
+        let write_buffer = input[8];
         let mut entries = config(&[
             ("endpoint", &endpoint),
             ("connect_timeout_ms", &connect.to_string()),
@@ -280,6 +297,7 @@ fn bolero_client_config_preserves_every_valid_connection_setting() {
             ("handshake_buffer_capacity", &capacity.to_string()),
             ("max_message_size", &message_size.to_string()),
             ("max_frame_size", &frame_size.to_string()),
+            ("write_buffer_size", &write_buffer.to_string()),
         ]);
         let explicit_idle = input[0].is_multiple_of(3);
         if explicit_idle {
@@ -321,5 +339,6 @@ fn bolero_client_config_preserves_every_valid_connection_setting() {
             usize::try_from(frame_size)
                 .assured("the generated u16-sized count fits every supported target")
         );
+        assert_eq!(parsed.write_buffer_size(), usize::from(write_buffer));
     });
 }

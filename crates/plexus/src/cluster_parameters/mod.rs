@@ -329,6 +329,12 @@ impl<'src> OfferedAssignments<'src> {
                 ClusterParameterChange::UdfCodeBytes,
             ),
             assignment(
+                ClusterParameterKey::UdfCompileBudget,
+                Identifier::UdfCompileBudget,
+                duration_value(),
+                ClusterParameterChange::UdfCompileBudget,
+            ),
+            assignment(
                 ClusterParameterKey::EntityLabelsMaxCount,
                 Identifier::EntityLabelsMaxCount,
                 u64_value("integer_literal"),

@@ -30,7 +30,7 @@ use thiserror::Error;
 
 use crate::{
     error::ArchiveWriteError,
-    section::{ArchiveRecord, MAX_RECORD_BYTES, RECORD_MAGIC, RecordKind},
+    section::{ArchiveRecord, MAX_RECORD_BYTES, RECORD_HEADER_BYTES, RECORD_MAGIC, RecordKind},
     state::{
         BranchLifecycleEntry, BranchLifecycleRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
     },
@@ -41,6 +41,16 @@ use crate::{
 };
 
 /// Scratch beyond the resolvers themselves, for the alignment of the buffer they are carved from.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the streamed writers' tests write the largest Kafka offsets and branch \
+                  lifecycle records the 64 MiB record limit holds, the lifecycle one beside a \
+                  48-deep and a 512-wide key, within exactly the scratch this slack completes, \
+                  carved at the worst alignment"
+    )
+)]
 const SCRATCH_SLACK_BYTES: usize = 256;
 
 /// A Kafka offsets record whose partition offsets are produced while it is written.
@@ -389,7 +399,7 @@ fn write_record(
         written: 0,
         failed: false,
     };
-    let mut header = Vec::with_capacity(RECORD_MAGIC.len() + 4);
+    let mut header = Vec::with_capacity(RECORD_HEADER_BYTES);
     header.extend_from_slice(&RECORD_MAGIC);
     header.extend_from_slice(&kind.tag().to_le_bytes());
     header.extend_from_slice(&version.to_le_bytes());
@@ -665,19 +675,27 @@ mod tests {
         value
     }
 
-    #[test]
-    fn the_declared_scratch_holds_the_deepest_and_the_widest_keys() {
-        let deep = vec![StateField {
+    /// A key whose one field nests 48 lists deep.
+    fn deepest_key() -> Vec<StateField> {
+        vec![StateField {
             name: "deep".to_string(),
             value: nested(48),
-        }];
-        let wide = (0..512)
+        }]
+    }
+
+    /// A key of 512 fields, each a list of four values.
+    fn widest_key() -> Vec<StateField> {
+        (0..512)
             .map(|index| StateField {
                 name: format!("field_{index:04}"),
                 value: StateValue::Vec(vec![StateValue::I32(index); 4]),
             })
-            .collect();
-        let record = lifecycle_with_keys(vec![wide, deep, Vec::new()]);
+            .collect()
+    }
+
+    #[test]
+    fn the_declared_scratch_holds_the_deepest_and_the_widest_keys() {
+        let record = lifecycle_with_keys(vec![widest_key(), deepest_key(), Vec::new()]);
         let stream = streamed_lifecycle(&record);
         let scratch = stream.scratch_bytes().assured("bounded keys have scratch");
         let section = write_section(scratch, |scratch, output| {
@@ -835,5 +853,145 @@ mod tests {
             "the whole record was measured: {length}"
         );
         assert!(output.received <= MAX_RECORD_BYTES);
+    }
+
+    /// Writes a record into exactly `bytes` of scratch that start one byte past a 16-byte boundary,
+    /// so every resolver allocation carved from it pads as far as its alignment allows.
+    fn write_misaligned(
+        bytes: usize,
+        write: impl FnOnce(&mut [MaybeUninit<u8>]) -> Result<u64, Report<ArchiveWriteError>>,
+    ) -> Result<u64, Report<ArchiveWriteError>> {
+        let mut buffer = vec![MaybeUninit::uninit(); bytes + 16];
+        let offset = (17 - buffer.as_ptr().addr() % 16) % 16;
+        write(&mut buffer[offset..offset + bytes])
+    }
+
+    /// The record limit in the width section lengths are counted in here.
+    fn record_limit() -> usize {
+        usize::try_from(MAX_RECORD_BYTES).assured("the 64 MiB record limit fits usize")
+    }
+
+    /// An offsets record of `partitions` partitions of a one-byte topic: the smallest entry an
+    /// offsets record holds, so the record limit admits the most of them.
+    fn smallest_offsets(
+        partitions: usize,
+    ) -> StreamedKafkaOffsets<impl ExactSizeIterator<Item = KafkaPartitionOffset> + Clone> {
+        let partitions = i32::try_from(partitions).assured("a record's partitions fit an i32");
+        StreamedKafkaOffsets {
+            unit: nervix_models::Unit::SINGLE,
+            domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
+            entity: ModelName::parse("source").assured("the entity is an accepted literal"),
+            schema: SchemaFingerprint::from_digest([5; 32]),
+            revision: 3,
+            applied_start_generation: Some(u64::MAX),
+            offsets: (0..partitions).map(|partition| KafkaPartitionOffset {
+                topic: "t".to_string(),
+                partition,
+                next_offset: 0,
+            }),
+        }
+    }
+
+    /// The largest offsets record the record limit admits streams within exactly the scratch its
+    /// writer declares, carved from a buffer at the worst alignment.
+    #[test]
+    fn the_largest_offsets_record_streams_within_its_declared_scratch() {
+        let one = smallest_offsets(1)
+            .encode()
+            .assured("one partition encodes")
+            .len();
+        let two = smallest_offsets(2)
+            .encode()
+            .assured("two partitions encode")
+            .len();
+        let entry = two - one;
+        let partitions = (record_limit() - one) / entry + 1;
+        let stream = smallest_offsets(partitions);
+        let scratch = stream
+            .scratch_bytes()
+            .assured("the largest offsets record has addressable scratch");
+        let length = write_misaligned(scratch, |scratch| {
+            stream.write(scratch, &mut io::sink(), &|| false)
+        })
+        .assured("the declared scratch holds the largest offsets record");
+        let length = usize::try_from(length).assured("a record's length fits usize");
+        assert!(
+            record_limit() - length < entry,
+            "{partitions} partitions fill the record limit but {length} bytes of it"
+        );
+    }
+
+    /// Branch `index` of a lifecycle whose first branches carry the `keyed` keys and whose others
+    /// are unbranched, the smallest entry a lifecycle record holds.
+    fn filling_branch(
+        index: usize,
+        keyed: &[nervix_models::BranchKeyFields<StateField>],
+    ) -> BranchLifecycleEntry {
+        let key = match keyed.get(index) {
+            Some(key) => key.clone(),
+            None => nervix_models::BranchKeyFields::Unbranched,
+        };
+        let incarnation = u64::try_from(index).assured("a record's branch index fits 64 bits");
+        BranchLifecycleEntry {
+            key,
+            last_ingestion: nervix_models::Timestamp::from_unix_nanos(0),
+            incarnation: incarnation + 1,
+        }
+    }
+
+    /// The keys that take the most nested scratch, ahead of the unbranched branches.
+    fn scratch_heavy_keys() -> Vec<nervix_models::BranchKeyFields<StateField>> {
+        vec![
+            nervix_models::BranchKeyFields::Direct(widest_key().into()),
+            nervix_models::BranchKeyFields::Direct(deepest_key().into()),
+        ]
+    }
+
+    /// A lifecycle record of `branches` branches: the widest and the deepest keys, then unbranched
+    /// branches.
+    fn filled_lifecycle(
+        branches: usize,
+    ) -> StreamedBranchLifecycle<impl ExactSizeIterator<Item = BranchLifecycleEntry> + Clone> {
+        let keyed = scratch_heavy_keys();
+        StreamedBranchLifecycle {
+            unit: nervix_models::Unit::SINGLE,
+            domain: DomainName::parse("payments").assured("the domain is an accepted literal"),
+            owner_kind: ModelKind::Ingestor,
+            entity: ModelName::parse("source").assured("the entity is an accepted literal"),
+            schema: SchemaFingerprint::from_digest([3; 32]),
+            revision: 9,
+            branches: (0..branches).map(move |index| filling_branch(index, &keyed)),
+        }
+    }
+
+    /// The largest lifecycle record the record limit admits, holding the keys that take the most
+    /// nested scratch, streams within exactly the scratch its writer declares, carved from a buffer
+    /// at the worst alignment.
+    #[test]
+    fn the_largest_lifecycle_record_streams_within_its_declared_scratch() {
+        let keyed = scratch_heavy_keys().len();
+        let one = filled_lifecycle(keyed + 1)
+            .encode()
+            .assured("one unbranched branch beside the keys encodes")
+            .len();
+        let two = filled_lifecycle(keyed + 2)
+            .encode()
+            .assured("two unbranched branches beside the keys encode")
+            .len();
+        let entry = two - one;
+        let branches = (record_limit() - one) / entry + keyed + 1;
+        let stream = filled_lifecycle(branches);
+        let scratch = stream
+            .scratch_bytes()
+            .assured("the largest lifecycle record has addressable scratch");
+        let length = write_misaligned(scratch, |scratch| {
+            stream.write(scratch, &mut io::sink(), &|| false)
+        })
+        .assured("the declared scratch holds the largest lifecycle record");
+        let length = usize::try_from(length).assured("a record's length fits usize");
+        assert!(
+            record_limit() - length < entry,
+            "{branches} branches fill the record limit but {length} bytes of it"
+        );
     }
 }

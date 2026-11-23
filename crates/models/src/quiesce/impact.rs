@@ -297,32 +297,36 @@ impl std::fmt::Display for ImpactPlanningBasis {
 /// The written form of a 32-byte fingerprint: its lowercase hexadecimal digest.
 ///
 /// A fingerprint is compared, not read, so every rendering of a report — text and JSON alike —
-/// spells it as one hexadecimal string rather than as the bytes it is made of.
+/// spells it as one hexadecimal string rather than as the bytes it is made of. faster-hex writes
+/// the digits and reads them back in either letter case.
 mod fingerprint_hex {
     use serde::{Deserialize as _, Deserializer, Serializer, de::Error as _};
 
-    /// Hexadecimal digits in one fingerprint: two per byte.
+    /// The digits of a fingerprint's written form. A text of any other length is refused before
+    /// its digits are read, because faster-hex reads the leading digits of a longer text without
+    /// complaint.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "RFC 4648 base16 writes a fingerprint's 32 bytes as exactly 64 digits, the \
+                      one length its written form has"
+        )
+    )]
     const DIGITS: usize = 64;
 
     pub(super) fn write(
         fingerprint: &[u8; 32],
         output: &mut impl std::fmt::Write,
     ) -> std::fmt::Result {
-        for byte in fingerprint {
-            write!(output, "{byte:02x}")?;
-        }
-        Ok(())
+        output.write_str(&faster_hex::hex_string(fingerprint))
     }
 
     pub(super) fn serialize<S: Serializer>(
         fingerprint: &[u8; 32],
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        let mut hex = String::with_capacity(DIGITS);
-        write(fingerprint, &mut hex).map_err(|_| {
-            <S::Error as serde::ser::Error>::custom("a fingerprint could not be written as text")
-        })?;
-        serializer.serialize_str(&hex)
+        serializer.serialize_str(&faster_hex::hex_string(fingerprint))
     }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
@@ -335,20 +339,11 @@ mod fingerprint_hex {
                 &"a fingerprint of 64 hexadecimal digits",
             ));
         }
-        // The length check above leaves no digit outside a pair.
-        let (pairs, _unpaired) = hex.as_bytes().as_chunks::<2>();
         let mut fingerprint = [0_u8; 32];
-        for (byte, digits) in fingerprint.iter_mut().zip(pairs) {
-            let digits = std::str::from_utf8(digits.as_slice()).map_err(|cause| {
-                D::Error::custom(format!(
-                    "a fingerprint holds only hexadecimal digits: {cause}"
-                ))
-            })?;
-            *byte = u8::from_str_radix(digits, 16).map_err(|cause| {
-                D::Error::custom(format!(
-                    "a fingerprint holds only hexadecimal digits: {cause}"
-                ))
-            })?;
+        if let Err(cause) = faster_hex::hex_decode(hex.as_bytes(), &mut fingerprint) {
+            return Err(D::Error::custom(format!(
+                "a fingerprint holds only hexadecimal digits: {cause}"
+            )));
         }
         Ok(fingerprint)
     }
@@ -1042,12 +1037,6 @@ pub enum TransactionOperation {
         domain: DomainName,
         node: NodeRef,
     },
-    StartDomain {
-        domain: DomainName,
-    },
-    StopDomain {
-        domain: DomainName,
-    },
     CreateResource {
         domain: DomainName,
         resource: ResourceName,
@@ -1074,8 +1063,6 @@ impl TransactionOperation {
             Self::CreateConfiguration { domain, .. }
             | Self::AlterConfiguration { domain, .. }
             | Self::DropConfiguration { domain, .. }
-            | Self::StartDomain { domain }
-            | Self::StopDomain { domain }
             | Self::CreateResource { domain, .. }
             | Self::EditResourceLabels { domain, .. }
             | Self::RebindResource { domain, .. } => domain,
@@ -1108,8 +1095,6 @@ pub enum OperationImpactReason {
         node: NodeRef,
         aspect: ModelChangeAspect,
     },
-    DomainStart,
-    DomainStop,
     ResourceCatalog {
         resource: ResourceName,
     },
@@ -1332,48 +1317,6 @@ pub struct ResourceBindingImpact {
 #[derive(
     Debug,
     Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-    AsRefStr,
-)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum DomainLifecycleAction {
-    Start,
-    Stop,
-}
-
-#[derive(
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    Archive,
-    RkyvSerialize,
-    RkyvDeserialize,
-)]
-pub struct DomainLifecycleImpact {
-    pub domain: DomainName,
-    pub action: DomainLifecycleAction,
-    pub attribution: ImpactAttribution,
-}
-
-#[derive(
-    Debug,
-    Clone,
     PartialEq,
     Eq,
     PartialOrd,
@@ -1537,7 +1480,6 @@ pub struct ImpactEffects {
     pub changed_configuration: CanonicalImpactSet<ConfigurationImpact>,
     pub topology: AffectedTopology,
     pub ownership_moves: CanonicalImpactSet<OwnershipMoveImpact>,
-    pub lifecycle: CanonicalImpactSet<DomainLifecycleImpact>,
     pub activations: CanonicalImpactSet<ActivationImpact>,
     pub rebuilds: CanonicalImpactSet<RebuildImpact>,
     pub state_resets: CanonicalImpactSet<StateResetImpact>,
@@ -2363,6 +2305,131 @@ mod impact_report_tests {
         }
     }
 
+    /// A fingerprint and the text it is written as.
+    struct WrittenFingerprint {
+        fingerprint: [u8; 32],
+        text: &'static str,
+    }
+
+    /// A digest with every hexadecimal digit in both halves of a byte.
+    const EVERY_DIGIT: [u8; 32] = [
+        0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+        0x32, 0x10, 0x0f, 0xf0, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96, 0xa5, 0xb4,
+        0xc3, 0xd2,
+    ];
+
+    /// No bit set, every bit set, and every digit in both halves of a byte.
+    const WRITTEN_FINGERPRINTS: [WrittenFingerprint; 3] = [
+        WrittenFingerprint {
+            fingerprint: [0x00; 32],
+            text: "0000000000000000000000000000000000000000000000000000000000000000",
+        },
+        WrittenFingerprint {
+            fingerprint: [0xff; 32],
+            text: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        },
+        WrittenFingerprint {
+            fingerprint: EVERY_DIGIT,
+            text: "000123456789abcdeffedcba98765432100ff01e2d3c4b5a69788796a5b4c3d2",
+        },
+    ];
+
+    #[test]
+    fn fingerprints_write_fixed_digests_as_lowercase_hexadecimal() {
+        for written in WRITTEN_FINGERPRINTS {
+            let json = format!("\"{}\"", written.text);
+
+            let basis = ImpactPlanningBasis::new(written.fingerprint);
+            assert_eq!(basis.to_string(), written.text);
+            let encoded =
+                serde_json::to_string(&basis).assured("a planning basis has a JSON representation");
+            assert_eq!(encoded, json);
+            let restored: ImpactPlanningBasis =
+                serde_json::from_str(&json).assured("the JSON was produced from a planning basis");
+            assert_eq!(restored, basis);
+
+            let key = BranchKeyFingerprint::new(written.fingerprint);
+            assert_eq!(key.to_string(), written.text);
+            let encoded =
+                serde_json::to_string(&key).assured("a branch key has a JSON representation");
+            assert_eq!(encoded, json);
+            let restored: BranchKeyFingerprint =
+                serde_json::from_str(&json).assured("the JSON was produced from a branch key");
+            assert_eq!(restored, key);
+        }
+    }
+
+    #[test]
+    fn a_fingerprint_reads_digits_of_either_letter_case() {
+        for text in [
+            "000123456789ABCDEFFEDCBA98765432100FF01E2D3C4B5A69788796A5B4C3D2",
+            "000123456789AbCdEfFeDcBa98765432100fF01e2d3c4b5a69788796A5B4C3D2",
+        ] {
+            let json = format!("\"{text}\"");
+            let basis: ImpactPlanningBasis = serde_json::from_str(&json)
+                .assured("digits of either letter case are hexadecimal digits");
+            assert_eq!(basis, ImpactPlanningBasis::new(EVERY_DIGIT));
+            let key: BranchKeyFingerprint = serde_json::from_str(&json)
+                .assured("digits of either letter case are hexadecimal digits");
+            assert_eq!(key, BranchKeyFingerprint::new(EVERY_DIGIT));
+        }
+    }
+
+    /// A text of another length is refused for its length, whatever characters it holds, and a
+    /// text of the right length for the character that is not a hexadecimal digit.
+    #[test]
+    fn fingerprint_refusals_name_the_length_or_the_digits_they_refuse() {
+        for (text, refusal) in [
+            (
+                "abab".to_string(),
+                "invalid length 4, expected a fingerprint of 64 hexadecimal digits",
+            ),
+            (
+                "ab".repeat(33),
+                "invalid length 66, expected a fingerprint of 64 hexadecimal digits",
+            ),
+            (
+                "zz".repeat(33),
+                "invalid length 66, expected a fingerprint of 64 hexadecimal digits",
+            ),
+            (
+                "zz".repeat(32),
+                "a fingerprint holds only hexadecimal digits",
+            ),
+            (
+                format!("a{}a", "\u{e9}".repeat(31)),
+                "a fingerprint holds only hexadecimal digits",
+            ),
+        ] {
+            let json = format!("\"{text}\"");
+            let Err(refused) = serde_json::from_str::<ImpactPlanningBasis>(&json) else {
+                panic!("{json} is not a fingerprint");
+            };
+            assert!(refused.is_data(), "{refused}");
+            assert!(refused.to_string().starts_with(refusal), "{refused}");
+        }
+    }
+
+    /// A digit pair is two hexadecimal digits. A sign is neither, though an integer parser reads
+    /// one ahead of a digit.
+    #[test]
+    fn a_fingerprint_refuses_a_sign_in_place_of_a_digit() {
+        let json = format!("\"{}\"", "+f".repeat(32));
+        let Err(refused) = serde_json::from_str::<ImpactPlanningBasis>(&json) else {
+            panic!("{json} is not a fingerprint");
+        };
+        assert!(
+            refused
+                .to_string()
+                .starts_with("a fingerprint holds only hexadecimal digits"),
+            "{refused}"
+        );
+        assert!(
+            serde_json::from_str::<BranchKeyFingerprint>(&json).is_err(),
+            "{json} is not a branch key fingerprint"
+        );
+    }
+
     #[test]
     fn canonical_sets_and_ordered_reasons_survive_json_and_rkyv_losslessly() {
         let report = two_operation_report();
@@ -2408,43 +2475,5 @@ mod impact_report_tests {
         let encoded_again = serde_json::to_vec(&restored)
             .assured("every restored report field has a JSON representation");
         assert_eq!(encoded_again, json);
-    }
-
-    #[test]
-    fn lifecycle_effects_remain_explicit_with_no_pause() {
-        let operation = TransactionOperationNumber::from_index(0)
-            .assured("operation one fits every target usize");
-        let effects = ImpactEffects {
-            lifecycle: CanonicalImpactSet::new([
-                DomainLifecycleImpact {
-                    domain: named("tenant"),
-                    action: DomainLifecycleAction::Stop,
-                    attribution: ImpactAttribution::single(operation),
-                },
-                DomainLifecycleImpact {
-                    domain: named("tenant"),
-                    action: DomainLifecycleAction::Start,
-                    attribution: ImpactAttribution::single(operation),
-                },
-            ]),
-            ..ImpactEffects::default()
-        };
-        let planned = PlannedExecutionStepImpact {
-            completeness: ImpactReportCompleteness::Complete,
-            pause: PauseRequirement::NoPause,
-            effects,
-        };
-        assert_eq!(planned.pause.level(), QuiesceLevel::Dynamic);
-        assert_eq!(planned.effects.lifecycle.len(), 2);
-        assert_eq!(
-            planned
-                .effects
-                .lifecycle
-                .as_slice()
-                .iter()
-                .map(|effect| effect.action)
-                .collect::<Vec<_>>(),
-            [DomainLifecycleAction::Start, DomainLifecycleAction::Stop]
-        );
     }
 }

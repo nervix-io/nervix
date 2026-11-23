@@ -37,6 +37,7 @@ pub(super) mod checkpoint_reader;
 mod checkpoint_stream;
 mod durability;
 pub(super) mod generation;
+mod key_segments;
 mod maintenance;
 
 #[cfg(test)]
@@ -72,49 +73,10 @@ mod wasm_properties;
 
 use durability::DurabilityBarrier;
 use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
-pub(crate) use maintenance::DEFAULT_RESTORE_STAGING_MAX_BYTES;
-
-/// The byte that opens the generation segment of a WASM guest state key. A key without it was not
-/// written in the current shape and fails to decode instead of addressing the current lifetime.
-const STATE_GENERATION_KEY_MARKER: u8 = b'g';
-
-/// The byte that opens the pinned model fingerprint segment of an inferencer state key.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the stored inferencer key format prefixes its model with m"
-    )
-)]
-const STATE_MODEL_KEY_MARKER: u8 = b'm';
-
-/// The byte that opens the schema fingerprint segment of every schema-bound state key.
-const STATE_SCHEMA_KEY_MARKER: u8 = b's';
-/// The current key's unit segment. A missing marker is an invalid stored shape.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(fixed, reason = "unit identity is part of the stored key format")
-)]
-const STATE_UNIT_KEY_MARKER: u8 = b'U';
-
-fn append_unit_key(key: &mut Vec<u8>, unit: Unit) {
-    key.push(0);
-    key.push(STATE_UNIT_KEY_MARKER);
-    match unit.kind() {
-        nervix_models::UnitKind::Single => {
-            key.push(0);
-            key.extend_from_slice(&0_u32.to_be_bytes());
-        }
-        nervix_models::UnitKind::Partition(partition) => {
-            key.push(1);
-            key.extend_from_slice(&partition.to_be_bytes());
-        }
-        nervix_models::UnitKind::Instance(instance) => {
-            key.push(2);
-            key.extend_from_slice(&instance.to_be_bytes());
-        }
-    }
-}
+use key_segments::{
+    STATE_GENERATION_KEY_MARKER, STATE_MODEL_KEY_MARKER, STATE_SCHEMA_KEY_MARKER,
+    STATE_UNIT_KEY_MARKER, append_unit_key,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct RuntimeStatePlacement {
@@ -1397,6 +1359,12 @@ impl RuntimeStatePlacement {
     }
 }
 
+/// The options a keyspace of this store is created with. The engine records them on creation
+/// and reuses the recorded memtable size on every later open.
+fn keyspace_options() -> KeyspaceCreateOptions {
+    KeyspaceCreateOptions::default().max_memtable_size(nervix_models::KEYSPACE_MEMTABLE_BYTES)
+}
+
 impl RuntimeStateStore {
     pub(in crate::runtime) fn from_database(
         db: Database,
@@ -1404,31 +1372,22 @@ impl RuntimeStateStore {
         restore_staging_max_bytes: u64,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let latest = db
-            .keyspace("runtime_state_latest", KeyspaceCreateOptions::default)
+            .keyspace("runtime_state_latest", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let lsm_index = db
-            .keyspace("runtime_state_lsm", KeyspaceCreateOptions::default)
+            .keyspace("runtime_state_lsm", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let restore_staging = db
-            .keyspace(
-                "runtime_state_restore_staging",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_restore_staging", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let restore_publications = db
-            .keyspace(
-                "runtime_state_restore_publications",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_restore_publications", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let checkpoint_chunks = db
-            .keyspace(
-                "runtime_state_checkpoint_chunks",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_checkpoint_chunks", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let format = db
-            .keyspace("runtime_state_format", KeyspaceCreateOptions::default)
+            .keyspace("runtime_state_format", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         match format
             .get(b"encoding")
@@ -1459,27 +1418,21 @@ impl RuntimeStateStore {
             }
         }
         let handoff_preparations = db
-            .keyspace(
-                "runtime_state_handoff_preparations",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_handoff_preparations", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let handoff_activations = db
-            .keyspace(
-                "runtime_state_handoff_activations",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_handoff_activations", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let forced_recovery_preparations = db
             .keyspace(
                 "runtime_state_forced_recovery_preparations",
-                KeyspaceCreateOptions::default,
+                keyspace_options,
             )
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let forced_recovery_completions = db
             .keyspace(
                 "runtime_state_forced_recovery_completions",
-                KeyspaceCreateOptions::default,
+                keyspace_options,
             )
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         Ok(Self {

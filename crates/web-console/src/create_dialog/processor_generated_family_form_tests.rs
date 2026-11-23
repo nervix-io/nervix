@@ -684,6 +684,7 @@ fn generated_family_submissions_render_their_canonical_statements() {
                 wasm.binding.file = "processors/filter_even.wasm".into();
                 wasm.max_fuel = "1000000000".into();
                 wasm.max_memory = "64MiB".into();
+                wasm.max_table_elements = "4096".into();
                 wasm.rejected_state = WasmRejectedStatePolicy::Reset;
                 wasm.global_error = Some(GeneralErrorPolicy::Log);
             }
@@ -700,6 +701,7 @@ fn generated_family_submissions_render_their_canonical_statements() {
             "FILE 'processors/filter_even.wasm'",
             "MAX FUEL 1000000000",
             "MAX MEMORY 64MiB",
+            "MAX TABLE ELEMENTS 4096",
             "ON REJECTED STATE RESET",
             "ON GLOBAL ERROR LOG",
         ] {

@@ -502,6 +502,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             limits: WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
                 max_memory_bytes: nonzero!(67_108_864u64),
+                max_table_elements: 4_096,
             },
             global_error_policy: nervix_models::GeneralErrorPolicy::Log,
             rejected_state_policy: Default::default(),
@@ -779,6 +780,8 @@ pub(in crate::application) async fn build_test_service_inner(
             recovered_members: Default::default(),
             interconnect: interconnect.clone(),
             membership: crate::cluster::MembershipSettings::default(),
+            session_notice_capacity: nervix_models::SessionCapabilities::default()
+                .notice_capacity(),
             prerequisites: interconnect.local_prerequisites(),
             fault_injection: Default::default(),
         })
@@ -835,6 +838,11 @@ pub(in crate::application) async fn build_test_service_inner(
                         nervix_arbitrary::Domain::Vocabulary,
                     )
                     .node_connector_host_capabilities(),
+                    membership: nervix_arbitrary::Arbitrary::new(
+                        &[],
+                        nervix_arbitrary::Domain::Vocabulary,
+                    )
+                    .node_membership_capabilities(),
                     listeners: crate::application::listener_settings::ListenerSettings::default()
                         .bounds(),
                     cpu_count: Some(std::num::NonZeroU64::MIN),

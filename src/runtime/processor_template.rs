@@ -783,6 +783,7 @@ impl RelayProcessorTemplate {
                 }
             },
             applied_revision: revision.clone(),
+            remote_ack_timing: runtime.remote_ack_timing().clone(),
         })
     }
 }
@@ -1015,6 +1016,7 @@ impl BranchInstanceTemplate {
         }
         let state = Mutex::new(BranchRuntime {
             key,
+            remote_ack_timing: runtime.remote_ack_timing().clone(),
             runtime: runtime.clone(),
             domain: domain.clone(),
             routing: runtime.domain_routing_cache(domain),
@@ -1215,6 +1217,7 @@ mod tests {
                 limits: WasmProcessorLimits {
                     max_fuel: nonzero!(1_000_000u64),
                     max_memory_bytes: nonzero!(1_048_576u64),
+                    max_table_elements: 4_096,
                 },
                 rejected_state_policy: WasmRejectedStatePolicy::Preserve,
                 compiled: None,

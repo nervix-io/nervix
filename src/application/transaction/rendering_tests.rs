@@ -11,17 +11,16 @@ use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
     CanonicalImpactSet, ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact,
-    ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
-    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
-    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, InspectionFormat,
-    ModelChangeAspect, ModelKind, NodeRef, OperationImpactReason, OperationImpactReport,
-    OwnershipMoveImpact, ParametrizerName, PauseRequirement, PlannedExecutionStepImpact,
-    QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName,
-    RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
-    ResourceName, StatePurge, StateResetImpact, TransactionImpactReport, TransactionInspection,
-    TransactionLifecycle, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition, TransactionStatus,
+    ConfigurationTransition, DomainName, ExecutionStepImpactReport, ExecutionStepOutcome,
+    ForceFlushImpact, ImpactAttribution, ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects,
+    ImpactGateBoundary, ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness,
+    ImpactTopology, InspectionFormat, ModelChangeAspect, ModelKind, NodeRef, OperationImpactReason,
+    OperationImpactReport, OwnershipMoveImpact, ParametrizerName, PauseRequirement,
+    PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
+    RelayName, RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction,
+    ResourceCatalogImpact, ResourceName, StatePurge, StateResetImpact, TransactionImpactReport,
+    TransactionInspection, TransactionLifecycle, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition, TransactionStatus, WasmProcessorName,
 };
 
 use super::InspectionRendering;
@@ -51,12 +50,13 @@ fn step_range(first: usize, last: usize) -> TransactionOperationRange {
         .assured("the fixture ranges are ordered")
 }
 
-/// Two operations applied as one entity-paused step, and a third that starts the domain alone.
+/// Two operations applied as one entity-paused step, and a third that creates a resource alone.
 fn three_operation_report(completeness: ImpactReportCompleteness) -> TransactionImpactReport {
     let schema = node(ModelKind::Schema, "orders");
     let junction = node(ModelKind::Junction, "enrich");
     let paused_step = step_range(1, 2);
-    let lifecycle_step = step_range(3, 3);
+    let catalog_step = step_range(3, 3);
+    let models = resource("models");
     let created = ConfigurationImpact {
         transition: ConfigurationTransition::Created {
             node: schema.clone(),
@@ -123,10 +123,13 @@ fn three_operation_report(completeness: ImpactReportCompleteness) -> Transaction
         },
         OperationImpactReport {
             number: operation(3),
-            operation: TransactionOperation::StartDomain { domain: domain() },
-            execution_step: lifecycle_step,
+            operation: TransactionOperation::CreateResource {
+                domain: domain(),
+                resource: models.clone(),
+            },
+            execution_step: catalog_step,
             completeness: ImpactReportCompleteness::Complete,
-            reasons: vec![OperationImpactReason::DomainStart],
+            reasons: vec![OperationImpactReason::ResourceCatalog { resource: models }],
             contribution: ImpactEffects::default(),
         },
     ];
@@ -145,7 +148,7 @@ fn three_operation_report(completeness: ImpactReportCompleteness) -> Transaction
             ActualExecutionStepImpact::unattempted(),
         ),
         ExecutionStepImpactReport::new(
-            lifecycle_step,
+            catalog_step,
             PlannedExecutionStepImpact {
                 completeness: ImpactReportCompleteness::Complete,
                 pause: PauseRequirement::NoPause,
@@ -217,9 +220,9 @@ fn text_renders_identity_scope_operations_and_steps_in_order() {
         "operation 2: ALTER_CONFIGURATION kind=junction name=enrich",
         "  execution step: 1-2",
         "  reason: CONFIGURATION kind=junction name=enrich aspect=PROCESSOR_ROUTES",
-        "operation 3: START_DOMAIN domain=payments",
+        "operation 3: CREATE_RESOURCE resource=models",
         "  execution step: 3",
-        "  reason: DOMAIN_START",
+        "  reason: RESOURCE_CATALOG resource=models",
         "execution step 1-2: planned ENTITY_PAUSE, actual DYNAMIC, outcome UNATTEMPTED",
         "  pause: SUBGRAPH nodes=1 gates=1",
         "    node kind=junction name=enrich branches=ALL operations=2",
@@ -272,7 +275,7 @@ fn a_selected_operation_leads_with_its_contribution_and_step_without_narrowing_t
     assert!(summary > selected, "the selected operation comes first");
     for rest in [
         "operation 1: CREATE_CONFIGURATION kind=schema name=orders",
-        "operation 3: START_DOMAIN domain=payments",
+        "operation 3: CREATE_RESOURCE resource=models",
         "execution step 3: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED",
     ] {
         assert_eq!(
@@ -303,7 +306,7 @@ fn a_failed_transaction_and_an_incomplete_report_say_so() {
     let mut failed = inspection(
         TransactionLifecycle::Failed {
             failing_operation: operation(3),
-            error: "domain start refused".to_string(),
+            error: "resource creation refused".to_string(),
         },
         2,
         None,
@@ -317,7 +320,7 @@ fn a_failed_transaction_and_an_incomplete_report_say_so() {
         diagnostic: ImpactDiagnostic {
             kind: ImpactDiagnosticKind::Application,
             operation: Some(operation(3)),
-            message: "domain start refused".to_string(),
+            message: "resource creation refused".to_string(),
         },
     };
     let mut recorded = Vec::with_capacity(steps.len());
@@ -340,13 +343,13 @@ fn a_failed_transaction_and_an_incomplete_report_say_so() {
     for expected in [
         "state: FAILED",
         "failing operation: 3",
-        "error: domain start refused",
+        "error: resource creation refused",
         "operations: 3 accepted, 2 applied, 0 pending",
         "report: INCOMPLETE",
         "- kind=TOPOLOGY operation=2 relay 'orders_in' is not yet resolved",
         "execution step 1-2: planned ENTITY_PAUSE, actual DYNAMIC, outcome APPLIED",
         "execution step 3: planned DYNAMIC, actual DYNAMIC, outcome FAILED",
-        "  failure: kind=APPLICATION operation=3 domain start refused",
+        "  failure: kind=APPLICATION operation=3 resource creation refused",
     ] {
         assert!(
             text.lines().any(|line| line == expected),
@@ -389,7 +392,7 @@ fn json_names_a_failure_inline_and_an_unselected_operation_as_null() {
     let inspection = inspection(
         TransactionLifecycle::Failed {
             failing_operation: operation(3),
-            error: "domain start refused".to_string(),
+            error: "resource creation refused".to_string(),
         },
         2,
         None,
@@ -402,7 +405,10 @@ fn json_names_a_failure_inline_and_an_unselected_operation_as_null() {
 
     assert_eq!(document["transaction"]["state"], "FAILED");
     assert_eq!(document["transaction"]["failing_operation"], 3);
-    assert_eq!(document["transaction"]["error"], "domain start refused");
+    assert_eq!(
+        document["transaction"]["error"],
+        "resource creation refused"
+    );
     assert!(document["operation"].is_null());
 }
 
@@ -437,6 +443,7 @@ fn every_kind_report() -> TransactionImpactReport {
     let dropped = relay_node("retired_events");
     let rebound = node(ModelKind::Inferencer, "score");
     let enrich = node(ModelKind::Junction, "enrich");
+    let guest = node(ModelKind::WasmProcessor, "guest");
     let bundle = resource("bundle");
     let selected = ConcreteBranchCoverage::selected(
         parametrizer("tenant"),
@@ -463,10 +470,16 @@ fn every_kind_report() -> TransactionImpactReport {
         },
         OperationImpactReport {
             number: operation(2),
-            operation: TransactionOperation::StopDomain { domain: domain() },
+            operation: TransactionOperation::ResetWasmState {
+                domain: domain(),
+                processor: WasmProcessorName::parse("guest")
+                    .assured("the fixture processor name is an accepted literal"),
+            },
             execution_step: step_range(2, 2),
             completeness: ImpactReportCompleteness::Complete,
-            reasons: vec![OperationImpactReason::DomainStop],
+            reasons: vec![OperationImpactReason::WasmStateReset {
+                node: guest.clone(),
+            }],
             contribution: ImpactEffects::default(),
         },
         OperationImpactReport {
@@ -554,10 +567,10 @@ fn every_kind_report() -> TransactionImpactReport {
         }]),
         ..ImpactEffects::default()
     };
-    let lifecycle_effects = ImpactEffects {
-        lifecycle: CanonicalImpactSet::new([DomainLifecycleImpact {
-            domain: domain(),
-            action: DomainLifecycleAction::Stop,
+    let reset_effects = ImpactEffects {
+        state_resets: CanonicalImpactSet::new([StateResetImpact {
+            node: ImpactNodeCoverage::all_executions(guest),
+            state: StatePurge::WasmGuestState,
             attribution: ImpactAttribution::single(operation(2)),
         }]),
         ..ImpactEffects::default()
@@ -624,7 +637,7 @@ fn every_kind_report() -> TransactionImpactReport {
         ),
         ExecutionStepImpactReport::new(
             step_range(2, 2),
-            planned(domain_pause, lifecycle_effects),
+            planned(domain_pause, reset_effects),
             uncertain,
         ),
         ExecutionStepImpactReport::new(
@@ -670,8 +683,8 @@ fn text_names_every_operation_reason_effect_and_outcome() {
         "operation 1: DROP_CONFIGURATION kind=relay name=retired_events",
         "  incomplete: kind=PLANNING operation=1 the prefix is still being planned",
         "  reason: CONFIGURATION kind=relay name=retired_events aspect=RELAY_SCHEMA",
-        "operation 2: STOP_DOMAIN domain=payments",
-        "  reason: DOMAIN_STOP",
+        "operation 2: RESET_WASM_STATE domain=payments processor=guest",
+        "  reason: WASM_STATE_RESET kind=wasm_processor name=guest",
         "operation 3: CREATE_RESOURCE resource=bundle",
         "  reason: RESOURCE_CATALOG resource=bundle",
         "operation 4: REBIND_RESOURCE resource=bundle version=3 requested=LATEST",
@@ -691,7 +704,8 @@ fn text_names_every_operation_reason_effect_and_outcome() {
         "  effect: force flush kind=junction name=enrich operations=1",
         "  quiescence: DOMAIN domain=payments REQUESTED, CONFIRMED, RELEASED",
         "execution step 2: planned DOMAIN_PAUSE, actual DOMAIN_PAUSE, outcome APPLYING",
-        "  effect: lifecycle STOP domain=payments operations=2",
+        "  effect: state reset WASM_GUEST_STATE kind=wasm_processor name=guest branches=ALL \
+         operations=2",
         "  quiescence: DOMAIN domain=payments UNCERTAIN (leadership changed)",
         "execution step 3: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED",
         "  effect: resource CREATE resource=bundle operations=3",

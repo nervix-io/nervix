@@ -16,7 +16,8 @@ use nervix_primitives::time::Instant;
 
 use super::{DEADLINE, Loopback, domain, opened_reply, orders_schema, subscription};
 use crate::{
-    SubscriptionEvent, SubscriptionLifecycle, SubscriptionRequest, SubscriptionRestorationCause,
+    ConnectOptions, SubscriptionEvent, SubscriptionLifecycle, SubscriptionRequest,
+    SubscriptionRestorationCause, connection::ServerDirectory,
 };
 
 fn name(value: &str) -> SubscriptionName {
@@ -305,6 +306,80 @@ async fn a_refused_restoration_is_repeated_after_a_growing_delay() {
             Duration::from_secs(4)
         ],
         "each report names the wait before the next attempt"
+    );
+
+    let restore = loopback.next_request().await;
+    loopback
+        .answer(restore.request_id, opened_reply(subscription("live", 2)))
+        .await;
+    loopback
+        .wait_for_lifecycle(
+            "live",
+            Some(SubscriptionLifecycle::Active(subscription("live", 2))),
+        )
+        .await;
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_refused_restoration_waits_from_the_configured_backoff_up_to_its_ceiling() {
+    let options = ConnectOptions {
+        restoration_backoff: Duration::from_millis(250),
+        restoration_max_backoff: Duration::from_millis(400),
+        ..ConnectOptions::default()
+    };
+    let mut loopback =
+        Loopback::configured(Some(domain("tenant")), ServerDirectory::default(), options);
+    loopback.open("live", 1).await;
+    loopback.replace_exchange().await;
+    let interrupted = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the lost session reports the subscription's gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+
+    let mut sent_at = Vec::new();
+    let mut reported_waits = Vec::new();
+    for _ in 0..3 {
+        let restore = loopback.next_request().await;
+        assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
+        sent_at.push(Instant::now());
+        loopback
+            .answer(
+                restore.request_id,
+                refused(
+                    SubscriptionRefusal::Unavailable,
+                    "relay 'orders' is starting",
+                ),
+            )
+            .await;
+        let reported = loopback
+            .client
+            .next_subscription()
+            .await
+            .assured("the refused restoration is reported");
+        let SubscriptionEvent::RestorationFailed(failure) = reported else {
+            panic!("a refused restoration is reported as such: {reported:?}");
+        };
+        reported_waits.push(failure.retry_after);
+    }
+    let mut intervals = Vec::new();
+    for pair in sent_at.windows(2) {
+        intervals.push(pair[1].duration_since(pair[0]));
+    }
+    assert_eq!(
+        intervals,
+        [Duration::from_millis(250), Duration::from_millis(400)],
+        "the waits start at the configured backoff and stop at the configured ceiling"
+    );
+    assert_eq!(
+        reported_waits,
+        [
+            Duration::from_millis(250),
+            Duration::from_millis(400),
+            Duration::from_millis(400)
+        ],
+        "each report names the configured wait before the next attempt"
     );
 
     let restore = loopback.next_request().await;

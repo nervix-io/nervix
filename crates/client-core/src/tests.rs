@@ -19,6 +19,8 @@ mod foreign_execution;
 #[cfg(not(feature = "shuttle"))]
 mod host_stack;
 #[cfg(not(feature = "shuttle"))]
+mod leader_routing;
+#[cfg(not(feature = "shuttle"))]
 mod progress;
 #[cfg(not(feature = "shuttle"))]
 mod reply_kind;
@@ -78,7 +80,7 @@ use crate::{
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
         EventQueue, EventQueueError, EventTargets, Exchange, ExchangeReader, ExchangeRequests,
-        PendingReplies, ReaderFlow, SERVER_NOTICE_BYTES, SESSION_LIMITS, SessionEvents,
+        PendingReplies, ReaderFlow, SESSION_LIMITS, SessionEvents,
     },
     outcome::Routing,
     split_query_statements,
@@ -329,8 +331,19 @@ fn client_reaching(
     session_domain: Option<DomainName>,
     servers: ServerDirectory,
 ) -> Client {
-    let connector = GrpcConnector::new(ConnectOptions::default())
-        .assured("options without credentials build no authorization metadata");
+    client_configured(exchange, session_domain, servers, ConnectOptions::default())
+}
+
+/// A client on `exchange` with the capabilities `options` select, which reopens a lost session on
+/// the servers `servers` knows.
+fn client_configured(
+    exchange: Exchange,
+    session_domain: Option<DomainName>,
+    servers: ServerDirectory,
+    options: ConnectOptions,
+) -> Client {
+    let connector = GrpcConnector::new(options)
+        .assured("test options validate and carry no credentials to build metadata from");
     let emitters = exchange.emitters.clone();
     let events = SessionEvents {
         leadership: emitters.leadership.subscribe(),
@@ -375,16 +388,29 @@ impl Loopback {
     }
 
     fn reaching(session_domain: Option<DomainName>, servers: ServerDirectory) -> Self {
+        Self::configured(session_domain, servers, ConnectOptions::default())
+    }
+
+    /// A loopback whose client, and the event queues its exchange routes to, take the
+    /// capabilities `options` select.
+    fn configured(
+        session_domain: Option<DomainName>,
+        servers: ServerDirectory,
+        options: ConnectOptions,
+    ) -> Self {
+        let capabilities = crate::ClientCapabilities::from_options(&options)
+            .assured("the test's connection capabilities validate");
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let client = client_reaching(
+        let client = client_configured(
             detached_exchange(
                 frames,
                 pending.clone(),
-                SessionEvents::new(crate::ClientCapabilities::default()).emitters,
+                SessionEvents::new(capabilities).emitters,
             ),
             session_domain,
             servers,
+            options,
         );
         Self {
             client,
@@ -448,7 +474,10 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
             .assured("default subscription byte bounds fit")
             .1,
     );
-    let notices = EventQueue::new(capacity, SERVER_NOTICE_BYTES);
+    let notices = EventQueue::new(
+        capacity,
+        crate::ClientCapabilities::default().notice_bytes().get(),
+    );
     let (leadership, observed_leadership) = watch::channel(None);
     let (domains, observed_domains) = watch::channel(None);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
@@ -2826,7 +2855,12 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
     };
     let notices = &client.inner.events.emitters.notices;
     notices.push(&generation, notice("dropped"), 1);
-    notices.push(&generation, notice("too large"), SERVER_NOTICE_BYTES + 1);
+    let too_large = crate::ClientCapabilities::default()
+        .notice_bytes()
+        .get()
+        .checked_add(1)
+        .assured("one byte above the default notice bound fits usize");
+    notices.push(&generation, notice("too large"), too_large);
     notices.push(&generation, notice("after the gap"), 1);
 
     let gap = client
@@ -2847,6 +2881,58 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
         .await
         .assured("the notice after the gap is returned");
     assert_eq!(after, notice("after the gap"));
+}
+
+#[nervix_primitives::test]
+async fn the_configured_notice_bounds_each_drop_the_held_notices_and_leave_a_gap() {
+    let notice = |message: &str| ServerEvent {
+        level: NoticeLevel::Warning,
+        kind: NoticeKind::Runtime,
+        message: message.to_string(),
+        error: None,
+    };
+    // Each notice below is charged 100 bytes: two fit the record bound well within the byte bound.
+    let charge = 100;
+    let options = ConnectOptions {
+        notice_capacity: NonZeroUsize::new(2).assured("two is positive"),
+        notice_bytes: NonZeroUsize::new(1_000).assured("a thousand is positive"),
+        ..ConnectOptions::default()
+    };
+    let capabilities = crate::ClientCapabilities::from_options(&options)
+        .assured("the configured notice bounds validate");
+    let events = SessionEvents::new(capabilities);
+    let generation = events
+        .emitters
+        .begin_generation(&SESSION_LIMITS)
+        .assured("the configured retention fits the fixture session");
+    let notices = &events.emitters.notices;
+
+    notices.push(&generation, notice("first"), charge);
+    notices.push(&generation, notice("second"), charge);
+    notices.push(&generation, notice("beyond the record bound"), charge);
+    notices.push(&generation, notice("after the record gap"), charge);
+    let Err(gap) = notices.next().await else {
+        panic!("a notice beyond the configured record bound leaves a gap");
+    };
+    assert_eq!(gap.current_context(), &EventQueueError::Overflow);
+    let after = notices
+        .next()
+        .await
+        .assured("the notice after the record gap is returned");
+    assert_eq!(after, notice("after the record gap"));
+
+    notices.push(&generation, notice("held"), charge);
+    notices.push(&generation, notice("beyond the byte bound"), 1_001);
+    notices.push(&generation, notice("after the byte gap"), charge);
+    let Err(gap) = notices.next().await else {
+        panic!("a notice beyond the configured byte bound leaves a gap");
+    };
+    assert_eq!(gap.current_context(), &EventQueueError::Overflow);
+    let after = notices
+        .next()
+        .await
+        .assured("the notice after the byte gap is returned");
+    assert_eq!(after, notice("after the byte gap"));
 }
 
 #[cfg(feature = "autocomplete")]

@@ -20,21 +20,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
-    TransactionActivity, TransactionCommandResult, TransactionCommitAdmissionFailure,
-    TransactionCommitAdmissionPlan, TransactionCommitAdvance, TransactionDiagnostic,
-    TransactionMutationError, TransactionOutcome, TransactionReportArchive,
+    CommandExecutionTransactionOperation, ConsensusError, ConsensusTransactionError,
+    DomainPlanningInputs, ReplicatedTransaction, TransactionActivity, TransactionCommandResult,
+    TransactionCommitAdmissionFailure, TransactionCommitAdmissionPlan, TransactionCommitAdvance,
+    TransactionDiagnostic, TransactionMutationError, TransactionOutcome, TransactionReportArchive,
     TransactionScheduleEligibility, TransactionState, TransactionStatementRequest,
     TransactionStepEffect, TransactionStepResult,
 };
 use nervix_execution::QueueAdmission;
 use nervix_models::{
-    CanonicalImpactSet, CommandExecutionReference, DomainName, DomainSchedule, DomainState,
-    DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage, ImpactPlanningBasis, Model,
-    ModelIndex, OwnershipMoveImpact, ResourceId, ResourceName, ResourceUploads, Statement,
-    TransactionCommitStepKind, TransactionOperationAdmission, TransactionOperationNumber,
-    TransactionPosition, TransactionPreviewIdentity, TransactionResolvedDomainStart,
-    TransactionStatus, UserName,
+    CanonicalImpactSet, CommandExecutionReference, DomainLifecycleCommand, DomainName,
+    DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage,
+    ImpactPlanningBasis, Model, ModelIndex, OwnershipMoveImpact, ResourceId, ResourceName,
+    ResourceUploads, Statement, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionPosition, TransactionPreviewIdentity, TransactionStatus, UserName,
 };
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::sync::{
@@ -56,13 +55,10 @@ use super::{
     session_service::SessionServiceImpl,
     subscription::{PendingSessionCommand, SessionBinding, SessionSubscriptions},
 };
-use crate::{
-    registry::{
-        PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind, Registry,
-        RegistryError, TransactionPlanningError, TransactionPlanningSnapshot,
-        TransactionScheduleDecision,
-    },
-    runtime::RuntimeError,
+use crate::registry::{
+    PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind, Registry,
+    RegistryError, TransactionPlanningError, TransactionPlanningSnapshot,
+    TransactionScheduleDecision,
 };
 
 mod application;
@@ -259,11 +255,6 @@ fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> S
 pub(in crate::application) enum TransactionCommitError {
     #[error("transaction consensus proposal failed")]
     Proposal,
-    #[error(
-        "START of domain '{domain}' in transaction '{id}' cannot place its units under the node \
-         rules this transaction changes; commit the change first, then START"
-    )]
-    StartNodeRules { id: String, domain: DomainName },
     #[error("transaction '{id}' is unknown")]
     UnknownTransaction { id: String },
     #[error("transaction '{id}' is still open")]
@@ -284,13 +275,6 @@ pub(in crate::application) enum TransactionCommitError {
     PreparePlan { id: String },
     #[error("failed to archive the complete commit report for transaction '{id}'")]
     ArchiveReport { id: String },
-    #[error("failed to resolve the domain start at operation {operation} for transaction '{id}'")]
-    PrepareDomainStart {
-        id: String,
-        operation: TransactionOperationNumber,
-    },
-    #[error("transaction '{id}' cannot start paced domain '{domain}' without a live clock voter")]
-    PrepareClockAuthority { id: String, domain: DomainName },
     #[error("transaction '{id}' commit was cancelled because the node's shutdown deadline passed")]
     ShutdownCancelled { id: String },
 }
@@ -659,11 +643,60 @@ pub(in crate::application) fn is_queueable_transaction_statement(statement: &Sta
             if matches!(edit.entity, nervix_models::EntityLabelTarget::Resource(_)))
         || matches!(
             statement,
-            Statement::StartDomain(_)
-                | Statement::StopDomain(_)
-                | Statement::CreateResource(_)
-                | Statement::ResetWasmState(_)
+            Statement::CreateResource(_) | Statement::ResetWasmState(_)
         )
+}
+
+/// Why a transaction does not queue a statement.
+#[derive(Debug, Error)]
+pub(in crate::application) enum TransactionQueueRefusal {
+    /// `START` and `STOP` switch the domain's processing on or off and change no configuration.
+    #[error(
+        "{command} cannot be queued in a transaction; START and STOP run on their own, after \
+         COMMIT"
+    )]
+    DomainLifecycle { command: DomainLifecycleCommand },
+    /// A statement that is no configuration statement of the transaction's domain.
+    #[error(
+        "{statement} cannot be queued in a transaction; a transaction applies to one existing \
+         domain and queues only that domain's configuration statements"
+    )]
+    Unqueueable { statement: String },
+}
+
+impl TransactionQueueRefusal {
+    /// Why a transaction does not queue `statement`, absent when it queues it.
+    pub(in crate::application) fn of(statement: &Statement) -> Option<Self> {
+        if let Some(command) = statement.domain_lifecycle_command() {
+            return Some(Self::DomainLifecycle { command });
+        }
+        if is_queueable_transaction_statement(statement) {
+            return None;
+        }
+        Some(Self::Unqueueable {
+            statement: transaction_statement_label(statement).to_owned(),
+        })
+    }
+
+    /// The refusal as a durable request records it, so a replay refuses the statement again
+    /// without retaining its source or Model.
+    pub(in crate::application) fn durable_operation(self) -> CommandExecutionTransactionOperation {
+        match self {
+            Self::DomainLifecycle { command } => {
+                CommandExecutionTransactionOperation::RefuseDomainLifecycle { command }
+            }
+            Self::Unqueueable { statement } => {
+                CommandExecutionTransactionOperation::RefuseUnqueueable {
+                    statement_label: statement,
+                }
+            }
+        }
+    }
+
+    /// The definitive failure the refused statement answers with.
+    pub(in crate::application) fn answer(self) -> CommandResult {
+        command_error(format!("{:#}", Report::new(self)))
+    }
 }
 
 pub(in crate::application) fn transaction_statement_label(statement: &Statement) -> &'static str {
@@ -1107,6 +1140,11 @@ impl SessionServiceImpl {
             .inputs
             .state()
             .assured("the planner verified that the captured domain exists");
+        let parameters = captured
+            .inputs
+            .parameters()
+            .verified("the planner refused a capture without a committed parameter record")
+            .values;
         let plan = &captured.plan;
         for step in plan.steps() {
             nervix_primitives::task::consume_budget().await;
@@ -1126,7 +1164,7 @@ impl SessionServiceImpl {
             .change_context(TransactionPlanningError::ExternalModelValidation {
                 operation: step.impact.operations().first(),
             })?;
-            self.prepare_planned_domain_udfs(planned)
+            self.prepare_planned_domain_udfs(planned, &parameters)
                 .await
                 .change_context(TransactionPlanningError::UdfPreparation {
                     operation: step.impact.operations().first(),
@@ -1154,26 +1192,6 @@ impl SessionServiceImpl {
                 .collect(),
             None => Default::default(),
         };
-        if let Some(execution) = &control.restore_installation
-            && statements
-                .iter()
-                .any(|statement| matches!(statement, Statement::StartDomain(_)))
-        {
-            return Err(Report::new(TransactionPlanningError::RestoreInstallation {
-                domain: domain.clone(),
-                execution: execution.clone(),
-            }));
-        }
-        if let Some(reason) = control.licensing_stop
-            && statements
-                .iter()
-                .any(|statement| matches!(statement, Statement::StartDomain(_)))
-        {
-            return Err(Report::new(TransactionPlanningError::LicensingStop {
-                domain: domain.clone(),
-                reason,
-            }));
-        }
         let schedule_inputs = self
             .capture_domain_schedule_planning_snapshot(&control.planning_inputs)
             .await;
@@ -1265,9 +1283,7 @@ impl SessionServiceImpl {
             PlannedTransactionStepKind::CreateResource {
                 already_existed, ..
             } => *already_existed,
-            PlannedTransactionStepKind::StartDomain { .. }
-            | PlannedTransactionStepKind::StopDomain
-            | PlannedTransactionStepKind::EditResourceLabels { .. }
+            PlannedTransactionStepKind::EditResourceLabels { .. }
             | PlannedTransactionStepKind::ResetWasmState { .. } => false,
         };
         let impact = plan
@@ -1417,74 +1433,6 @@ impl SessionServiceImpl {
                 .change_context(TransactionCommitError::PreparePlan {
                     id: transaction.id.clone(),
                 })?;
-        let mut resolved_starts = BTreeMap::new();
-        // The graph and schedule the latest model step of this transaction leaves, which a START
-        // after it starts. A START no model step precedes was placed against the committed state.
-        let mut changed = None;
-        for step in captured.plan.steps() {
-            nervix_primitives::task::consume_budget().await;
-            if let PlannedTransactionStepKind::Models { plan } = &step.kind {
-                changed = Some((
-                    plan.planned
-                        .as_ref()
-                        .and_then(crate::registry::PlannedMutations::candidate_graph),
-                    plan.schedule.clone(),
-                ));
-                continue;
-            }
-            let PlannedTransactionStepKind::StartDomain { previous } = &step.kind else {
-                continue;
-            };
-            if let Some((Some(graph), Some(schedule))) = &changed {
-                self.refuse_start_breaking_node_rules(&transaction.domain, graph, schedule)
-                    .await
-                    .change_context(TransactionCommitError::StartNodeRules {
-                        id: transaction.id.clone(),
-                        domain: transaction.domain.clone(),
-                    })?;
-            }
-            let operation = step.impact.operations().first();
-            let statement_index = step.impact.operations().first_index();
-            let queued = transaction.statements.get(statement_index).ok_or_else(|| {
-                Report::new(TransactionCommitError::InvalidProgress {
-                    id: transaction.id.clone(),
-                })
-            })?;
-            let Statement::StartDomain(start) = &queued.statement else {
-                return Err(Report::new(TransactionCommitError::InvalidProgress {
-                    id: transaction.id.clone(),
-                }));
-            };
-            let authority = if previous.config.pace.is_paced() {
-                Some(
-                    self.selected_domain_clock_authority(&transaction.domain)
-                        .await
-                        .ok_or_else(|| {
-                            Report::new(TransactionCommitError::PrepareClockAuthority {
-                                id: transaction.id.clone(),
-                                domain: transaction.domain.clone(),
-                            })
-                        })?,
-                )
-            } else {
-                None
-            };
-            let resolved = self
-                .resolve_domain_start(&transaction.domain, previous, &start.start)
-                .await
-                .change_context(TransactionCommitError::PrepareDomainStart {
-                    id: transaction.id.clone(),
-                    operation,
-                })?;
-            resolved_starts.insert(
-                operation,
-                TransactionResolvedDomainStart {
-                    start: resolved.concrete_start,
-                    clock: previous.config.pace.is_paced().then_some(resolved.clock),
-                    authority,
-                },
-            );
-        }
         captured
             .schedule_inputs
             .validate_eligibility(self)
@@ -1504,11 +1452,9 @@ impl SessionServiceImpl {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let commit_plan = captured.plan.commit_plan(
-            transaction.id.clone(),
-            &ownership_transition_ids,
-            &resolved_starts,
-        );
+        let commit_plan = captured
+            .plan
+            .commit_plan(transaction.id.clone(), &ownership_transition_ids);
         let eligibility = captured.schedule_inputs.transaction_eligibility();
         let commit_plan =
             TransactionCommitAdmissionPlan::capture(commit_plan, captured.inputs, eligibility)
@@ -1697,13 +1643,6 @@ impl SessionServiceImpl {
         let Some(current) = self.inner.consensus.current_transaction(&id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
-        // A START of a stopped domain first places every unit its node rules constrain, and waits,
-        // holding the transaction's mutation lease, while some unit has no node they admit.
-        if let TransactionState::Open(_) = &current.state
-            && let Err(error) = self.place_units_for_start(&current).await
-        {
-            return self.start_placement_refusal(error).await;
-        }
         let started = match &current.state {
             TransactionState::Open(_) => match self.prepare_transaction_commit(&current).await {
                 Ok(prepared) => {
@@ -1932,12 +1871,6 @@ impl SessionServiceImpl {
                 })
             })?;
             let stored_impact = stored_step.decision.impact.clone();
-            let admitted_kind = stored_step.decision.kind.clone();
-            let previous = stored_step.inputs.state().cloned().ok_or_else(|| {
-                Report::new(TransactionCommitError::InvalidProgress {
-                    id: transaction.id.clone(),
-                })
-            })?;
             let expected_schedule = stored_step.inputs.schedule().cloned();
             let current_models = self
                 .inner
@@ -1946,7 +1879,6 @@ impl SessionServiceImpl {
             let planned_step = match Registry::restore_transaction_commit_step(
                 &transaction.domain,
                 current_models,
-                previous,
                 expected_schedule,
                 stored_step.decision,
             ) {
@@ -2080,7 +2012,6 @@ impl SessionServiceImpl {
                 first_statement,
                 planned_step,
                 stored_step.inputs,
-                admitted_kind,
             ))
             .await?;
             if matches!(advanced.state, TransactionState::Finished(_)) {
@@ -2269,7 +2200,6 @@ impl SessionServiceImpl {
         statement_index: usize,
         planned_step: PlannedTransactionStep,
         inputs: DomainPlanningInputs,
-        admitted_kind: TransactionCommitStepKind,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         transaction.statements.get(statement_index).verified(
             "the caller checked this index against the same statement list before dispatching the \
@@ -2278,10 +2208,6 @@ impl SessionServiceImpl {
         let impact = planned_step.impact;
         let actual = TransactionStepImpactRecorder::new(&impact);
         let planned_kind = planned_step.kind;
-        let resolved_start = match admitted_kind {
-            TransactionCommitStepKind::StartDomain { resolved, .. } => Some(resolved),
-            _ => None,
-        };
         let domain_id = &transaction.domain;
         let (result, effect) = match planned_kind {
             PlannedTransactionStepKind::CreateResource {
@@ -2318,39 +2244,6 @@ impl SessionServiceImpl {
                     labels,
                 }),
             ),
-            PlannedTransactionStepKind::StartDomain { .. } => {
-                let resolved = resolved_start
-                    .verified("a restored START step retains its exact admitted clock decision");
-                (
-                    command_ok(format!("starting domain '{}'", domain_id.as_str())),
-                    Some(TransactionStepEffect::StartDomain {
-                        inputs: Box::new(inputs),
-                        start: resolved.start,
-                        clock: resolved.clock,
-                        authority: resolved.authority,
-                    }),
-                )
-            }
-            PlannedTransactionStepKind::StopDomain => {
-                let limit = match transaction
-                    .statements
-                    .get(statement_index)
-                    .map(|statement| &statement.statement)
-                {
-                    Some(Statement::StopDomain(stop)) => stop.wait_limit,
-                    _ => None,
-                };
-                (
-                    command_ok(format!("stopped domain '{}'", domain_id.as_str())),
-                    Some(TransactionStepEffect::StopDomain {
-                        inputs: Box::new(inputs),
-                        request: Box::new(nervix_models::OperatorStopRequest {
-                            requested_at: current_timestamp(),
-                            limit,
-                        }),
-                    }),
-                )
-            }
             PlannedTransactionStepKind::ResetWasmState {
                 reset,
                 request,
@@ -2363,9 +2256,9 @@ impl SessionServiceImpl {
                 )),
                 Some(TransactionStepEffect::ResetWasmState {
                     inputs: Box::new(inputs),
-                    reset: Box::new(reset),
+                    reset,
                     request,
-                    schedule: Box::new(schedule),
+                    schedule,
                 }),
             ),
             PlannedTransactionStepKind::Models { .. } => {
@@ -2447,11 +2340,7 @@ impl SessionServiceImpl {
                 ));
             }
             if let Some(error) = activation_error
-                && !matches!(
-                    error.current_context(),
-                    RuntimeError::RuntimeRevisionPreparation { .. }
-                        | RuntimeError::RuntimeRevisionReadiness { .. }
-                )
+                && !error.current_context().waits_for_readiness()
             {
                 application_failure = Some(format!(
                     "transaction '{}' committed step {}, but runtime activation did not complete: \
@@ -2496,19 +2385,6 @@ impl SessionServiceImpl {
                 .is_err()
         {
             return Ok(advanced);
-        }
-        // A STOP step's effect only began, or joined, the domain's stop. The step applies until
-        // that stop ends, as when a later attempt resumes it, so the steps after it run against
-        // the stopped domain they were planned for.
-        if succeeded
-            && application_failure.is_none()
-            && let TransactionState::Committing(progress) = &advanced.state
-            && let Some(applying) = &progress.applying
-            && let Some(TransactionStepEffect::StopDomain { inputs, request }) = &applying.effect
-        {
-            application_failure =
-                Box::pin(self.wait_for_transaction_stop(&advanced, applying, inputs, request))
-                    .await;
         }
         self.record_transaction_application_completion(
             &advanced,

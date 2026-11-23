@@ -385,6 +385,21 @@ The schedule classifier retains Model-based change-aspect and quiescence decisio
 registry. The runtime receives typed dynamic values, affected node identities, state purges,
 and gate relays. It does not reclassify the new schedule.
 
+The force flush of an entity swap covers the domain's full current execution graph, as engaging any
+entity gate does ([Transaction Quiescence](transaction-quiescence.md)), on every node that applies
+the swap, including a node whose own units the change leaves in place. A failover or forced
+recovery that moves a relay off a node that stopped answering is such a swap: once its gates are
+quiescent, every node that applies it sends what its routes hold, whatever their `FLUSH EACH`
+cadence. When the moved relay is one output of a junction on a node that stays live, a row the
+junction's other route holds therefore leaves when that node applies the recovery, before the
+route's cadence. The flush sends it once, in its own branch, and loses nothing. When the row's
+copy for the moved relay was delivered before its owner stopped answering, a source waiting for
+the row's acknowledgement hears that it completed. A copy that the lost owner still held follows
+failover's at-least-once rule instead ([Planned Ownership Handoffs And
+Failover](control-plane.md#planned-ownership-handoffs-and-failover)). A route's flush is an upper
+bound only ([Plexus Overview](plexus-overview.md#statement-catalog)), so this early delivery is the
+contract, not a loss.
+
 An entity swap that fails on a node never rebuilds the domain there. The swap records each part of
 the running execution it stops, replaces or starts, before the operation that can fail after it.
 When a later step fails, it puts the previous execution back, last change first, while the

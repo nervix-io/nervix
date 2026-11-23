@@ -31,12 +31,17 @@ pub use settings::{
     DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout, TaskGracePeriod,
 };
 
-pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = nervix_models::DrainTimeout::DEFAULT;
-/// How long a shutdown may take from its first stop request until the process exits. It covers
-/// the default drain timeout and leaves the rest to the services that stop after the drain.
-pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = nervix_models::ShutdownTimeout::DEFAULT;
+/// The drain timeout's default, which the application's argument tests compare with.
+#[cfg(test)]
+pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = DrainTimeout::DEFAULT;
+/// The shutdown timeout's default, which the application's argument tests compare with.
+#[cfg(test)]
+pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = ShutdownTimeout::DEFAULT;
+// The default shutdown timeout, how long a shutdown may take from its first stop request until the
+// process exits, covers the default drain timeout and leaves the rest to the services that stop
+// after the drain.
 const _: () = assert!(
-    DEFAULT_DRAIN_TIMEOUT.as_nanos() < DEFAULT_SHUTDOWN_TIMEOUT.as_nanos(),
+    DrainTimeout::DEFAULT.as_nanos() < ShutdownTimeout::DEFAULT.as_nanos(),
     "the default shutdown timeout must leave terminal teardown time after the default drain"
 );
 
@@ -252,10 +257,8 @@ impl std::fmt::Debug for ShutdownCoordinator {
 
 impl Default for ShutdownCoordinator {
     fn default() -> Self {
-        Self::new(
-            DEFAULT_SHUTDOWN_TIMEOUT,
-            ShutdownSettings::default().task_grace_period(),
-        )
+        let settings = ShutdownSettings::default();
+        Self::new(settings.shutdown_timeout(), settings.task_grace_period())
     }
 }
 

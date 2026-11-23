@@ -1126,13 +1126,13 @@ impl BranchSnapshotCodec for WindowSnapshotCodec {
 mod tests {
     use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
     use meticulous::ResultExt as _;
-    use nervix_models::ParseAsType;
+    use nervix_models::{ParseAsType, SettingDefinition as _};
 
     use super::*;
     use crate::{
         runtime::{
-            WindowArgumentColumns, test_schema, window_checkpoint_cases::WindowCheckpointCase,
-            window_plan,
+            RestoreStagingMaxBytes, WindowArgumentColumns, test_schema,
+            window_checkpoint_cases::WindowCheckpointCase, window_plan,
         },
         runtime_schema::{
             CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue,
@@ -2084,7 +2084,7 @@ mod tests {
         let store = RuntimeStateStore::from_database(
             database,
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .assured("the state store opens");
         assert_eq!(

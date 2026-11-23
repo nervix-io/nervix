@@ -38,6 +38,8 @@ mod restore_stream;
 )]
 mod tests;
 
+use std::time::Duration;
+
 use error_stack::Report;
 use leptos::{ev, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -66,6 +68,32 @@ use crate::{
     command_execution_reference, command_outcome_lines, request_handoff::RequestSender,
     transaction_inspector::ImpactReportView, transaction_is_active,
 };
+
+/// How long a download waits for its next frame, and a restore for its connection to take a
+/// chunk or for its reply once the last chunk was sent, before the call counts as stalled.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long a frame may take depends on the network and the cluster, and the \
+                  console has no settings carrier yet; it stays fixed until its repair task serves \
+                  it with the session opening https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
+const FRAME_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The pause before a download starts again from its first byte, and before a restore is streamed
+/// again.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long a retry should wait depends on the network and the cluster, and the \
+                  console has no settings carrier yet; it stays fixed until its repair task serves \
+                  it with the session opening https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
+const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// The two forms of the dialog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

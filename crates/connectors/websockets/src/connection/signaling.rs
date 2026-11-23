@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Compiled wire formats and ordered jaq clauses, handshake state and timeout, frame
-//!   encoding and matching, accepted-data delivery through the caller's connector, and typed
-//!   peer-Close and stream-end outcomes with the peer's status and reason retained.
+//!   encoding and matching, the bound a caller sets on the messages a session sends,
+//!   accepted-data delivery through the caller's connector, and typed peer-Close and stream-end
+//!   outcomes with the peer's status and reason retained.
 //! - **Depends on.** The connector contract, typed signaling plans and host services, vocabulary
 //!   values, jaq, protobuf reflection, execution primitives, WebSocket transport, and contextual errors.
 //! - **Must not know.** Configuration Models, Plexus, registry or resource-store state, graph
@@ -39,6 +40,15 @@ use tokio_tungstenite::{
 };
 
 /// How much of a rejection value is carried into the failure reason.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual has a signaling rejection's reason quote at most 512 bytes \
+                  of the peer-chosen FAIL JAQ value, cut on a character boundary, so a peer \
+                  cannot grow the diagnostic without bound"
+    )
+)]
 const MAX_REJECTION_REASON_BYTES: usize = 512;
 
 type SignalingFrameEncodeResult<T> = Result<T, Report<SignalingFrameEncodeError>>;
@@ -234,6 +244,12 @@ pub enum WebsocketSignalingError {
         index: usize,
         format: &'static str,
         reason: String,
+    },
+    #[error("SEND JAQ program #{index} encodes {bytes} bytes, above max_message_size {maximum}")]
+    SendTooLarge {
+        index: usize,
+        bytes: usize,
+        maximum: usize,
     },
     #[error("signaling rejected by FAIL JAQ matcher '{matcher}': {reason}")]
     Rejected { matcher: String, reason: String },
@@ -652,11 +668,50 @@ impl WebsocketDataFrame {
 
 pub struct WebsocketSignalingSession {
     protocol: Arc<CompiledSignalingProtocol>,
+    /// The largest message this side sends, where its transport is sized for no larger one. A
+    /// `SEND JAQ` output above it fails the handshake before it is written.
+    largest_message: Option<usize>,
 }
 
 impl WebsocketSignalingSession {
     pub fn new(protocol: Arc<CompiledSignalingProtocol>) -> Self {
-        Self { protocol }
+        Self {
+            protocol,
+            largest_message: None,
+        }
+    }
+
+    /// A session whose `SEND JAQ` messages are at most `largest_message` bytes: the outbound
+    /// client's `max_message_size`, which its transport's outgoing buffer is sized for.
+    pub fn sending_at_most(
+        protocol: Arc<CompiledSignalingProtocol>,
+        largest_message: usize,
+    ) -> Self {
+        Self {
+            protocol,
+            largest_message: Some(largest_message),
+        }
+    }
+
+    /// Refuses the frame `SEND JAQ` program `index` produced when it is larger than this session
+    /// sends, before anything of it is written.
+    fn admit(
+        &self,
+        index: usize,
+        frame: &Message,
+    ) -> error_stack::Result<(), WebsocketSignalingError> {
+        let Some(maximum) = self.largest_message else {
+            return Ok(());
+        };
+        let bytes = frame.len();
+        if bytes > maximum {
+            return Err(Report::new(WebsocketSignalingError::SendTooLarge {
+                index,
+                bytes,
+                maximum,
+            }));
+        }
+        Ok(())
     }
 
     /// Run the handshake, streaming payload frames to `connector` once `ACCEPT DATA` opens the relay.
@@ -755,6 +810,7 @@ impl WebsocketSignalingSession {
                                 }),
                             }
                         }?;
+                        self.admit(sent, &frame)?;
                         websocket.send(frame).await?;
                     }
                 }

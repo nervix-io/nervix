@@ -450,6 +450,7 @@ fn wasm_draft(value: &CreateWasmProcessor<RequestedResourceVersion>) -> Processo
     wasm.binding = binding(&value.resource, value.resource_version, &value.file);
     wasm.max_fuel = value.limits.max_fuel.to_string();
     wasm.max_memory = format!("{}B", value.limits.max_memory_bytes);
+    wasm.max_table_elements = value.limits.max_table_elements.to_string();
     wasm.rejected_state = value.rejected_state_policy;
     wasm.global_error = Some(value.global_error_policy.clone());
     draft

@@ -113,8 +113,8 @@ impl WasmCallbackReporting<'_> {
             .verified("a guest callback only runs on a branch that holds an instance")
             .module;
         let reported = module.guest_failure(failure, None);
-        // A guest that exhausted MAX FUEL or MAX MEMORY ran into a declared limit; any other
-        // failed callback, a trap among them, is the guest breaking its contract.
+        // A guest that exhausted MAX FUEL, MAX MEMORY or MAX TABLE ELEMENTS ran into a declared
+        // limit; any other failed callback, a trap among them, is the guest breaking its contract.
         let class = if resource_limit_exceeded {
             MessageErrorClass::LIMIT
         } else {
@@ -141,6 +141,7 @@ impl WasmCallbackReporting<'_> {
     )]
     pub(super) async fn complete_callback(
         self,
+        ack_timing: &SharedRemoteAckTiming,
         replicated_state: &ReplicatedWasmProcessorState,
         instance: &mut Option<Box<WasmLiveInstance>>,
         ack_map: &mut WasmAckMap,
@@ -151,13 +152,11 @@ impl WasmCallbackReporting<'_> {
             holds.release();
             return;
         };
-        let checkpoint = holds
-            .keep_alive_while(checkpoint_wasm_instance(
-                self.runtime,
-                replicated_state,
-                live,
-                execution_now,
-            ))
+        let checkpoint = ack_timing
+            .keep_alive_while(
+                &holds,
+                checkpoint_wasm_instance(self.runtime, replicated_state, live, execution_now),
+            )
             .await;
         match checkpoint {
             Ok(()) => holds.release(),
@@ -371,7 +370,8 @@ mod tests {
             nervix_primitives::sync::oneshot::channel::<()>();
 
         {
-            let checkpoint = holds.keep_alive_while(checkpoint_finished);
+            let timing = SharedRemoteAckTiming::default();
+            let checkpoint = timing.keep_alive_while(&holds, checkpoint_finished);
             let mut checkpoint = std::pin::pin!(checkpoint);
             let progress = nervix_primitives::select! {
                 biased;

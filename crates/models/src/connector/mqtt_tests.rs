@@ -614,9 +614,19 @@ fn topic_emission_bounds_broker_answers_by_its_ack_timeout_clause() {
             "QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the \
              maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher \
              without acknowledgement needs no session, and an acknowledged one always keeps it.",
-            "The client resumes its own session across reconnects, and a new client is refused \
-             while the broker keeps a session under its identity, since it holds no state to \
-             resume it with.",
+            "At QOS 1 and 2 the client sends again by itself, after each reconnect whose CONNACK \
+             resumes its session, every publish the broker has not acknowledged, and at QOS 2 the \
+             PUBREL of every publish the broker answered with PUBREC. A CONNACK that resumes no \
+             session makes it fail them instead, for RETRY POLICY to retry their records. At QOS \
+             0 it sends nothing again.",
+            "The client keeps a QOS 1 or 2 publish until the broker answers it, also after ACK \
+             TIMEOUT has ended the emitter's wait, so the broker can receive that record twice: \
+             the kept publish, answered late or sent again, and the new publish RETRY POLICY \
+             sends. At QOS 1 the broker also delivers again a publish it acknowledged when the \
+             connection lost that PUBACK; at QOS 2 the broker delivers a publish sent again under \
+             its packet identifier once.",
+            "A new client is refused while the broker keeps a session under its identity, since \
+             it holds no state to resume it with.",
         ]
     );
 }

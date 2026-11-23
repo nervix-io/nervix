@@ -6,8 +6,7 @@
 //!   staging quota, their single defaults, the derivation of the quota from the volume that holds
 //!   the node database, the group that holds them, and the named environment a runtime is
 //!   constructed in.
-//! - **Depends on.** The vocabulary's setting classes and the state store's and state
-//!   replication's defaults.
+//! - **Depends on.** The vocabulary's setting classes and state replication's defaults.
 //! - **Must not know.** Command-line parsing or the control plane that configures a node.
 
 #![cfg_attr(
@@ -26,28 +25,28 @@ use nervix_execution::Executor;
 use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use ubyte::ByteUnit;
 
-use super::DEFAULT_RESTORE_STAGING_MAX_BYTES;
 use crate::ConfiguredFaultInjection;
 
-/// The most unpublished restore checkpoint key and value bytes this node stages. Without a value
-/// the node derives it from the volume that holds its database.
+/// The most unpublished restore checkpoint key and value bytes this node stages. Without an
+/// override the node holds the default to the volume that holds its database.
 pub struct RestoreStagingMaxBytes;
 
 impl SettingDefinition for RestoreStagingMaxBytes {
     type Class = NodeCapabilities;
-    type Value = Option<ByteUnit>;
+    type Value = ByteUnit;
     type Context = ();
     type Error = Infallible;
 
     const NAME: &'static str = "restore-staging-max-bytes";
-    const DERIVATION: Option<&'static str> =
-        Some("the smaller of 128 GiB and the capacity of the volume that holds the node database");
+    const DERIVATION: Option<&'static str> = Some(
+        "without an override, limited by the capacity of the volume that holds the node database",
+    );
 
-    fn default_value(_: &()) -> Option<ByteUnit> {
-        None
+    fn default_value(_: &()) -> ByteUnit {
+        ByteUnit::Gibibyte(128)
     }
 
-    fn validate(_: &Option<ByteUnit>, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<Infallible>> {
         Ok(())
     }
 }
@@ -59,9 +58,13 @@ pub struct RuntimeSettings {
     pub connector_host: super::ConnectorHostSettings,
     pub vm: nervix_vm::VmSettings,
     pub wasm_engine: nervix_wasm::WasmEngineSettings,
+    pub udf: nervix_roto::UdfSettings,
     pub inspection: super::StateInspectionSettings,
     pub state_snapshot_interval: Setting<StateSnapshotInterval>,
     pub restore_staging_max_bytes: Setting<RestoreStagingMaxBytes>,
+    /// Whether the operator gave the restore staging quota, which the database volume then never
+    /// reduces.
+    restore_staging_explicit: bool,
 }
 
 impl RuntimeSettings {
@@ -75,10 +78,12 @@ impl RuntimeSettings {
             connector_host: super::ConnectorHostSettings::default(),
             vm: nervix_vm::VmSettings::default(),
             wasm_engine: nervix_wasm::WasmEngineSettings::default(),
+            udf: nervix_roto::UdfSettings::default(),
             inspection: super::StateInspectionSettings::default(),
             state_snapshot_interval: Setting::resolve(state_snapshot_interval, &())?,
-            restore_staging_max_bytes: Setting::new(restore_staging_max_bytes, &())
-                .assured("the local restore capability accepts every optional byte bound"),
+            restore_staging_max_bytes: Setting::resolve(restore_staging_max_bytes, &())
+                .assured("the local restore capability accepts every byte bound"),
+            restore_staging_explicit: restore_staging_max_bytes.is_some(),
         })
     }
 
@@ -95,7 +100,12 @@ impl RuntimeSettings {
             vm_pattern_sets_per_batch: positive(self.vm.pattern_sets_per_batch().get()),
             wasm_stack_bytes: positive(self.wasm_engine.stack_bytes()),
             wasm_memory_reservation_bytes: self.wasm_engine.memory_reservation_bytes(),
+            wasm_memory_guard_bytes: self.wasm_engine.memory_guard_bytes(),
+            wasm_memory_growth_reservation_bytes: self
+                .wasm_engine
+                .memory_growth_reservation_bytes(),
             wasm_parallel_compilation: self.wasm_engine.parallel_compilation(),
+            udf_watchdog: self.udf.watchdog(),
         }
     }
 
@@ -104,20 +114,23 @@ impl RuntimeSettings {
     }
 
     /// The restore staging quota the operator gave, if any.
-    pub fn restore_staging_max_bytes(&self) -> Option<ByteUnit> {
-        *self.restore_staging_max_bytes.value()
+    pub fn requested_restore_staging_max_bytes(&self) -> Option<ByteUnit> {
+        if self.restore_staging_explicit {
+            Some(*self.restore_staging_max_bytes.value())
+        } else {
+            None
+        }
     }
 
     /// The restore staging this node holds when its database lives on a volume of
     /// `database_volume`: the operator's quota, or else the smaller of the default quota and the
     /// volume, which a quota beyond it could never be staged on.
     pub fn restore_staging_quota(&self, database_volume: ByteUnit) -> ByteUnit {
-        match self.restore_staging_max_bytes() {
-            Some(configured) => configured,
-            None => std::cmp::min(
-                ByteUnit::Byte(DEFAULT_RESTORE_STAGING_MAX_BYTES),
-                database_volume,
-            ),
+        let quota = *self.restore_staging_max_bytes.value();
+        if self.restore_staging_explicit {
+            quota
+        } else {
+            std::cmp::min(quota, database_volume)
         }
     }
 }
@@ -161,7 +174,7 @@ impl RuntimeEnvironment {
             outward_tls: nervix_tls::OutwardTlsPolicy::default(),
             dns: None,
             db: None,
-            restore_staging_max_bytes: ByteUnit::Byte(DEFAULT_RESTORE_STAGING_MAX_BYTES),
+            restore_staging_max_bytes: RestoreStagingMaxBytes::default_value(&()),
             fault_injection: ConfiguredFaultInjection::default(),
             temp_dir: PathBuf::from(super::DEFAULT_TEMP_DIR),
         }
@@ -170,3 +183,51 @@ impl RuntimeEnvironment {
 
 // Cluster policy definitions have one vocabulary owner. These facades hold bootstrap inputs.
 pub use nervix_models::StateSnapshotInterval;
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use nervix_execution::Executor;
+    use ubyte::ByteUnit;
+
+    use super::{RuntimeEnvironment, RuntimeSettings};
+
+    #[test]
+    fn an_omitted_restore_staging_quota_is_the_smaller_of_128_gib_and_the_database_volume() {
+        let settings = RuntimeSettings::default();
+        assert_eq!(settings.requested_restore_staging_max_bytes(), None);
+        for (volume, quota) in [
+            (ByteUnit::Gibibyte(64), ByteUnit::Gibibyte(64)),
+            (ByteUnit::Gibibyte(128), ByteUnit::Gibibyte(128)),
+            (ByteUnit::Tebibyte(1), ByteUnit::Gibibyte(128)),
+        ] {
+            assert_eq!(settings.restore_staging_quota(volume), quota, "{volume}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_restore_staging_quota_is_kept_whatever_the_database_volume() {
+        for quota in [
+            ByteUnit::Byte(0),
+            ByteUnit::Mebibyte(5),
+            ByteUnit::Gibibyte(128),
+            ByteUnit::Tebibyte(2),
+        ] {
+            let settings = RuntimeSettings::resolve(None, Some(quota))
+                .assured("the runtime settings accept every restore staging quota");
+            assert_eq!(settings.requested_restore_staging_max_bytes(), Some(quota));
+            for volume in [ByteUnit::Gibibyte(1), ByteUnit::Tebibyte(1)] {
+                assert_eq!(settings.restore_staging_quota(volume), quota, "{volume}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_transient_runtime_stages_up_to_128_gib_since_no_volume_was_measured() {
+        let environment = RuntimeEnvironment::transient(Executor::default());
+        assert_eq!(
+            environment.restore_staging_max_bytes,
+            ByteUnit::Gibibyte(128)
+        );
+    }
+}

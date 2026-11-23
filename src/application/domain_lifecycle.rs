@@ -19,7 +19,9 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
-use nervix_consensus::{ConsensusConflict, ConsensusError, DomainMutationLease};
+use nervix_consensus::{
+    ConsensusConflict, ConsensusError, DomainMutationLease, OrphanedPauseRecovery,
+};
 use nervix_interconnect::{
     DomainDrainStatusEnvelope, RemoteOperationFailure,
     backup::{BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest},
@@ -33,7 +35,7 @@ use thiserror::Error;
 
 use super::{
     backup::cut_reach::CutReach,
-    command_result::CommandResult,
+    command_result::{CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
     entity_gate::DrainOutstanding,
     model_mutation::{command_error, command_ok, command_ok_already_existed},
@@ -131,27 +133,26 @@ impl DomainDrainMode {
     }
 }
 
+/// What a command that found its domain paused by an alteration does next.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::application) enum PausedDomainRecovery {
+    /// The pause was orphaned and is resumed, or the domain changed meanwhile: look again.
+    Replan,
+    /// The pause is not the command's to resume; the command keeps its paused-domain refusal.
+    RetainRefusal,
+}
+
 pub(in crate::application) struct ResolvedDomainStart {
     pub(in crate::application) concrete_start: DomainStartPoint,
     pub(in crate::application) clock: DomainClockState,
 }
 
-/// The retained log cap, in bytes, a test build's saturated-log refusal reports.
-#[cfg(feature = "testing")]
-const REFUSED_WRITE_LOG_CAP_BYTES: u64 = 64 * 1024 * 1024;
-
-/// The retained log a test build's saturated-log refusal reports: one byte past its cap.
-#[cfg(feature = "testing")]
-const REFUSED_WRITE_RETAINED_LOG_BYTES: u64 = REFUSED_WRITE_LOG_CAP_BYTES + 1;
-
-/// The wait for reclamation a test build's saturated-log refusal reports.
-#[cfg(feature = "testing")]
-const REFUSED_WRITE_RECLAMATION_WAIT: Duration = Duration::from_secs(5);
-
 impl SessionServiceImpl {
     /// The error this leader's consensus refuses a write with, before appending it, when a test
     /// build armed a model publication refusal of this kind. A lapsed lease is observed against the
-    /// node's current tenure, as a refusal Raft returned would be.
+    /// node's current tenure, as a refusal Raft returned would be. A saturated log is the node's own
+    /// retained log cap exceeded by one byte once its retention admission wait has passed, which a
+    /// test arms only on a node whose cap a log can exceed.
     #[cfg(feature = "testing")]
     pub(in crate::application) fn refused_write(
         &self,
@@ -162,10 +163,18 @@ impl SessionServiceImpl {
                 self.inner.consensus.lapsed_lease_refusal()
             }
             crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog => {
+                use meticulous::OptionExt as _;
+
+                let retention = self.inner.consensus.raft_retention_policy();
+                let cap = retention.retained_log_cap_bytes;
+                let retained = cap.checked_add(1).assured(
+                    "a test arms a saturated-log refusal only on a node whose retained log cap a \
+                     log can exceed",
+                );
                 ConsensusError::LogRetentionSaturated {
-                    retained: REFUSED_WRITE_RETAINED_LOG_BYTES,
-                    cap: REFUSED_WRITE_LOG_CAP_BYTES,
-                    waited: REFUSED_WRITE_RECLAMATION_WAIT,
+                    retained,
+                    cap,
+                    waited: retention.retention_admission_timeout,
                 }
             }
         }
@@ -870,6 +879,76 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Resumes the pause of `domain` an alteration left behind when no committing transaction and
+    /// no alteration on this node owns it any more, under `mutation`, the mutation lease of the
+    /// command that found the domain paused. Consensus checks the lease, the restore start gate,
+    /// the licensing stop gate and the domain's committing transactions in the same applied
+    /// revision.
+    pub(in crate::application) async fn recover_paused_domain(
+        &self,
+        domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
+    ) -> Result<PausedDomainRecovery, Box<CommandResult>> {
+        if self.inner.runtime.domain_alter_is_active(domain) {
+            return Ok(PausedDomainRecovery::RetainRefusal);
+        }
+        let Some(mutation) = mutation else {
+            return Ok(PausedDomainRecovery::RetainRefusal);
+        };
+        let recovered = self
+            .inner
+            .consensus
+            .recover_orphaned_model_pause(domain.clone(), mutation)
+            .await;
+        match recovered {
+            Ok(OrphanedPauseRecovery::Resumed) => {
+                tracing::info!(domain = domain.as_str(), "resumed orphaned ALTER pause");
+                if let Err(error) = self.apply_current_cluster_state().await {
+                    return Err(Box::new(CommandResult::new(
+                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                        format!(
+                            "orphaned pause recovery is committed but runtime application is \
+                             incomplete: {error:#}; retry with the same execution reference"
+                        ),
+                    )));
+                }
+                Ok(PausedDomainRecovery::Replan)
+            }
+            Ok(OrphanedPauseRecovery::Unchanged) => Ok(PausedDomainRecovery::Replan),
+            Ok(OrphanedPauseRecovery::TransactionActive { transaction }) => {
+                Err(Box::new(CommandResult::new(
+                    CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                    format!(
+                        "transaction '{transaction}' owns the domain pause; retry with the same \
+                         execution reference"
+                    ),
+                )))
+            }
+            Err(error) => {
+                // Neither gate lets the pause resume; the command keeps its paused-domain refusal.
+                if let ConsensusError::Conflict(
+                    ConsensusConflict::RestoreInstallation { .. }
+                    | ConsensusConflict::LicensingStop { .. },
+                ) = error.current_context()
+                {
+                    return Ok(PausedDomainRecovery::RetainRefusal);
+                }
+                let mut response = self
+                    .consensus_error_response(error.current_context(), format!("{error:#}"))
+                    .await;
+                if let CommandDisposition::Failed = response.disposition {
+                    response.disposition =
+                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying);
+                    response.message.push_str(
+                        "; orphaned pause recovery was not confirmed; retry with the same \
+                         execution reference",
+                    );
+                }
+                Err(Box::new(response))
+            }
+        }
+    }
+
     pub(in crate::application) async fn resolve_domain_start(
         &self,
         domain_id: &DomainName,
@@ -930,6 +1009,40 @@ mod tests {
         super::test_fixtures::{TestService, build_test_service},
         *,
     };
+
+    /// A test build refuses a write for a saturated log as this node's consensus would: one byte
+    /// past the retained log cap the node resolved, once its retention admission wait has passed.
+    /// The fixture's consensus runs the default retention settings.
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn an_injected_saturated_log_refusal_reports_the_nodes_retention_policy() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let policy = nervix_consensus::RaftRetentionSettings::default()
+            .policy(&nervix_consensus::RaftOperationSettings::default());
+
+        let refusal = service
+            .refused_write(crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog);
+
+        let ConsensusError::LogRetentionSaturated {
+            retained,
+            cap,
+            waited,
+        } = refusal
+        else {
+            panic!("a saturated log refuses the write as a saturated log: {refusal:?}");
+        };
+        assert_eq!(cap, policy.retained_log_cap_bytes);
+        assert_eq!(Some(retained), cap.checked_add(1));
+        assert_eq!(waited, policy.retention_admission_timeout);
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
+    }
 
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]

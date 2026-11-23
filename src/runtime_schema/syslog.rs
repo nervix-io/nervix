@@ -40,6 +40,15 @@ use super::{
     SyslogStructuredDataIssue,
 };
 
+/// The priority of a message whose `<PRI>` header is absent or malformed.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 3164 gives a message without a valid PRI priority 13, a user-level notice, \
+                  which the Syslog chapter documents"
+    )
+)]
 const DEFAULT_PRIORITY: u8 = 13;
 
 #[cfg_attr(

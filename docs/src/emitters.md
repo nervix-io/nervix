@@ -157,7 +157,8 @@ means Nervix collects an in-memory Arrow batch before handing it to the external
 is a domain-logical duration, so a paced domain's `TIME RATE` accelerates or slows it; retry
 backoff, acknowledgement keepalive, and emitter acknowledgement timeouts stay on the physical clock.
 While a partial buffer or staging connector holds acknowledged work, the host keeps its source
-alive every 100 physical milliseconds, including while another input waits for materialized state.
+alive every committed `REMOTE_ACK_ALIVE_INTERVAL` of physical time, 100 milliseconds by default,
+including while another input waits for materialized state. A committed change reaches the next beat.
 New input does not postpone this beat. The beat acknowledges no records and stops when no work
 remains; an active retry supplies its own keepalive instead.
 See [Domains And Time](domains-and-time.md) for the full clock split. The
@@ -2234,7 +2235,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | content_type: STRING<br>message_expiry: U32<br>response_topic: STRING<br>correlation_data: BYTES |
 | Buffers | publishes queued for the driver: set by 1 under NO ACK and ACK SEQUENTIAL, ACK PARALLEL MAX under ACK PARALLEL; when full, fails the publish for the host to retry |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>answers to QOS 1 and 2 publishes: `ACK TIMEOUT`<br>writes to the connection: unbounded<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
-| Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>The client resumes its own session across reconnects, and a new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
+| Driver limits | Packets above the broker's maximum packet size are rejected.<br>QOS 0 connects a clean session; QOS 1 and 2 connect a persistent one with the maximum Session Expiry Interval, and SESSION is not an emitter option: a publisher without acknowledgement needs no session, and an acknowledged one always keeps it.<br>At QOS 1 and 2 the client sends again by itself, after each reconnect whose CONNACK resumes its session, every publish the broker has not acknowledged, and at QOS 2 the PUBREL of every publish the broker answered with PUBREC. A CONNACK that resumes no session makes it fail them instead, for RETRY POLICY to retry their records. At QOS 0 it sends nothing again.<br>The client keeps a QOS 1 or 2 publish until the broker answers it, also after ACK TIMEOUT has ended the emitter's wait, so the broker can receive that record twice: the kept publish, answered late or sent again, and the new publish RETRY POLICY sends. At QOS 1 the broker also delivers again a publish it acknowledged when the connection lost that PUBACK; at QOS 2 the broker delivers a publish sent again under its packet identifier once.<br>A new client is refused while the broker keeps a session under its identity, since it holds no state to resume it with. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MQTT TOPIC capability and mirror reference](connector-capabilities.md#mqtt-topic-emit).
@@ -2295,9 +2296,15 @@ confirm that the broker received it.
 QoS 1 waits for `PUBACK`; QoS 2 waits for the complete exactly-once handshake, which `PUBCOMP`
 ends, so a record stays unacknowledged after the broker's `PUBREC` even though the broker already
 holds it. Their persistent session and stable client identity let the same client resume in-flight
-publishes across network reconnects while the broker retains the session. Nervix keeps local
-delivery attempts and acknowledgements in memory, so this is not a durable checkpoint of emitter
-state.
+publishes across network reconnects while the broker retains the session: after each reconnect
+whose `CONNACK` resumes the session, the client sends again by itself every publish the broker has
+not acknowledged, and at QoS 2 the `PUBREL` of every publish the broker answered with `PUBREC`. A
+`CONNACK` that resumes no session makes the client fail those publishes instead, and the emitter
+retries their records on its retry policy. At QoS 1 the broker delivers again a publish it had
+acknowledged when the lost connection carried that `PUBACK` away; at QoS 2 it recognizes a publish
+sent again under its packet identifier and delivers it once. QoS 0 sends nothing again. Nervix keeps
+local delivery attempts and acknowledgements in memory, so this is not a durable checkpoint of
+emitter state.
 
 A new client cannot take over such a session. The client that a node or emitter restart or an
 ownership move creates holds no session state, and it refuses a broker's `CONNACK` with
@@ -2310,8 +2317,9 @@ the broker or client fails it for a reason that
 is not the record's own, the emitter keeps every answer the broker already gave and retries only the
 records without one; `DESCRIBE EMITTER` shows why, such as
 `the broker did not answer within ACK TIMEOUT 10s`. A record the emitter stopped waiting for stays
-with the client, which sends it again after a reconnect that resumes the session, beside the
-emitter's own retry, so the broker can receive it twice. A definitive record rejection, such as an
+with the client until the broker answers it, and the client sends it again after a reconnect that
+resumes the session. The emitter's own retry sends the record as a new publish beside it, so the
+broker can receive it twice. A definitive record rejection, such as an
 invalid topic or payload-format rejection, follows `ON MESSAGE ERROR`. So does a record whose
 `PUBLISH` packet would exceed the Maximum Packet Size the broker declared when the client connected,
 or the largest packet MQTT can express: the emitter rejects it before handing it to the client,
@@ -3519,7 +3527,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | a pool checkout: the wait for the pool, name resolution, connection, TLS, authentication and the borrow test: `pool_acquire_timeout_ms`; 30s when omitted<br>each catalog query and each insert: `timeout_ms`; unbounded when omitted<br>closing an interrupted query connection: driver default, SQLx close-on-drop timeout, 5 s<br>testing a connection returned to the pool, which keeps its place until the server answers: unbounded |
-| Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline. |
+| Driver limits | timeout_ms accepts at most 2147483647 milliseconds, PostgreSQL's statement_timeout maximum.<br>Without timeout_ms, catalog queries and inserts have no Nervix response deadline.<br>The pool tries again to open a connection the server refuses, by refusing the TCP connection or answering SQLSTATE 53300 (too_many_connections) or 57P03 (cannot_connect_now), after 10 ms and then twice as long each time, at most a fifth of what remained of pool_acquire_timeout_ms at its first try, and stops when pool_acquire_timeout_ms has passed since the checkout or the pool's opening began. Any other failure to connect ends that checkout or opening at once. A publish whose checkout ends without a connection fails, and RETRY POLICY decides the next attempt. |
 | Stalled-peer checks | `STALLED PEER timeout_ms`<br>`STALLED PEER pool_acquire_timeout_ms` |
 
 See the [POSTGRES TABLE capability and mirror reference](connector-capabilities.md#postgres-table-emit).
@@ -4024,7 +4032,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | records staged on disk until a commit: set by COMMIT EACH ... MAX SIZE; when full, holds back what fills it |
-| Network waits | catalog requests: unbounded<br>object-store metadata and delete operations: `timeout_ms`; 1m when omitted<br>object-store reads and writes: `timeout_ms`; 10s when omitted |
+| Network waits | catalog requests: unbounded<br>object-store metadata operations: stat, directory creation, rename and presign: `timeout_ms`; 1m when omitted<br>object-store reads, writes, lists, copies and deletes: `timeout_ms`; 10s when omitted |
 | Driver limits | None declared. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -4412,8 +4420,8 @@ retry layer, and the object-store HTTP client resends no request.
 
 Set `timeout_ms` in the `S3`, `GCS` or `AZURE_BLOB` client's `CONFIG` to bound each object-store
 operation, including DNS, connection, TLS and credential requests. It also bounds each read or
-write call of a streaming object. If omitted, metadata and delete operations allow 60 seconds and
-reads and writes allow 10 seconds. A call that runs out of its deadline fails the attempt it
+write call of a streaming object. If omitted, metadata operations (stat, directory creation, rename
+and presign) allow 60 seconds, and reads, writes, lists, copies and deletes allow 10 seconds. A call that runs out of its deadline fails the attempt it
 belongs to, and with `timeout_ms` set the failure names the key and its bound. Nervix sets no
 deadline on REST catalog requests: a request the catalog accepts and never answers waits until its
 connection fails or a stop ends the wait. The operator and the initial table's effective storage
@@ -4517,7 +4525,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | On a `NATS STREAM` emitter, `MESSAGE ID`: JetStream does not store again a message whose `Nats-Msg-Id` its stream stored within the stream's duplicate window, which the stream's operator configures. A retry carries the ID its first attempt carried, and an ID computed from the record's own fields also covers its redelivery within that window. Core `NO ACK` offers none |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | Without `MANDATORY`, a message no binding routes is dropped by the broker and its record reported delivered; `NO ACK` can lose a record after the broker's channel has taken it; persistence requires PERSISTENT and a provisioned durable queue | None |
 | SQS | Retry after an ambiguous `SendMessage` or `SendMessageBatch` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | On a FIFO queue, `DEDUPLICATION ID` or the queue's content-based deduplication: SQS does not deliver again a message whose id, or body, it accepted within the previous five minutes. A retry carries the id and body its first attempt carried, and an id computed from the record's own fields also covers its redelivery within that interval |
-| MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
+| MQTT | QoS 1 or 2 retry after an ambiguous handshake or a missed `ACK TIMEOUT`, as a new publish beside the client's own publish of the record, answered late or sent again after a reconnect that resumes the session; at QoS 1, the client's own resend after a reconnect of a publish whose `PUBACK` the lost connection carried away; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |
 | Redis Pub/Sub | Retry after a `PUBLISH` whose answer missed the driver's 500 ms or was lost with its connection, which Redis may already have delivered; retry after Redis accepts `PUBLISH` but the Nervix ACK is lost, or after attached sibling failure | Any failure after detached relay acceptance; subscribers that are absent or disconnected miss the message | None |
 | ZeroMQ | Retry after socket send acceptance followed by lost ACK or attached sibling failure | Any failure after detached relay acceptance; socket send does not establish durable receiver storage | None |
 | Syslog COLLECTOR | Retry after a connection or write failure, including a partial frame write or timeout; lost upstream ACK or attached sibling failure can repeat an accepted frame | Local socket acceptance and flush do not establish remote receipt or durable storage; UDP can lose datagrams | None |

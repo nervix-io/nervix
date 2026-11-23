@@ -423,6 +423,17 @@ struct UploadProgress {
 }
 
 impl UploadProgress {
+    /// How long each frame of the upload's spinner is shown.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the upload spinner's frame cadence is display design: it samples a local \
+                      byte counter and never paces the transfer"
+        )
+    )]
+    const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
     /// Starts drawing the progress of uploading a version of `identifier`.
     fn start(identifier: &str) -> Self {
         let state = Arc::new(UploadProgressState {
@@ -432,8 +443,7 @@ impl UploadProgress {
         let drawn = Arc::clone(&state);
         let identifier = identifier.to_string();
         let drawing = nervix_primitives::task::spawn(async move {
-            let mut interval =
-                nervix_primitives::time::interval(std::time::Duration::from_millis(120));
+            let mut interval = nervix_primitives::time::interval(Self::FRAME_INTERVAL);
             let frames = ["|", "/", "-", "\\"];
             let mut frame_index = 0_usize;
             loop {

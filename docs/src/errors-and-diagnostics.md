@@ -2187,7 +2187,7 @@ What each failure gets:
 | --- | --- |
 | An expression of any clause (`SET`, `INHERIT`, route `WHERE`, `FILTER WHERE`, `FROM ... WHERE`, `INVOKE`, `VALUES`, an envelope or ordering-group expression, an HTTP request field, a window aggregate argument, a `RATE LIMIT` measure) | `evaluation` |
 | A payload its codec refuses (a [decode rejection](#decode-rejections)), a row its codec cannot encode, a batch container the codec cannot write | `codec` |
-| A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL` or `MAX MEMORY` | `limit` |
+| A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL`, `MAX MEMORY` or `MAX TABLE ELEMENTS` | `limit` |
 | A required field left unset, a value a connector or an admission check refuses, an invalid HTTP request field | `validation` |
 | A destination that refuses a record, a model that refuses a row, a guest's declared message error, an emitter publish that fails for good | `refused` |
 | Emitter work cut at a stop or shutdown deadline, and an ingested payload whose domain is not running or whose branch Nervix closed before it was routed | `interrupted` |
@@ -3443,9 +3443,9 @@ counts include unreachable active chunks as well as unpublished staging.
 Staging or publication failure leaves the durable start gate in place, including a failure after the
 complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory.
-Transaction planning reports a blocked `START` as `TransactionPlanningError::RestoreInstallation`,
-naming the domain and restore execution before lifecycle admission. The client receives a definitive
-failure.
+`START` reports a blocked start as `DomainStartError::RestoreInstallation`, naming the domain and
+restore execution before it places the domain's units, and consensus refuses the start itself with
+`ConsensusConflict::RestoreInstallation`. The client receives a definitive failure.
 
 No restore diagnostic includes password hashes or resource bytes. When a state section's entity is
 absent from the restored schedule or its schema fingerprint differs, installation skips that section
@@ -3813,11 +3813,13 @@ driver and interrupted compiler keep distinct diagnoses.
 [Architecture enforcement](architecture-enforcement.md) owns the matrix, shared admission protocol
 and cache evidence that produce these tooling reports.
 
-The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
+The isolated architecture compiler emits nineteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`; the four failure diagnostics above; the six architecture diagnostics
+`nervix::invalid_contract`; the five failure diagnostics above; the six architecture diagnostics
 [Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries) describes;
-and `nervix::clamped_arithmetic` and `nervix::combinator_control_flow`. The
+`nervix::clamped_arithmetic` and `nervix::combinator_control_flow`; `nervix::branch_inversion`; and
+`nervix::hidden_tunable`, which [Hidden Tunables](./architecture-enforcement.md#hidden-tunables)
+describes. The
 [architecture rule matrix](./architecture-enforcement.md#rule-contracts) lists them by family.
 Source contracts and narrow reason-bearing expectations own the architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with
@@ -4155,12 +4157,11 @@ committed member, and a returning member does not consume another quota slot.
 
 While the [stop gate](node-settings.md#cluster-licensing) is closed, every refusal carries the typed
 `LicensingStopReason`, which renders `ephemeral activation expired at <instant>`. Admission refuses
-all usage with refusal state `stopped`. Planning refuses a direct `START` before lifecycle
-admission, a transactional `START` as `TransactionPlanningError::LicensingStop` naming the domain,
-and `RESTORE ... RESUME` as `RestoreRefusal::LicensingStop`, each with
-`licensing stopped processing` and its reason. The client receives a definitive failure. Consensus
-refuses a change that would run a domain with `ConsensusConflict::LicensingStop`, and a
-transaction's `START` step with `TransactionMutationError::LicensingStop`; neither changes state.
+all usage with refusal state `stopped`. `START` refuses as `DomainStartError::LicensingStop` naming
+the domain before it places the domain's units, and `RESTORE ... RESUME` as
+`RestoreRefusal::LicensingStop`, each with `licensing stopped processing` and its reason. The client
+receives a definitive failure. Consensus refuses a change that would run a domain, the start of a
+domain included, with `ConsensusConflict::LicensingStop`, and changes no state.
 Model-pause recovery that the gate refuses keeps the command's paused-domain refusal. An `ALTER` or
 a backup whose resume the gate refuses is not failed by it: the operation ends its pause with the
 licensing stop under its own mutation lease, and only a failure of that stop is reported, as

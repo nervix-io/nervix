@@ -116,11 +116,13 @@ impl HttpRequestBody {
             }
         };
         let acks = batch.merged_acks();
-        let payloads = await_emitter_confirmation(
-            &acks,
-            encode_pending_broker_payloads(codec.clone(), context, batch, pending_rows),
-        )
-        .await?;
+        let payloads = context
+            .remote_ack_timing
+            .keep_alive_while(
+                &acks,
+                encode_pending_broker_payloads(codec.clone(), context, batch, pending_rows),
+            )
+            .await?;
         let mut bodies = Vec::with_capacity(payloads.len());
         for PendingRowPayload { row_index, payload } in payloads {
             let body = match payload {

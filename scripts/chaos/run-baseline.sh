@@ -235,6 +235,10 @@ while [[ "$#" -gt 0 ]]; do
             elif [[ "${scenario}" == graceful-stop || "${scenario}" == alteration-handover ]]; then
                 record_count=1000
                 overall_timeout=1800
+            elif [[ "${scenario}" == capability-roll || "${scenario}" == parameter-return \
+                || "${scenario}" == parameter-live || "${scenario}" == prerequisite-refusal ]]; then
+                record_count=1000
+                overall_timeout=1800
             fi
             shift 2
             ;;
@@ -499,7 +503,14 @@ if [[ "${scenario}" == binding-endpoints && -z "${binding_image_ref}" ]]; then
 fi
 case "${scenario}" in
     baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | ingestor-instances-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | graceful-stop | alteration-handover) ;;
+    capability-roll | parameter-return | parameter-live | prerequisite-refusal) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
+esac
+# The node-settings scenarios start every node through node-launch.sh, which applies the settings
+# the controller chose for each node's next process.
+node_settings_scenario=false
+case "${scenario}" in
+    capability-roll | parameter-return | parameter-live | prerequisite-refusal) node_settings_scenario=true ;;
 esac
 # An expected failure names symptoms of the scenario's own verdict; a scenario whose verdict names
 # none cannot be expected to fail.
@@ -543,6 +554,9 @@ esac
 case "${scenario}" in
     stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop | alteration-handover) recovery_scenario=true ;;
 esac
+if [[ "${node_settings_scenario}" == true ]]; then
+    recovery_scenario=true
+fi
 # The backup scenarios install the backup form of the baseline graph, whose Kafka ingestor keeps
 # domain-owned offsets instead of a consumer group.
 backup_graph=false
@@ -568,7 +582,7 @@ esac
 # Every scenario that injects a fault drives Pumba through the local Docker daemon.
 uses_pumba=true
 case "${scenario}" in
-    baseline | backup | backup-cycles | restore-fresh-cluster | restore-volume | alteration-handover) uses_pumba=false ;;
+    baseline | backup | backup-cycles | restore-fresh-cluster | restore-volume | alteration-handover | parameter-live) uses_pumba=false ;;
 esac
 if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != backup-cycles && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != endpoints && "${scenario}" != binding-endpoints && "${scenario}" != lifetimes && "${scenario}" != domain-time && "${scenario}" != alteration-handover && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
@@ -639,6 +653,9 @@ if [[ ( "${scenario}" == stale-follower || "${scenario}" == former-owner-restart
 fi
 if [[ "${scenario}" == restore-volume && "${outage_option_set}" == true ]]; then
     setup_error 'restore-volume injects no fault; --outage-seconds is for crash scenarios'
+fi
+if [[ "${node_settings_scenario}" == true && "${outage_option_set}" == true ]]; then
+    setup_error "${scenario} holds each node down until its own conditions; --outage-seconds is for crash and cluster-restart scenarios"
 fi
 if [[ "${scenario}" == restore-fault && "${fault}" == leader-partition && "${outage_option_set}" == true ]]; then
     setup_error 'leader-partition holds its isolation until the restore ends; --outage-seconds is for the crash faults'
@@ -849,7 +866,7 @@ case "${scenario}" in
         # One record every two seconds keeps the bounded fixture flowing through all four cases.
         load_interval_ms=2000
         ;;
-    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop | alteration-handover)
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | endpoints | binding-endpoints | lifetimes | domain-time | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop | alteration-handover | capability-roll | parameter-return | parameter-live | prerequisite-refusal)
         # One record a second keeps the bounded fixture flowing through the slowest case.
         load_interval_ms=1000
         ;;
@@ -886,6 +903,21 @@ if [[ "${scenario}" == restore-fault && "${fault}" == reclamation-owner-crash ]]
     # A restore whose coordinator and client are both lost stays applying until the retry validity
     # of its execution reference ends; three minutes bound the run's wait for that failure.
     export CHAOS_COMMAND_RETRY_VALIDITY=3m
+fi
+# Each node of a node-settings scenario starts with the settings its own directory names: none, the
+# deployment's own, until the scenario chooses others for one of its processes. The node reads its
+# directory through a read-only mount, so the directory and its file are readable by the image's
+# user.
+node_launch_dir=""
+if [[ "${node_settings_scenario}" == true ]]; then
+    node_launch_dir="${artifact_dir}/node-launch"
+    for launch_number in 1 2 3; do
+        mkdir -p "${node_launch_dir}/nervix-${launch_number}"
+        : >"${node_launch_dir}/nervix-${launch_number}/settings.env"
+        chmod 0755 "${node_launch_dir}" "${node_launch_dir}/nervix-${launch_number}"
+        chmod 0644 "${node_launch_dir}/nervix-${launch_number}/settings.env"
+    done
+    export CHAOS_NODE_LAUNCH_DIR="${node_launch_dir}"
 fi
 export CHAOS_STATE_LOAD_FILE="${artifact_dir}/fixtures/state-input.ndjson"
 export CHAOS_PACED_LOAD_FILE="${artifact_dir}/fixtures/paced-input.ndjson"
@@ -1107,12 +1139,15 @@ elif [[ "${scenario}" == binding-endpoints ]]; then
     compose_args+=(--profile binding)
 elif [[ "${scenario}" == lifetimes ]]; then
     compose_args+=(--profile lifetimes)
-elif [[ "${scenario}" == graceful-stop ]]; then
+elif [[ "${scenario}" == graceful-stop || "${scenario}" == parameter-live ]]; then
     compose_args+=(--profile events)
 elif [[ "${scenario}" == domain-time ]]; then
     compose_args+=(--profile paced)
 elif [[ "${scenario}" == alteration-handover ]]; then
     compose_args+=(--profile events)
+fi
+if [[ "${node_settings_scenario}" == true ]]; then
+    compose_args+=(--file "${script_dir}/compose.node-settings.yaml")
 fi
 # A three-node leader crash also qualifies the committed outward TLS policy through its failover.
 if [[ "${scenario}" == leader-crash && "${node_count}" == "3" ]]; then
@@ -1497,6 +1532,14 @@ finish() {
                 >"${artifact_dir}/diagnostics/partition-restart-heal.txt" 2>&1
         fi
     fi
+    # A node-settings case can hold a node stopped with settings it chose for one process, such as a
+    # heartbeat its peers refuse; every node starts again with the deployment's own.
+    if [[ -n "${node_launch_dir}" ]]; then
+        local launch_settings
+        for launch_settings in "${node_launch_dir}"/nervix-*/settings.env; do
+            [[ -f "${launch_settings}" ]] && : >"${launch_settings}"
+        done
+    fi
     # A recovery case can end while it holds nodes stopped; start them after every heal so retained
     # resources and diagnostics never leave a node down.
     local stopped_id
@@ -1684,6 +1727,10 @@ finish() {
             if ((${#expected_failure_symptoms[@]} > 0)); then
                 reproducer+="$(printf ' --expect-failure %q' "$(IFS=,; printf '%s' "${expected_failure_symptoms[*]}")")"
             fi
+        elif [[ "${node_settings_scenario}" == true ]]; then
+            # A node-settings scenario runs only on three nodes and holds no fixed outage.
+            reproducer="$(printf 'just chaos run %q --image %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${record_count}")"
         else
             reproducer="$(printf 'just chaos run %q --image %q --nodes %q --records %q --outage-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${node_count}" "${record_count}" "${outage_seconds}")"
@@ -1822,7 +1869,8 @@ finish() {
                 fi
             done
             local case_directory
-            for case_directory in stale former-owner restart stateful endpoints lifetimes domain-time mixed graceful-stop alteration-handover; do
+            for case_directory in stale former-owner restart stateful endpoints lifetimes domain-time mixed graceful-stop \
+                alteration-handover capability-roll parameter-return parameter-live prerequisite-refusal; do
                 [[ -d "${artifact_dir}/${case_directory}" ]] || continue
                 while IFS= read -r evidence_path; do
                     evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
@@ -2977,6 +3025,10 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=alteration-handover-scenario.sh
         source "${script_dir}/alteration-handover-scenario.sh"
         run_alteration_handover
+    elif [[ "${node_settings_scenario}" == true ]]; then
+        # shellcheck source=node-settings-scenario.sh
+        source "${script_dir}/node-settings-scenario.sh"
+        run_node_settings
     elif [[ "${scenario}" == mixed-instability ]]; then
         # shellcheck source=mixed-scenario.sh
         source "${script_dir}/mixed-scenario.sh"
@@ -3081,10 +3133,17 @@ observed_count="$(wc -l <"${artifact_dir}/traffic/observed-output.ndjson")"
 phase "external ledger verification"
 ledger_args=()
 # A graceful stop and an alteration handover touch only their own domain, so the baseline path
-# they run beside keeps the baseline's strict ledger.
+# they run beside keeps the baseline's strict ledger. The node-settings scenarios crash no node:
+# their restarts are graceful stops whose drains hand the work over, as in a rolling restart, and a
+# parameter change discards no payload, so their ledger is strict too.
 if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${backup_graph}" == true || "${recovery_scenario}" == true ]] \
-    && [[ "${scenario}" != graceful-stop && "${scenario}" != alteration-handover ]]; then
+    && [[ "${scenario}" != graceful-stop && "${scenario}" != alteration-handover && "${node_settings_scenario}" != true ]]; then
     ledger_args+=(--allow-replay-duplicates)
+fi
+# A live parameter change also takes the strict verdict of the baseline path, with the counters and
+# error events of its window as inputs, and records every symptom as a finding first.
+if [[ "${scenario}" == parameter-live ]]; then
+    parameter_live_delivery_verdict
 fi
 "${script_dir}/verify-ledger.sh" \
     "${artifact_dir}/traffic/accepted-input.ndjson" \

@@ -2307,9 +2307,18 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
             branches,
             else_result,
         } => {
+            #[cfg_attr(
+                nervix_lint,
+                nervix::constant(
+                    fixed,
+                    reason = "a CASE branch holds exactly two expressions, its WHEN condition and \
+                              its THEN result"
+                )
+            )]
+            const BRANCH_EXPRESSIONS: usize = 2;
             let mut children = Vec::with_capacity(
                 usize::from(operand.is_some())
-                    + branches.len() * 2
+                    + branches.len() * BRANCH_EXPRESSIONS
                     + usize::from(else_result.is_some()),
             );
             if let Some(operand) = operand {

@@ -128,6 +128,23 @@ pub enum ClusterParameterError {
         requested: u64,
         available: u64,
     },
+    /// A node probes each peer once per health-probe interval and waits at most the probe timeout
+    /// for each answer, while an observation stays fresh for the unavailability timeout. A
+    /// timeout that does not exceed the interval plus the probe timeout lets every observation go
+    /// stale before that node observes the peer again.
+    #[error(
+        "{timeout_name} ({timeout:?}) must exceed node '{node}' {interval_name} \
+         ({health_probe_interval:?}) plus probe-timeout ({probe_timeout:?}), a tenth of \
+         {timeout_name}",
+        timeout_name = ClusterParameterKey::NodeUnavailabilityTimeout,
+        interval_name = crate::HealthProbeInterval::NAME
+    )]
+    NodeHealthProbeInterval {
+        node: crate::ClusterNodeName,
+        timeout: Duration,
+        health_probe_interval: Duration,
+        probe_timeout: Duration,
+    },
     #[error("{parameter} must be greater than zero")]
     NonPositiveDuration { parameter: ClusterParameterKey },
     #[error("{parameter} must not exceed {maximum:?}")]
@@ -395,6 +412,7 @@ parameter_values! {
     client_producer_session_bytes: ClientProducerSessionBytes(u64) => Bytes,
     client_consumer_session_bytes: ClientConsumerSessionBytes(u64) => Bytes,
     udf_code_bytes: UdfCodeBytes(u64) => Bytes,
+    udf_compile_budget: UdfCompileBudget(Duration) => Duration,
     http_header_bytes: HttpHeaderBytes(u64) => Bytes,
     http_header_fields: HttpHeaderFields(u64) => Count<u32>,
     client_batch_rows: ClientBatchRows(u64) => Count<u32>,
@@ -545,8 +563,8 @@ impl ClusterParameterValues {
         RemoteAckTiming::from_parameters(self).validate()
     }
 
-    /// Validate the local lifecycle budgets and database volumes captured in the same commit fence
-    /// as the policy.
+    /// Validate the local lifecycle budgets, database volumes and health-probe intervals captured
+    /// in the same commit fence as the policy.
     pub fn validate_runtime_capabilities<'a>(
         &self,
         records: impl IntoIterator<Item = &'a crate::NodeCapabilityRecord>,
@@ -555,8 +573,39 @@ impl ClusterParameterValues {
             let node = record.identity.node_id();
             self.validate_runtime_budget(node, record.capabilities.shutdown)?;
             self.validate_resource_volume(node, record.capabilities.database_volume_bytes)?;
+            self.validate_health_probe_interval(
+                node,
+                record.operational.control_plane.health_probe_interval(),
+            )?;
         }
         Ok(())
+    }
+
+    /// Refuse an unavailability timeout that the node named `node` cannot observe a peer within
+    /// when it starts a health round every `health_probe_interval`. The timeout must exceed that
+    /// interval plus the probe timeout derived from it, so an observation is still fresh when the
+    /// node observes the peer again.
+    pub fn validate_health_probe_interval(
+        &self,
+        node: &crate::ClusterNodeName,
+        health_probe_interval: Duration,
+    ) -> Result<(), Report<ClusterParameterError>> {
+        let timeout = self.node_unavailability_timeout();
+        let probe_timeout = ProbeTimeout::default_value(self);
+        // A sum beyond any duration cannot be shorter than the timeout either.
+        if let Some(observation_gap) = health_probe_interval.checked_add(probe_timeout)
+            && timeout > observation_gap
+        {
+            return Ok(());
+        }
+        Err(Report::new(
+            ClusterParameterError::NodeHealthProbeInterval {
+                node: node.clone(),
+                timeout,
+                health_probe_interval,
+                probe_timeout,
+            },
+        ))
     }
 
     /// The first resource byte quota a database volume of `volume_bytes` cannot hold. Every node

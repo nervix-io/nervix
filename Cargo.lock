@@ -6800,6 +6800,7 @@ dependencies = [
  "blake3",
  "bolero",
  "error-stack",
+ "faster-hex",
  "meticulous",
  "nervix-arbitrary",
  "nervix-models",
@@ -6891,6 +6892,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "error-stack",
+ "faster-hex",
  "humantime",
  "meticulous",
  "nervix-arbitrary",
@@ -8024,6 +8026,7 @@ dependencies = [
  "bolero",
  "chrono",
  "error-stack",
+ "faster-hex",
  "humantime",
  "indexmap 2.14.2",
  "meticulous",
@@ -8358,6 +8361,7 @@ dependencies = [
  "criterion 0.5.1",
  "error-stack",
  "eventsource-stream",
+ "faster-hex",
  "fastrand",
  "fjall",
  "flatbuffers",
@@ -13603,7 +13607,7 @@ checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 [[package]]
 name = "tonic"
 version = "0.13.1"
-source = "git+https://github.com/nervix-io/grpc-rust.git?rev=90b5289e691815f26ec6a89fed89c8c370674aaa#90b5289e691815f26ec6a89fed89c8c370674aaa"
+source = "git+https://github.com/nervix-io/grpc-rust.git?rev=86e4a338006f63f9fdef9f397326155cc5238cc7#86e4a338006f63f9fdef9f397326155cc5238cc7"
 dependencies = [
  "async-trait",
  "axum",

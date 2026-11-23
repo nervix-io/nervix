@@ -228,9 +228,23 @@ retained rows. A batch task multiplexes row progress and keepalive polls on its 
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
 ingestor ACK timeout while task cardinality stays bounded by admitted batches. Before admission, the
 delivering side reports the batch's records alive from inside the delivery itself: the task that
-runs the delivery races it against a 100-millisecond timer and, each time the timer wins, publishes
-progress on each record's own acknowledgement root. That adds no task, no shared state and no
-wait-and-notify protocol, and a delivery admitted within one interval publishes nothing. A receiver whose relay
+runs the delivery races it against a timer of the committed alive interval and, each time the timer
+wins, publishes progress on each record's own acknowledgement root. That adds no task, no
+wait-and-notify protocol and no shared state beyond the node's installed acknowledgement timing,
+and a delivery admitted within one interval publishes nothing.
+
+Every owner of held work reports the acknowledgements it holds alive at the committed
+`REMOTE_ACK_ALIVE_INTERVAL` in the same way: a delivery waiting for admission, a processor branch's
+evaluation, checkpoint or inference, an ingestor's group, an emitter's buffered, staged, retried or
+in-flight work, and a message-error route's buffered errors. Each owner keeps the node's installed
+timing publication from its creation, the one its relay deliveries load the timing group they
+capture from, so no beat looks up a registry or a shared map. A keepalive polls its held work
+before it arms anything, so work that completes at its first poll reads no interval and arms no
+timer; it reads the interval once the work is pending and keeps it until the work ends, as the
+receiving side keeps the timing a delivery captured for that delivery's lifetime. An emitter's
+recurring beat reads it as each beat is armed, and a message-error route's beat when it is first
+armed and again after each beat fires or once nothing is buffered. A committed change therefore
+reaches a running owner at its next keepalive, or its next beat, with no rebuild. A receiver whose relay
 budget has no room for a batch's watches holds the unadmitted batch on its own channel lane and
 reads the budget again at one thirty-thousandth of its original admission budget (10 milliseconds at the five-minute default); it registers for no release notification and never
 queues in the budget's semaphore, whose released permits would otherwise go to the held charge
@@ -914,6 +928,8 @@ work. It retains no additional ACK roots, includes new input without copying the
 obligations, and reads the current obligations only on a due beat or branch retirement. Hot input
 does not move the deadline, and a pending materialized-state future stays pinned across beats.
 An active retry uses its existing keepalive owner; an empty host and connector disarm the beat.
+Each beat, and each beat of an active retry, waits the committed alive interval it reads from the
+task's kept timing publication as it is armed.
 
 Terminal teardown races the whole emitter task against its domain shutdown signal. It can cancel
 an in-flight connector await after the graph drain budget expires, dropping the task's volatile
@@ -2797,8 +2813,10 @@ therefore only retains bounded identity vectors, submits to its lock-free `Repor
 reports, counts refusals, and unparks the findings thread. Each queued active report retains at
 most 64 threads/waits; an order report retains at most 65 identities to describe a 64-edge prefix.
 The findings thread correlates source context and calls the emitter serially. Missing order payloads
-are loss, not a clean run. Emitter panic aborts. Installation failure closes the handoff. A periodic
-wake also delivers history overload that produced no upstream cycle.
+are loss, not a clean run. Emitter panic aborts. Installation failure closes the handoff. The
+findings thread also wakes every 100 ms without being unparked: a lost history record wakes no
+thread, so that period bounds how late history overload that produced no upstream cycle reaches
+the emitter.
 
 The history, handoff, output and artifact limits are Nervix retention limits. They do not bound the
 vendor graph, its cache, its pre-callback allocation or its dispatcher backlog. No exact upstream
@@ -3415,13 +3433,13 @@ including the host's tracked quiesce and teardown paths.
 An MQTT ingestor connection has one mutable owner of its event loop: the driver task the ingestor
 starts once its subscription is established. The driver hands every publish to the ingestor through
 one bounded read-ahead, keyed by that one connection. In an `ACK` mode it reserves the entire
-Receive Maximum for acknowledged packet outcomes and permits at most 64 QoS 0 outcomes alongside
-them. A queued QoS 0 outcome owns a semaphore permit until the ingestor takes it; acquiring a permit
+Receive Maximum for acknowledged packet outcomes and permits at most the node's
+`--mqtt-read-ahead-headroom` QoS 0 outcomes, 64 by default, alongside them. A queued QoS 0 outcome owns a semaphore permit until the ingestor takes it; acquiring a permit
 never waits, and a refusal drops and counts that publish before reading the next. QoS 0 traffic
 therefore cannot occupy an acknowledged outcome's capacity or stop polling. The host supplies a
 read-ahead overflow report around its pre-resolved counter child, so a drop reaches no shared map
 and is counted while the host waits on downstream acknowledgement. Under `NO ACK` the queue holds
-64 outcomes and applies backpressure. A peer exceeding the advertised Receive Maximum can also
+the headroom's count of outcomes and applies backpressure. A peer exceeding the advertised Receive Maximum can also
 exhaust the queue. A full
 queue holds its next outcome and stops polling until the ingestor reads one. The driver
 publishes its progress as one immutable watch value: how many acknowledgements the event loop has

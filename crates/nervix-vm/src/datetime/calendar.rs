@@ -48,9 +48,19 @@ use crate::{
 /// The most days a calendar difference moves its end date toward its start while looking for the
 /// latest date whose start time of day does not lie past the end.
 ///
-/// The end's own date needs no move, a start time of day later than the end's needs one, and a
-/// transition that shifts local time needs one more. The bundled database shifts local time by less
-/// than two days, which the zone tests check for every zone, so three moves always suffice.
+/// The end's own date needs no move, and a start time of day later than the end's needs one. A
+/// transition that shifts local time needs at most two more, because the bundled database shifts
+/// local time by less than two days, which the zone tests check for every zone, so three moves always
+/// suffice.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a later start time of day takes one day move and a transition at most two more, \
+                  because the bundled time zone database shifts local time by less than two days, \
+                  which the zone tests check for every zone"
+    )
+)]
 const MOST_DAY_CORRECTIONS: i64 = 3;
 
 /// Extracts one date part from every lane, read in the local time `offsets` shows.

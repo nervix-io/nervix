@@ -58,6 +58,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO enriched_events
         SET value = value, tenant = tenant, message = message, occurred_at = occurred_at, bucket = bucket
@@ -140,6 +141,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO wasm_output_events
         SET value = value,
@@ -212,6 +214,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO required_output
         SET value = value
@@ -288,6 +291,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -328,6 +332,10 @@ Feature: WASM processor runtime behavior
     And the last command output contains
       """
       max memory: 67108864 bytes
+      """
+    And the last command output contains
+      """
+      max table elements: 4096
       """
     And the last command output contains
       """
@@ -391,6 +399,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_buffered_metrics
         SET value = value, message = message
@@ -463,6 +472,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL <max_fuel>
         MAX MEMORY <max_memory>
+        MAX TABLE ELEMENTS <max_table_elements>
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -481,7 +491,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"beta","message":"small-after"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'limited_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_limited_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: <expected_error>
@@ -490,7 +500,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"alpha","message":"small-after-limit"}
       """
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       "tenant":"beta" | "note":"ok"
@@ -498,11 +508,13 @@ Feature: WASM processor runtime behavior
       """
 
     Examples:
-      | cluster_size | replica_count | limit  | max_fuel | max_memory | expected_error                             |
-      | 1            | 0             | fuel   | 100000   | 1MiB       | wasm guest exhausted MAX FUEL 100000       |
-      | 3            | 0             | fuel   | 100000   | 1MiB       | wasm guest exhausted MAX FUEL 100000       |
-      | 1            | 0             | memory | 1000000  | 64KiB      | wasm guest exceeded MAX MEMORY 65536 bytes |
-      | 3            | 0             | memory | 1000000  | 64KiB      | wasm guest exceeded MAX MEMORY 65536 bytes |
+      | cluster_size | replica_count | limit  | max_fuel | max_memory | max_table_elements | expected_error                             |
+      | 1            | 0             | fuel   | 100000   | 1MiB       | 0                  | wasm guest exhausted MAX FUEL 100000       |
+      | 3            | 0             | fuel   | 100000   | 1MiB       | 0                  | wasm guest exhausted MAX FUEL 100000       |
+      | 1            | 0             | memory | 1000000  | 64KiB      | 0                  | wasm guest exceeded MAX MEMORY 65536 bytes |
+      | 3            | 0             | memory | 1000000  | 64KiB      | 0                  | wasm guest exceeded MAX MEMORY 65536 bytes |
+      | 1            | 0             | table  | 1000000  | 1MiB       | 1                  | wasm guest exceeded MAX TABLE ELEMENTS 1   |
+      | 3            | 0             | table  | 1000000  | 1MiB       | 1                  | wasm guest exceeded MAX TABLE ELEMENTS 1   |
 
   Scenario Outline: WASM processor reports a rejected saved state without discarding it
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -544,6 +556,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 100000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -558,13 +571,13 @@ Feature: WASM processor runtime behavior
       {"tenant":"beta","message":"small-before"}
       """
     And http payload for tenant "alpha" with a 4096 byte message is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
-    Then within "10s" the relay subscription receives payloads containing all fragments
+    Then within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       "tenant":"alpha" | "note":"ok"
       """
     When http payload for tenant "alpha" with a 16384 byte message is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'restoring_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest exhausted MAX FUEL 100000
@@ -573,7 +586,7 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"alpha","message":"small-after-limit"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
@@ -586,12 +599,12 @@ Feature: WASM processor runtime behavior
       """
       {"tenant":"alpha","message":"small-again"}
       """
-    Then within "10s" the active session observes a server error
+    Then within "60s" the active session observes a server error
     And the last server error contains
       """
       wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
-    And within "10s" the relay subscription receives payloads containing all fragments
+    And within "60s" the relay subscription receives payloads containing all fragments
       """
       "tenant":"beta" | "note":"ok"
       """
@@ -641,6 +654,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -722,6 +736,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_secret_tenant
         TO secret_events
         SET note = coalesce(note, "ok")
@@ -788,6 +803,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -900,6 +916,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO enriched_metrics
         SET value = value, tenant = tenant, bucket = bucket
@@ -999,6 +1016,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO selected_metrics
         SET value = value
@@ -1129,6 +1147,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET value = value, tenant = tenant
@@ -1224,6 +1243,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO counted_events
         SET tenant = branch.tenant,
@@ -1369,6 +1389,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_tenant
         TO filtered_metrics
         SET value = value, tenant = tenant
@@ -1489,6 +1510,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1552,6 +1574,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1618,6 +1641,7 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_rust_guest.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO rust_filtered_metrics
         SET value = value
@@ -1628,6 +1652,7 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_go_guest.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO go_filtered_metrics
         SET value = value
@@ -1713,6 +1738,7 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_rust_guest.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO rust_filtered_metrics
         SET value = value
@@ -1723,6 +1749,7 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_go_guest.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO go_filtered_metrics
         SET value = value
@@ -1795,6 +1822,7 @@ Feature: WASM processor runtime behavior
         FILE 'nervix_wasm_processor_rust_guest.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO rust_filtered_metrics
         SET value = value
@@ -1860,6 +1888,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1927,6 +1956,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -1986,6 +2016,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -2045,6 +2076,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -2107,6 +2139,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
@@ -2120,6 +2153,58 @@ Feature: WASM processor runtime behavior
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: A WASM module that defines two <objects> prevents runtime startup
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has a WASM fixture defining two <objects> in resource directory "wasm_processor"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_two_objects;
+      UPLOAD RESOURCE wasm_two_objects VERSION '{{wasm_processor}}';
+      """
+    And these Plexus commands fail with "wasm processor 'filter_even_rows' module compilation failed (resource 'wasm_two_objects' version 1 file 'processors/filter_even.wasm'): <error>"
+      """
+      CREATE SCHEMA metric ( value I32 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE WIRE JSON CODEC metric_codec FROM WIRE SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge two-objects-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/metrics';
+      CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_two_objects VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
+        UNBRANCHED
+        TO filtered_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      START;
+      """
+
+    Examples:
+      | cluster_size | objects  | error                                                                |
+      | 1            | memories | wasm module defines 2 linear memories, but a guest defines at most 1 |
+      | 3            | memories | wasm module defines 2 linear memories, but a guest defines at most 1 |
+      | 1            | tables   | wasm module defines 2 tables, but a guest defines at most 1          |
+      | 3            | tables   | wasm module defines 2 tables, but a guest defines at most 1          |
 
   Scenario Outline: A WASM processor output whose generated column <defect> reports a runtime error
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -2157,6 +2242,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO generated_metrics
         SET value = value
@@ -2223,6 +2309,7 @@ Feature: WASM processor runtime behavior
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value

@@ -1207,10 +1207,11 @@ terminal outcome. The [CLI](./client-tools-cli.md#asynchronous-output) labels al
 to its event panel and the other kinds to its transcript.
 
 A session that falls behind the node's notice bus skips the notices it missed; the node logs how
-many. The Rust client holds at most 128 notices and 1 MiB its caller has not read. A
-notice that does not fit drops the ones held, and the caller's next read reports that gap before
-the notices that follow it. Notices end with the session that delivered them, and the client's
-notice stream continues with the next session it opens.
+many. The Rust client holds at most `notice_capacity` notices and `notice_bytes` bytes of them its
+caller has not read, 128 notices and 1 MiB by default, each notice charged its text and its
+in-memory header. A notice that does not fit drops the ones held, and the caller's next read
+reports that gap before the notices that follow it. Notices end with the session that delivered
+them, and the client's notice stream continues with the next session it opens.
 
 There is no separate discovery request. A client learns where the leader is from these observations
 and from the redirects in its replies. Endpoints come from the cluster's discovery, which carries
@@ -1267,9 +1268,12 @@ once neither the answer nor a report arrived within it. A request that goes sile
 `request_timeout` causes the client to end every request still waiting on that session, and the
 next request opens a new one. The deadline bounds silence only: a request the server still serves
 is reported however long it waits, so a wait ends on a node that stopped answering, not on one that
-is slow to answer. While an election converges it retries with a delay that starts at 100 milliseconds and doubles up to one
-second. When a call's deadline passes before a command's outcome is known, and the command may have
-been admitted, the call fails as uncertain and names the execution reference. When a nonterminal
+is slow to answer. While an election converges it retries with a delay that starts at
+`retry_backoff` and doubles up to `retry_max_backoff`, 100 milliseconds and one second by default,
+until the call's deadline passes: a call makes at most as many attempts as its budget holds waits of
+`retry_backoff`, so the attempts never run out first. When a call's deadline passes before a
+command's outcome is known, and the command may have been admitted, the call fails as uncertain and
+names the execution reference. When a nonterminal
 server answer arrived before the deadline, the Rust client's report also retains the last such
 answer's typed disposition and message beneath the uncertainty and above the deadline. That answer
 does not establish the command's outcome. The console never
@@ -1331,9 +1335,10 @@ client then reports a restoration failure for that subscription or clock, carryi
 the server's message and the wait before the next attempt, and sends the request again on the same
 session. A restoration the session leaves unanswered past the request timeout ends that session
 instead, as any request that outlives the timeout does, and the next session restores it again. The
-wait starts at one second and doubles after each refusal up to thirty seconds. It keeps trying for
-as long as the session stays open and the client still wants the subscription or follows the clock;
-the next session starts again from one second. An attach answered `DomainClockAlreadyAttached` means
+wait starts at `restoration_backoff` and doubles after each refusal up to `restoration_max_backoff`,
+one second and thirty seconds by default. It keeps trying for as long as the session stays open and
+the client still wants the subscription or follows the clock; the next session starts again from
+`restoration_backoff`. An attach answered `DomainClockAlreadyAttached` means
 the session already holds the attachment, so the client follows the clock on that session and reads
 its frames from then on.
 
@@ -2318,8 +2323,8 @@ failure remains definitive. A failure with origin `Recovered`, or one carrying a
 settles the restore, including the steps a failed restore already applied.
 
 A domain whose restore has not published its complete runtime-state generation refuses `START`
-with a definitive command failure naming the incomplete installation. Planning rejects it before
-admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
+with a definitive command failure naming the incomplete installation. `START` refuses it before it
+places the domain's units, and consensus checks the same gate in the write that starts the domain. Failure of the
 restore, release of its mutation lease, and node restart do not release this gate. Only completion
 of the whole installation does.
 With `RESUME`, complete publication, gate release and the transition to `Running` at the archived
@@ -2836,6 +2841,12 @@ internal dependency/generator full-snapshot protocol.
 The serving node declares its [Listener Bounds](node-settings.md#listener-bounds) in its committed
 capability record. Public connection admission, TLS and idle deadlines precede or contain a session;
 gRPC also bounds handler response time and concurrent streams and uses HTTP/2 and kernel TCP keepalive.
+Its declared HTTP/2 receive windows bound what a client sends ahead of the node's reading, on one
+stream and across a connection, and its send buffer bounds the responses one stream queues for a
+client that stops reading. A client that resets streams faster than the declared rapid-reset limits
+allow loses its connection with `ENHANCE_YOUR_CALM`. A console session's WebSocket collects at most
+the declared write buffer before writing, and holds at most one more frame for a client that stops
+reading.
 A streaming response already established is not given a whole-session request deadline. A peer
 that stops acknowledging server pings is closed, releasing session-owned resources. These transport
 bounds introduce no session wire message and do not change command admission or recovery identity.

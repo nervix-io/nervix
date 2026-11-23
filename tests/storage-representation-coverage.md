@@ -67,14 +67,15 @@ Wire-schema generators carry each format's declared types, and codec generators 
 datetimes or bytes. JSON, CBOR and AVRO retain their own wire type enums; CBOR carries its six
 native representation types, and an AVRO array nests its item type, arrays included, to a
 bounded depth. The Model/archive, registry and consensus properties preserve those complete
-values, including inferencer state bindings and their initial expressions, and each
-inferencer's required working memory.
-The `NERVIX DURATIONS` registry signature and `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_`
+values, including inferencer state bindings and their initial expressions, each
+inferencer's required working memory, and each WASM processor's required `MAX TABLE ELEMENTS`.
+The `NERVIX WASM TBLS` registry signature and `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_`
 consensus namespace identify the current Model layout before decoding, including the `parametrizer` kind text of the
 declared entity that defines a parametrization, the ordered `RATE LIMIT` clauses an
 ingestor body writes, the `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, the required
-response timing of each endpoint pause buffer, and the `DURATION` type with the duration literals
-expressions, subscription bindings and branch selections hold.
+response timing of each endpoint pause buffer, the `DURATION` type with the duration literals
+expressions, subscription bindings and branch selections hold, and a WASM processor's
+`MAX TABLE ELEMENTS`.
 
 Placement generators draw colocation rules, domain-wide or over corridors, and node rules for
 `FOR` members or `DOMAIN WIDE` with `REQUIRE NODES WHERE`, `PREFER NODES WHERE` and `ANY NODE`,
@@ -88,7 +89,7 @@ Kafka's and Pulsar's `SET START AT`, a declared quiesce mode and `SET CLIENT` wh
 or writes through a client. They mix them with the shared operations, the in-place construction
 changes of a route or an emitter, and an emitter's envelope clauses and properties. The
 Model/archive, consensus and canonical Plexus properties preserve the complete operations in order,
-and the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_` consensus namespace identifies the
+and the `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_` consensus namespace identifies the
 stored transaction statement layout before decoding.
 
 The complete cluster-parameter record uses each declaration's validated inline storage. Its
@@ -96,11 +97,13 @@ The complete cluster-parameter record uses each declaration's validated inline s
 entity-label limits retain their full 64-bit range. The direct parameter property compares complete
 archive and JSON round trips; consensus state and log properties recover every field through their
 production storage codecs. The
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_` namespace and `ClusterState` encoding 51
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_` namespace and `ClusterState` encoding 55
 identify the current layout, which includes labels on domains, logical resources and users and
 the one label edit, setting and removing keys, that administrative label commands and transaction
 statements store, each node's trace export capabilities and measured database volume in its
-committed capability claim, and interconnect capabilities that announce no relay watermark count.
+committed capability claim, interconnect capabilities that announce no relay watermark count, and
+listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits, the
+HTTP/1 header count and the WebSocket write buffer.
 
 `RESET WASM PROCESSOR ... STATE` statement generators draw a processor and an unbranched,
 all-branches or concrete-branch scope; the statement takes its domain from the transaction that
@@ -143,7 +146,7 @@ contain synthetic data and describe the current shapes.
 | Domain entity label maps | `entity-label-maps` | Every exact key and UTF-8 value survives complete JSON and archive equality, with empty values distinct from absence |
 | Label mutation sequences | `entity-label-mutations` | The complete map equals an independently updated string map after every merge or idempotent removal |
 | Malformed current label maps | `entity-label-decoding` | Current archived invalid-key bytes and invalid or duplicate JSON assignments are refused; the complete valid archive remains unchanged |
-| Committed cluster parameters | `cluster-parameters` | All 44 class-typed parameter values, including the coherent remote ACK timing group and payload unfold limit, duration nanoseconds, byte limits, counts and revision identities survive validated archive and JSON round trips with complete equality |
+| Committed cluster parameters | `cluster-parameters` | All 45 class-typed parameter values, including the coherent remote ACK timing group, payload unfold limit and UDF compile budget, duration nanoseconds, byte limits, counts and revision identities survive validated archive and JSON round trips with complete equality |
 | Committed node records and their typed announcement messages | `node-records` | Complete commit revision, node name, incarnation, explicit unknown or positive CPU and memory measurements, transport/DNS/database/consensus policy, runtime, shutdown, operational and engine/connector host capacities, all four positive receive bounds, every detected and undetected property outcome and tags at their bounds survive canonical durable encoding and validated JSON; current announcement requests and every publication outcome survive the same validated archive codec |
 | Domain schedule units in control-plane storage | `scheduled-units` | The complete schedule, including each unit kind, full-width ordinal, primary, assigned nodes and ownership state, survives archive encoding unchanged |
 | Execution revision built from a scheduled domain | `execution-revision-units` | Every declared partition retains its placement and the handoff fingerprint changes with it; moving one unit names that exact unit in the reassignment and preserves every sibling |

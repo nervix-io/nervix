@@ -50,6 +50,11 @@ const MAX_MESSAGE_SIZE: ClientConfigKey = ClientConfigKey::defaulted(
 );
 const PING_INTERVAL: ClientConfigKey =
     ClientConfigKey::optional("ping_interval_ms", ClientConfigValue::Milliseconds);
+const WRITE_BUFFER_SIZE: ClientConfigKey = ClientConfigKey::defaulted(
+    "write_buffer_size",
+    ClientConfigValue::UnsignedInteger,
+    "131072",
+);
 
 /// The idle deadline when neither `idle_timeout_ms` nor a ping interval supplies one, in CONFIG's
 /// milliseconds. It depends on the ping interval, so the schema cannot declare it as the idle
@@ -70,6 +75,7 @@ pub(super) const CLIENT_CONFIG: ClientConfigSchema = ClientConfigSchema::new(
         ClientConfigKey::TLS_CA.only_for_scheme(ENDPOINT.name, "wss"),
         ClientConfigKey::TLS_CERT.only_for_scheme(ENDPOINT.name, "wss"),
         ClientConfigKey::TLS_KEY.only_for_scheme(ENDPOINT.name, "wss"),
+        WRITE_BUFFER_SIZE,
     ],
     &[],
     &[],
@@ -112,6 +118,12 @@ impl Count for NonZeroU32 {
     }
 }
 
+impl Count for u32 {
+    fn maximum() -> u32 {
+        Self::MAX
+    }
+}
+
 /// Validated client values. Absence of a ping interval means the client only answers peer pings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebsocketsClientConfig {
@@ -122,6 +134,7 @@ pub struct WebsocketsClientConfig {
     handshake_buffer_capacity: NonZeroU16,
     max_message_size: NonZeroU32,
     max_frame_size: NonZeroU32,
+    write_buffer_size: u32,
 }
 
 impl WebsocketsClientConfig {
@@ -167,6 +180,7 @@ impl WebsocketsClientConfig {
             handshake_buffer_capacity: Self::count(&values, HANDSHAKE_BUFFER_CAPACITY)?,
             max_message_size: Self::count(&values, MAX_MESSAGE_SIZE)?,
             max_frame_size: Self::count(&values, MAX_FRAME_SIZE)?,
+            write_buffer_size: Self::count(&values, WRITE_BUFFER_SIZE)?,
         })
     }
 
@@ -190,8 +204,8 @@ impl WebsocketsClientConfig {
         Ok(derived)
     }
 
-    /// The schema admitted a positive decimal count, so only a count above what the
-    /// representation holds is refused here.
+    /// The schema admitted a decimal count, positive where the key declares it, so only a count
+    /// above what the representation holds is refused here.
     fn count<T: Count>(
         values: &BTreeMap<&str, &str>,
         key: ClientConfigKey,
@@ -231,12 +245,20 @@ impl WebsocketsClientConfig {
     pub fn handshake_buffer_capacity(&self) -> usize {
         usize::from(self.handshake_buffer_capacity.get())
     }
+    /// The largest message in each direction: one the client receives, fragmented ones included,
+    /// and one it sends while signaling.
     pub fn max_message_size(&self) -> usize {
         usize::try_from(self.max_message_size.get())
             .assured("Nervix's native and browser targets have at least 32-bit addresses")
     }
     pub fn max_frame_size(&self) -> usize {
         usize::try_from(self.max_frame_size.get())
+            .assured("Nervix's native and browser targets have at least 32-bit addresses")
+    }
+    /// The outgoing bytes the transport collects before it writes them; zero writes each frame at
+    /// once.
+    pub fn write_buffer_size(&self) -> usize {
+        usize::try_from(self.write_buffer_size)
             .assured("Nervix's native and browser targets have at least 32-bit addresses")
     }
 }

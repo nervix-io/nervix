@@ -1288,6 +1288,13 @@ Stateful inference publishes after every admitted batch. Eviction publishes an e
 generation, so a returning branch begins with `INITIAL`; dropping the inferencer removes its
 snapshots.
 
+Route buffers live in memory, and a failover or forced recovery elsewhere in the domain does not
+lose them on a node that stays live, even the buffer of a junction route whose sibling output relay
+the recovery moved. When that node applies the recovery it flushes what its routes hold, so a row
+held behind a `FLUSH EACH` cadence can leave before the cadence. The flush sends it once, in its
+own branch. A route's flush bounds the hold from above only; see
+[Incremental Changes And Rebuilds](execution-plans.md#incremental-changes-and-rebuilds).
+
 ## Restart And Recovery
 
 ### Recovered Ownership Is Fenced

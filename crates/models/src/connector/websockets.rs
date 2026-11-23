@@ -35,6 +35,15 @@ pub use upgrade_headers::{
 };
 
 /// The existing transport budget shared by ping writes and the close handshake.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long a ping or close write may take depends on the peer's link; it stays \
+                  fixed until its repair task bounds those writes by the client's timeout_ms \
+                  https://app.clickup.com/t/86bd5vvdj"
+    )
+)]
 pub const WEBSOCKETS_CONTROL_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
 use super::{
@@ -135,6 +144,17 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
                 overflow: BufferOverflow::FailRead,
             },
         },
+        DeclaredBuffer {
+            holds: "outgoing frames the transport has not written yet: signaling messages, pings, \
+                    pong replies and the Close",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "write_buffer_size bytes (default 131072), plus max_message_size bytes \
+                     (default 67108864) or 125, whichever is larger, plus 14 bytes of frame header",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
     ],
     waits: &[
         DeclaredWait {
@@ -188,6 +208,13 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
+            holds: "the header lines of the upgrade request head",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-max-headers"),
+                overflow: BufferOverflow::RefuseOversized,
+            },
+        },
+        DeclaredBuffer {
             holds: "an incoming frame payload, per session",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("websocket-frame-bytes"),
@@ -199,6 +226,13 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("websocket-message-bytes"),
                 overflow: BufferOverflow::CloseSession,
+            },
+        },
+        DeclaredBuffer {
+            holds: "outgoing frames collected before a write, per session",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("websocket-write-buffer-bytes"),
+                overflow: BufferOverflow::Backpressure,
             },
         },
         DeclaredBuffer {
