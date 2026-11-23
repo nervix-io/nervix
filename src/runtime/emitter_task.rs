@@ -82,6 +82,10 @@ pub(in crate::runtime) struct EmitterConnectorContext {
     /// cadences. Publish attempts, retry backoff, acknowledgement keepalive and stop deadlines
     /// stay on the monotonic clock and never read it.
     pub(super) clock: DomainClock,
+    /// The node's installed remote acknowledgement timing, kept from the task's start. Every beat
+    /// that keeps the emitter's held acknowledgements alive reads its committed alive interval
+    /// here once that work waits.
+    pub(super) remote_ack_timing: SharedRemoteAckTiming,
 }
 
 impl EmitterConnectorContext {
@@ -122,6 +126,9 @@ struct EmitterBatchContext<'a> {
     /// every other emitter.
     http_requests: Option<&'a CompiledHttpRequestFields>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
+    /// The emitter task's kept remote acknowledgement timing, which every program it runs over a
+    /// batch reports the batch's acknowledgements alive by while it waits.
+    remote_ack_timing: &'a SharedRemoteAckTiming,
 }
 
 enum EmitterOutputMetrics {
@@ -821,7 +828,7 @@ impl EmitterTaskState {
         context: &EmitterConnectorContext,
     ) -> Self {
         let reconnect_on_wake = connector.unavailable_reason().is_some();
-        let mut retry = EmitterRetrySchedule::default();
+        let mut retry = EmitterRetrySchedule::new(context.remote_ack_timing.clone());
         if let Some(reason) = connector.unavailable_reason() {
             retry.defer(
                 context,
@@ -840,7 +847,7 @@ impl EmitterTaskState {
             connector,
             buffer,
             retry,
-            keepalive: EmitterBufferedKeepalive::default(),
+            keepalive: EmitterBufferedKeepalive::new(context.remote_ack_timing.clone()),
             backoff,
             reconnect_on_wake,
         }
@@ -1242,6 +1249,7 @@ impl EmitterTask {
                 error_policies: task_error_policies.clone(),
                 udfs,
                 clock: domain_clock.clone(),
+                remote_ack_timing: runtime.remote_ack_timing().clone(),
             };
             let _registration = super::emitter_supervision::EmitterTaskRegistration::new(&context);
             let failure_status = context.status.clone();
@@ -1284,6 +1292,7 @@ impl EmitterTask {
                 envelope: programs.envelope.as_ref(),
                 http_requests: programs.http_requests.as_ref(),
                 materialized_state: &task_materialized_state,
+                remote_ack_timing: &context.remote_ack_timing,
             };
             let mut task_loop = EmitterTaskLoop {
                 context: &context,
@@ -1385,8 +1394,8 @@ impl EmitterTaskLoop<'_> {
                 Err(failure) if failure.error.current_context().is_wake_timing() => {
                     self.context.record_failure(format!("{:#}", failure.error));
                     let acks = self.state.connector.pending_acks(&self.state.buffer);
-                    RuntimeReconnectBackoff::wait_duration_with_ack_alive(
-                        RETRY_ACK_ALIVE_EACH,
+                    RuntimeReconnectBackoff::wait_ack_alive_interval(
+                        &self.context.remote_ack_timing,
                         &mut *self.shutdown_rx,
                         &acks,
                     )
@@ -1717,29 +1726,36 @@ impl EmitterTaskLoop<'_> {
                         || self.state.connector.unavailable_reason().is_some()
                     {
                         let acks = self.state.connector.pending_acks(&self.state.buffer);
-                        super::emitter_publishing::await_emitter_confirmation(&acks, async {
-                            if self.state.connector.retries_installation() {
-                                self.state.connector = EmitterConnectorState::open_until_cancelled(
-                                    self.plan,
-                                    self.context,
-                                    self.input_schema,
-                                    self.output_schema,
-                                    self.codec,
-                                    &mut *self.work_cancel_rx,
-                                )
-                                .await;
-                            } else {
-                                self.state
-                                    .connector
-                                    .resume_until_cancelled(self.context, &mut *self.work_cancel_rx)
-                                    .await
-                                    .discarded(
-                                        "the retained connector records its resume failure for \
-                                         the host retry",
-                                    );
-                            }
-                        })
-                        .await;
+                        let context = self.context;
+                        context
+                            .remote_ack_timing
+                            .keep_alive_while(&acks, async {
+                                if self.state.connector.retries_installation() {
+                                    self.state.connector =
+                                        EmitterConnectorState::open_until_cancelled(
+                                            self.plan,
+                                            self.context,
+                                            self.input_schema,
+                                            self.output_schema,
+                                            self.codec,
+                                            &mut *self.work_cancel_rx,
+                                        )
+                                        .await;
+                                } else {
+                                    self.state
+                                        .connector
+                                        .resume_until_cancelled(
+                                            self.context,
+                                            &mut *self.work_cancel_rx,
+                                        )
+                                        .await
+                                        .discarded(
+                                            "the retained connector records its resume failure \
+                                             for the host retry",
+                                        );
+                                }
+                            })
+                            .await;
                         self.state
                             .buffer
                             .report_staged_messages(self.state.connector.staged_messages());
@@ -2139,6 +2155,7 @@ impl EmitterBatchContext<'_> {
                 let evaluated = ordering_group
                     .evaluate(
                         self.runtime.executor(),
+                        self.remote_ack_timing,
                         input_relay,
                         &batch,
                         execution_now,
@@ -2199,6 +2216,7 @@ impl EmitterBatchContext<'_> {
         };
         let planned = plan_emitter_filter_map_batch(
             self.runtime.executor(),
+            self.remote_ack_timing,
             self.emitter,
             filter_map,
             batch,
@@ -2296,6 +2314,7 @@ impl EmitterBatchContext<'_> {
         let prepared = requests
             .prepare(
                 self.runtime.executor(),
+                self.remote_ack_timing,
                 self.emitter,
                 batch,
                 HttpRequestEvaluation {
@@ -2352,6 +2371,7 @@ impl EmitterBatchContext<'_> {
             .with_evaluated_envelopes(
                 envelope,
                 self.runtime.executor(),
+                self.remote_ack_timing,
                 input,
                 side_inputs,
                 execution_now,
@@ -2408,6 +2428,7 @@ impl EmitterBatchContext<'_> {
             ProgramRun {
                 executor: self.runtime.executor(),
                 now: execution_now,
+                ack_timing: self.remote_ack_timing,
             },
             "emitter",
             self.emitter,

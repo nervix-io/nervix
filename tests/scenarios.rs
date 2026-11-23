@@ -234,6 +234,7 @@ mod emitter_lifecycle;
 mod emitter_metrics;
 mod endpoint_intake;
 mod engine_settings;
+mod entity_swap_failure;
 mod generated_http_payloads;
 mod http_transport;
 mod iceberg_delivery;
@@ -282,6 +283,7 @@ mod session_protocol;
 mod session_settings;
 mod session_tls;
 mod standalone_transaction;
+mod start_placement;
 mod subscription_restoration;
 mod wasm_state_inspection;
 mod web_console_command_retry;
@@ -598,6 +600,10 @@ struct ScenarioWorld {
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
+    /// The payloads single-payload subscription waits read and passed over while waiting for
+    /// another payload, so a later wait that times out can name the payload it expects when it
+    /// already arrived before that wait began.
+    passed_over_subscription_payloads: Vec<String>,
     /// The metric values each named subscription passed from sampling, recorded once every value
     /// that was sampled had been drawn for.
     sampled_metric_values: BTreeMap<String, Vec<i64>>,
@@ -1104,6 +1110,7 @@ impl ScenarioWorld {
         self.active_session_node = None;
         self.active_session_has_subscription = false;
         self.last_subscription_payload = None;
+        self.passed_over_subscription_payloads.clear();
         self.last_command_error = None;
         self.last_command_output = None;
         self.last_server_error = None;
@@ -8935,6 +8942,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
     world.active_session_node = None;
     world.active_session_has_subscription = false;
     world.last_subscription_payload = None;
+    world.passed_over_subscription_payloads.clear();
     world.last_command_error = None;
     world.last_command_output = None;
     world.last_server_error = None;
@@ -10943,20 +10951,6 @@ async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld
     world
         .fault_injection
         .force_next_domain_drain_timeout(domain);
-}
-
-#[given(expr = "the next entity schedule swap in domain {string} on the leader is forced to fail")]
-async fn given_next_entity_schedule_swap_on_leader_fails(
-    world: &mut ScenarioWorld,
-    domain: String,
-) {
-    let leader = current_leader_node(world).await;
-    let domain = expand_placeholders(world, &domain);
-    let domain = nervix_models::DomainName::try_from(domain.as_str())
-        .assured("the scenario uses an identifier-shaped domain name");
-    world
-        .fault_injection
-        .fail_next_entity_schedule_swap_on(crate::common::cluster::node_name(&leader), domain);
 }
 
 #[given("graceful shutdown drain is enabled")]
@@ -17144,10 +17138,16 @@ async fn when_emitter_connector_stalls_after_resolving(
         .stall_emitter_connector_after_resolving_on_all_nodes(&emitter, resolved);
 }
 
+/// How often an ingestor in fault mode rechecks whether it may run again, which its
+/// `DESCRIBE INGESTOR` reports as the reconnect backoff.
+const INGESTOR_FAULT_RECHECK: Duration = Duration::from_millis(250);
+
 #[when(expr = "ingestor {string} enters fault mode")]
 async fn when_ingestor_enters_fault_mode(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = expand_placeholders(world, &ingestor);
-    world.cluster().fail_ingestor_on_all_nodes(&ingestor);
+    world
+        .cluster()
+        .fail_ingestor_on_all_nodes(&ingestor, INGESTOR_FAULT_RECHECK);
 }
 
 #[when(expr = "ingestor {string} leaves fault mode")]
@@ -18994,6 +18994,54 @@ async fn then_background_command_request_reports_leadership_lost(world: &mut Sce
         result.message
     );
     session_protocol::assert_reports_moved_leadership(&result.message);
+}
+
+/// Like the step above, for a command that was still applying when its node stopped leading: the
+/// node answered with a redirect to `node_id`, so the answer names that leader in its message and
+/// in its diagnostic. A command whose own outcome was refused on the way, and whose recording then
+/// met the lost leadership, is reported as being finalized instead, without the redirect.
+#[then(
+    expr = "the background command request reports that leadership moved to node {string} while \
+            it was applying"
+)]
+async fn then_background_command_request_reports_leadership_moved_while_applying(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let request = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(30), request)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert_eq!(
+        result.disposition,
+        nervix_client_wire::CommandDisposition::OutcomeUnknown(
+            nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+        ),
+        "background command request did not report that leadership moved: {}",
+        result.message
+    );
+    let moved = format!("leadership moved to node '{node_id}' while command execution reference '");
+    assert!(
+        result.message.starts_with(&moved) && result.message.contains("' was applying;"),
+        "background command request must report that leadership moved to node '{node_id}' while \
+         it was applying: {}",
+        result.message
+    );
+    let redirect = format!("retry this command on leader '{node_id}'");
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == redirect),
+        "background command request must carry the redirect to node '{node_id}': {:?}",
+        result.diagnostics
+    );
 }
 
 #[then("the last command request reports an execution reference content conflict")]
@@ -21888,40 +21936,6 @@ async fn then_transaction_report_records_actual_quiescence(
     }
 }
 
-#[then(expr = "transaction {string} report step {int} eventually records recovery rebuild effects")]
-async fn then_transaction_report_records_recovery_rebuilds(
-    world: &mut ScenarioWorld,
-    transaction_id: String,
-    step_number: usize,
-) {
-    let transaction_id = expand_placeholders(world, &transaction_id);
-    let index = step_number
-        .checked_sub(1)
-        .assured("transaction report step numbers are one-based");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        assert!(
-            Instant::now() < deadline,
-            "transaction '{transaction_id}' report step {step_number} did not record recovery \
-             rebuild effects"
-        );
-        if let Ok(report) = read_transaction_impact_report(world, &transaction_id).await
-            && let Some(step) = report.execution_steps().get(index)
-        {
-            let rebuilds = step.actual().effects.rebuilds.as_slice();
-            if rebuilds.len() > step.planned().effects.rebuilds.len()
-                && rebuilds
-                    .iter()
-                    .any(|rebuild| rebuild.reason == nervix_models::RebuildReason::Recovery)
-            {
-                return;
-            }
-        }
-        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 #[then(expr = "transaction {string} is eventually removed")]
 async fn then_transaction_is_eventually_removed(world: &mut ScenarioWorld, transaction_id: String) {
     let transaction_id = expand_placeholders(world, &transaction_id);
@@ -23200,6 +23214,7 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
     world.last_command_output = None;
     world.last_server_error = None;
     world.last_subscription_payload = None;
+    world.passed_over_subscription_payloads.clear();
 
     let transport = IngestorLogicTransportFixture::parse(&transport_fixture);
     let output_schema = IngestorLogicOutputSchemaFixture::parse(&output_schema_fixture);
@@ -23279,6 +23294,7 @@ async fn when_the_ingestor_logic_fixture_fails_to_start_with_output_schema_and_p
     world.last_command_output = None;
     world.last_server_error = None;
     world.last_subscription_payload = None;
+    world.passed_over_subscription_payloads.clear();
     world.active_session = None;
     world.active_session_node = None;
     world.active_session_has_subscription = false;
@@ -28767,6 +28783,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let expected: f64 = expected.approx_into();
+    // A node that exposes no such family counts nothing, since it never ran an instance the family
+    // counts; at least one node must expose it, so a misspelled family still fails.
     let mut observed = BTreeMap::new();
     let outcome =
         nervix_primitives::time::timeout(common::status_request::STATUS_WAIT_BUDGET, async {
@@ -28774,22 +28792,26 @@ async fn then_cluster_observability_metric_eventually_totals(
                 nervix_primitives::task::consume_budget().await;
                 observed.clear();
                 let mut total = 0.0;
+                let mut exposed = false;
                 for node in world.cluster().node_ids() {
                     nervix_primitives::task::consume_budget().await;
                     let value = match world
                         .cluster()
-                        .sum_observability_metric(&node, &metric_name, &labels)
+                        .sum_declared_observability_metric(&node, &metric_name, &labels)
                         .await
                     {
                         Ok(value) => value,
                         Err(error) => {
-                            panic!("node '{node}' did not expose '{metric_name}': {error}")
+                            panic!("node '{node}' did not report '{metric_name}': {error}")
                         }
                     };
-                    total += value;
+                    if let Some(value) = value {
+                        exposed = true;
+                        total += value;
+                    }
                     observed.insert(node, value);
                 }
-                if total == expected {
+                if exposed && total == expected {
                     break;
                 }
                 nervix_primitives::time::sleep(Duration::from_millis(100)).await;
@@ -28798,7 +28820,8 @@ async fn then_cluster_observability_metric_eventually_totals(
         .await;
     assert!(
         outcome.is_ok(),
-        "metric '{metric_name}' with labels {labels:?} did not total {expected}: {observed:?}"
+        "metric '{metric_name}' with labels {labels:?} did not total {expected} (a node without \
+         the family shows None): {observed:?}"
     );
 }
 
@@ -38797,9 +38820,10 @@ async fn capture_and_assert_subscription_payload(
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out waiting for subscription payload containing {}. observed {:?}",
+            "timed out waiting for subscription payload containing {}. observed {:?}.{}",
             expected_payload,
-            observed
+            observed,
+            earlier_arrival_note(world, &expected_payload)
         );
         let wait = deadline.saturating_duration_since(now);
         let event = world
@@ -38820,22 +38844,44 @@ async fn capture_and_assert_subscription_payload(
                 domain_descriptions.push(format!("{node_id}: {result:?}"));
             }
             panic!(
-                "timed out waiting for subscription payload containing {}. observed {:?}. domain \
-                 descriptions: {:?}",
-                expected_payload, observed, domain_descriptions
+                "timed out waiting for subscription payload containing {}. observed {:?}.{} \
+                 domain descriptions: {:?}",
+                expected_payload,
+                observed,
+                earlier_arrival_note(world, &expected_payload),
+                domain_descriptions
             );
         };
         let payload = event.payload;
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
 
-        if expect_topic_key && !payload.contains("key=notifications") {
-            continue;
-        }
-        if payload.contains(&expected_payload) {
+        let carries_topic_key = !expect_topic_key || payload.contains("key=notifications");
+        if carries_topic_key && payload.contains(&expected_payload) {
             break;
         }
+        world.passed_over_subscription_payloads.push(payload);
     }
+}
+
+/// What a timed-out single-payload wait adds when an earlier wait already read past the payload it
+/// expects. Rows of different branches have no delivery order, so a row can arrive while an earlier
+/// step still waits for another branch's row, and that step reads past it.
+fn earlier_arrival_note(world: &ScenarioWorld, expected_payload: &str) -> String {
+    let mut arrived_earlier = Vec::new();
+    for payload in &world.passed_over_subscription_payloads {
+        if payload.contains(expected_payload) {
+            arrived_earlier.push(payload.as_str());
+        }
+    }
+    if arrived_earlier.is_empty() {
+        return String::new();
+    }
+    format!(
+        " An earlier wait for another payload read past {arrived_earlier:?}, so the expected \
+         payload arrived before this wait began. Rows of different branches have no delivery \
+         order: wait for them together with \"the relay subscription receives payloads\"."
+    )
 }
 
 #[then(
@@ -38895,6 +38941,72 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
             arrived_after >= expected_delay,
             "expected the payload no sooner than {expected_delay:?} after publishing, but it \
              arrived after {arrived_after:?}"
+        );
+        break;
+    }
+}
+
+/// Bounds a payload's delivery from the instant its publishing request began, the anchor of the
+/// "no sooner than" step above. A budget that opened at this step's start would grow by however
+/// long the publishing request took, so a scenario that compares the budget with a route's
+/// cadence could not rely on the two windows staying apart.
+#[then(expr = "the relay subscription receives a payload within {string} after it was published")]
+async fn then_stream_subscription_receives_payload_within_publication_budget(
+    world: &mut ScenarioWorld,
+    budget: String,
+    #[step] step: &Step,
+) {
+    let budget = parse_duration_text(&budget).assured("the receive budget is a valid duration");
+    let published_at = world
+        .last_publish_at
+        .assured("a delivery-budget assertion follows a publishing step");
+    let expected_payload = expand_placeholders(world, docstring(step))
+        .trim()
+        .to_string();
+    append_cucumber_log_line(&format!(
+        "awaiting subscription payload containing {} within {budget:?} after publishing",
+        expected_payload.replace('\n', "\\n")
+    ));
+    let deadline = published_at
+        .checked_add(budget)
+        .assured("a scenario's receive budget lies seconds after a recent instant");
+    let mut observed = Vec::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for subscription payload containing {expected_payload} within \
+             {budget:?} after publishing. observed {observed:?}"
+        );
+        let event = world
+            .active_session
+            .as_mut()
+            .assured("the scenario opened its subscription before publishing")
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .unwrap_or_else(|error| panic!("the subscription session failed: {error}"));
+        let Some(event) = event else {
+            panic!(
+                "timed out waiting for subscription payload containing {expected_payload} within \
+                 {budget:?} after publishing. observed {observed:?}"
+            );
+        };
+        let read_after = published_at.elapsed();
+        let payload = event.payload;
+        observed.push(payload.clone());
+        world.last_subscription_payload = Some(payload.clone());
+        if !payload.contains(&expected_payload) {
+            continue;
+        }
+        append_cucumber_log_line(&format!(
+            "subscription payload containing {} read {read_after:?} after publishing",
+            expected_payload.replace('\n', "\\n")
+        ));
+        assert!(
+            read_after <= budget,
+            "expected the payload within {budget:?} after publishing, but it was read after \
+             {read_after:?}"
         );
         break;
     }

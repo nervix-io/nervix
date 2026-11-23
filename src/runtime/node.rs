@@ -11,7 +11,7 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use super::{schedule_apply::AppliedRuntimeRecoveryExpansions, *};
+use super::*;
 
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
 
@@ -78,10 +78,6 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) schedule_application: Mutex<ScheduleApplication>,
     #[cfg(test)]
     pub(in crate::runtime) test_applied_schedule: ArcSwapOption<ClusterSchedule>,
-    /// The recovery expansion observed by the schedule application owner, published for
-    /// transaction reporting without adding another acquisition of the execution-policy lock.
-    pub(in crate::runtime) applied_recovery_expansions:
-        ArcSwapOption<AppliedRuntimeRecoveryExpansions>,
     pub(in crate::runtime) domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
     pub(in crate::runtime) domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
     /// How many times this node has installed the committed domain states since it started. An
@@ -302,6 +298,8 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
     pub(in crate::runtime) connector_host: super::ConnectorHostSettings,
     pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
+    /// The UDF settings every domain's compiled UDFs keep on this node.
+    pub(in crate::runtime) udf_settings: nervix_roto::UdfSettings,
     /// The guest-requested branch state resets this node's branch tasks are waiting for. A branch
     /// fences itself and leaves its request here; the control-plane coordinator drains them.
     pub(in crate::runtime) guest_wasm_state_resets: PendingGuestWasmStateResets,

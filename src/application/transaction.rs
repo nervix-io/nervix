@@ -1107,6 +1107,11 @@ impl SessionServiceImpl {
             .inputs
             .state()
             .assured("the planner verified that the captured domain exists");
+        let parameters = captured
+            .inputs
+            .parameters()
+            .verified("the planner refused a capture without a committed parameter record")
+            .values;
         let plan = &captured.plan;
         for step in plan.steps() {
             nervix_primitives::task::consume_budget().await;
@@ -1126,7 +1131,7 @@ impl SessionServiceImpl {
             .change_context(TransactionPlanningError::ExternalModelValidation {
                 operation: step.impact.operations().first(),
             })?;
-            self.prepare_planned_domain_udfs(planned)
+            self.prepare_planned_domain_udfs(planned, &parameters)
                 .await
                 .change_context(TransactionPlanningError::UdfPreparation {
                     operation: step.impact.operations().first(),
@@ -2435,8 +2440,7 @@ impl SessionServiceImpl {
             let activation_error = if reset_effect.is_some() {
                 None
             } else {
-                self.apply_current_cluster_state_recording_recovery(&actual, &advanced)
-                    .await
+                Box::pin(self.apply_current_cluster_state()).await.err()
             };
             if let Some(error) = &activation_error {
                 self.broadcast_error(format!(

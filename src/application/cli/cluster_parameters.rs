@@ -17,68 +17,70 @@ use crate::application::cli_values::{HumanBytes, HumanDuration};
 #[derive(clap::Args, Debug, Clone, PartialEq)]
 #[command(next_help_heading = "First-bootstrap cluster parameters")]
 pub struct ClusterParameterArgs {
-    #[arg(long = nervix_models::PayloadUnfoldLimit::NAME, env = "NERVIX_PAYLOAD_UNFOLD_LIMIT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PayloadUnfoldLimit, "Maximum records unfolded from one ingested payload"))]
+    #[arg(long = nervix_models::PayloadUnfoldLimit::NAME, env = "NERVIX_PAYLOAD_UNFOLD_LIMIT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PayloadUnfoldLimit, "The most records a codec unfolds from one ingested payload"))]
     pub payload_unfold_limit: Option<u64>,
-    #[arg(long = nervix_models::ForcedRecoveryBudget::NAME, env = "NERVIX_FORCED_RECOVERY_BUDGET", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ForcedRecoveryBudget, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::ForcedRecoveryBudget::NAME, env = "NERVIX_FORCED_RECOVERY_BUDGET", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ForcedRecoveryBudget, "How long a forced ownership recovery gives its destination to prepare"))]
     pub forced_recovery_budget: Option<HumanDuration>,
-    #[arg(long = nervix_models::OwnershipHandoffPollInterval::NAME, env = "NERVIX_OWNERSHIP_HANDOFF_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::OwnershipHandoffPollInterval, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::OwnershipHandoffPollInterval::NAME, env = "NERVIX_OWNERSHIP_HANDOFF_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::OwnershipHandoffPollInterval, "How often planned ownership handoffs are reconciled"))]
     pub ownership_handoff_poll_interval: Option<HumanDuration>,
-    #[arg(long = nervix_models::EntityGatePollInterval::NAME, env = "NERVIX_ENTITY_GATE_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGatePollInterval, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::EntityGatePollInterval::NAME, env = "NERVIX_ENTITY_GATE_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGatePollInterval, "How often an entity gate observes the drain it waits for"))]
     pub entity_gate_poll_interval: Option<HumanDuration>,
-    #[arg(long = nervix_models::DomainDrainPollInterval::NAME, env = "NERVIX_DOMAIN_DRAIN_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainPollInterval, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::DomainDrainPollInterval::NAME, env = "NERVIX_DOMAIN_DRAIN_POLL_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainPollInterval, "How often a domain drain observes the work it waits for"))]
     pub domain_drain_poll_interval: Option<HumanDuration>,
-    #[arg(long = nervix_models::RuntimeReadinessPropagationBound::NAME, env = "NERVIX_RUNTIME_READINESS_PROPAGATION_BOUND", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RuntimeReadinessPropagationBound, "First-bootstrap seed; change live policy with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::RuntimeReadinessPropagationBound::NAME, env = "NERVIX_RUNTIME_READINESS_PROPAGATION_BOUND", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RuntimeReadinessPropagationBound, "How long a live node has to report an applied revision ready"))]
     pub runtime_readiness_propagation_bound: Option<HumanDuration>,
-    #[arg(long = nervix_models::TlsCipherSuites::NAME, env = "NERVIX_TLS_CIPHER_SUITES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsCipherSuites, "First-bootstrap comma-separated algorithm names or aliases"))]
+    #[arg(long = nervix_models::TlsCipherSuites::NAME, env = "NERVIX_TLS_CIPHER_SUITES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsCipherSuites, "The cipher suites of outward TLS connections, in order, as comma-separated algorithm names or aliases"))]
     pub tls_cipher_suites: Option<nervix_crypto_policy::TlsCipherSuites>,
-    #[arg(long = nervix_models::TlsKeyExchangeGroups::NAME, env = "NERVIX_TLS_KEY_EXCHANGE_GROUPS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsKeyExchangeGroups, "First-bootstrap comma-separated algorithm names or aliases"))]
+    #[arg(long = nervix_models::TlsKeyExchangeGroups::NAME, env = "NERVIX_TLS_KEY_EXCHANGE_GROUPS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::TlsKeyExchangeGroups, "The key-exchange groups of outward TLS connections, in order, as comma-separated algorithm names or aliases"))]
     pub tls_key_exchange_groups: Option<nervix_crypto_policy::TlsKeyExchangeGroups>,
-    #[arg(long = nervix_models::PasswordIterations::NAME, env = "NERVIX_PASSWORD_ITERATIONS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PasswordIterations, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::PasswordIterations::NAME, env = "NERVIX_PASSWORD_ITERATIONS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::PasswordIterations, "The PBKDF2 iterations of newly created user credentials"))]
     pub password_iterations: Option<u64>,
-    #[arg(long = nervix_models::LicensingRequestTimeout::NAME, env = "NERVIX_LICENSING_REQUEST_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingRequestTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::LicensingRequestTimeout::NAME, env = "NERVIX_LICENSING_REQUEST_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingRequestTimeout, "One licensing request, including resolution, TLS and the response body"))]
     pub licensing_request_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::LicensingRetryBackoffMax::NAME, env = "NERVIX_LICENSING_RETRY_BACKOFF_MAX", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingRetryBackoffMax, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::LicensingRetryBackoffMax::NAME, env = "NERVIX_LICENSING_RETRY_BACKOFF_MAX", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingRetryBackoffMax, "The ceiling of the exponential licensing retry"))]
     pub licensing_retry_backoff_max: Option<HumanDuration>,
-    #[arg(long = nervix_models::LicensingStreamIdleTimeout::NAME, env = "NERVIX_LICENSING_STREAM_IDLE_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingStreamIdleTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::LicensingStreamIdleTimeout::NAME, env = "NERVIX_LICENSING_STREAM_IDLE_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::LicensingStreamIdleTimeout, "How long the licensing notification stream may stay idle"))]
     pub licensing_stream_idle_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::DomainDrainTimeout::NAME, env = "NERVIX_DOMAIN_DRAIN_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::DomainDrainTimeout::NAME, env = "NERVIX_DOMAIN_DRAIN_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::DomainDrainTimeout, "How long a domain drain waits for the domain's admitted work"))]
     pub domain_drain_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::EntityGateDeadline::NAME, env = "NERVIX_ENTITY_GATE_DEADLINE", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGateDeadline, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::EntityGateDeadline::NAME, env = "NERVIX_ENTITY_GATE_DEADLINE", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityGateDeadline, "How long a coordinated entity gate may take to engage and drain"))]
     pub entity_gate_deadline: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteAckAliveInterval::NAME, env = "NERVIX_REMOTE_ACK_ALIVE_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckAliveInterval, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::RemoteAckAliveInterval::NAME, env = "NERVIX_REMOTE_ACK_ALIVE_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckAliveInterval, "How often a receiver reports on a remote delivery it retains, and held local work reports the acknowledgements it holds alive"))]
     pub remote_ack_alive_interval: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteAckDispatchTimeout::NAME, env = "NERVIX_REMOTE_ACK_DISPATCH_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckDispatchTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::RemoteAckDispatchTimeout::NAME, env = "NERVIX_REMOTE_ACK_DISPATCH_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckDispatchTimeout, "How long a remote admission attempt may make no progress"))]
     pub remote_ack_dispatch_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteAckSilenceTimeout::NAME, env = "NERVIX_REMOTE_ACK_SILENCE_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSilenceTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::RemoteAckSilenceTimeout::NAME, env = "NERVIX_REMOTE_ACK_SILENCE_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSilenceTimeout, "How long a sender waits without a report after admission"))]
     pub remote_ack_silence_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteAckSweepInterval::NAME, env = "NERVIX_REMOTE_ACK_SWEEP_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSweepInterval, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::RemoteAckSweepInterval::NAME, env = "NERVIX_REMOTE_ACK_SWEEP_INTERVAL", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteAckSweepInterval, "How often a sender counts silence and admission time"))]
     pub remote_ack_sweep_interval: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteRelayTotalTimeout::NAME, env = "NERVIX_REMOTE_RELAY_TOTAL_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayTotalTimeout, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::RemoteRelayTotalTimeout::NAME, env = "NERVIX_REMOTE_RELAY_TOTAL_TIMEOUT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayTotalTimeout, "The whole budget of one remote admission"))]
     pub remote_relay_total_timeout: Option<HumanDuration>,
-    #[arg(long = nervix_models::RemoteRelayInstantiationWait::NAME, env = "NERVIX_REMOTE_RELAY_INSTANTIATION_WAIT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayInstantiationWait, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::RemoteRelayInstantiationWait::NAME, env = "NERVIX_REMOTE_RELAY_INSTANTIATION_WAIT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::RemoteRelayInstantiationWait, "How long a delivery waits for its route to become available"))]
     pub remote_relay_instantiation_wait: Option<HumanDuration>,
 
-    #[arg(long = nervix_models::MaxBatchMessages::NAME, env = "NERVIX_MAX_BATCH_MESSAGES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::MaxBatchMessages, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::MaxBatchMessages::NAME, env = "NERVIX_MAX_BATCH_MESSAGES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::MaxBatchMessages, "The most records one declared emitter batch may contain"))]
     pub max_batch_messages: Option<u64>,
-    #[arg(long = nervix_models::ClientProducerSessionBytes::NAME, env = "NERVIX_CLIENT_PRODUCER_SESSION_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ClientProducerSessionBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::ClientProducerSessionBytes::NAME, env = "NERVIX_CLIENT_PRODUCER_SESSION_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ClientProducerSessionBytes, "The outstanding producer payload bytes one session may reserve"))]
     pub client_producer_session_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_models::ClientConsumerSessionBytes::NAME, env = "NERVIX_CLIENT_CONSUMER_SESSION_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ClientConsumerSessionBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::ClientConsumerSessionBytes::NAME, env = "NERVIX_CLIENT_CONSUMER_SESSION_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ClientConsumerSessionBytes, "The outstanding consumer payload bytes one session may reserve"))]
     pub client_consumer_session_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_models::UdfCodeBytes::NAME, env = "NERVIX_UDF_CODE_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::UdfCodeBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::UdfCodeBytes::NAME, env = "NERVIX_UDF_CODE_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::UdfCodeBytes, "The most source bytes one Roto function may declare"))]
     pub udf_code_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_models::EntityLabelsMaxCount::NAME, env = "NERVIX_ENTITY_LABELS_MAX_COUNT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxCount, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::UdfCompileBudget::NAME, env = "NERVIX_UDF_COMPILE_BUDGET", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::UdfCompileBudget, "How long compiling one Roto UDF and running its test blocks may take on the node that compiles it"))]
+    pub udf_compile_budget: Option<HumanDuration>,
+    #[arg(long = nervix_models::EntityLabelsMaxCount::NAME, env = "NERVIX_ENTITY_LABELS_MAX_COUNT", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxCount, "The most labels one entity may carry"))]
     pub entity_labels_max_count: Option<u64>,
-    #[arg(long = nervix_models::EntityLabelsMaxKeyBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_KEY_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxKeyBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::EntityLabelsMaxKeyBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_KEY_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxKeyBytes, "The most UTF-8 bytes of one label key"))]
     pub entity_labels_max_key_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_models::EntityLabelsMaxValueBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_VALUE_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxValueBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::EntityLabelsMaxValueBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_VALUE_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxValueBytes, "The most UTF-8 bytes of one label value"))]
     pub entity_labels_max_value_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_models::EntityLabelsMaxBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::EntityLabelsMaxBytes::NAME, env = "NERVIX_ENTITY_LABELS_MAX_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::EntityLabelsMaxBytes, "The most combined key and value bytes of one entity's labels"))]
     pub entity_labels_max_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_models::HttpHeaderBytes::NAME, env = "NERVIX_HTTP_HEADER_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::HttpHeaderBytes, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::HttpHeaderBytes::NAME, env = "NERVIX_HTTP_HEADER_BYTES", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::HttpHeaderBytes, "The most application header bytes one HTTP request may carry"))]
     pub http_header_bytes: Option<HumanBytes>,
-    #[arg(long = nervix_models::HttpHeaderFields::NAME, env = "NERVIX_HTTP_HEADER_FIELDS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::HttpHeaderFields, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::HttpHeaderFields::NAME, env = "NERVIX_HTTP_HEADER_FIELDS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::HttpHeaderFields, "The most distinct application header fields one HTTP request may carry"))]
     pub http_header_fields: Option<u64>,
-    #[arg(long = nervix_models::ClientBatchRows::NAME, env = "NERVIX_CLIENT_BATCH_ROWS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ClientBatchRows, "First-bootstrap seed; change a running cluster with ALTER CLUSTER SET"))]
+    #[arg(long = nervix_models::ClientBatchRows::NAME, env = "NERVIX_CLIENT_BATCH_ROWS", help = super::settings::parameter_seed_help(nervix_models::ClusterParameterKey::ClientBatchRows, "The most rows one client payload batch may contain"))]
     pub client_batch_rows: Option<u64>,
 }
 impl ClusterParameterArgs {
@@ -120,6 +122,7 @@ impl ClusterParameterArgs {
             udf_code_bytes: seeds
                 .udf_code_bytes
                 .map(|bytes| HumanBytes(ubyte::ByteUnit::Byte(bytes))),
+            udf_compile_budget: seeds.udf_compile_budget.map(HumanDuration),
             entity_labels_max_count: seeds.entity_labels_max_count,
             entity_labels_max_key_bytes: seeds
                 .entity_labels_max_key_bytes
@@ -229,6 +232,10 @@ impl ClusterParameterArgs {
             self.client_consumer_session_bytes,
         );
         command_line.optional(nervix_models::UdfCodeBytes::NAME, self.udf_code_bytes);
+        command_line.optional(
+            nervix_models::UdfCompileBudget::NAME,
+            self.udf_compile_budget,
+        );
         command_line.optional(
             nervix_models::EntityLabelsMaxCount::NAME,
             self.entity_labels_max_count,

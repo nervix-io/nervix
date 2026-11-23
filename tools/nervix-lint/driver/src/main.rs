@@ -49,6 +49,7 @@ mod audit;
 mod branches;
 mod contracts;
 mod errors;
+mod tunables;
 
 /// Actual definition ownership, without rustc's diagnostic re-export path shortening.
 fn definition_path(tcx: rustc_middle::ty::TyCtxt<'_>, id: rustc_span::def_id::DefId) -> String {
@@ -114,12 +115,13 @@ struct AcquisitionPass {
     architecture: architecture::ArchitectureRules,
     audit: audit::Audit,
     branches: branches::BranchRules,
+    tunables: tunables::TunableRules,
     authored_files: BTreeMap<String, bool>,
     root: PathBuf,
     report: Arc<Mutex<CompilerReport>>,
 }
 
-impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, errors::PARTIAL_REPORT_FIELD, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW, branches::BRANCH_INVERSION]);
+impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, errors::PARTIAL_REPORT_FIELD, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW, branches::BRANCH_INVERSION, tunables::HIDDEN_TUNABLE]);
 
 /// Why a span has no authored source location.
 enum Exclusion {
@@ -504,6 +506,7 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx rustc_hir::Item<'tcx>) {
         if self.authored(cx, item.span) {
             self.architecture.alias(cx, item, &mut self.flow);
+            self.tunables.item(cx, item, &mut self.flow);
             if let Some((name, span)) = self.branches.item(cx, item, &mut self.flow) {
                 self.record_branch_inversion(cx, item.hir_id(), name, span);
             }
@@ -535,6 +538,9 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             item.hir_id(),
             matches!(item.kind, rustc_hir::ImplItemKind::Fn(..)),
         );
+        if self.authored(cx, item.span) {
+            self.tunables.impl_item(cx, item, &mut self.flow);
+        }
     }
     fn check_trait_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx rustc_hir::TraitItem<'tcx>) {
         self.flow.validate(
@@ -542,6 +548,9 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             item.hir_id(),
             matches!(item.kind, rustc_hir::TraitItemKind::Fn(..)),
         );
+        if self.authored(cx, item.span) {
+            self.tunables.trait_item(cx, item, &mut self.flow);
+        }
         if matches!(item.kind, rustc_hir::TraitItemKind::Fn(..)) && self.authored(cx, item.span) {
             self.architecture
                 .signature(cx, item.owner_id.def_id, item.span, &mut self.flow);
@@ -650,6 +659,7 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             self.architecture.expression(cx, expression, &mut self.flow);
             self.errors.expression(cx, expression, &mut self.flow);
             api::expression(cx, expression, &mut self.flow);
+            tunables::expression(cx, expression, &mut self.flow);
             if let Some(span) = self
                 .branches
                 .numeric_identity_use(cx, expression, &mut self.flow)
@@ -854,6 +864,7 @@ impl Callbacks for Analysis {
                 api::CLAMPED_ARITHMETIC,
                 api::COMBINATOR_CONTROL_FLOW,
                 branches::BRANCH_INVERSION,
+                tunables::HIDDEN_TUNABLE,
             ]);
             let inputs = IntoDynSyncSend(PassInputs {
                 root: root.clone(),
@@ -867,6 +878,7 @@ impl Callbacks for Analysis {
                     architecture: architecture::ArchitectureRules::default(),
                     audit: audit::Audit::default(),
                     branches: branches::BranchRules::default(),
+                    tunables: tunables::TunableRules::default(),
                     authored_files: BTreeMap::new(),
                     root: inputs.root.clone(),
                     report: inputs.report.clone(),
@@ -997,6 +1009,7 @@ fn main() -> anyhow::Result<()> {
                 "-Wnervix::clamped_arithmetic",
                 "-Wnervix::combinator_control_flow",
                 "-Wnervix::branch_inversion",
+                "-Wnervix::hidden_tunable",
             ]
             .map(String::from),
         );

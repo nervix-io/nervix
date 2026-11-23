@@ -65,10 +65,12 @@ mod emitter_mode;
 mod entity_drain;
 #[cfg(test)]
 mod entity_drain_tests;
+mod entity_swap;
 mod execution;
 mod explicit_commit;
 mod forced_recovery;
 mod handoff_gate_link;
+mod ingestor_fault;
 mod interest_visibility;
 mod licensing;
 mod listener_accept;
@@ -109,6 +111,7 @@ mod runtime_installation;
 mod session_backpressure;
 mod shutdown_handoff;
 mod standalone_transaction;
+mod start_placement;
 mod subscription_opening;
 mod subscription_response;
 #[cfg(test)]
@@ -130,6 +133,7 @@ pub use domain_resume::DomainResumeBoundary;
 use emitter_mode::EmitterFaultMode;
 use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
+use entity_swap::{EntitySwapFaultKey, EntitySwapReplacementPause};
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
 use interest_visibility::InterestVisibilityRefusal;
@@ -152,8 +156,37 @@ use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
 use runtime_installation::RuntimeInstallationRefusals;
 use session_backpressure::ArmedSessionBackpressure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
+pub use start_placement::StartPlacementBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 pub use wasm_state_page_reply::WasmStatePageOverflow;
+
+/// How many scenario requests one node's task queues: a WASM state reset or an application
+/// progress query. The scenario awaits each request's answer, so one queued request keeps the
+/// task busy without letting the scenario run ahead of it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "every scenario request to a node's task awaits its answer, so a single queued \
+                  request makes the channel a handoff that keeps the scenario from running ahead"
+    )
+)]
+const SCENARIO_REQUEST_CAPACITY: usize = 1;
+
+/// How many leadership transfer requests the channel keeps for a node that has not read them yet.
+/// A leadership move asks one leader to transfer and asks again only once the target reports a new
+/// leadership, so a scenario has a single request outstanding. Every node reads each request and
+/// acts on it only when it names that node as the leader to transfer from.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a leadership move asks one leader to transfer and asks again only after the \
+                  target reports a new leadership, so a scenario has at most one transfer request \
+                  outstanding"
+    )
+)]
+const LEADERSHIP_TRANSFER_CAPACITY: usize = 1;
 
 /// A consensus storage failure a scenario armed for a node before that node started.
 ///
@@ -205,7 +238,9 @@ struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     /// Construction counts only for emitters explicitly observed by a scenario.
     observed_emitter_opens: DashMap<EmitterName, usize, RandomState>,
-    failed_ingestors: DashMap<String, (), RandomState>,
+    /// The ingestors a scenario holds failed, each with how often its task rechecks whether it may
+    /// run again.
+    failed_ingestors: DashMap<String, Duration, RandomState>,
     unavailable_emitter_clients: DashMap<String, (), RandomState>,
     /// One-shot, emitter-scoped emitter stalls: the next write of the emitter keeps the emitter's answers
     /// for this many of its records, and the answers for the rest are lost.
@@ -255,8 +290,13 @@ struct FaultInjectionState {
     stale_owner_buffer_drain_reports: DashMap<(DomainName, ClusterNodeName), (), RandomState>,
     /// One-shot, domain-scoped timeouts consumed after the durable domain pause engages.
     forced_domain_drain_timeouts: DashMap<DomainName, (), RandomState>,
-    /// One-shot entity-swap failures consumed by the selected runtime node and domain.
-    failed_entity_schedule_swaps: DashMap<EntityScheduleSwapFailureKey, (), RandomState>,
+    /// Entity-swap failures armed for one node and domain, met while a swap replaces the named
+    /// processor, until the scenario clears them.
+    entity_swap_replacement_failures: DashMap<EntitySwapFaultKey, NodeRef, RandomState>,
+    /// One-swap pauses armed for one node and domain, held while a swap replaces the named
+    /// processor.
+    entity_swap_replacement_pauses:
+        DashMap<EntitySwapFaultKey, EntitySwapReplacementPause, RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
     /// cordon that node's own graceful shutdown drain set.
@@ -405,6 +445,8 @@ struct FaultInjectionState {
     wasm_state_reset_fresh_initialization_failing: AtomicBool,
     /// While set, every node refuses to install a runtime-state checkpoint it replicates.
     state_replica_installation_failing: AtomicBool,
+    /// While set, every node that starts skips draining its admitted work when it shuts down.
+    shutdown_drain_skipped: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
     /// A scenario can fail one stream accept on a selected bound address, and observe that the
     /// source consumed the fault before checking its established connections. The armed request
@@ -486,12 +528,6 @@ struct EntityGateResponsePauseKey {
     domain: DomainName,
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct EntityScheduleSwapFailureKey {
-    node: ClusterNodeName,
-    domain: DomainName,
-}
-
 /// The direction a record acknowledgement travels: from the node that resolved it back to the
 /// node that registered it.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -550,7 +586,7 @@ pub(crate) struct LeadershipTransferRequest {
 
 impl Default for FaultInjection {
     fn default() -> Self {
-        let (leadership_transfers, _) = broadcast::channel(16);
+        let (leadership_transfers, _) = broadcast::channel(LEADERSHIP_TRANSFER_CAPACITY);
         let (syslog_listener_faults, _) = watch::channel(None);
         let (listener_accept_failures, _) = watch::channel(ListenerAcceptFailures::default());
         let (session_backpressure, _) = watch::channel(None);
@@ -583,7 +619,8 @@ impl Default for FaultInjection {
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
-                failed_entity_schedule_swaps: DashMap::default(),
+                entity_swap_replacement_failures: DashMap::default(),
+                entity_swap_replacement_pauses: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
                 delayed_ingestor_confirmations: DashMap::default(),
@@ -639,6 +676,7 @@ impl Default for FaultInjection {
                 wasm_checkpoint_storage_failing: AtomicBool::new(false),
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
+                shutdown_drain_skipped: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
                 syslog_listener_faults,
                 listener_accept_failures,
@@ -825,7 +863,7 @@ impl FaultInjection {
         &self,
         node: ClusterNodeName,
     ) -> mpsc::Receiver<WasmStateResetRequest> {
-        let (sender, receiver) = mpsc::channel(1);
+        let (sender, receiver) = mpsc::channel(SCENARIO_REQUEST_CAPACITY);
         self.inner
             .wasm_state_reset_coordinators
             .insert(node, sender);
@@ -1171,18 +1209,6 @@ impl FaultInjection {
         keyspace.rotate_memtable_and_wait()
     }
 
-    pub fn fail_ingestor(&self, ingestor: &str) {
-        self.inner
-            .failed_ingestors
-            .insert(ingestor.to_ascii_lowercase(), ());
-    }
-
-    pub fn clear_ingestor_fault(&self, ingestor: &str) {
-        self.inner
-            .failed_ingestors
-            .remove(&ingestor.to_ascii_lowercase());
-    }
-
     pub fn fail_emitter_client_unavailable(&self, emitter: &str) {
         self.inner
             .unavailable_emitter_clients
@@ -1252,13 +1278,6 @@ impl FaultInjection {
     /// Forces the next domain drain to time out after the durable pause has engaged.
     pub fn force_next_domain_drain_timeout(&self, domain: DomainName) {
         self.inner.forced_domain_drain_timeouts.insert(domain, ());
-    }
-
-    /// Fails the next incremental entity swap for `domain` on `node`.
-    pub fn fail_next_entity_schedule_swap_on(&self, node: ClusterNodeName, domain: DomainName) {
-        self.inner
-            .failed_entity_schedule_swaps
-            .insert(EntityScheduleSwapFailureKey { node, domain }, ());
     }
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
@@ -2166,21 +2185,6 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario selects one retained ingestor failure seam",
-            key = "one test ingestor",
-            bound = "one keyed presence read with no retained guard"
-        )
-    )]
-    pub(crate) fn ingestor_is_failed(&self, ingestor: &IngestorName) -> bool {
-        self.inner
-            .failed_ingestors
-            .contains_key(&ingestor.as_str().to_ascii_lowercase())
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
             reason = "the scenario selects one retained emitter unavailability seam",
             key = "one test emitter",
             bound = "one keyed presence read with no retained guard"
@@ -2256,20 +2260,6 @@ impl FaultInjection {
         self.inner
             .forced_domain_drain_timeouts
             .remove(domain)
-            .is_some()
-    }
-
-    pub(crate) fn take_failed_entity_schedule_swap(
-        &self,
-        node: &ClusterNodeName,
-        domain: &DomainName,
-    ) -> bool {
-        self.inner
-            .failed_entity_schedule_swaps
-            .remove(&EntityScheduleSwapFailureKey {
-                node: node.clone(),
-                domain: domain.clone(),
-            })
             .is_some()
     }
 

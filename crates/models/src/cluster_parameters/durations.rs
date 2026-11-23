@@ -1,7 +1,9 @@
-//! Cluster parameter duration definitions and their positive bounds.
+//! Cluster parameter duration definitions, their positive bounds and the application-probe deadline
+//! derived from member unavailability.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Cluster parameter duration definitions and their positive bounds.
+//! - **Owns.** Cluster parameter duration definitions and their positive bounds, and the
+//!   application-probe deadline derived from member unavailability.
 //! - **Depends on.** Setting classes, semantic values and typed validation reports.
 //! - **Must not know.** Parsing, consensus, command-line options or running services.
 
@@ -10,13 +12,13 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::time::Duration;
+use std::{convert::Infallible, time::Duration};
 
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{ClusterParameterError, ClusterParameterKey};
+use super::{ClusterParameterError, ClusterParameterKey, ClusterParameterValues};
 use crate::{ClusterParameters, SettingDefinition};
 
 /// How long an unobserved member remains available.
@@ -37,6 +39,24 @@ impl SettingDefinition for NodeUnavailabilityTimeout {
 
     fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
         ClusterParameterKey::NodeUnavailabilityTimeout.validate_duration(*value)
+    }
+}
+
+/// One tenth of the unavailability budget for an application health answer.
+pub struct ProbeTimeout;
+impl SettingDefinition for ProbeTimeout {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ClusterParameterValues;
+    type Error = Infallible;
+    const NAME: &'static str = "interconnect-probe-timeout";
+    const DERIVATION: Option<&'static str> =
+        Some("node-unavailability-timeout / 10, at least one timer nanosecond");
+    fn default_value(context: &ClusterParameterValues) -> Duration {
+        (context.node_unavailability_timeout() / 10).max(Duration::from_nanos(1))
+    }
+    fn validate(_: &Duration, _: &ClusterParameterValues) -> Result<(), Report<Infallible>> {
+        Ok(())
     }
 }
 
@@ -166,29 +186,36 @@ impl SettingDefinition for StateSnapshotInterval {
     }
 }
 
+/// How long compiling one Roto UDF and running its `test` blocks may take on the node that
+/// compiles it. This is cluster policy because exceeding it refuses the statement that declares the
+/// function; the verdict remains the compiling node's own wall-clock measurement.
+pub struct UdfCompileBudget;
+
+impl SettingDefinition for UdfCompileBudget {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ();
+    type Error = ClusterParameterError;
+
+    const NAME: &'static str = "udf-compile-budget";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(10)
+    }
+
+    fn validate(value: &Duration, _: &()) -> Result<(), Report<ClusterParameterError>> {
+        ClusterParameterKey::UdfCompileBudget.validate_duration(*value)
+    }
+}
+
 impl DomainDrainTimeout {
     /// The compile-time source of this setting definition's default.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the setting definition owns this compile-time default, not an additional \
-                      policy input"
-        )
-    )]
     pub const DEFAULT: Duration = Duration::from_secs(30);
 }
 
 impl StateSnapshotInterval {
     /// The compile-time source of this setting definition's default.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::constant(
-            fixed,
-            reason = "the setting definition owns this compile-time default, not an additional \
-                      policy input"
-        )
-    )]
     pub const DEFAULT: Duration = Duration::from_secs(30);
 }
 

@@ -157,12 +157,9 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       {"tenant":"beta","transaction_id":"txn-1"}
       """
-    Then within "10s" the relay subscription receives a payload
+    Then within "10s" the relay subscription receives payloads
       """
       {"tenant":"acme","transaction_id":"txn-1"}
-      """
-    And within "10s" the relay subscription receives a payload
-      """
       {"tenant":"beta","transaction_id":"txn-1"}
       """
     When these Plexus commands are executed on the active session
@@ -696,16 +693,11 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       {"tenant":"beta","transaction_id":"txn-1","amount":20}
       """
-    Then within "10s" the relay subscription receives a payload
+    Then within "10s" the relay subscription receives payloads containing all fragments
       """
-      {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
+      {"amount":10,"tenant":"acme","transaction_id":"txn-1"} | key={"tenant":"acme"}
+      {"amount":20,"tenant":"beta","transaction_id":"txn-1"} | key={"tenant":"beta"}
       """
-    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
-    And within "10s" the relay subscription receives a payload
-      """
-      {"amount":20,"tenant":"beta","transaction_id":"txn-1"}
-      """
-    And the last relay subscription payload contains key fragment '{"tenant":"beta"}'
     When these Plexus commands are executed on the active session
       """
       RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 FOLLOW PREFERENCES;
@@ -749,12 +741,9 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       {"tenant":"beta","transaction_id":"txn-2","amount":21}
       """
-    Then within "15s" the relay subscription receives a payload
+    Then within "15s" the relay subscription receives payloads
       """
       {"amount":11,"tenant":"acme","transaction_id":"txn-2"}
-      """
-    And within "15s" the relay subscription receives a payload
-      """
       {"amount":21,"tenant":"beta","transaction_id":"txn-2"}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/relocate"

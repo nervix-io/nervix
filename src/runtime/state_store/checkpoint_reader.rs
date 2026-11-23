@@ -340,9 +340,10 @@ impl ListedCheckpoint {
 )]
 pub(super) mod tests {
     use nervix_interconnect::backup::RestoreStateInventory;
+    use nervix_models::SettingDefinition as _;
 
     use super::*;
-    use crate::runtime::state_store::generation::StateNamespace;
+    use crate::runtime::{RestoreStagingMaxBytes, state_store::generation::StateNamespace};
 
     fn placement() -> RuntimeStatePlacement {
         RuntimeStatePlacement {
@@ -372,7 +373,7 @@ pub(super) mod tests {
         RuntimeStateStore::from_database(
             Database::builder(path).open().assured("database opens"),
             Executor::default(),
-            super::super::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .assured("store opens")
     }

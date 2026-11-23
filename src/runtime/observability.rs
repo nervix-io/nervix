@@ -1148,12 +1148,16 @@ mod tests {
     use futures_util::FutureExt as _;
     use nervix_models::{
         ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType, RelayName,
+        SettingDefinition as _,
     };
     use nervix_primitives::sync::Arc;
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{metrics::RuntimeMetrics, runtime::events::RuntimeErrorEvent};
+    use crate::{
+        metrics::RuntimeMetrics,
+        runtime::{RestoreStagingMaxBytes, events::RuntimeErrorEvent},
+    };
 
     #[nervix_primitives::test]
     async fn a_reported_runtime_error_reaches_every_attached_observer() {
@@ -1238,7 +1242,7 @@ mod tests {
             let store = RuntimeStateStore::from_database(
                 db,
                 Executor::default(),
-                crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+                RestoreStagingMaxBytes::default_value(&()).as_u64(),
             )
             .expect("state store should open");
             let metrics = RuntimeMetrics::default();
@@ -1309,7 +1313,7 @@ mod tests {
         let store = RuntimeStateStore::from_database(
             db.clone(),
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();
@@ -1393,7 +1397,7 @@ mod tests {
         let store = RuntimeStateStore::from_database(
             db.clone(),
             Executor::default(),
-            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         )
         .expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();

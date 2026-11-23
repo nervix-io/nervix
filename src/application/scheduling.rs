@@ -1103,7 +1103,9 @@ impl SessionServiceImpl {
                 if let Some(handoff) = handoff {
                     debug_assert_eq!(handoff.moves, planned_moves);
                     if let Some(error) = &revision_activation_error {
-                        self.defer_planned_ownership_handoff_release(&domain, handoff, error, None);
+                        self.hold_planned_ownership_handoff_until_applied(
+                            &domain, handoff, error, None,
+                        );
                     } else if let Err(error) = self
                         .finish_planned_ownership_handoff(&domain, handoff, None)
                         .await

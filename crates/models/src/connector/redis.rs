@@ -63,6 +63,14 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 };
 
 /// The longest channel or channel pattern Nervix subscribes or publishes to, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual publishes 1 to 1,024 bytes as the Redis channel and \
+                  pattern rule, which the Emitters manual applies to a published channel"
+    )
+)]
 const REDIS_CHANNEL_MAX: usize = 1024;
 
 external_names! {
@@ -212,6 +220,10 @@ const REDIS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[
         "A payload above the server's proto-max-bulk-len is rejected, and Redis then closes the \
          connection that sent it.",
+        "The pool tries again to open a connection that failed, after 400 ms and then twice as \
+         long each time, at most half of connect_timeout_ms, and stops at the first failure after \
+         connect_timeout_ms has passed since its first try. A publish whose checkout ends without \
+         a connection fails, and RETRY POLICY decides the next attempt.",
     ],
 };
 

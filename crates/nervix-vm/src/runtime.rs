@@ -90,7 +90,9 @@ use crate::{
         Shift, ShiftCounts, ShiftedInteger, SignedInteger,
     },
     operand::{Broadcast, Operand},
-    program::{BinaryOp, CastFailure, DatetimeFunction, FunctionName, Span, UnaryOp},
+    program::{
+        BinaryOp, CastFailure, DatetimeFunction, FixedTimeUnit, FunctionName, Span, UnaryOp,
+    },
     regexp::{ActivePattern, BatchPatterns, PatternSource, RegexpCall, RegexpFunction},
     semantics::{
         ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
@@ -4510,7 +4512,8 @@ fn execute_string_slice_transform(
     let end = usize::try_from(input_offsets[input.len()])
         .assured("arrow offset and width buffers are non-negative by construction");
     let mut values = Vec::with_capacity(end - start);
-    let mut offsets = Vec::with_capacity(input.len() + 1);
+    // The output holds one offset for each of the input's.
+    let mut offsets = Vec::with_capacity(input_offsets.len());
     offsets.push(0_i32);
     for value in input.iter() {
         if let Some(value) = value {
@@ -4589,12 +4592,20 @@ fn execute_uuid_v4(row_count: usize) -> StringArray {
 }
 
 /// The bits a version 7 UUID holds its time in, as milliseconds since the Unix epoch.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 9562 gives a version 7 UUID a 48-bit unix_ts_ms field of milliseconds since \
+                  the Unix epoch"
+    )
+)]
 const UUID_V7_TIME_BITS: u32 = 48;
-const NANOSECONDS_PER_MILLISECOND: i64 = 1_000_000;
 
 // The latest DATETIME's milliseconds fit the field, so the only execution time a version 7 UUID
 // cannot encode is one before the epoch.
-const _: () = assert!(i64::MAX / NANOSECONDS_PER_MILLISECOND < 1_i64 << UUID_V7_TIME_BITS);
+const _: () =
+    assert!(i64::MAX / FixedTimeUnit::Millisecond.nanoseconds() < 1_i64 << UUID_V7_TIME_BITS);
 
 /// A new version 7 UUID for every row, whose time is the execution time. An execution time before
 /// the Unix epoch has no encoding, so every row reports an error instead of another instant's UUID.
@@ -5395,26 +5406,33 @@ fn cycled_bytes(fill: &str, fill_chars: NonZeroUsize, count: usize) -> Option<us
 }
 
 fn execute_md5(input: &StringArray) -> StringArray {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
+    /// The text of one digest: the 32 hexadecimal digits md5 returns.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "RFC 1321 makes an MD5 digest 16 bytes, which md5 writes as the 32 \
+                      hexadecimal digits the Expression Functions chapter states"
+        )
+    )]
+    const DIGEST_HEX_DIGITS: usize = 32;
     let mut builder = StringBuilder::with_capacity(
         input.len(),
         input
             .len()
-            .checked_mul(32)
+            .checked_mul(DIGEST_HEX_DIGITS)
             .assured("a fixed width per row of a batch this node already holds in memory"),
     );
-    let mut digest_text = String::with_capacity(32);
+    let mut digest_text = [0_u8; DIGEST_HEX_DIGITS];
     for row in 0..input.len() {
         if input.is_null(row) {
             builder.append_null();
         } else {
-            digest_text.clear();
             // Non-security checksum exposed by md5(); collision-resistant hashing uses sha256().
-            for byte in md5::compute(input.value(row)).0 {
-                digest_text.push(char::from(HEX[usize::from(byte >> 4)]));
-                digest_text.push(char::from(HEX[usize::from(byte & 0x0f)]));
-            }
-            builder.append_value(&digest_text);
+            let digest = md5::compute(input.value(row));
+            let text = faster_hex::hex_encode(&digest.0, &mut digest_text)
+                .assured("the text buffer holds the 32 digits of a 16-byte digest");
+            builder.append_value(text);
         }
     }
     builder.finish()
@@ -5869,13 +5887,23 @@ fn execute_to_hex_values(
     row_count: usize,
     mut value_at: impl FnMut(usize) -> Option<u64>,
 ) -> StringArray {
+    /// The longest text of one value: two hexadecimal digits for each byte of a `u64`.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "to_hex writes integers of at most 64 bits, which hexadecimal spells in at \
+                      most 16 digits, two for each byte"
+        )
+    )]
+    const LONGEST_HEX_DIGITS: usize = 2 * size_of::<u64>();
     let mut builder = StringBuilder::with_capacity(
         row_count,
         row_count
-            .checked_mul(16)
+            .checked_mul(LONGEST_HEX_DIGITS)
             .assured("a fixed width per row of a batch this node already holds in memory"),
     );
-    let mut formatted = String::with_capacity(16);
+    let mut formatted = String::with_capacity(LONGEST_HEX_DIGITS);
     for row in 0..row_count {
         let Some(value) = value_at(row) else {
             builder.append_null();
@@ -6057,13 +6085,25 @@ pub(crate) fn cast_values(
     Ok(output)
 }
 
+/// The value bytes a displayed column first reserves for each row: an initial estimate that the
+/// string builder grows past as any row needs, so it bounds nothing.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an initial value-byte estimate per displayed row; the string builder grows past \
+                  it, so it bounds nothing"
+    )
+)]
+const DISPLAYED_VALUE_BYTES_ESTIMATE: usize = 8;
+
 fn display_values_as_utf8<T>(len: usize, values: impl Iterator<Item = Option<T>>) -> StringArray
 where
     T: fmt::Display,
 {
     let mut builder = StringBuilder::with_capacity(
         len,
-        len.checked_mul(8)
+        len.checked_mul(DISPLAYED_VALUE_BYTES_ESTIMATE)
             .assured("a fixed width per row of a batch this node already holds in memory"),
     );
     for value in values {
@@ -10224,6 +10264,31 @@ mod tests {
             &TypedArray::Utf8(StringArray::from(vec!["café", "É"]))
         );
         assert!(output.errors().iter().all(<[SideError]>::is_empty));
+    }
+
+    #[test]
+    fn md5_writes_each_digest_as_its_32_lowercase_hexadecimal_digits() {
+        // The test suite of RFC 1321, appendix A.5, with a null row among its values.
+        let input = StringArray::from(vec![
+            Some(""),
+            Some("a"),
+            None,
+            Some("abc"),
+            Some("message digest"),
+            Some("abcdefghijklmnopqrstuvwxyz"),
+        ]);
+        let digests = execute_md5(&input);
+        assert_eq!(
+            digests,
+            StringArray::from(vec![
+                Some("d41d8cd98f00b204e9800998ecf8427e"),
+                Some("0cc175b9c0f1b6a831c399e269772661"),
+                None,
+                Some("900150983cd24fb0d6963f7d28e17f72"),
+                Some("f96b697d7cb7938d525a2f31aaf161d0"),
+                Some("c3fcd3d76192e4007dfb496cca67e13b"),
+            ])
+        );
     }
 }
 

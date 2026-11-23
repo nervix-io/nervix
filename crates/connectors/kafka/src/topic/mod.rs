@@ -94,13 +94,37 @@ const ONLY_ERROR_REPORTS_PROPERTY: &str = "delivery.report.only.error";
 
 /// The longest `delivery.timeout.ms` librdkafka accepts, which it holds as a C `int` of
 /// milliseconds.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "librdkafka holds delivery.timeout.ms as a C int of milliseconds, so i32::MAX \
+                  milliseconds is the longest it accepts"
+    )
+)]
 const LONGEST_MESSAGE_TIMEOUT_MILLIS: u32 = i32::MAX.unsigned_abs();
 
 /// Nanoseconds in one millisecond, the unit `delivery.timeout.ms` counts in.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a millisecond, the unit delivery.timeout.ms and a Kafka record's timestamp \
+                  count in, is a million nanoseconds"
+    )
+)]
 const NANOS_PER_MILLI: u32 = 1_000_000;
 
 /// The longest single wait inside librdkafka's flush. A finish waits in such steps until its
-/// deadline, so each step's milliseconds fit the C `int` librdkafka takes.
+/// deadline.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the connector contract publishes that a Kafka finish waits inside the driver's \
+                  flush in steps of at most a second"
+    )
+)]
 const FLUSH_STEP: Duration = Duration::from_secs(1);
 
 /// The native queue byte limit, expressed by librdkafka in kibibytes.
@@ -108,6 +132,14 @@ const QUEUE_CAPACITY_PROPERTY: &str = "queue.buffering.max.kbytes";
 
 /// A delivery callback can wake its waiter before librdkafka frees the native message's queue
 /// place. Recheck that short interval cooperatively; ACK TIMEOUT bounds the complete wait.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the connector contract publishes that a confirmed Kafka publish checks queue \
+                  admission again at one-millisecond intervals once no window answer remains"
+    )
+)]
 const QUEUE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 pub struct KafkaTopicEmitterConfig {
@@ -1303,6 +1335,73 @@ mod tests {
                 "a record stays retained until its report is served, in {mode:?}"
             );
             assert_eq!(config.get("bootstrap.servers"), Some("127.0.0.1:9092"));
+        }
+    }
+
+    /// The resend and ordering settings the Emitters manual declares for a producer whose client
+    /// sets none of them: librdkafka sends a failed batch again until the record's delivery bound,
+    /// with up to a million requests in flight and idempotence off, so a resend can overtake a later
+    /// batch.
+    #[test]
+    fn a_producer_keeps_librdkafkas_resend_defaults_when_its_client_sets_none() {
+        let entries = [entry("bootstrap.servers", "127.0.0.1:9092")];
+
+        for mode in [
+            BrokerPublishingMode::NoAck,
+            confirmed(Duration::from_secs(5)),
+        ] {
+            let native = KafkaTopicEmitter::producer_config(&entries, mode)
+                .assured("the client entries pass through")
+                .create_native_config()
+                .assured("librdkafka accepts a producer with its own defaults");
+            for (property, declared) in [
+                ("enable.idempotence", "false"),
+                ("max.in.flight.requests.per.connection", "1000000"),
+                ("message.send.max.retries", "2147483647"),
+                ("retry.backoff.ms", "100"),
+            ] {
+                assert_eq!(
+                    native
+                        .get(property)
+                        .assured("librdkafka reads every producer property it declares"),
+                    declared,
+                    "{property} in {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// Idempotence, acknowledgements, requests in flight and resends are the operator's choices in
+    /// the client's `CONFIG`, so every mode hands them to librdkafka as written.
+    #[test]
+    fn a_producer_takes_its_clients_resend_and_ordering_settings_as_written() {
+        let entries = [
+            entry("bootstrap.servers", "127.0.0.1:9092"),
+            entry("enable.idempotence", "true"),
+            entry("request.required.acks", "-1"),
+            entry("max.in.flight.requests.per.connection", "5"),
+            entry("message.send.max.retries", "10"),
+            entry("retry.backoff.ms", "250"),
+        ];
+
+        for mode in [
+            BrokerPublishingMode::NoAck,
+            confirmed(Duration::from_secs(5)),
+        ] {
+            let native = KafkaTopicEmitter::producer_config(&entries, mode)
+                .assured("the client entries pass through")
+                .create_native_config()
+                .assured("librdkafka accepts the client's resend and ordering settings");
+            for written in &entries[1..] {
+                assert_eq!(
+                    native
+                        .get(&written.key)
+                        .assured("librdkafka reads every producer property it declares"),
+                    written.value,
+                    "{} in {mode:?}",
+                    written.key
+                );
+            }
         }
     }
 

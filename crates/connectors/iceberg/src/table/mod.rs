@@ -142,8 +142,17 @@ pub struct IcebergTableEmitterConfig {
     pub writer: String,
 }
 
-/// What one staging append is charged. The batches are already in memory and the writer streams
-/// them to the file, so the charge only admits the append onto the filesystem workers.
+/// What one staging append or staged-file measurement job is charged: a token that admits the job
+/// onto the filesystem workers, not an estimate of its memory.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the charge is an admission token for the filesystem workers, not a memory \
+                  estimate, so it is the least nonzero reservation: a zero request takes no \
+                  permit and never waits"
+    )
+)]
 const STAGED_WRITE_RESERVATION_BYTES: u64 = 1;
 
 /// The Iceberg emitter, which appends each mapped batch to a local Arrow IPC staging file and
@@ -1855,9 +1864,15 @@ impl IcebergTableEmitterClient {
 impl IcebergCatalogConnection<'_> {
     /// Builds the catalog's HTTP client over the node resolver and its TLS configuration, and
     /// loads the catalog with the paired properties and the storage factory.
+    ///
+    /// The client sends each catalog request once, so the emitter's `RETRY POLICY` is the only
+    /// retry of a failed catalog request. Reqwest's default policy sends a request again only after
+    /// an HTTP/2 refusal, and this client speaks HTTP/1.1, so the policy is turned off for the day
+    /// the client negotiates HTTP/2 rather than for a resend it makes today.
     async fn open(self, dns: &DnsResolver) -> IcebergResult<RestCatalog> {
         let client = reqwest_iceberg::Client::builder()
             .dns_resolver(StdArc::new(dns.clone()))
+            .retry(reqwest_iceberg::retry::never())
             .use_preconfigured_tls(self.tls.clone())
             .build()
             .map_err(|error| {

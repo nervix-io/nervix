@@ -1138,10 +1138,28 @@ impl SessionServiceImpl {
                         .unwrap_or_else(|| format!("{error:#}")),
                 );
             }
-            let prepared_udfs = match Box::pin(self.prepare_planned_domain_udfs(&planned)).await {
-                Ok(prepared) => prepared,
-                Err(error) => return command_error(format!("{error:#}")),
+            // The UDFs compile under the parameter record the batch was planned against.
+            let planning_inputs = match (&transaction_step, &direct_plan) {
+                (Some(step), _) => Some(&step.inputs),
+                (None, Some(plan)) => Some(&plan.inputs),
+                (None, None) => captured_inputs.as_ref(),
             };
+            let Some(planning_parameters) =
+                planning_inputs.and_then(DomainPlanningInputs::parameters)
+            else {
+                let error = Report::new(
+                    crate::registry::TransactionPlanningError::ClusterParametersUnseeded,
+                );
+                return command_error(transaction_planning_error_message(&error));
+            };
+            let planning_parameters = planning_parameters.values;
+            let prepared_udfs =
+                match Box::pin(self.prepare_planned_domain_udfs(&planned, &planning_parameters))
+                    .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) => return command_error(format!("{error:#}")),
+                };
             let base_classified_level = if let DomainStatus::Running = domain_state.status {
                 planned.quiesce().level()
             } else {
@@ -1632,11 +1650,7 @@ impl SessionServiceImpl {
                         Ok(transaction) => {
                             self.pause_transaction_commit_if_armed(&transaction).await;
                             let activation_error =
-                                Box::pin(self.apply_current_cluster_state_recording_recovery(
-                                    transaction_step.actual,
-                                    &transaction,
-                                ))
-                                .await;
+                                Box::pin(self.apply_current_cluster_state()).await.err();
                             recorded_transaction = Some(transaction);
                             if let Some(handoff) = ownership_handoff.take() {
                                 if let Some(error) = &activation_error {
@@ -1646,7 +1660,7 @@ impl SessionServiceImpl {
                                          {error:#}",
                                         domain.as_str()
                                     ));
-                                    self.defer_planned_ownership_handoff_release(
+                                    self.hold_planned_ownership_handoff_until_applied(
                                         &domain,
                                         handoff,
                                         error,
@@ -1820,7 +1834,7 @@ impl SessionServiceImpl {
                         Some(Box::pin(self.inner.consensus.current_runtime_revision()).await);
                     if let Err(error) = Box::pin(self.apply_current_cluster_state()).await {
                         if let Some(handoff) = ownership_handoff.take() {
-                            self.defer_planned_ownership_handoff_release(
+                            self.hold_planned_ownership_handoff_until_applied(
                                 &domain,
                                 handoff,
                                 &error,

@@ -18,6 +18,7 @@
 use std::{collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, time::Duration};
 
 use ahash::HashMap;
+use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -36,6 +37,7 @@ use rkyv::{
     api::high::{HighDeserializer, HighSerializer},
     rancor::Error as RkyvError,
     ser::{allocator::ArenaHandle, writer::IoWriter},
+    util::AlignedVec,
 };
 use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
 use thiserror::Error;
@@ -348,6 +350,37 @@ impl RequestSubquota {
     }
 }
 
+/// Why one typed request of a kind could not carry a message on this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RequestFitError {
+    #[error(
+        "request '{request}' archives to {bytes} bytes, above its class's {limit}-byte payload \
+         limit"
+    )]
+    Payload {
+        request: &'static str,
+        bytes: u64,
+        limit: u64,
+    },
+    #[error(
+        "request '{request}' needs a {bytes}-byte control body with its envelope, above its \
+         class's {limit}-byte limit"
+    )]
+    Body {
+        request: &'static str,
+        bytes: u64,
+        limit: u64,
+    },
+    #[error("request '{request}' cannot be archived")]
+    Archive { request: &'static str },
+}
+
+impl RequestFitError {
+    fn archive(error: RkyvError, request: &'static str) -> Report<Self> {
+        Report::new(error).change_context(Self::Archive { request })
+    }
+}
+
 /// One typed request message and the response type its handler produces.
 pub trait InterconnectRequest: RkyvMessage {
     type Response: RkyvMessage;
@@ -395,6 +428,19 @@ pub struct ApplicationProgress {
     pub runtime_ready: Option<u64>,
     /// The runtime revision every domain clock of the incarnation matches.
     pub domain_clock_installed: Option<u64>,
+    /// The newest runtime revision the incarnation failed to prepare, until it prepares that
+    /// revision or a later one.
+    pub runtime_failure: Option<RuntimeApplicationFailure>,
+}
+
+/// A runtime revision one process incarnation failed to prepare, and why.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeApplicationFailure {
+    pub revision: u64,
+    /// The failing incarnation's own description of the failure, because the application ran
+    /// inside that incarnation. It names the domain and the entities, never the records they
+    /// carry.
+    pub reason: String,
 }
 
 /// One phase of [`ApplicationProgress`].
@@ -415,6 +461,7 @@ impl ApplicationProgress {
             runtime_prepared: None,
             runtime_ready: None,
             domain_clock_installed: None,
+            runtime_failure: None,
         }
     }
 
@@ -443,7 +490,38 @@ impl ApplicationProgress {
             return false;
         }
         *reached = Some(revision);
+        if let ApplicationProgressPhase::RuntimePrepared = phase
+            && let Some(failure) = &self.runtime_failure
+            && failure.revision <= revision
+        {
+            // Preparing the failed revision, or a later one, ends that failure.
+            self.runtime_failure = None;
+        }
         true
+    }
+
+    /// Records that the incarnation failed to prepare runtime revision `revision` for `reason`,
+    /// and answers whether that changed the progress. A failure of a revision the incarnation
+    /// prepared since, or of one before the failure it already reports, changes nothing.
+    pub fn fail_runtime(&mut self, revision: u64, reason: String) -> bool {
+        if let Some(prepared) = self.runtime_prepared
+            && prepared >= revision
+        {
+            return false;
+        }
+        if let Some(failure) = &self.runtime_failure
+            && (failure.revision > revision
+                || (failure.revision == revision && failure.reason == reason))
+        {
+            return false;
+        }
+        self.runtime_failure = Some(RuntimeApplicationFailure { revision, reason });
+        true
+    }
+
+    /// The runtime revision the incarnation failed to prepare and has not prepared since.
+    pub const fn runtime_failure(&self) -> Option<&RuntimeApplicationFailure> {
+        self.runtime_failure.as_ref()
     }
 
     /// Takes every phase `report`, a later report of the same incarnation, reached beyond this
@@ -463,6 +541,11 @@ impl ApplicationProgress {
             if self.advance(phase, revision) {
                 advanced = true;
             }
+        }
+        if let Some(failure) = &report.runtime_failure
+            && self.fail_runtime(failure.revision, failure.reason.clone())
+        {
+            advanced = true;
         }
         advanced
     }
@@ -1829,6 +1912,49 @@ impl Transport {
             .await
     }
 
+    /// Refuses `message` when one typed request of its kind could not carry it on this node: its
+    /// archive above the class's payload limit, or that archive inside the request envelope a send
+    /// writes above the class's control body limit. It measures both encodings without sending
+    /// anything or charging a budget, so an owner that holds its largest request to a bound checks
+    /// that bound with it before it sends anything.
+    pub fn check_request_fits<M>(&self, message: &M) -> Result<(), Report<RequestFitError>>
+    where
+        M: InterconnectRequest
+            + for<'a> Serialize<HighSerializer<AlignedVec, ArenaHandle<'a>, RkyvError>>,
+    {
+        let executor = self.inner.executor();
+        let payload = rkyv::to_bytes::<RkyvError>(message)
+            .map_err(|error| RequestFitError::archive(error, M::NAME))?
+            .into_vec();
+        let payload_bytes: u64 = payload.len().arch_into();
+        let payload_limit = M::CLASS.payload_limit(executor);
+        if payload_bytes > payload_limit {
+            return Err(Report::new(RequestFitError::Payload {
+                request: M::NAME,
+                bytes: payload_bytes,
+                limit: payload_limit,
+            }));
+        }
+        let control = ControlEnvelope::Request(RequestEnvelope {
+            class: M::CLASS,
+            request: M::NAME.to_string(),
+            payload,
+        });
+        let body_bytes: u64 = rkyv::to_bytes::<RkyvError>(&control)
+            .map_err(|error| RequestFitError::archive(error, M::NAME))?
+            .len()
+            .arch_into();
+        let body_limit = M::CLASS.control_body_limit(executor);
+        if body_bytes > body_limit {
+            return Err(Report::new(RequestFitError::Body {
+                request: M::NAME,
+                bytes: body_bytes,
+                limit: body_limit,
+            }));
+        }
+        Ok(())
+    }
+
     pub async fn request_stream<M>(
         &self,
         node: &ClusterNodeName,
@@ -2454,6 +2580,7 @@ mod tests {
             runtime_prepared: Some(4),
             runtime_ready: None,
             domain_clock_installed: Some(2),
+            runtime_failure: None,
         };
         assert!(progress.absorb(&late));
         assert_eq!(
@@ -2464,12 +2591,65 @@ mod tests {
                 runtime_prepared: Some(5),
                 runtime_ready: None,
                 domain_clock_installed: Some(2),
+                runtime_failure: None,
             },
             "a report takes every phase it reached further and keeps every phase it reached less"
         );
         assert!(
             !progress.absorb(&late),
             "absorbing the same report again advances nothing"
+        );
+    }
+
+    #[test]
+    fn a_runtime_failure_holds_until_its_revision_or_a_later_one_is_prepared() {
+        let identity = ClusterNodeIdentity::new(
+            ClusterNodeName::parse("node-b")
+                .assured("the test node name follows the public node-name grammar"),
+            nervix_models::ClusterNodeIncarnation::new(3),
+        );
+        let mut progress = ApplicationProgress::new(identity.clone());
+        assert!(progress.advance(ApplicationProgressPhase::RuntimePrepared, 4));
+        assert!(
+            !progress.fail_runtime(4, "late".to_owned()),
+            "a revision the incarnation prepared cannot fail afterwards"
+        );
+        assert!(progress.fail_runtime(5, "first".to_owned()));
+        assert!(
+            !progress.fail_runtime(5, "first".to_owned()),
+            "the same failure again changes nothing"
+        );
+        assert!(
+            progress.fail_runtime(5, "retried".to_owned()),
+            "a later attempt at the same revision reports its own reason"
+        );
+        assert!(
+            !progress.fail_runtime(4, "earlier".to_owned()),
+            "an earlier revision's failure never replaces a later one"
+        );
+        assert_eq!(
+            progress.runtime_failure(),
+            Some(&RuntimeApplicationFailure {
+                revision: 5,
+                reason: "retried".to_owned(),
+            })
+        );
+
+        let mut held = ApplicationProgress::new(identity);
+        assert!(held.absorb(&progress), "a held report takes the failure");
+        assert_eq!(held.runtime_failure(), progress.runtime_failure());
+
+        assert!(progress.advance(ApplicationProgressPhase::RuntimePrepared, 5));
+        assert_eq!(
+            progress.runtime_failure(),
+            None,
+            "preparing the failed revision ends its failure"
+        );
+        assert!(held.absorb(&progress));
+        assert_eq!(
+            held.runtime_failure(),
+            None,
+            "a later report that prepared the revision ends the failure it held"
         );
     }
 

@@ -35,6 +35,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The longest a name may be, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "every Nervix name kind shares this 1 to 128 byte rule, and stored, archived and \
+                  transmitted names decode through it"
+    )
+)]
 const MAX_NAME_LEN: usize = 128;
 
 /// Why a string is not a name.

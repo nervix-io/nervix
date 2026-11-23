@@ -68,9 +68,9 @@ pub use connection::MqttConnectionError;
 use error_stack::{Report, ResultExt as _};
 use futures_util::FutureExt as _;
 pub use ingestor::{
-    MqttClientIdError, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
-    MqttTopicIngestorPlan, MqttTopicIngestorPosition, MqttTopicIngestorSessions,
-    MqttTopicIngestorSettings,
+    MqttClientIdError, MqttReadAheadHeadroom, MqttReadAheadSettings, MqttReadAheadSettingsError,
+    MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage, MqttTopicIngestorPlan,
+    MqttTopicIngestorPosition, MqttTopicIngestorSessions, MqttTopicIngestorSettings,
 };
 use meticulous::OptionExt as _;
 #[cfg(test)]
@@ -106,6 +106,14 @@ const MQTT: &str = "mqtt";
 
 /// The largest Remaining Length an MQTT packet can declare. Its variable byte integer holds at most
 /// four bytes of seven value bits each.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MQTT encodes Remaining Length as a variable byte integer of at most four \
+                  seven-bit groups, whose largest value is 268,435,455"
+    )
+)]
 const MQTT_MAX_REMAINING_LENGTH: usize = 268_435_455;
 
 /// The quality of service an MQTT emitter publishes at.
@@ -202,6 +210,14 @@ struct MqttPublishFraming {
 
 impl MqttPublishFraming {
     fn new(topic: &MqttTopicName, mode: MqttPublishingMode) -> Self {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "MQTT prefixes the PUBLISH topic name, a UTF-8 encoded string, with a \
+                          two-byte length"
+            )
+        )]
         const TOPIC_LENGTH_PREFIX_BYTES: usize = 2;
         const IN_MEMORY: &str = "a topic name and a few framing bytes fit in usize";
         let packet_identifier_bytes = match mode {
@@ -278,6 +294,14 @@ struct MqttBrokerPacketLimit(AtomicU32);
 
 impl MqttBrokerPacketLimit {
     /// The value the atomic holds while the broker has declared no maximum.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "MQTT forbids a Maximum Packet Size of zero, so the packed atomic reserves \
+                      zero to encode an undeclared maximum"
+        )
+    )]
     const UNDECLARED: u32 = 0;
 
     fn declare(&self, connack: &ConnAck) {

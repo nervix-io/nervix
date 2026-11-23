@@ -44,8 +44,19 @@ use crate::{batch::TypedArray, semantics::ClassifiedFloat};
 /// bound does.
 const DIGITS_BOUND: i16 = 400;
 
-/// Exponents `k` for which `10^k`, and so `5^k`, fits the 128-bit integer tables below.
-const INTEGER_POWER_COUNT: usize = 23;
+/// How many exponents `k`, from zero, the 128-bit integer tables below hold `5^k` and `10^k` for:
+/// one for each power of ten an `F64` represents exactly, the exponents float rounding looks them
+/// up at. Integer rounding looks them up at `10^19` at most.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the tables hold a power for each exponent whose power of ten an F64 represents \
+                  exactly, 10^0 through 10^22, which bounds every exponent rounding looks them up \
+                  at"
+    )
+)]
+const INTEGER_POWER_COUNT: usize = <f64 as DecimalRounding>::EXACT_POWERS_OF_TEN.len();
 
 const POWERS_OF_FIVE: [u128; INTEGER_POWER_COUNT] = integer_powers(5);
 
@@ -311,7 +322,8 @@ enum SignificandRounding<F> {
 pub(crate) trait DecimalRounding:
     CheckedFloat + ClassifiedFloat + Display + FromStr
 {
-    /// The bits of the significand of every normal value.
+    /// The bits of the significand of every normal value, which the float type's IEEE 754 binary
+    /// format fixes.
     const SIGNIFICAND_BITS: i32;
 
     /// `10^k` for every `k` whose power of ten the type represents exactly.
@@ -545,7 +557,15 @@ impl BinaryParts {
 }
 
 impl DecimalRounding for f64 {
-    const SIGNIFICAND_BITS: i32 = 53;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "IEEE 754 binary64 gives every normal F64 a 53-bit significand, its implicit \
+                      leading bit included"
+        )
+    )]
+    const SIGNIFICAND_BITS: i32 = f64::MANTISSA_DIGITS.cast_signed();
 
     const EXACT_POWERS_OF_TEN: &'static [Self] = &[
         1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
@@ -587,7 +607,15 @@ impl DecimalRounding for f64 {
 }
 
 impl DecimalRounding for f32 {
-    const SIGNIFICAND_BITS: i32 = 24;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "IEEE 754 binary32 gives every normal F32 a 24-bit significand, its implicit \
+                      leading bit included"
+        )
+    )]
+    const SIGNIFICAND_BITS: i32 = f32::MANTISSA_DIGITS.cast_signed();
 
     const EXACT_POWERS_OF_TEN: &'static [Self] =
         &[1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10];

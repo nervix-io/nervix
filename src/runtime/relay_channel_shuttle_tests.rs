@@ -537,6 +537,86 @@ fn shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release() {
     explore(move || dispatches_parked_behind_a_lease_wake_only_on_its_release(deadline));
 }
 
+/// Hands `hand_ons` batches on one after another the way an owner's fan-out does: it takes a
+/// hand-on permit, or waits for hand-on to reopen and tries again, and holds each permit across a
+/// scheduling point.
+async fn hand_on(gate: Arc<RelayDispatchGate>, records: Arc<GateRecords>, hand_ons: usize) {
+    for _ in 0..hand_ons {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if let Some(permit) = gate.try_acquire_hand_on() {
+                records.permit_acquired();
+                nervix_primitives::task::yield_now().await;
+                records.assert_no_permit_overlaps_a_quiescent_lease();
+                records.permit_dropping();
+                drop(permit);
+                break;
+            }
+            gate.wait_hand_on_open().await;
+        }
+    }
+}
+
+fn hand_on_passes_a_producers_hold_and_waits_behind_a_swap(deadline: Instant) {
+    shuttle::future::block_on(async {
+        let gate = Arc::new(RelayDispatchGate::new());
+        let records = Arc::new(GateRecords::default());
+        // A coordinated drain holds producers for the whole check; hand-on keeps flowing past it.
+        let mut drain = RelayDispatchGateLease::engage_producers(
+            gate.clone(),
+            deadline,
+            "shuttle coordinated drain",
+        );
+        assert!(
+            drain.wait_quiescent().await,
+            "no dispatch holds a permit before the check starts"
+        );
+        let first = nervix_primitives::task::spawn(hand_on(gate.clone(), records.clone(), 2));
+        let second = nervix_primitives::task::spawn(hand_on(gate.clone(), records.clone(), 2));
+        let (release, released) = oneshot::channel();
+        let swap = nervix_primitives::task::spawn(fence_until_released(
+            gate.clone(),
+            records.clone(),
+            released,
+            deadline,
+        ));
+        nervix_primitives::task::yield_now().await;
+        release
+            .send(())
+            .assured("the swap holds its lease until the check releases it");
+        swap.await
+            .assured("a check task that panics fails the execution before its join returns");
+        // Every hand-on finishes while the producers hold stays engaged: a hand-on parked behind
+        // the swap is woken by its release, and the drain never parks one.
+        first
+            .await
+            .assured("a check task that panics fails the execution before its join returns");
+        second
+            .await
+            .assured("a check task that panics fails the execution before its join returns");
+        assert!(gate.is_engaged(), "the producers hold is still engaged");
+        assert!(
+            gate.try_acquire_hand_on().is_some(),
+            "a producers hold alone never holds hand-on back"
+        );
+        drop(drain);
+        assert_eq!(
+            gate.in_flight_dispatches(),
+            0,
+            "every permit and rolled-back acquisition returns its dispatch count"
+        );
+    });
+}
+
+/// A hand-on (an owner's fan-out or a routed delivery) passes a hold that holds producers only,
+/// never overlaps the quiescent lease of a hold that holds hand-on back, and is woken by that
+/// hold's release rather than refused or left waiting.
+#[test]
+fn shuttle_hand_on_passes_a_producers_hold_and_waits_behind_a_swap_until_its_release() {
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || hand_on_passes_a_producers_hold_and_waits_behind_a_swap(deadline));
+}
+
 fn capacity(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).assured("check capacities are nonzero literals")
 }

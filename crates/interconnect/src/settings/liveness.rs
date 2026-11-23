@@ -1,7 +1,8 @@
 //! Liveness budgets derived from the committed cluster policy.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** HTTP/2 ping and application-probe derivations from member unavailability.
+//! - **Owns.** HTTP/2 ping derivations from member unavailability, and one live projection of
+//!   them with the vocabulary's application-probe deadline.
 //! - **Depends on.** Vocabulary setting classes and the committed parameter values.
 //! - **Must not know.** Membership decisions, gossip publication or graph execution.
 #![cfg_attr(
@@ -13,7 +14,9 @@ use std::{convert::Infallible, time::Duration};
 
 use error_stack::Report;
 use meticulous::ResultExt as _;
-use nervix_models::{ClusterParameterValues, ClusterParameters, Setting, SettingDefinition};
+use nervix_models::{
+    ClusterParameterValues, ClusterParameters, ProbeTimeout, Setting, SettingDefinition,
+};
 
 /// Half the unavailability budget between HTTP/2 pings.
 pub struct PingInterval;
@@ -45,24 +48,6 @@ impl SettingDefinition for PingTimeout {
         Some("node-unavailability-timeout / 4, at least one timer nanosecond");
     fn default_value(context: &ClusterParameterValues) -> Duration {
         (context.node_unavailability_timeout() / 4).max(Duration::from_nanos(1))
-    }
-    fn validate(_: &Duration, _: &ClusterParameterValues) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// One tenth of the unavailability budget for an application health answer.
-pub struct ProbeTimeout;
-impl SettingDefinition for ProbeTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ClusterParameterValues;
-    type Error = Infallible;
-    const NAME: &'static str = "interconnect-probe-timeout";
-    const DERIVATION: Option<&'static str> =
-        Some("node-unavailability-timeout / 10, at least one timer nanosecond");
-    fn default_value(context: &ClusterParameterValues) -> Duration {
-        (context.node_unavailability_timeout() / 10).max(Duration::from_nanos(1))
     }
     fn validate(_: &Duration, _: &ClusterParameterValues) -> Result<(), Report<Infallible>> {
         Ok(())

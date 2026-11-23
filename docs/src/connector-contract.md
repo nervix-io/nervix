@@ -338,6 +338,17 @@ including a path another feature adds or changes. Each rule names the section th
   every answer already given before a failure ends the publish; see [Emitter boundary](#emitter-boundary).
   The RabbitMQ emitter, which settles what its broker confirmed itself when it loses a channel, is
   the one brokered emitter that does not use the window yet.
+- **A driver sends nothing again that its entity does not declare.** A request a driver would send
+  again by itself after writing any of it, beneath the host's `RETRY POLICY`, is turned off in every
+  client Nervix builds whose settings the operator cannot reach, as in the shared [HTTP
+  client](#http-client-transport) and the Iceberg clients. A request a connection pool moves to a
+  fresh connection before writing any of it reached no server and is not sent again. A driver retry
+  that turning off would make worse is kept and stated with its bound in the entity's driver limits,
+  as the Redis command pool's retry of a failed connection open within `connect_timeout_ms` is. A
+  resend the operator configures through the client's pass-through driver options, such as
+  librdkafka's resends or a MongoDB connection string's `retryWrites`, keeps the driver's default,
+  and the entity's driver limits and manual state that default, what it can duplicate or reorder,
+  and the option that changes it.
 - **Every buffer and every wait is declared with its bound.** The deadline keys keep one meaning,
   no driver call parks an asynchronous worker, and each deadline key an entity's waits name has its
   stalled-peer scenario. A change adds no unbounded buffer and no wait that only a stop ends; one
@@ -371,6 +382,9 @@ A change that adds or alters an ingestor or emitter entity, or a host path that 
 - a payload its codec refuses becomes a decode rejection rather than failing its whole batch;
 - each emitter answers `finish` for what its client can still hold once a publish returns, and a
   brokered emitter in `MODE ACK` awaits its broker through the `ConfirmationWindow`;
+- every request a driver sends again by itself after writing any of it is turned off, or declared
+  in the entity's driver limits with its bound, what it can duplicate or reorder, and the option
+  that changes it;
 - the [bounds review checklist](#review-checklist) holds;
 - a new host protocol on these paths has a Shuttle check over its production owner.
 
@@ -394,7 +408,8 @@ operation receives that context, and the S3, GCS and Azure signers send the HTTP
 OpenDAL's credential providers through its transport too. The object-store client's optional
 `timeout_ms`, read through `ConfiguredDeadline`, sets both the operation and I/O timeout of the
 OpenDAL operator, including credential HTTP calls, name resolution, connection and TLS. Without
-the key, metadata and delete operations allow 60 seconds and reads and writes allow 10 seconds.
+the key, metadata operations (stat, directory creation, rename and presign) allow 60 seconds, and
+reads, writes, lists, copies and deletes allow 10 seconds.
 Each of the two Iceberg HTTP clients receives the rustls configuration that the shared
 `RustlsClientConfigProvider` builds from its own client's entries. It holds the bundled WebPKI roots and the
 platform's native roots with the client's `tls_ca_file` added, and the identity of its
@@ -410,7 +425,9 @@ emitter's location and the initial table's effective storage properties. Table m
 retain that table's `FileIO` and its initialized storage, so later object calls reuse the operator;
 an object URL for a different storage root is refused. OpenDAL's credential providers keep their
 own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
-neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt. Catalog
+requests make one attempt too: the Reqwest 0.12 catalog client's retry policy is off, although that
+client speaks HTTP/1.1, where the policy never sends a request again.
 An Azure location's host names the Blob service for `wasb`/`wasbs` and the Data Lake service for
 `abfs`/`abfss`, and the emitter checks that service and the container before `@` when it opens.
 Object requests for every Azure scheme go to the account's Data Lake endpoint, which the connector
@@ -441,6 +458,12 @@ one contract:
   names through the node resolver, never reads `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
   `NO_PROXY` or their lowercase forms, follows no redirect by itself, bounds each request by the
   client's `timeout_ms` where the client sets it, and presents the client's TLS trust and identity.
+  It sends each request once. Reqwest's own policy, which would send a request again after an
+  HTTP/2 `REFUSED_STREAM` or graceful `GOAWAY`, is off, so the refusal fails the attempt and the
+  connector's retry policy decides about the next one. The connection pool beneath still writes a
+  request on a fresh connection when the reused connection it chose closed before any of the
+  request was written; that request never reached the server, and Reqwest offers no way to turn
+  that choice off.
   It obtains its preconfigured rustls client from `RustlsClientConfigProvider`, the same owner the
   HTTP request emitter uses: bundled Mozilla roots plus native roots, with every certificate in
   `tls_ca_file` added and the optional paired client certificate and key. An empty native store
@@ -1807,9 +1830,11 @@ sender replacement or shutdown ends them. These correlations remain volatile and
 connector position or persisted commit. [Cluster Interconnect](./interconnect.md) owns their
 capacity and deadline contracts.
 
-The host refreshes pending ACK progress every 100 milliseconds during connector requests and
-retries. This cadence must stay shorter than an ingestor's one-second `ACK TIMEOUT` so a pending
-attached emitter attempt does not make the ingestor replay work while the emitter still owns it.
+The host refreshes pending ACK progress every committed `REMOTE_ACK_ALIVE_INTERVAL`, 100
+milliseconds by default, during connector requests and retries. This cadence must stay shorter than
+an ingestor's `ACK TIMEOUT`, such as a one-second one, so a pending attached emitter attempt does not
+make the ingestor replay work while the emitter still owns it. Each request or retry wait reads the
+interval once it is pending, so a committed change reaches the next one.
 
 Each ingestor host retains its exact instance readiness handle. Poll success and suspend/resume
 publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
@@ -1873,7 +1898,7 @@ does meanwhile:
 | Kafka | A consumer group's member pauses fetching and services its group through the hold hook, so it stays in its group; a domain-offset reader keeps its explicit assignment. |
 | Pulsar | The connection task answers the broker's pings, and the broker stops sending once the receiver queue's flow permits are spent. |
 | RabbitMQ | Heartbeats run on the client's own task. An acknowledged mode's prefetch bounds what the broker sends; under `NO ACK` Lapin's delivery queue keeps growing, without a bound. |
-| MQTT | The connection's driver task keeps the event loop, and with it the keep-alive, running while it reads up to 64 publishes ahead under `NO ACK`. Once those fill, the driver stops reading, and the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| MQTT | The connection's driver task keeps the event loop, and with it the keep-alive, running while it reads up to `--mqtt-read-ahead-headroom` publishes, 64 by default, ahead under `NO ACK`. Once those fill, the driver stops reading, and the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
 | Redis Pub/Sub | The dedicated reader keeps reading and sending idle probes until `subscription_buffer_messages` messages wait, then applies TCP backpressure; Redis closes the subscriber at its `client-output-buffer-limit`. |
 | WebSocket client | The hold hook keeps reading, answering the server's pings and writing the client's own, and parks one data frame in a declared read-ahead that the next read hands over first. Once a frame is parked nothing further is read: unread frames stay with the transport, and a server that pings with a deadline can close the connection. The idle window restarts when reading resumes, so the held time is not counted as the peer's silence. |
 
@@ -2091,19 +2116,22 @@ publishes or compact discard acknowledgements to the ingestor through a bounded 
 packet order. Admitted topic, payload and correlation bytes are copied out of the raw framing
 allocation, so a small admitted slice cannot retain an oversized neighbouring frame.
 
-In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
-Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
-Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 or 2 while that many
-wait on their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
-gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra capacity lets the
-connection keep reading while the host holds a batch. The broker holds back no publish at QoS 0,
-which a subscription at QoS 1 or 2 receives from a publisher that sends at QoS 0. In an `ACK` mode the
-read-ahead reserves the full Receive Maximum for QoS 1/2 packet outcomes and admits up to 64 QoS 0
-outcomes alongside them, in the same packet-ordered queue. Each queued QoS 0 outcome owns one
-capacity permit until the ingestor takes it. Excess QoS 0 publishes are dropped and counted, so
-they cannot stop event-loop polling, consume a QoS 1/2 slot, delay a `PUBACK` or `PUBREC`, or stop
-keep-alive pings. An oversized QoS 0 publish that cannot enter read-ahead is counted as overflow rather than
-as an oversized outcome; no payload is counted twice.
+In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window plus the node's
+`--mqtt-read-ahead-headroom`, 64 by default, as its Receive Maximum, up to MQTT's largest Receive
+Maximum, 65,535: at the default, 65 under `ACK SEQUENTIAL` and `ACK PARALLEL MAX` plus 64 under
+`ACK PARALLEL`. The headroom is a node capability of the connector host, so nodes may run different
+values during a roll, and it changes nothing a statement declares. The broker then sends no further
+publish at QoS 1 or 2 while that many wait on their acknowledgements, so a batch holds at most that
+many, and an `ACK PARALLEL MAX` above 65,535 gathers at most 65,535 of them before its
+`BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the host holds a
+batch. The broker holds back no publish at QoS 0, which a subscription at QoS 1 or 2 receives from a
+publisher that sends at QoS 0. In an `ACK` mode the read-ahead reserves the full Receive Maximum for
+QoS 1/2 packet outcomes and admits up to the headroom's count of QoS 0 outcomes alongside them, in
+the same packet-ordered queue. Each queued QoS 0 outcome owns one capacity permit until the ingestor
+takes it. Excess QoS 0 publishes are dropped and counted, so they cannot stop event-loop polling,
+consume a QoS 1/2 slot, delay a `PUBACK` or `PUBREC`, or stop keep-alive pings. An oversized QoS 0
+publish that cannot enter read-ahead is counted as overflow rather than as an oversized outcome; no
+payload is counted twice.
 
 The host resolves `nervix_ingestor_read_ahead_dropped_payloads_total` for each ingestor unit,
 registered at zero, and hands the connector an `IngestorReadAheadOverflow` report in the unit's
@@ -2145,9 +2173,9 @@ cancellation, retirement debt and terminal close. The registered Shuttle check c
 production subscription owner's lifetime with controlled completion and no modeled network.
 
 Under `NO ACK`, the client acknowledges every publish on receipt and the broker holds back none.
-Its read-ahead holds 64 outcomes. Once it is full, the task holds the next outcome and polls
-nothing until the ingestor reads one, so the connection's flow control holds the broker back and
-the client sends no keep-alive until the host reads again.
+Its read-ahead holds the headroom's count of outcomes, 64 by default. Once it is full, the task
+holds the next outcome and polls nothing until the ingestor reads one, so the connection's flow
+control holds the broker back and the client sends no keep-alive until the host reads again.
 
 Acknowledging a batch requests a `PUBACK` for each of its publishes at QoS 1, and a `PUBREC` for
 each at QoS 2, and returns once the event loop has written all of them to the connection and

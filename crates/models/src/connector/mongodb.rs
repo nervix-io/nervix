@@ -84,6 +84,14 @@ pub const MONGODB_MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MONGODB_NAMESPACE_MAX_BYTES: usize = 120;
 
 // A database is nonempty and its separator is one byte.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a namespace joins a nonempty database and a one-byte separator to its \
+                  collection, which keeps the namespace budget less those two bytes"
+    )
+)]
 const MAX_COLLECTION_BYTES: usize = MONGODB_NAMESPACE_MAX_BYTES - 2;
 const _: () = assert!(MAX_COLLECTION_BYTES > 0);
 
@@ -147,7 +155,15 @@ const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
     ],
-    driver_limits: &["A document above the declared BSON document limit is rejected."],
+    driver_limits: &[
+        "A document above the declared BSON document limit is rejected.",
+        "The driver sends a write, or the collection lookup at open, again by itself: once after \
+         a network error or a retryable server error, a write only on a replica set or sharded \
+         cluster, and up to twice with its own backoff after an error the server labels as \
+         overload. A resent write carries the same transaction number, so the server applies each \
+         document once. The connection string's retryWrites, retryReads and maxAdaptiveRetries \
+         change this, and RETRY POLICY retries what the driver leaves unresolved.",
+    ],
 };
 
 impl EmitterDeclaration for MongoDbCollectionEmitter {

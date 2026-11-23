@@ -5926,6 +5926,21 @@ selections = [
 ]
 
 [[workload]]
+coverage = "Exercises committed-parameter validation, live installation and the UDF compile path on one and three nodes; the compile budget's elapsed-time check has no tracked synchronization."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.udf-compile-budget"
+invariant = "A committed UDF_COMPILE_BUDGET refuses zero, installs live on every node, refuses a UDF whose compilation and test blocks outlast it without storing it, and admits one again once raised."
+invocation = "cluster-parameters"
+scenario = "The UDF compile budget refuses a UDF whose test blocks outlast it on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
 coverage = "Each live node installs the committed policy before command completion."
 examples = 2
 feature = "tests/features/cluster/cluster_parameters.feature"
@@ -5993,6 +6008,21 @@ id = "parameters.return"
 invariant = "A returning node adopts live policy before its stale log catches up."
 invocation = "cluster-parameters"
 scenario = "A node down during a parameter change adopts the committed record when it returns"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A parameter change whose admitting leader moves under its durable admission, on three nodes: with the leader's own resumption held, the request's retry on the next leader meets the refused finalization, and a later retry records the outcome. The fault-injection holds and the leadership move are untracked."
+examples = 1
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.moved-finalization-refusal"
+invariant = "A finalization the next leader refuses after a leadership move leaves the parameter change's outcome unknown to its request, and a retry under the same reference commits the change once."
+invocation = "cluster-parameters"
+scenario = "A parameter change whose leader moves after admitting it still reports its refused finalization as unknown"
 selections = [
   "deloxide",
   "deloxide-order",
@@ -6098,6 +6128,20 @@ id = "parameters.resource-quota-volume"
 invariant = "A committed resource quota always fits the database volume of every admitted node."
 invocation = "cluster-parameters"
 scenario = "A resource quota above a node's database volume is refused, naming the node, on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+[[workload]]
+coverage = "A lowered node-unavailability timeout is validated against the health-probe interval each admitted node's committed claim carries, in the application pre-check and the replicated apply, and is refused naming the node on one and three nodes; the last node restarted with an interval the committed timeout does not fit refuses before readiness, naming itself, and starts once its interval fits. The check reads immutable claims and adds no tracked lock."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.node-unavailability-health-probes"
+invariant = "A committed node-unavailability timeout always exceeds every admitted node's health-probe interval plus the probe timeout derived from it."
+invocation = "cluster-parameters"
+scenario = "An unavailability timeout a node's health probes cannot observe within is refused, naming the node, on a cluster of <cluster_size>"
 selections = [
   "deloxide",
   "deloxide-order",

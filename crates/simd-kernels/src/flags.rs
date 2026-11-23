@@ -21,6 +21,13 @@ use fearless_simd::{Level, dispatch, prelude::*};
 use crate::LEVEL;
 
 /// The lanes one bitmask word covers.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a bitmask word is one u64, one bit for each of its 64 lanes"
+    )
+)]
 pub const WORD_LANES: usize = 64;
 
 /// Packs runs of flag bytes into bitmask words, lane zero of each word in its lowest bit, at the

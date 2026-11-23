@@ -27,6 +27,24 @@ Feature: Declared infrastructure settings
       | 1            |
       | 3            |
 
+  Scenario Outline: Configured gossip and MQTT read-ahead capacities are visible on a cluster of <cluster_size>
+    Given node-1 starts with gossip-receive-queue-capacity = 512
+    And node-1 starts with gossip-tombstone-grace-period = 90s
+    And node-1 starts with mqtt-read-ahead-headroom = 32
+    And a <cluster_size> node nervix cluster is started
+    Then node "node-<cluster_size>" eventually describes node "node-1" with "membership: gossip-receive-queue-capacity=512 gossip-tombstone-grace-period=1m 30s"
+    And the last command output contains
+      """
+      mqtt-read-ahead-headroom=32
+      """
+    When 2 domains named "configured_membership" are created on the leader node
+    Then within "60s" every node has applied 2 domains named "configured_membership"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Committed unavailability changes transport liveness on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands

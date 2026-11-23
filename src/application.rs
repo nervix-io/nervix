@@ -299,8 +299,6 @@ pub struct Application {
         setter(skip)
     )]
     pub shutdown: ShutdownCoordinator,
-    #[builder(default = true)]
-    pub graceful_shutdown_drain: bool,
 }
 
 impl Application {
@@ -329,7 +327,7 @@ impl Application {
             web_console_https_listen_addr,
         )
         .change_context(AppError::BuildConsoleAdvertiseUrl)?;
-        let graceful_shutdown_drain = self.graceful_shutdown_drain;
+        let graceful_shutdown_drain = self.fault_injection.runs_shutdown_drain();
         let drain_timeout = self.settings.shutdown.drain_timeout();
         let cluster_id = self.identity.cluster_id.clone();
         let node_id = self.identity.node_id.clone();
@@ -697,18 +695,13 @@ impl Application {
         };
         if allow_bootstrap
             && consensus.observer().cluster_parameters().is_none()
-            && let Err(error) = preflight::validate_resource_volume(
+            && let Err(error) = preflight::validate_selected_policy(
                 &parameter_seeds,
-                capabilities.database_volume_bytes,
+                &node_id,
+                &capabilities,
+                &settings.operational,
                 &db_path,
             )
-            .and_then(|()| {
-                preflight::validate_runtime_budget(
-                    &parameter_seeds,
-                    &node_id,
-                    capabilities.shutdown,
-                )
-            })
         {
             startup.consensus = Some(consensus);
             startup.terminate().await;
@@ -762,6 +755,7 @@ impl Application {
             recovered_members: recovered_endpoints,
             interconnect: interconnect.clone(),
             membership: settings.membership,
+            session_notice_capacity: settings.operational.session.notice_capacity(),
             prerequisites: interconnect.local_prerequisites(),
             fault_injection: fault_injection.clone(),
         })
@@ -1246,14 +1240,14 @@ impl Application {
                 consensus.observer().cluster_parameters()
             };
             if let Some(record) = record {
-                preflight::validate_resource_volume(
+                preflight::validate_selected_policy(
                     &record.values,
-                    capabilities.database_volume_bytes,
+                    &node_id,
+                    &capabilities,
+                    &settings.operational,
                     &db_path,
                 )
                 .change_context(AppError::Preflight)?;
-                preflight::validate_runtime_budget(&record.values, &node_id, capabilities.shutdown)
-                    .change_context(AppError::Preflight)?;
                 break record;
             }
             sleep(settings.membership.gossip_interval()).await;
