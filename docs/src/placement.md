@@ -769,7 +769,14 @@ its rules admit. A unit stored on a node its rules no longer admit moves, with i
 the planned ownership handoff. While some unit has no admitted node, `START` waits, much as a
 Kubernetes pod stays Pending until a node matches. It holds the domain's mutation lease, so the domain's
 other changes are refused meanwhile, and it continues by itself once a node that satisfies the
-rules is live with a committed record. Nothing starts until every unit can be placed. A `START`
+rules is live with a committed record. A move whose destination cannot take the unit yet, such as a
+node that has just restarted and not yet applied the committed schedule, is tried again a scheduling
+interval later. When the leader running a waiting `START` loses its leadership, `START` is not
+refused: its outcome stays unknown, the answer names the new leader, and the statement repeated
+there under the same execution reference, which a client that follows the session protocol does on
+its own, waits on. When that node shuts down instead, `START` stops waiting and fails, saying that
+the node is shutting down; the domain stays stopped, and repeating the statement under the same
+execution reference returns that refusal. Nothing starts until every unit can be placed. A `START`
 in the same transaction as a node-rule change that would leave a breach is refused; commit the
 change first, then `START`.
 
