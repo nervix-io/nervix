@@ -144,6 +144,17 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
                 overflow: BufferOverflow::FailRead,
             },
         },
+        DeclaredBuffer {
+            holds: "outgoing frames the transport has not written yet: signaling messages, pings, \
+                    pong replies and the Close",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "write_buffer_size bytes (default 131072), plus max_message_size bytes \
+                     (default 67108864) or 125, whichever is larger, plus 14 bytes of frame header",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
     ],
     waits: &[
         DeclaredWait {

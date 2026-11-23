@@ -416,7 +416,12 @@ Dynamic changes preserve live execution, entity changes drain only affected enti
 changes pause and drain the domain. Success follows schedule application, ownership handoff, runtime
 readiness, and gate release. A no-op reapplies the current required state before returning.
 
-`START` waits until every listener and assigned ingestor has completed its startup boundary. `STOP`
+`START` waits until every listener and assigned ingestor has completed its startup boundary. It is
+a lifecycle command of its own, not an internal transaction: the one write that starts the domain
+records its revision in the command's execution, so a coordinator that resumes the applying `START`
+waits for that revision instead of starting the domain again, and one that finds no revision
+recorded checks, places and commits the start afresh
+([Starting A Domain](./control-plane.md#starting-a-domain)). `STOP`
 waits, with no limit of its own, until the domain's work in motion has come to rest, then for
 remote ingestor and listener teardown, including when it stops the cluster's last running domain,
 for the last state write of every deduplicator and window branch it ends, for the last checkpoint

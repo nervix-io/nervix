@@ -3,9 +3,10 @@
 //! Layer: engines and infrastructure.
 //! - **Owns.** The active transport, immutable response headers, optional ping cadence, the
 //!   inbound activity deadline and bounded missed-ping response window retained across
-//!   cancellation, and the Close a connection this client ends offers its peer: going away when
-//!   that deadline ends it, the status of a frame the peer sent that failed the read, or the
-//!   status of the failure that ended its signaling handshake.
+//!   cancellation, the Close a connection this client ends offers its peer: going away when that
+//!   deadline ends it, the status of a frame the peer sent that failed the read, or the status of
+//!   the failure that ended its signaling handshake, and how this client writes its own frames
+//!   after what the transport already holds.
 //! - **Depends on.** Connector outcomes, signaling outcomes, execution primitives, recovery
 //!   classes and WebSocket transport.
 //! - **Must not know.** Configuration Models, Plexus, domains, relays, registry or host admission.
@@ -19,7 +20,7 @@
     nervix::input(plans, reason = "the ingestor supplies validated connection settings")
 )]
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use error_stack::Report;
 use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _};
@@ -36,6 +37,7 @@ use nervix_primitives::{
     time::{Instant, error::Elapsed, timeout_at},
 };
 use nervix_recovery::Reported as _;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
     tungstenite::{
@@ -119,11 +121,46 @@ pub(super) enum ConnectionEnding {
     Release,
 }
 
+/// How this client writes its own frames, beside the automatic replies the transport queues.
+///
+/// While the peer is not reading, tungstenite still buffers the automatic pong to each ping it
+/// reads, until the pongs fill the outgoing buffer's cap, and it refuses any further frame as
+/// `WriteBufferFull`. A frame of the client's own therefore first writes out what the transport
+/// holds: that waits for the peer, within the caller's own budget, and then the frame finds room.
+pub(super) trait OwnFrames {
+    /// Writes `frame` once what the transport already holds is written.
+    fn send_own(
+        &mut self,
+        frame: Message,
+    ) -> impl Future<Output = Result<(), WebsocketError>> + Send;
+
+    /// Writes what the transport holds, then the reply tungstenite queued to a peer's Close. A
+    /// reply that did not fit beside the frames already buffered stays queued through the first
+    /// flush, which makes room for it, and the second writes it.
+    fn flush_reply(&mut self) -> impl Future<Output = Result<(), WebsocketError>> + Send;
+}
+
+impl<S> OwnFrames for WebSocketStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    async fn send_own(&mut self, frame: Message) -> Result<(), WebsocketError> {
+        self.flush().await?;
+        self.send(frame).await
+    }
+
+    async fn flush_reply(&mut self) -> Result<(), WebsocketError> {
+        self.flush().await?;
+        self.flush().await
+    }
+}
+
 impl ConnectionEnding {
     /// Offers the peer this ending's Close, waiting neither for the write nor for a reply. The
-    /// frame gets one poll outside the cooperative budget, so only a transport that cannot take it
-    /// at once holds it back, and the caller releases the connection either way. A write the
-    /// transport refuses is reported under `operation`. A release offers nothing.
+    /// frame gets one poll outside the cooperative budget, so only a transport that cannot take
+    /// what it already holds and the frame at once holds it back, and the caller releases the
+    /// connection either way. A write the transport refuses is reported under `operation`. A
+    /// release offers nothing.
     pub(super) fn offer(
         self,
         relay: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
@@ -135,7 +172,7 @@ impl ConnectionEnding {
                     code: status,
                     reason: "".into(),
                 }));
-                let offered = unconstrained(relay.send(close)).now_or_never();
+                let offered = unconstrained(relay.send_own(close)).now_or_never();
                 if let Some(written) = offered {
                     written.reported(operation);
                 }
@@ -226,10 +263,12 @@ impl From<&WebsocketSignalingError> for ConnectionEnding {
             // for another connection, as the idle verdict does.
             WebsocketSignalingError::Timeout { .. } => Self::Close(CloseCode::Away),
             // This client's own programs failed the handshake: a SEND JAQ program did not produce
-            // exactly one value, the format could not encode it, or a CAPTURE program failed or
-            // produced no object. RFC 6455 erratum 3227 extends this status to clients.
+            // exactly one value, the format could not encode it, its message is larger than
+            // max_message_size, or a CAPTURE program failed or produced no object. RFC 6455
+            // erratum 3227 extends this status to clients.
             WebsocketSignalingError::SendProgram { .. }
             | WebsocketSignalingError::SendEncode { .. }
+            | WebsocketSignalingError::SendTooLarge { .. }
             | WebsocketSignalingError::Capture { .. } => Self::Close(CloseCode::Error),
             // This client's own write failed, so the transport takes no Close either.
             WebsocketSignalingError::Send(_) => Self::Release,

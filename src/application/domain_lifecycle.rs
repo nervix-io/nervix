@@ -19,7 +19,9 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
-use nervix_consensus::{ConsensusConflict, ConsensusError, DomainMutationLease};
+use nervix_consensus::{
+    ConsensusConflict, ConsensusError, DomainMutationLease, OrphanedPauseRecovery,
+};
 use nervix_interconnect::{
     DomainDrainStatusEnvelope, RemoteOperationFailure,
     backup::{BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest},
@@ -33,7 +35,7 @@ use thiserror::Error;
 
 use super::{
     backup::cut_reach::CutReach,
-    command_result::CommandResult,
+    command_result::{CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
     entity_gate::DrainOutstanding,
     model_mutation::{command_error, command_ok, command_ok_already_existed},
@@ -129,6 +131,15 @@ impl DomainDrainMode {
             Self::Backup { deadline } => ApplicationBound::Deadline(deadline),
         }
     }
+}
+
+/// What a command that found its domain paused by an alteration does next.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::application) enum PausedDomainRecovery {
+    /// The pause was orphaned and is resumed, or the domain changed meanwhile: look again.
+    Replan,
+    /// The pause is not the command's to resume; the command keeps its paused-domain refusal.
+    RetainRefusal,
 }
 
 pub(in crate::application) struct ResolvedDomainStart {
@@ -864,6 +875,76 @@ impl SessionServiceImpl {
                     format!("failed to create domain '{}'", create.id.as_str()),
                 )
                 .await
+            }
+        }
+    }
+
+    /// Resumes the pause of `domain` an alteration left behind when no committing transaction and
+    /// no alteration on this node owns it any more, under `mutation`, the mutation lease of the
+    /// command that found the domain paused. Consensus checks the lease, the restore start gate,
+    /// the licensing stop gate and the domain's committing transactions in the same applied
+    /// revision.
+    pub(in crate::application) async fn recover_paused_domain(
+        &self,
+        domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
+    ) -> Result<PausedDomainRecovery, Box<CommandResult>> {
+        if self.inner.runtime.domain_alter_is_active(domain) {
+            return Ok(PausedDomainRecovery::RetainRefusal);
+        }
+        let Some(mutation) = mutation else {
+            return Ok(PausedDomainRecovery::RetainRefusal);
+        };
+        let recovered = self
+            .inner
+            .consensus
+            .recover_orphaned_model_pause(domain.clone(), mutation)
+            .await;
+        match recovered {
+            Ok(OrphanedPauseRecovery::Resumed) => {
+                tracing::info!(domain = domain.as_str(), "resumed orphaned ALTER pause");
+                if let Err(error) = self.apply_current_cluster_state().await {
+                    return Err(Box::new(CommandResult::new(
+                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                        format!(
+                            "orphaned pause recovery is committed but runtime application is \
+                             incomplete: {error:#}; retry with the same execution reference"
+                        ),
+                    )));
+                }
+                Ok(PausedDomainRecovery::Replan)
+            }
+            Ok(OrphanedPauseRecovery::Unchanged) => Ok(PausedDomainRecovery::Replan),
+            Ok(OrphanedPauseRecovery::TransactionActive { transaction }) => {
+                Err(Box::new(CommandResult::new(
+                    CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying),
+                    format!(
+                        "transaction '{transaction}' owns the domain pause; retry with the same \
+                         execution reference"
+                    ),
+                )))
+            }
+            Err(error) => {
+                // Neither gate lets the pause resume; the command keeps its paused-domain refusal.
+                if let ConsensusError::Conflict(
+                    ConsensusConflict::RestoreInstallation { .. }
+                    | ConsensusConflict::LicensingStop { .. },
+                ) = error.current_context()
+                {
+                    return Ok(PausedDomainRecovery::RetainRefusal);
+                }
+                let mut response = self
+                    .consensus_error_response(error.current_context(), format!("{error:#}"))
+                    .await;
+                if let CommandDisposition::Failed = response.disposition {
+                    response.disposition =
+                        CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::StillApplying);
+                    response.message.push_str(
+                        "; orphaned pause recovery was not confirmed; retry with the same \
+                         execution reference",
+                    );
+                }
+                Err(Box::new(response))
             }
         }
     }

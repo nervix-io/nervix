@@ -556,12 +556,22 @@ conflicts. The operation checks lease authority, the restore start gate and all 
 committing transactions before resuming a pause in one applied revision. It changes only domain
 status, keeping the start version, start mode, clock, schedule and incremental storage unchanged.
 
+The archived command shapes also include the start of a domain, which only a `START` command
+execution proposes. Under that execution's exact mutation lease, one applied revision checks the
+restore start gate, the licensing stop gate and the domain planning inputs the start was placed
+against, refuses a domain that is not stopped, marks the domain running at its next start version
+with the resolved start point, paced mapping and clock authority, and records its own applied
+revision in the execution's `START` effect. A repeated proposal for an execution that already
+recorded its start applies nothing, so a resumed execution never starts the domain twice. A
+planning-input conflict is a typed refusal the execution answers by placing and proposing again.
+Transaction commit plans and step effects hold no lifecycle step.
+
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_peers_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_peers_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_peers_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_peers_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_peers_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_peers_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_peers_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_peers_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
@@ -598,7 +608,7 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database, consensus, engine, connector
 host, membership, runtime, shutdown, operational (trace export included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 52. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 53. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
@@ -868,9 +878,9 @@ whose `ephemeral_expires_at` committed licensing time has reached. It reads the 
 not the decision's verification view, so edited bytes cannot lift it. `ReleaseLicense` refuses an
 expired activation through the same predicate, evaluated at the licensing time the release
 establishes. While it is closed, apply
-refuses `StartDomain`, `ResumeDomain`, a model-pause recovery that would resume a domain, a
-`PutDomain` that writes a running or paused record, and a transaction's `START` step with the typed
-`LicensingStop` conflict, and admits no new domain record. A restore's final step under the gate
+refuses `StartDomain`, `ResumeDomain`, a model-pause recovery that would resume a domain, and a
+`PutDomain` that writes a running or paused record with the typed `LicensingStop` conflict, and
+admits no new domain record. A restore's final step under the gate
 leaves its domains stopped with the licensing cause instead of running. `StopDomain` carries the
 cause of the stop, an operator's or licensing's, and the domain record retains it until the next
 start clears it, so every node renders the cause after restart or snapshot installation.

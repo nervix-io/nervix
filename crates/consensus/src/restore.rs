@@ -1425,14 +1425,17 @@ mod tests {
             ConsensusResponse::Applied
         );
         state.domain_mutations.remove(&domain("prod"));
-        let refused = crate::tests::commit_start_step(&mut state, "prod")
-            .expect_err("an unfinished restore keeps refusing the step of a START");
-        let crate::TransactionMutationError::StepConflict { reason, .. } =
-            refused.current_context()
+        let refused = crate::tests::start_through_command(&mut state, "prod", 41);
+        let ConsensusResponse::Conflict(crate::ConsensusConflict::RestoreInstallation { cause }) =
+            refused
         else {
-            panic!("the START step is refused by the unfinished restore, not {refused:?}");
+            panic!("an unfinished restore keeps refusing the start of a START, not {refused:?}");
         };
-        assert!(reason.contains("restore state installation is incomplete"));
+        assert!(
+            cause
+                .to_string()
+                .contains("restore state installation is incomplete")
+        );
         assert_eq!(
             state
                 .domains

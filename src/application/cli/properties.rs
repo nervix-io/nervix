@@ -486,9 +486,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 stream_receive_window: Some(ByteUnit::Byte(
                     self.entropy.between(1..=(1 << 31) - 1),
                 )),
-                connection_receive_window: Some(ByteUnit::Byte(
-                    self.entropy.between(1..=(1 << 31) - 1),
-                )),
+                connection_receive_window: Some(ByteUnit::Byte(self.entropy.boundary_biased(
+                    nervix_interconnect::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES
+                        ..=nervix_interconnect::MAX_HTTP2_WINDOW_BYTES,
+                ))),
                 connection_setup_timeout: Some(self.infrastructure_duration()),
                 request_timeout: Some(self.infrastructure_duration()),
                 progress_timeout: Some(self.infrastructure_duration()),

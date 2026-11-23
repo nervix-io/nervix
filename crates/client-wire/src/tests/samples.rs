@@ -11,12 +11,12 @@ use nervix_models::{
     ClientProducerAdmission, ClientProducerDescription, ClientProducerGrant, ClientProducerLimits,
     ClientProducerPolicy, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
     DomainClockObservation, DomainClockObservedState, DomainClockPeriod, DomainClockSkew,
-    DomainClockState, DomainLifecycleAction, DomainLifecycleImpact, DomainTimeRate, DurationValue,
-    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
-    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary,
-    ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology,
-    ImpactTopologyEdge, ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason,
-    OperationImpactReport, OwnershipMoveImpact, PacedDomainClock, ParseAsType, PauseRequirement,
+    DomainClockState, DomainTimeRate, DurationValue, ExecutionStepImpactReport,
+    ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
+    ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, ImpactTopologyEdge,
+    ModelChangeAspect, ModelKind, ModelName, NodeRef, OperationImpactReason, OperationImpactReport,
+    OwnershipMoveImpact, PacedDomainClock, ParseAsType, PauseRequirement,
     PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
     RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact,
     SchemaField, StatePurge, StateResetImpact, Timestamp, TransactionImpactReport,
@@ -560,18 +560,6 @@ fn full_effects() -> ImpactEffects {
             destination: name("node-2"),
             attribution: attribution(2, 2),
         }]),
-        lifecycle: CanonicalImpactSet::new([
-            DomainLifecycleImpact {
-                domain: name("tenant"),
-                action: DomainLifecycleAction::Start,
-                attribution: attribution(1, 1),
-            },
-            DomainLifecycleImpact {
-                domain: name("tenant"),
-                action: DomainLifecycleAction::Stop,
-                attribution: attribution(1, 1),
-            },
-        ]),
         activations: CanonicalImpactSet::new([
             ActivationImpact {
                 node: emitter.clone(),
@@ -760,15 +748,25 @@ pub(crate) fn impact_report() -> TransactionImpactReport {
         ),
         operation_report(
             4,
-            TransactionOperation::StartDomain { domain: tenant() },
+            TransactionOperation::ResetWasmState {
+                domain: tenant(),
+                processor: name("guest"),
+            },
             range(4, 7),
-            vec![OperationImpactReason::DomainStart],
+            vec![OperationImpactReason::WasmStateReset {
+                node: node(ModelKind::WasmProcessor, "guest"),
+            }],
         ),
         operation_report(
             5,
-            TransactionOperation::StopDomain { domain: tenant() },
+            TransactionOperation::EditResourceLabels {
+                domain: tenant(),
+                resource: name("model"),
+            },
             range(4, 7),
-            vec![OperationImpactReason::DomainStop],
+            vec![OperationImpactReason::ResourceCatalog {
+                resource: name("model"),
+            }],
         ),
         operation_report(
             6,
