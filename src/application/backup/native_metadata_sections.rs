@@ -36,6 +36,10 @@ use nervix_backup::{
 use nervix_execution::{Cancellation, Executor, MemoryClass};
 use nervix_interconnect::{RemoteOperationFailure, RuntimeState};
 use nervix_models::{DomainName, DomainSchedule, ModelKind, ModelName, SchemaFingerprint};
+use nervix_primitives::sync::{
+    StdArc,
+    atomic::{AtomicBool, Ordering},
+};
 use thiserror::Error;
 
 use super::{
@@ -200,32 +204,43 @@ impl SessionServiceImpl {
             .try_stage_artifact(MAX_RECORD_BYTES)
             .await
             .map_err(|error| refusal(domain, error))?;
+        let entity = section.entity.clone();
         let interruption = self
             .inner
             .runtime
-            .native_metadata_capture_interruption(domain, &section.entity);
-        writer
+            .native_metadata_capture_interruption(domain, &entity);
+        // A capture attempt that runs short runs again, so a test's interruption belongs to the
+        // stream that reaches it: an attempt that ends before streaming that far leaves it armed.
+        let fired = StdArc::new(AtomicBool::new(false));
+        let firing = StdArc::clone(&fired);
+        let staged = writer
             .encode_artifact(working, move |output, cancellation| {
                 let _conversion = conversion;
                 section
-                    .write(&executor, output, cancellation, interruption)
+                    .write(&executor, output, cancellation, interruption, &firing)
                     .change_context(SnapshotStagingError::Encode)
             })
-            .await
-            .map_err(|error| refusal(domain, error))
+            .await;
+        if interruption.is_some() && (staged.is_ok() || fired.load(Ordering::Acquire)) {
+            self.inner
+                .runtime
+                .native_metadata_capture_streamed(domain, &entity);
+        }
+        staged.map_err(|error| refusal(domain, error))
     }
 }
 
 impl NativeSection {
     /// Reads the captured checkpoint and streams its record into `output`. The record stops when
     /// the staging job is cancelled, or once it has written `interruption` entries when a test
-    /// interrupts it.
+    /// interrupts it, which sets `fired`.
     fn write(
         &self,
         executor: &Executor,
         output: &mut dyn Write,
         cancellation: &Cancellation,
         interruption: Option<u64>,
+        fired: &AtomicBool,
     ) -> error_stack::Result<(), NativeSectionError> {
         let kind = self.record.kind();
         let entity = || self.entity.clone();
@@ -243,7 +258,11 @@ impl NativeSection {
                     .checked_add(1)
                     .assured("a record asks fewer times than 64 bits count"),
             );
-            reached >= limit
+            if reached < limit {
+                return false;
+            }
+            fired.store(true, Ordering::Release);
+            true
         };
         match &self.record {
             NativeRecord::KafkaOffsets { schema } => {
