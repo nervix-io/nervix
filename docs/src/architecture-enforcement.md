@@ -191,6 +191,14 @@ and exporters match the compiler that produced them. `scripts/native_coverage.py
 runner's and driver's profiles within the existing producer; ordinary builds retain the stable
 runner and pinned analysis compiler.
 
+The analysis solves trait goals the way the product compiler does. A nightly build of rustc uses the
+next-generation trait solver for every goal by default, because rustc's bootstrap sets that default
+for the nightly and dev channels only, while a stable build uses it for coherence alone. The driver
+passes `-Znext-solver=coherence`, so the analysis checks the code with the product compiler's
+solver. Under the nightly default, the server library's analysis needs about four times the memory.
+A stable toolchain upgrade that changes the product compiler's solver changes the driver's flag in
+the same change.
+
 Upgrading the pinned nightly is one change that moves every declaration together: the tooling
 `rust-toolchain.toml`, the driver's compiler check, the runner's `configuration::TOOLCHAIN`, the justfile recipes
 that name the toolchain, `scripts/native_coverage.py`, the Bolero inventory and the sanitizer
