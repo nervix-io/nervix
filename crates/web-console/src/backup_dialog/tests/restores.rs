@@ -23,14 +23,14 @@ use super::{dialog_signals, outcome, reference, restore_report};
 use crate::{
     SESSION_LIMITS,
     backup_dialog::{
-        RestoreProgress,
+        RETRY_DELAY, RestoreProgress,
         browser::{
             Received,
             in_memory::{InMemoryBrowser, MemoryFile, Reply, Script},
         },
         restore_stream::{
             DRAIN_POLL, MAX_BUFFERED_BYTES, MAX_DRAIN_POLLS, MAX_RESTORE_ATTEMPTS,
-            MEASURE_SLICE_BYTES, RESTORE_CHUNK_BYTES, RETRY_DELAY, RestoreEnd, RestoreStreamError,
+            MEASURE_SLICE_BYTES, RESTORE_CHUNK_BYTES, RestoreEnd, RestoreStreamError,
             RestoreUpload, measure_archive,
         },
     },

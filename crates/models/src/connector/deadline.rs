@@ -36,6 +36,14 @@ pub struct ClientDeadline(Duration);
 impl ClientDeadline {
     /// The longest deadline a wait can be scheduled with: half the nanoseconds a `u64` holds, about
     /// 292 years.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the connector contract holds every client deadline key to at most about 292 \
+                      years, half the nanoseconds a u64 holds"
+        )
+    )]
     pub const LONGEST: Duration = Duration::from_nanos(u64::MAX / 2);
 
     /// The timeout `milliseconds` states, written as ASCII digits alone: no sign, fraction, unit or

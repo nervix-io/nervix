@@ -44,6 +44,15 @@ use crate::{batch::TypedArray, ir::RegisterType};
 
 /// The most distinct fixed-width elements a set compares a value with one by one. A set with more
 /// looks each value up by key, so no row is compared with more elements than this.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the VM Functions chapter compares a value with up to 8 fixed-width IN elements \
+                  in turn, the set size up to which the membership_kernels benchmarks measure \
+                  comparing faster than hashing"
+    )
+)]
 pub const SMALL_SET_CAPACITY: usize = 8;
 
 /// The prepared constants of one `IN` test.

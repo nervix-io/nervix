@@ -125,9 +125,25 @@ pub use detector::{
 
 /// The most threads one cycle describes. A longer cycle keeps its first threads in cycle order and
 /// counts the rest.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter bounds an active cycle report at 64 threads \
+                  and their waits"
+    )
+)]
 pub const MAX_CYCLE_THREADS: usize = 64;
 
 /// The most bytes a thread name or a source file path keeps.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter keeps at most 512 UTF-8 bytes of each text a \
+                  finding carries"
+    )
+)]
 pub const MAX_TEXT_BYTES: usize = 512;
 
 /// A thread of this process, by the number the detector gave it when the thread first used a
@@ -182,7 +198,15 @@ pub struct BoundedText {
 
 /// The shortest a cut text can be: the bound less the three bytes a character can extend past the
 /// last boundary within it.
-const SHORTEST_CUT_BYTES: usize = MAX_TEXT_BYTES - 3;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a cut at a character boundary within the bound drops at most the three leading \
+                  bytes of a four-byte UTF-8 character that crosses it"
+    )
+)]
+const SHORTEST_CUT_BYTES: usize = MAX_TEXT_BYTES - (char::MAX_LEN_UTF8 - 1);
 
 impl BoundedText {
     /// `text`, cut to the bound at a character boundary when it is longer.

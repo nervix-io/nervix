@@ -31,10 +31,19 @@ use crate::ClientDeadline;
 /// a connection a connector dials for itself, name resolution, the address attempts, TLS and the
 /// protocol handshake; for one a listener accepted, its TLS handshake.
 ///
-/// A policy input: generous for a peer across a wide area network, and short enough that a silent
-/// name server or an address that drops every packet costs one attempt of the retry policy rather
-/// than the operating system's connect timeout, and that a peer which never completes its handshake
-/// holds a listener's connection no longer.
+/// A policy the connector contract publishes, which a client changes through the key: generous for
+/// a peer across a wide area network, and short enough that a silent name server or an address that
+/// drops every packet costs one attempt of the retry policy rather than the operating system's
+/// connect timeout, and that a peer which never completes its handshake holds a listener's
+/// connection no longer.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the connector contract allows 30 seconds where a client leaves \
+                  connect_timeout_ms out, and the key is how a client changes it"
+    )
+)]
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const _: () = assert!(

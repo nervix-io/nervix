@@ -1,8 +1,8 @@
 //! The resolved capacity claim of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** CPU, memory and database volume capacity, transport, DNS, database, consensus,
-//!   engine, connector host, operational and listener limits, peer receive bounds and the
+//! - **Owns.** CPU, memory and database volume capacity, transport, membership, DNS, database,
+//!   consensus, engine, connector host, operational and listener limits, peer receive bounds and the
 //!   incarnation-bound claim the node record holds.
 //! - **Depends on.** Node identities and serialization primitives.
 //! - **Must not know.** Detection, consensus, transport or placement policy.
@@ -42,6 +42,8 @@ pub struct EngineCapabilities {
     pub wasm_memory_guard_bytes: u64,
     pub wasm_memory_growth_reservation_bytes: u64,
     pub wasm_parallel_compilation: bool,
+    /// How long one call of a compiled Roto UDF may run on this node before its batch fails.
+    pub udf_watchdog: Duration,
 }
 
 /// Local host cadence and intake limits, independent of external client configuration.
@@ -64,6 +66,26 @@ pub struct ConnectorHostCapabilities {
     pub partition_topology_poll_interval: std::time::Duration,
     pub syslog_intake_queue_capacity: NonZeroU64,
     pub syslog_read_chunk_bytes: NonZeroU64,
+    pub mqtt_read_ahead_headroom: NonZeroU64,
+}
+
+/// The local gossip bounds of one run: what it queues from its peers and how long it keeps a
+/// deleted key's tombstone. Neither is a prerequisite, so peers run beside any value.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct MembershipCapabilities {
+    pub gossip_receive_queue_capacity: NonZeroU64,
+    pub gossip_tombstone_grace_period: Duration,
 }
 
 /// Positive limits the receiver enforces. They bound work; they never change cluster acceptance.
@@ -229,6 +251,7 @@ pub struct NodeCapabilities {
     pub shutdown: ShutdownCapabilities,
     pub engines: EngineCapabilities,
     pub connector_host: ConnectorHostCapabilities,
+    pub membership: MembershipCapabilities,
     pub cpu_count: Option<NonZeroU64>,
     pub memory_bytes: Option<NonZeroU64>,
     /// The total size of the volume that holds the node's database directory, measured when this

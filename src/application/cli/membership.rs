@@ -2,9 +2,10 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The command-line form of the node unavailability timeout, the gossip interval and
-//!   the clock-skew tolerance, their conversion into the membership settings group, and the
-//!   rendering of that group back into options.
+//! - **Owns.** The command-line form of the node unavailability timeout, the gossip interval, the
+//!   clock-skew tolerance, the gossip receive queue capacity and the gossip tombstone grace
+//!   period, their conversion into the membership settings group, and the rendering of that group
+//!   back into options.
 //! - **Depends on.** The membership settings definition and the edge's duration form.
 //! - **Must not know.** How membership observes a node.
 
@@ -13,15 +14,17 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
+use std::num::NonZeroUsize;
+
 use error_stack::Report;
 use nervix_models::SettingDefinition;
 
-use super::settings::CommandLine;
+use super::settings::{CommandLine, capability_help};
 use crate::{
     application::cli_values::HumanDuration,
     cluster::{
-        ClockSkewTolerance, GossipInterval, MembershipSettings, MembershipSettingsError,
-        MembershipValues, NodeUnavailabilityTimeout,
+        ClockSkewTolerance, GossipInterval, GossipReceiveQueueCapacity, GossipTombstoneGracePeriod,
+        MembershipSettings, MembershipSettingsError, MembershipValues, NodeUnavailabilityTimeout,
     },
 };
 
@@ -50,6 +53,25 @@ pub struct MembershipArgs {
                 through"
     )]
     pub clock_skew_tolerance: HumanDuration,
+    #[arg(
+        long = GossipReceiveQueueCapacity::NAME,
+        env = "NERVIX_GOSSIP_RECEIVE_QUEUE_CAPACITY",
+        help = capability_help::<GossipReceiveQueueCapacity>(
+            "Incoming gossip datagrams queued between the interconnect and gossip, each at most \
+             60 KiB",
+            GossipReceiveQueueCapacity::default_value(&()),
+        )
+    )]
+    pub gossip_receive_queue_capacity: Option<NonZeroUsize>,
+    #[arg(
+        long = GossipTombstoneGracePeriod::NAME,
+        env = "NERVIX_GOSSIP_TOMBSTONE_GRACE_PERIOD",
+        help = capability_help::<GossipTombstoneGracePeriod>(
+            "How long a deleted gossip key's tombstone stays before gossip collects it",
+            HumanDuration(GossipTombstoneGracePeriod::default_value(&())),
+        )
+    )]
+    pub gossip_tombstone_grace_period: Option<HumanDuration>,
 }
 
 impl MembershipArgs {
@@ -58,6 +80,8 @@ impl MembershipArgs {
             node_unavailability_timeout: self.node_unavailability_timeout.map(|value| value.0),
             gossip_interval: Some(self.gossip_interval.0),
             clock_skew_tolerance: Some(self.clock_skew_tolerance.0),
+            gossip_receive_queue_capacity: self.gossip_receive_queue_capacity,
+            gossip_tombstone_grace_period: self.gossip_tombstone_grace_period.map(|value| value.0),
         })
     }
 
@@ -68,6 +92,10 @@ impl MembershipArgs {
             )),
             gossip_interval: HumanDuration(settings.gossip_interval()),
             clock_skew_tolerance: HumanDuration(settings.clock_skew_tolerance()),
+            gossip_receive_queue_capacity: Some(settings.gossip_receive_queue_capacity()),
+            gossip_tombstone_grace_period: Some(HumanDuration(
+                settings.gossip_tombstone_grace_period(),
+            )),
         }
     }
 
@@ -78,5 +106,13 @@ impl MembershipArgs {
         );
         command_line.option(GossipInterval::NAME, self.gossip_interval);
         command_line.option(ClockSkewTolerance::NAME, self.clock_skew_tolerance);
+        command_line.optional(
+            GossipReceiveQueueCapacity::NAME,
+            self.gossip_receive_queue_capacity,
+        );
+        command_line.optional(
+            GossipTombstoneGracePeriod::NAME,
+            self.gossip_tombstone_grace_period,
+        );
     }
 }

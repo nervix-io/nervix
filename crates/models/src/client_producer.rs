@@ -40,8 +40,6 @@ use crate::{AckWindow, SchemaField};
     )
 )]
 pub const MAX_CLIENT_PRODUCERS_PER_SESSION: usize = 32;
-/// The default requested session-byte window; admission uses committed cluster parameters.
-pub const DEFAULT_CLIENT_PRODUCER_SESSION_BYTES: u64 = crate::ClientProducerSessionBytes::DEFAULT;
 /// The most batches one producer may have outstanding at once.
 #[cfg_attr(
     nervix_lint,
@@ -51,8 +49,6 @@ pub const DEFAULT_CLIENT_PRODUCER_SESSION_BYTES: u64 = crate::ClientProducerSess
     )
 )]
 pub const MAX_CLIENT_PRODUCER_BATCHES: u32 = 1024;
-/// The default client row window; the server grants its committed row limit.
-pub const DEFAULT_CLIENT_BATCH_ROWS: u32 = crate::ClientBatchRows::DEFAULT;
 
 const _: () = assert!(
     MAX_CLIENT_PRODUCERS_PER_SESSION > 0 && MAX_CLIENT_PRODUCER_BATCHES > 0,

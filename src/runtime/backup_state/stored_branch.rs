@@ -26,11 +26,10 @@ use nervix_execution::{AdmissionError, Executor, MemoryClass, Reservation};
 
 use super::{BackupStateCaptureError, ListedCheckpoint, Runtime};
 use crate::runtime::{
-    SnapshotStagingError, StagedSnapshotWriter, snapshot_staging::MappedArtifact,
-    window_archive::CapturedWindowState,
+    RESTORE_STATE_CHUNK_BYTES, SnapshotStagingError, StagedSnapshotWriter,
+    snapshot_staging::MappedArtifact, window_archive::CapturedWindowState,
 };
 
-const CHUNK_BYTES: usize = super::super::RESTORE_STATE_CHUNK_BYTES;
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
@@ -54,7 +53,7 @@ impl StoredBranchCheckpoint {
     /// A retained segment, its Fjall read, the transfer block and the staged output buffer
     /// overlap. Inline value copies have their own metadata charge.
     fn reserve_staging(executor: &Executor) -> error_stack::Result<Reservation, AdmissionError> {
-        let segment_bytes: u64 = CHUNK_BYTES.arch_into();
+        let segment_bytes: u64 = RESTORE_STATE_CHUNK_BYTES.arch_into();
         let read_bytes = segment_bytes
             .checked_mul(3)
             .verified("three persisted segments fit in u64");
@@ -157,7 +156,7 @@ impl StoredBranchCheckpoint {
                     .checkpoint
                     .open_with_revision()
                     .change_context(SnapshotStagingError::Read)?;
-                let mut block = [0_u8; CHUNK_BYTES];
+                let mut block = [0_u8; RESTORE_STATE_CHUNK_BYTES];
                 loop {
                     cancellation
                         .check()

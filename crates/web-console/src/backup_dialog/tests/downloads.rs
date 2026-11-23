@@ -17,9 +17,8 @@ use super::{ARCHIVE, reference, summary};
 use crate::{
     SESSION_LIMITS,
     backup_dialog::{
-        archive_download::{
-            ArchiveDownload, DownloadError, FRAME_TIMEOUT, MAX_DOWNLOAD_ATTEMPTS, RETRY_DELAY,
-        },
+        FRAME_TIMEOUT, RETRY_DELAY,
+        archive_download::{ArchiveDownload, DownloadError, MAX_DOWNLOAD_ATTEMPTS},
         browser::{
             Received,
             in_memory::{InMemoryBrowser, SavedArchive, Script},

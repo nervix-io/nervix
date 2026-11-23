@@ -203,6 +203,19 @@ guest ABI, so its Rust callers can still inspect typed causes.
   failure. Other `GuestError` variants return their negative ABI code without
   latching.
 
+The guest ABI fixes only that a failure is negative, and reserves `-7` and `-8`
+for `nervix_load_state` verdicts and `-9` for a refused reset request. The SDK
+numbers its other failure kinds, and the example guests return the same codes:
+
+| Code | `GuestError` | Meaning |
+| --- | --- | --- |
+| `-1` | `InvalidSize` | A byte size is negative or does not fit the guest address space. |
+| `-2` | `OutOfBounds` | A pointer and size range lies outside guest memory. |
+| `-3` | `NotInitialized` | The processor was invoked before `nervix_init`. |
+| `-4` | `ArrowIpc` | An Arrow IPC decode or encode error. |
+| `-5` | `Protocol` | A batch envelope decode or encode error. |
+| `-6` | `Failed` | The guest latched into error state; the reason is on the global-error channel. |
+
 Panics are converted into latched global errors; with `panic = "abort"` they
 surface as Wasmtime traps, which the host also treats as global errors.
 

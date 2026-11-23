@@ -360,6 +360,7 @@ impl UnitAllowance {
                 ProgramRun {
                     executor: run.executor,
                     now: run.now,
+                    ack_timing: run.ack_timing,
                 },
                 program,
                 FilterMapBatchInputs {

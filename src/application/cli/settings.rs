@@ -27,6 +27,18 @@ where
     }
 }
 
+/// Help for a node capability whose default derives from context the edge resolves later, such as
+/// the node's memory: it names the class and the definition's derivation.
+pub(super) fn derived_capability_help<D>(description: &str) -> String
+where
+    D: nervix_models::SettingDefinition<Class = nervix_models::NodeCapabilities>,
+{
+    match D::DERIVATION {
+        Some(derivation) => format!("{description}. Node capability. Default: {derivation}"),
+        None => format!("{description}. Node capability"),
+    }
+}
+
 pub(super) fn parameter_seed_help(
     parameter: nervix_models::ClusterParameterKey,
     description: &str,
@@ -168,6 +180,10 @@ impl SettingsArgs {
                 .cluster_parameters
                 .udf_code_bytes
                 .map(|bytes| bytes.0.as_u64()),
+            udf_compile_budget: self
+                .cluster_parameters
+                .udf_compile_budget
+                .map(|duration| duration.0),
             entity_labels_max_count: self.cluster_parameters.entity_labels_max_count,
             entity_labels_max_key_bytes: self
                 .cluster_parameters
@@ -311,6 +327,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .engines
             .wasm_settings()
             .change_context(AppError::InvalidWasmEngineSettings)?;
+        runtime.udf = args
+            .engines
+            .udf_settings()
+            .change_context(AppError::InvalidUdfSettings)?;
         let traces = args
             .trace_export
             .settings()
@@ -385,6 +405,7 @@ impl From<&NodeSettings> for SettingsArgs {
             engines: super::engines::EngineArgs::from_settings(
                 &settings.runtime.vm,
                 &settings.runtime.wasm_engine,
+                &settings.runtime.udf,
             ),
             cluster_parameters: super::cluster_parameters::ClusterParameterArgs::from_seeds(
                 &settings.parameter_seeds,

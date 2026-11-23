@@ -300,19 +300,50 @@ where
 impl<K, V> ExpiryMap<K, V> {
     /// The entry's shared allocation: its reference count, its order link, its key handle and its
     /// value.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "triomphe's Arc allocates a usize reference count beside the entry it shares"
+        )
+    )]
     const ENTRY_ALLOCATION_BYTES: usize =
         std::mem::size_of::<usize>() + std::mem::size_of::<Entry<K, V>>();
 
     /// The key's shared allocation: its reference count and the inline key.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "triomphe's Arc allocates a usize reference count beside the key it shares"
+        )
+    )]
     const KEY_ALLOCATION_BYTES: usize = std::mem::size_of::<usize>() + std::mem::size_of::<K>();
 
     /// One slot of the index: the key handle and the entry handle it stores, and its control byte.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a slot of the standard library's SwissTable hash map stores its key and \
+                      entry handles beside one control byte"
+        )
+    )]
     const INDEX_SLOT_BYTES: usize =
         std::mem::size_of::<SharedKey<K>>() + std::mem::size_of::<Arc<Entry<K, V>>>() + 1;
 
     /// What the map holds for one entry beside the heap data the key itself owns: the entry's and
     /// the key's shared allocations, and two index slots, for the room the index keeps while it
     /// grows.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "an entry is charged its two shared allocations exactly and two index slots \
+                      as an estimate of the room the hash index keeps: at its 7/8 load limit a \
+                      table holds between 8/7 and 16/7 slots per entry between growths"
+        )
+    )]
     pub const ENTRY_BYTES: usize =
         Self::ENTRY_ALLOCATION_BYTES + Self::KEY_ALLOCATION_BYTES + 2 * Self::INDEX_SLOT_BYTES;
 }

@@ -25,6 +25,8 @@ pub enum ConnectorHostSettingsError {
     Kafka,
     #[error("invalid Syslog intake capability")]
     Syslog,
+    #[error("invalid MQTT read-ahead capability")]
+    Mqtt,
     #[error(
         "partition-topology-poll-interval must be positive and no longer than u32::MAX seconds"
     )]
@@ -56,6 +58,7 @@ pub struct ConnectorHostSettings {
     pub retry: nervix_connector::RetryBackoffSettings,
     pub kafka: nervix_connector_kafka::KafkaTopicIngestorSettings,
     pub syslog: nervix_connector_syslog::SyslogListenerSettings,
+    pub mqtt: nervix_connector_mqtt::MqttReadAheadSettings,
     topology_poll: Setting<PartitionTopologyPollInterval>,
 }
 
@@ -67,6 +70,7 @@ pub struct ConnectorHostSettingOverrides {
     pub partition_topology_poll_interval: Option<Duration>,
     pub syslog_queue_capacity: Option<std::num::NonZeroUsize>,
     pub syslog_read_chunk_bytes: Option<u64>,
+    pub mqtt_read_ahead_headroom: Option<std::num::NonZeroUsize>,
 }
 
 impl ConnectorHostSettings {
@@ -88,6 +92,10 @@ impl ConnectorHostSettings {
                 values.syslog_read_chunk_bytes,
             )
             .change_context(ConnectorHostSettingsError::Syslog)?,
+            mqtt: nervix_connector_mqtt::MqttReadAheadSettings::resolve(
+                values.mqtt_read_ahead_headroom,
+            )
+            .change_context(ConnectorHostSettingsError::Mqtt)?,
             topology_poll: Setting::resolve(values.partition_topology_poll_interval, &())?,
         })
     }
@@ -103,6 +111,7 @@ impl ConnectorHostSettings {
             partition_topology_poll_interval: self.partition_topology_poll_interval(),
             syslog_intake_queue_capacity: positive(self.syslog.queue_capacity()),
             syslog_read_chunk_bytes: positive(self.syslog.read_chunk_bytes()),
+            mqtt_read_ahead_headroom: positive(self.mqtt.headroom().get()),
         }
     }
 
@@ -130,6 +139,37 @@ impl super::Runtime {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mqtt_read_ahead_headroom_reaches_the_claim_and_refuses_its_bound() {
+        assert_eq!(
+            ConnectorHostSettings::default()
+                .capabilities()
+                .mqtt_read_ahead_headroom
+                .get(),
+            64
+        );
+        let settings = ConnectorHostSettings::resolve(ConnectorHostSettingOverrides {
+            mqtt_read_ahead_headroom: std::num::NonZeroUsize::new(32),
+            ..Default::default()
+        })
+        .assured("a headroom of 32 publishes fits the native channel");
+        assert_eq!(settings.mqtt.headroom().get(), 32);
+        assert_eq!(settings.capabilities().mqtt_read_ahead_headroom.get(), 32);
+        let error = ConnectorHostSettings::resolve(ConnectorHostSettingOverrides {
+            mqtt_read_ahead_headroom: std::num::NonZeroUsize::new(
+                nervix_primitives::sync::Semaphore::MAX_PERMITS,
+            ),
+            ..Default::default()
+        })
+        .err()
+        .assured("a headroom that leaves no room for MQTT's widest Receive Maximum is refused");
+        assert!(matches!(
+            error.current_context(),
+            ConnectorHostSettingsError::Mqtt
+        ));
+        assert!(error.contains::<nervix_connector_mqtt::MqttReadAheadSettingsError>());
+    }
 
     #[test]
     fn topology_polling_retains_its_resolved_override_and_rejects_invalid_bounds() {

@@ -62,6 +62,15 @@ pub use offline_config::validate_client_configuration;
 use thiserror::Error;
 
 const SQS: &str = "sqs";
+/// The most entries one SQS batch request carries.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "SQS takes at most ten entries in a SendMessageBatch, DeleteMessageBatch or \
+                  ChangeMessageVisibilityBatch request"
+    )
+)]
 const SQS_MAX_BATCH_ENTRIES: usize = 10;
 /// The longest message group or deduplication id SQS accepts, in characters.
 #[cfg_attr(

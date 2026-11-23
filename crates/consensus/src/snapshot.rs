@@ -38,6 +38,14 @@ use crate::{
 };
 
 pub(crate) const KEY_MANIFEST: &[u8] = b"manifest";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "stored snapshot sections sit under this tag byte in the persisted consensus \
+                  snapshot keyspace, apart from its manifest and installation marker keys"
+    )
+)]
 const SECTION_TAG: u8 = b's';
 
 /// One keyed state-machine record inside a snapshot section.
@@ -121,9 +129,12 @@ impl SnapshotManifest {
     }
 }
 
-/// The key one section of one generation is stored under.
+/// The key one section of one generation is stored under: the section tag, then the generation and
+/// the index in big-endian order.
 pub(crate) fn section_key(generation: u64, index: u32) -> Vec<u8> {
-    let mut key = Vec::with_capacity(1 + 8 + 4);
+    let mut key = Vec::with_capacity(
+        size_of_val(&SECTION_TAG) + size_of_val(&generation) + size_of_val(&index),
+    );
     key.push(SECTION_TAG);
     key.extend_from_slice(&generation.to_be_bytes());
     key.extend_from_slice(&index.to_be_bytes());
@@ -132,7 +143,7 @@ pub(crate) fn section_key(generation: u64, index: u32) -> Vec<u8> {
 
 /// The key range covering every section of one generation.
 pub(crate) fn generation_prefix(generation: u64) -> Vec<u8> {
-    let mut prefix = Vec::with_capacity(1 + 8);
+    let mut prefix = Vec::with_capacity(size_of_val(&SECTION_TAG) + size_of_val(&generation));
     prefix.push(SECTION_TAG);
     prefix.extend_from_slice(&generation.to_be_bytes());
     prefix
