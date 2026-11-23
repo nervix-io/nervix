@@ -247,11 +247,10 @@ pub use node_settings::NodeSettings;
 use preflight::{Preflight, PreflightOutcome};
 pub use scheduling::{ReplicaCount, SchedulingSettings};
 use service_tasks::ServiceTasks;
-use shutdown::BeforeDeadline;
 pub use shutdown::{
-    DrainTimeout, ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase,
+    ShutdownCoordinator, ShutdownDeadline, ShutdownMoveOutcome, ShutdownOutcome, ShutdownPhase,
     ShutdownPhaseOutcome, ShutdownRequest, ShutdownRequestOutcome, ShutdownSettings,
-    ShutdownSettingsError, ShutdownTimeout,
+    ShutdownTimeout,
 };
 use tracing::{Instrument as _, debug, error, info, warn};
 pub use transaction::{
@@ -329,7 +328,6 @@ impl Application {
         )
         .change_context(AppError::BuildConsoleAdvertiseUrl)?;
         let graceful_shutdown_drain = self.fault_injection.runs_shutdown_drain();
-        let drain_timeout = self.settings.shutdown.drain_timeout();
         let cluster_id = self.identity.cluster_id.clone();
         let node_id = self.identity.node_id.clone();
         let node_tags = self.identity.tags.clone();
@@ -649,9 +647,7 @@ impl Application {
             interconnect_tls,
             nervix_interconnect::TransportOptions {
                 accept_retry_delay: settings.listeners.accept_retry_delay,
-                ..settings
-                    .interconnect
-                    .options(Some(peer_receive), Some(settings.shutdown.drain_timeout()))
+                ..settings.interconnect.options(Some(peer_receive))
             },
             startup.runtime.executor().clone(),
             PeerResolver::new(dns),
@@ -2816,53 +2812,43 @@ impl Application {
         }
 
         // The node serves until its first stop request, whether a termination signal, the caller
-        // embedding the application, or a failed listener made it. That request's deadline bounds
-        // everything that follows.
-        let deadline = shutdown_coordinator.requested().await.deadline();
+        // embedding the application, or a failed listener made it.
+        shutdown_coordinator.requested().await;
 
-        let advertisement = deadline.bound(cluster.mark_local_terminating()).await;
-        let advertisement_outcome = match advertisement {
-            BeforeDeadline::Finished(()) => ShutdownPhaseOutcome::Completed,
-            BeforeDeadline::Expired => {
-                warn!(
-                    "shutdown deadline expired before this node advertised that it is terminating"
-                );
-                ShutdownPhaseOutcome::Forced
-            }
-        };
+        let terminating = cluster.mark_local_terminating().await;
         shutdown_coordinator.stop_admission();
-        let listeners =
-            join_public_listeners(public_listeners, &shutdown_coordinator, deadline).await;
-        let stop_admission_outcome = advertisement_outcome
-            .combine(listeners.outcome)
-            .unless_deadline_passed(deadline);
-        shutdown_coordinator.begin_drain_support(stop_admission_outcome);
+        let listeners = join_public_listeners(public_listeners, &shutdown_coordinator).await;
+        // A node that is turning off takes part in nothing but saving and moving its own work:
+        // the commits, commands and coordination its services still run end here, and recovery
+        // completes what they left undone.
+        service.inner.service_tasks.stop();
+        shutdown_coordinator.begin_save(listeners.outcome);
 
-        let drain_support_outcome = if graceful_shutdown_drain && runtime_admission.is_admitted() {
-            let drain = service.drain_local_node_before_shutdown(drain_timeout, deadline);
-            let drained = deadline.bound(drain).await;
-            match drained {
-                BeforeDeadline::Finished(outcome) => outcome.unless_deadline_passed(deadline),
-                BeforeDeadline::Expired => {
-                    warn!("shutdown deadline expired while this node drained its admitted work");
-                    ShutdownPhaseOutcome::Forced
-                }
-            }
+        // The save has no limit of its own: it waits only for work in motion, which ends on its
+        // own. The shutdown timeout bounds only the moves that follow it.
+        let saving = graceful_shutdown_drain && runtime_admission.is_admitted();
+        let save = if saving {
+            Some(service.save_local_node_before_moves().await)
         } else {
-            ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline)
+            None
         };
-        shutdown_coordinator.begin_terminal_teardown(drain_support_outcome);
+        let deadline = shutdown_coordinator.begin_moves(ShutdownPhaseOutcome::Completed);
+        let moves = match save {
+            Some(save) => service.move_local_node_for_shutdown(save, deadline).await,
+            None => ShutdownMoveOutcome::NowhereToMove,
+        };
+        shutdown_coordinator.begin_terminal_teardown(moves);
 
+        let grace_period = shutdown_coordinator.task_grace_period();
         let background_task_shutdowns = background_tasks.into_iter().map(|task| {
-            await_background_task_shutdown(task, "application background task", deadline)
+            await_background_task_shutdown(task, "application background task", grace_period)
         });
         let background_task_outcomes = join_all(background_task_shutdowns).await;
         let mut terminal_teardown_outcome = ShutdownPhaseOutcome::Completed;
         for task_outcome in background_task_outcomes {
             terminal_teardown_outcome = terminal_teardown_outcome.combine(task_outcome);
         }
-        let service_tasks_outcome = service.inner.service_tasks.shut_down(deadline).await;
-        terminal_teardown_outcome = terminal_teardown_outcome.combine(service_tasks_outcome);
+        service.inner.service_tasks.wait_stopped().await;
         // An installation of the committed state that one of those tasks, or a request handler,
         // began still runs in a task of the runtime admission, which holds the installation turn
         // until the installation ends. Taking the turn waits for the last one, and keeping it means
@@ -2870,10 +2856,17 @@ impl Application {
         runtime_admission.finish_installations().await;
         // The services below own this node's remaining tasks, connections, and storage, and
         // stopping them is what releases those, so each stop runs to completion rather than being
-        // abandoned at the deadline. A server process whose deadline passes meanwhile is ended by
-        // its deadline supervision.
-        runtime.shutdown(deadline.remaining()).await;
+        // abandoned. A stop that hangs is ended by the platform supervising the node.
+        runtime.shutdown().await;
         ApplicationStartup::stop_consensus(&consensus, &fault_injection).await;
+        // Gossip is the last thing the node gives up: its peers must hear that it is terminating
+        // before it goes silent.
+        cluster
+            .let_terminating_advertisement_propagate(
+                terminating,
+                settings.membership.terminating_propagation(),
+            )
+            .await;
         let cluster_shutdown_result = cluster
             .shutdown()
             .await
@@ -2904,7 +2897,7 @@ impl Application {
             terminal_teardown_outcome =
                 terminal_teardown_outcome.combine(ShutdownPhaseOutcome::Abandoned);
         }
-        shutdown_coordinator.finish(terminal_teardown_outcome.unless_deadline_passed(deadline));
+        shutdown_coordinator.finish(terminal_teardown_outcome);
 
         let refused_join = join_refusal.borrow().clone();
         if let Some(refusal) = refused_join {
@@ -2917,8 +2910,8 @@ impl Application {
         let outcome = shutdown_coordinator
             .outcome()
             .verified("the terminal-teardown phase finished above");
-        if outcome.deadline_expired() {
-            return Err(Report::new(AppError::ShutdownDeadlineExpired));
+        if outcome.disrupted() {
+            return Err(Report::new(AppError::ShutdownDisrupted));
         }
 
         Ok(())

@@ -255,10 +255,11 @@ spec:
       securityContext:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
-      # SIGTERM starts graceful shutdown, which the default 50s shutdown timeout bounds, including
-      # the default 30s drain timeout. Keep the grace period longer, so a node that cannot finish
-      # shutting down exits on its own before the kubelet sends SIGKILL.
-      terminationGracePeriodSeconds: 60
+      # SIGTERM starts graceful shutdown: the node saves what it holds, its units move to the other
+      # nodes within its 600s shutdown timeout, and it tears down. The grace period adds two
+      # minutes for the save and the teardown, so the kubelet's SIGKILL does not cut a shutdown
+      # short.
+      terminationGracePeriodSeconds: 720
       volumes:
         - name: interconnect-tls
           projected:
@@ -326,6 +327,7 @@ spec:
                 --interconnect-tls-cert "/etc/nervix/interconnect/${node_id}/tls.crt" \
                 --interconnect-tls-key "/etc/nervix/interconnect/${node_id}/tls.key" \
                 --replica-count 3 \
+                --shutdown-timeout 600s \
                 --db-path /var/lib/nervix/db \
                 ${bootstrap_args}
           env:

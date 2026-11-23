@@ -25,7 +25,7 @@ use crate::InterconnectRequest;
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StoppingNodeDrainAction {
     /// Cordon the node and move its scheduled work to other nodes through planned ownership
-    /// handoffs, within the time the stopping node has left for its drain.
+    /// handoffs, within what remains of the stopping node's shutdown timeout.
     Drain { budget: Duration },
     /// Clear the cordon the node's own drain set.
     ReleaseCordon,
@@ -40,13 +40,29 @@ pub struct StoppingNodeDrainRequest {
     pub action: StoppingNodeDrainAction,
 }
 
+/// Why the units a stopping node's drain left on that node did not move.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StoppingNodeUnmoved {
+    /// No node besides the stopping one could take them: none was live and schedulable, or every
+    /// node the leader chose for them was terminating too.
+    NowhereToMove,
+    /// At least one of them could have moved to a node able to take it, and did not.
+    CouldHaveMoved,
+}
+
 /// What the node that received a [`StoppingNodeDrainRequest`] did.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StoppingNodeDrainResponse {
     /// The answering node completed the action. The report is its account of the
     /// action, for the stopping node's log.
     Completed { report: String },
-    /// The answering node leads and could not complete the action. The report is its account of
+    /// The answering node leads, and its drain left units on the stopping node. The report names
+    /// each unit and why it did not move, for the stopping node's log.
+    Unmoved {
+        report: String,
+        unmoved: StoppingNodeUnmoved,
+    },
+    /// The answering node leads and could not release the cordon. The report is its account of
     /// the failure, for the stopping node's log.
     Failed { report: String },
     /// The answering node does not lead. Already committed work is preserved, and the sender
@@ -58,8 +74,8 @@ impl InterconnectRequest for StoppingNodeDrainRequest {
     type Response = StoppingNodeDrainResponse;
 
     const NAME: &'static str = "stopping_node_drain";
-    /// Longer than the default shutdown timeout. A stopping node bounds each request by what
-    /// remains of its own drain timeout instead.
+    /// The deadline of a cordon release. A stopping node bounds each drain request by what
+    /// remains of its shutdown timeout instead.
     const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Transfer;
 }
 
@@ -82,6 +98,10 @@ mod wire_properties {
     #[derive(Debug, bolero::TypeGenerator)]
     enum DrainAnswerCase {
         Completed(String),
+        Unmoved {
+            report: String,
+            nowhere_to_move: bool,
+        },
         Failed(String),
         NotLeader,
     }
@@ -102,6 +122,17 @@ mod wire_properties {
             match &self.answer {
                 DrainAnswerCase::Completed(report) => StoppingNodeDrainResponse::Completed {
                     report: report.clone(),
+                },
+                DrainAnswerCase::Unmoved {
+                    report,
+                    nowhere_to_move,
+                } => StoppingNodeDrainResponse::Unmoved {
+                    report: report.clone(),
+                    unmoved: if *nowhere_to_move {
+                        StoppingNodeUnmoved::NowhereToMove
+                    } else {
+                        StoppingNodeUnmoved::CouldHaveMoved
+                    },
                 },
                 DrainAnswerCase::Failed(report) => StoppingNodeDrainResponse::Failed {
                     report: report.clone(),

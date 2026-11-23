@@ -232,7 +232,7 @@ mod tests {
             .node_records
             .insert(current.clone(), committed_capability(record.clone()));
         record.identity = nervix_models::ClusterNodeIdentity::new(departed.clone(), incarnation);
-        record.capabilities.shutdown.drain_timeout = Duration::from_secs(1);
+        record.capabilities.shutdown.shutdown_timeout = Duration::from_secs(1);
         record.capabilities.database_volume_bytes = 1;
         state
             .node_records
@@ -301,7 +301,7 @@ mod tests {
         assert_eq!(node.as_str(), "node-2");
 
         let mut short_budget = roomy.clone();
-        short_budget.capabilities.shutdown.drain_timeout = Duration::from_secs(1);
+        short_budget.capabilities.shutdown.shutdown_timeout = Duration::from_secs(1);
         short_budget.capabilities.database_volume_bytes = GIB;
         assert!(
             matches!(

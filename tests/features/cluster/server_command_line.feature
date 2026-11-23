@@ -9,9 +9,19 @@ Feature: Server command-line values
 
     Examples:
       | option                    | value                              | reason                              |
-      | --drain-timeout           | 18446744073709551615s 1000000000ns | it is longer than a duration can be |
       | --raft-heartbeat-interval | 18446744073709551615.5s500000000ns | it is longer than a duration can be |
       | --shutdown-timeout        | oops                               | expected number at 0                |
+
+  Scenario: A node started without a shutdown timeout reports a ten-minute shutdown timeout
+    Given a nervix-server process is started
+    When these Plexus commands are executed on the server process
+      """
+      DESCRIBE CLUSTER;
+      """
+    Then the last command output contains
+      """
+      shutdown-timeout=10m
+      """
 
   Scenario: A node refuses a duration setting from its environment that it cannot read
     When a nervix-server process is started with environment variable "NERVIX_TRANSACTION_IDLE_TIMEOUT" set to "18446744073709551615s 1000000000ns"
@@ -28,7 +38,6 @@ Feature: Server command-line values
 
     Examples:
       | option                          | value | refusal                                                                                      |
-      | --drain-timeout                 | 1m    | drain-timeout (60s) must not exceed shutdown-timeout (50s)                                   |
       | --raft-heartbeat-interval       | 0s    | raft-heartbeat-interval (0ns) must be at least 1ms, the resolution consensus runs timings at |
       | --gossip-interval               | 0s    | gossip-interval (0ns) must be at least 1ms                                                   |
       | --clock-skew-tolerance          | 0s    | clock-skew-tolerance (0ns) must be at least 1ms                                              |

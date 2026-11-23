@@ -414,7 +414,8 @@ Feature: MQTT emission
   Scenario Outline: STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds
     Given MQTT is running
     And a stallable MQTT endpoint is configured
-    And drain timeout is configured as "60s"
+    And schema change drain timeout is configured as "60s"
+    And entity gate deadline is configured as "60s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus statements

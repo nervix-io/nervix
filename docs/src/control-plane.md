@@ -907,71 +907,66 @@ signal received during startup takes effect once startup completes. Every later 
 with status 128 plus the number of the signal that forced it, without running its remaining
 phases. The rest of the cluster observes that exit exactly as it observes a crash.
 
-Graceful shutdown has one deadline, set by `--shutdown-timeout` (`NERVIX_SHUTDOWN_TIMEOUT`, default
-`50s`) and measured on the process monotonic clock from the first stop request: the first `SIGINT`
-or `SIGTERM`, or a public listener that fails. A later request never restarts or extends it, and
-domain pacing never changes its physical length. Every shutdown step described below waits at most
-until the deadline. When it passes, the process logs the phase it had reached, reports
-`shutdown deadline expired; abandoning graceful shutdown`, and exits at once with status 1 without
-running its remaining phases, so the rest of the cluster again observes a crash. Whichever comes
-first, the deadline or a repeated signal, decides how the process exits.
+Graceful shutdown declares one limit, the shutdown timeout, set by `--shutdown-timeout`
+(`NERVIX_SHUTDOWN_TIMEOUT`, default `10m`). It bounds only the moves of the node's units to other
+nodes, measured on the process monotonic clock from the end of the node's save, and domain pacing
+never changes its physical length. The save before it has no limit of its own: it waits only for
+work in motion, and a save that never ends is ended by the platform that supervises the node. Units
+that could have moved and did not within the shutdown timeout are a cluster disruption: the node
+logs it at `error`, runs its remaining phases, and exits with status 1.
 
 When graceful shutdown begins, the process advertises that its current incarnation is terminating.
-The incarnation remains live for Raft and for ownership handoffs already in progress, while placement
-and explicit relocation exclude it as a new destination. A leader whose gossip has not yet observed
-the advertisement can still choose the incarnation, so the incarnation itself refuses to prepare a
-new planned handoff for which it is the destination; see
+The incarnation remains live for Raft and for ownership handoffs that move units away from it, while
+placement and explicit relocation exclude it as a new destination. A leader whose gossip has not yet
+observed the advertisement can still choose the incarnation, so the incarnation itself refuses to
+prepare, or to confirm, a planned handoff for which it is the destination; see
 [Terminating Incarnation And Placement Eligibility](shutdown.md#terminating-incarnation-and-placement-eligibility).
 The advertisement is transient state of
 that process incarnation, so a restarted incarnation is eligible again unless the stable node name
 is cordoned in Raft. The process then stops accepting on its public gRPC, connector, observability,
 and console listeners and closes the client connections they had accepted. Closing a connection
 cancels the requests it carries, such as a session stream or a resource upload that is waiting for
-its client, so no client can delay the drain or the process exit. Work that a session command had
-already started, such as a transaction commit, keeps running, and terminal teardown waits for it
-until the shutdown deadline.
+its client, so no client can delay the save or the process exit. Once its listeners have closed,
+the node is turning off and takes part in no service work: a transaction commit or other command
+still running ends at its next await, and the recovery that completes a stopped node's work resumes
+it, after a restart or by the leader that follows. A leader that is turning off answers another
+stopping node's request to move its units as a node that does not lead.
+
+The node then saves what it holds. It stops new intake on all of its ingestors, whatever their
+`ON QUIESCE` mode, and its generators stop producing, and every domain it runs reads as stopping
+on it, as a domain's `STOP` makes it read. Work already admitted keeps flowing while the node's
+relays, processors, emitters, and acknowledgement paths stay alive: Nervix repeatedly force-flushes
+ingestor routes, processor collections and route buffers, message-error routes, reingestors, and
+emitters, whatever their `FLUSH EACH` cadence, until no work in motion remains, and one more force
+flush confirms that nothing is still moving, so work an upstream flush publishes after a downstream
+node finished its own flush is not left behind. Held work, which only a timer or further input
+could move, never holds the save open: a pending `REQUIRED WAIT` record, the records an emitter
+holds for a retry, and the rows a reorderer, correlator or window holds. The save cuts the held work
+whose kind has no saved form yet, reports each cut by domain, entity and kind, and then stops every
+domain's execution, which writes its final checkpoints. What it cut is negatively acknowledged: an
+ingestor with external acknowledgements redelivers it after restart, and a `MODE NO ACK` ingestor
+loses it.
+
+Then the node's units move. When another live, schedulable Raft voter exists, the node asks the
+leader to move them through the planned handoff above, with what remains of its shutdown timeout,
+and its moves report `Moved` once every unit moved. When none exists, such as on a single node, on
+the last schedulable node of a cluster, or when every node stops at once, nothing moves: the units
+stay saved on the node, a restart restores them, and its moves report `NowhereToMove`, a successful
+stop.
 
 Graceful shutdown records whether that stable node name was already cordoned before it invokes the
-drain. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
-runs after a successful, failed, timed-out, or unanswered drain attempt. A pre-existing operator
-cordon therefore remains set across shutdown and restart. When the drain timeout or the shutdown
-deadline passes before the node observes a leader to request its drain from, nothing was cordoned
-and no cleanup runs. The cleanup runs beside the completion of admitted work in place;
-[Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) owns its bound and what a
-cleanup that cannot complete leaves behind. A follower requests both the drain and the cleanup from
-the leader over the cluster interconnect, authenticated by its node certificate rather than by a
-user credential; see [Topology Cases](./shutdown.md#topology-cases).
+moves. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
+runs after successful, failed, timed-out, or unanswered moves. A pre-existing operator cordon
+therefore remains set across shutdown and restart. When the shutdown timeout passes before the node
+observes a leader to request its moves from, nothing was cordoned and no cleanup runs;
+[Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) owns the cleanup's bound and
+what a cleanup that cannot complete leaves behind. A follower requests both the moves and the
+cleanup from the leader over the cluster interconnect, authenticated by its node certificate rather
+than by a user credential; see [Topology Cases](./shutdown.md#topology-cases).
 
-A graceful-shutdown drain has two parts that share one drain timeout, and the drain also ends when
-the shutdown deadline passes first. When another live, schedulable Raft voter exists, the node
-first moves its scheduled work there through the planned handoff above. It then completes the work
-it has already admitted in place. That second part is the whole drain when no replacement exists,
-such as on a single node or on the last schedulable node of a cluster, and it also covers listener
-ingestors, which bind on every node, and any unit whose move failed. The
-terminating node stops new intake on all of its ingestors, whatever their `ON QUIESCE` mode, and its
-generators stop producing. Work already admitted keeps flowing while the node's relays, processors,
-emitters, and acknowledgement paths stay alive: Nervix repeatedly force-flushes ingestor routes,
-processor collections and route buffers, message-error routes, reingestors, and emitters, whatever
-their `FLUSH EACH` cadence, until no relay batch, node work item, emitter buffer or publish, or
-admitted acknowledgement root remains. One more force flush then confirms that nothing is still
-moving, so work an upstream flush publishes after a downstream node finished its own flush is not
-left behind.
-Ingestor acknowledgements and commits, such as Kafka consumer-group offsets, complete before the ingestor
-session stops.
-
-Terminal teardown stops the node's tasks only after that drain completes or its timeout passes. It
-gives each background task at most two seconds to stop, waits for work that sessions and commands
-started until the shutdown deadline and cancels whatever still runs then, and finally stops the
-runtime, consensus, cluster membership, and the interconnect and releases the node's storage. A
-timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
-ingestor with external acknowledgements redelivers it after restart, and a `MODE NO ACK` ingestor loses
-it. An emitter that stays unavailable therefore holds the drain until its timeout. Pending
-`REQUIRED WAIT` records do not hold the drain open; every force flush retries them against the
-state that is present, and teardown negatively acknowledges whatever still waits. Payloads that
-other live nodes publish into this node's relays are admitted work as well, so an owner that keeps
-publishing extends the drain until its timeout. When every node terminates at once, each node
-completes its own admitted work within its own drain timeout, and work that reaches a peer after
-that peer finished its drain is negatively acknowledged.
+Terminal teardown begins once the moves end. It gives each background task at most two seconds to
+stop, waits for the service work the node ended to reach its next await, and finally stops the
+runtime, consensus, cluster membership, and the interconnect and releases the node's storage.
 
 `DROP NODE` records the stopped process incarnation before removing its Raft membership. It reads
 the newest identity from both live gossip and the failure detector's dead process identities, so a

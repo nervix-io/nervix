@@ -20,7 +20,9 @@ x-nervix-service: &nervix-service
   image: ${NERVIX_IMAGE:?NERVIX_IMAGE is required}
   init: true
   restart: "no"
-  stop_grace_period: 60s
+  # A stopping node saves what it holds, moves its units within its 10-minute default shutdown
+  # timeout, and tears down; the grace period adds two minutes for the save and the teardown.
+  stop_grace_period: 720s
   logging:
     driver: local
     options:
