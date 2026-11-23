@@ -1575,11 +1575,11 @@ miss-heavy keys; a lower count or a shorter function is not a speedup.
   happened and require output at least the cadence later. A flush cadence is such a delay only
   while nothing forces a flush ([Flush and route errors](#flush-and-route-errors)): a scenario that
   moves, alters, fails over, drains, stops or gates anything in the domain while a route holds rows
-  asserts that they arrive within the cadence plus room for load, never that they waited for it.
-  A "never arrives" window is only for output that must never arrive. An exact
-  batch-count assertion needs a flush window much wider than the spread of the messages it groups,
-  and a unit test comparing wall-clock instants anchors its bound to an instant observed after the
-  value under test was computed.
+  asserts that they arrive within the cadence plus room for load, never that they waited for it. A
+  "never arrives" window is only for output that must never arrive. An exact batch-count assertion
+  needs a flush window much wider than the spread of the messages it groups, and a unit test
+  comparing wall-clock instants anchors its bound to an instant observed after the value under test
+  was computed.
 - The scenario suite and harness regressions are the `nervix-scenarios` package rooted at `tests/`,
   with only test targets and dev-dependencies, so the server is never linked twice and its `testing`
   feature stays out of ordinary builds.
