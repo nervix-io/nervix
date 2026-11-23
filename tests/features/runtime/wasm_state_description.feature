@@ -113,6 +113,7 @@ Feature: Guest-rendered WASM state sections
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -211,6 +212,7 @@ Feature: Guest-rendered WASM state sections
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -553,6 +555,7 @@ Feature: Guest-rendered WASM state sections
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -614,6 +617,7 @@ Feature: Guest-rendered WASM state sections
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO filtered_metrics
         SET value = value
