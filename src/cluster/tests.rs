@@ -137,10 +137,10 @@ async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one
         .local_prerequisites()
         .consensus_floors
         .largest_management_event_bytes;
-    assert_eq!(management_event_bytes, 64 << 10);
+    assert_eq!(management_event_bytes, 68 << 10);
 
     GossipExchange::check_fits(&interconnect, management_event_bytes)
-        .assured("a 60 KiB exchange and its typed request fields fit the 64 KiB bound");
+        .assured("Chitchat's largest message and its typed request fields fit the 68 KiB bound");
 
     let from = GossipExchange::largest().from;
     let exchange_of = |payload_bytes: usize| GossipExchange {
@@ -148,7 +148,7 @@ async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one
         payload: vec![0; payload_bytes],
     };
     let refused = interconnect
-        .check_request_fits(&exchange_of(64 << 10))
+        .check_request_fits(&exchange_of(68 << 10))
         .err()
         .assured("a payload of the whole bound leaves no room for its typed request fields");
     assert!(matches!(
@@ -160,7 +160,7 @@ async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one
     // Just below the whole bound the exchange's own archive fits, and only the request envelope
     // around it no longer does: the check counts the envelope too.
     let mut envelope_refusals = 0_u32;
-    for payload_bytes in (64 << 10) - 128..64 << 10 {
+    for payload_bytes in (68 << 10) - 128..68 << 10 {
         let Err(refused) = interconnect.check_request_fits(&exchange_of(payload_bytes)) else {
             continue;
         };
@@ -195,14 +195,68 @@ fn a_gossip_exchange_larger_than_one_message_is_refused() {
     assert_eq!(
         refusal,
         GossipExchangeRefusal::Oversized {
-            size: 61_441,
-            limit: 61_440,
+            size: 65_508,
+            limit: 65_507,
         }
     );
     assert_eq!(
         refusal.to_string(),
-        "a gossip message of 61441 bytes exceeds the 61440-byte bound"
+        "a gossip message of 65508 bytes exceeds the 65507-byte bound"
     );
+}
+
+/// Chitchat discards the error of a reply it cannot send, so the sender itself refuses a message
+/// above the gossip bound before anything reaches the peer's queue, and logs it. A digest is the
+/// only part Chitchat does not split; a Syn whose cluster identifier fills a whole Chitchat string
+/// stands in here for one whose digest has outgrown the bound.
+#[nervix_primitives::test]
+async fn the_sender_refuses_a_gossip_message_above_the_bound_before_queuing_it() {
+    const SYN_MESSAGE_TAG: u8 = 0;
+    let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let interconnect = crate::application::test_fixtures::test_interconnect("test", &node).await;
+    let address = interconnect.local_addr();
+    let transport = InterconnectGossipTransport::build(
+        interconnect.clone(),
+        address,
+        BTreeMap::new(),
+        node,
+        crate::ConfiguredFaultInjection::default(),
+        MembershipSettings::default().gossip_receive_queue_capacity(),
+    )
+    .assured("the gossip handler is registered once");
+    let mut socket = GossipTransport::open(&transport, address)
+        .await
+        .assured("the transport opens its one socket");
+
+    // Every Chitchat message opens with the same header, its magic number and protocol version,
+    // before its one-byte type. A Syn then carries its digest, empty here, and the cluster
+    // identifier as one Chitchat string, whose length prefix allows at most u16::MAX bytes.
+    let bad_cluster = chitchat::Serializable::serialize_to_vec(&ChitchatMessage::BadCluster);
+    let (_bad_cluster_type, header) = bad_cluster
+        .split_last()
+        .assured("a BadCluster message encodes its header and its type");
+    let mut encoded = header.to_vec();
+    encoded.push(SYN_MESSAGE_TAG);
+    chitchat::Serializable::serialize(&0_u16, &mut encoded);
+    let cluster_id = "x".repeat(usize::from(u16::MAX));
+    chitchat::Serializable::serialize(&cluster_id, &mut encoded);
+    let mut remaining = encoded.as_slice();
+    let oversized = <ChitchatMessage as chitchat::Deserializable>::deserialize(&mut remaining)
+        .assured("the fixture encodes a Syn with an empty digest");
+    assert!(chitchat::Serializable::serialize_to_vec(&oversized).len() > MAX_GOSSIP_MESSAGE_BYTES);
+
+    let peer = SocketAddr::from(([127, 0, 0, 1], 7946));
+    let refused = socket
+        .send(peer, oversized)
+        .await
+        .expect_err("a message above the gossip bound is refused at the sender");
+    assert_eq!(refused.to_string(), "gossip message exceeds 65507 bytes");
+    assert!(
+        transport.inner.outgoing.is_empty(),
+        "nothing was queued for the peer"
+    );
+
+    interconnect.shutdown().await;
 }
 
 /// The settings of the member `node_id` of the cluster `test`, reached on `interconnect`. It joins
@@ -224,6 +278,7 @@ fn loopback_member_settings(
         recovered_members: BTreeMap::new(),
         interconnect: interconnect.clone(),
         membership: MembershipSettings::default(),
+        session_notice_capacity: nervix_models::SessionCapabilities::default().notice_capacity(),
         prerequisites: interconnect.local_prerequisites(),
         fault_injection: crate::ConfiguredFaultInjection::default(),
     }

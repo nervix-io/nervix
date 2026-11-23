@@ -758,7 +758,7 @@ validation and derivations, and the rest are fixed by the encoded operation and 
 | Follower decoded resident window | 4 batches per live append stream | `--execution-resident-replication-batches` |
 | Commands memory budget | 1/32 of the node's memory, at least 24 MiB | `--execution-commands-memory-bytes` |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation | fixed |
-| Vote or metadata storage | 256 KiB working reservation from the Management class | fixed: four 64 KiB management events, which `--execution-management-memory-bytes` must hold |
+| Vote or metadata storage | 272 KiB working reservation from the Management class | fixed: four 68 KiB management events, which `--execution-management-memory-bytes` must hold |
 | Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them | fixed |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds | half of `--interconnect-request-timeout` / `--raft-append-idle-bound` |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB | fixed |

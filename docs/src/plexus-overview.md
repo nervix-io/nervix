@@ -1016,7 +1016,7 @@ node: node-1 (leader)
   trust root: <64 hexadecimal digits>
   wire contract: <64 hexadecimal digits>
   largest command: 1MiB
-  largest management event: 64KiB
+  largest management event: 68KiB
   durability promise: fsync every append
   raft-heartbeat-interval: 250ms
   gossip-interval: 500ms
@@ -1043,7 +1043,7 @@ node: node-2
   trust root: <64 hexadecimal digits>
   wire contract: <64 hexadecimal digits>
   largest command: 1MiB
-  largest management event: 64KiB
+  largest management event: 68KiB
   durability promise: fsync every append
   raft-heartbeat-interval: 400ms, the leader's 250ms
   gossip-interval: 500ms

@@ -46,6 +46,22 @@ const _: () = assert!(
      budget that holds the vote also holds every operation bounded by one event",
 );
 
+/// One management or discovery event, its typed request fields and envelope included. The largest
+/// is a gossip exchange: one message of the gossip library, which sizes every message it builds to
+/// the largest IPv4 UDP payload, 65,507 bytes, whatever carries it. The event keeps 4 KiB above
+/// that message for the exchange's other fields and its request envelope, and a node refuses to
+/// start when its bound cannot carry the largest exchange.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Cluster Interconnect chapter carries each gossip message, at most the \
+                  65,507-byte largest IPv4 UDP payload the gossip library builds, as one \
+                  management event with 4 KiB for its typed request fields and envelope"
+    )
+)]
+const MANAGEMENT_EVENT_BYTES: ByteUnit = ByteUnit::Kibibyte(68);
+
 /// AWS-LC's constant-time verifier allocates one buffer for the profile's 512-bit digest.
 /// Native PBKDF2 HMAC scratch is fixed stack state on the already bounded credentials worker.
 #[cfg_attr(
@@ -343,7 +359,7 @@ impl Default for OperationLimits {
             command_bytes: ByteUnit::Mebibyte(1),
             replication_batch_bytes: ByteUnit::Mebibyte(2),
             resident_replication_batches: NonZeroU32::new(4).unwrap_or(NonZeroU32::MIN),
-            management_event_bytes: ByteUnit::Kibibyte(64),
+            management_event_bytes: MANAGEMENT_EVENT_BYTES,
             bulk_chunk_bytes: ByteUnit::Kibibyte(64),
             snapshot_header_bytes: ByteUnit::Kibibyte(64),
             snapshot_section_bytes: ByteUnit::Mebibyte(8),

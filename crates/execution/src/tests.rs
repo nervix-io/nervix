@@ -436,7 +436,7 @@ async fn a_management_budget_below_one_consensus_vote_fails_to_start() {
             class: "management",
             operation: "consensus vote or metadata write",
             budget: ByteUnit::Kibibyte(128).as_u64(),
-            required: ByteUnit::Kibibyte(256).as_u64(),
+            required: ByteUnit::Kibibyte(272).as_u64(),
         }
     );
 }
@@ -449,7 +449,7 @@ async fn a_management_budget_of_one_consensus_vote_starts_and_holds_it() {
     let working_set = limits
         .management_storage_working_bytes()
         .expect("the default management event times the storage multiplier fits a u64");
-    assert_eq!(working_set, ByteUnit::Kibibyte(256).as_u64());
+    assert_eq!(working_set, ByteUnit::Kibibyte(272).as_u64());
     let executor = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
             management: ByteUnit::Byte(working_set),
