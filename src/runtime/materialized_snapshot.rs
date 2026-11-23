@@ -1281,9 +1281,10 @@ impl RestoredMaterializedSnapshot {
                     // A container in memory declares exactly what its sections keep, so its open
                     // takes exactly that share and never runs again. A total past `u64` is past
                     // the class too, so it takes the whole class.
-                    Some(sections) => metadata_bytes
-                        .checked_add(sections)
-                        .map_or(capacity, |total| total.min(capacity)),
+                    Some(sections) => match metadata_bytes.checked_add(sections) {
+                        Some(total) => total.min(capacity),
+                        None => capacity,
+                    },
                     None => RetainedShare::first(
                         metadata_bytes,
                         cursor.remaining(),
@@ -1464,11 +1465,19 @@ impl RetainedShare {
         // The estimate is clamped to the class, and a total past `u64` is past the class too: an
         // attempt that needs more finds out, and asks for the whole class before it reports that
         // even that is too little.
+        match Self::first_estimate(metadata_bytes, remaining, groups) {
+            Some(estimate) => estimate.min(capacity),
+            None => capacity,
+        }
+    }
+
+    /// The row metadata, twice the bytes still to read and one byte per group, or nothing when
+    /// that sum passes `u64`.
+    fn first_estimate(metadata_bytes: u64, remaining: u64, groups: u32) -> Option<u64> {
         remaining
-            .checked_mul(2)
-            .and_then(|columns| columns.checked_add(metadata_bytes))
-            .and_then(|total| total.checked_add(u64::from(groups)))
-            .map_or(capacity, |total| total.min(capacity))
+            .checked_mul(2)?
+            .checked_add(metadata_bytes)?
+            .checked_add(u64::from(groups))
     }
 
     /// Wait for a share of `share` bytes while the open holds nothing of the class.
@@ -1520,19 +1529,27 @@ impl RetainedShare {
         // The class bounds every share, and a share larger than the class is refused as one. A
         // bound past `u64` is past every class, so the next attempt then asks for the most a share
         // can be and is refused.
-        let most = remaining
-            .checked_mul(8)
-            .and_then(|rest| rest.checked_add(self.drawn))
-            .and_then(|total| total.checked_add(bytes))
-            .and_then(|total| total.checked_add(u64::from(groups)));
-        let needed = match (most, self.share.checked_mul(2)) {
-            (Some(most), Some(twice)) => most.max(twice),
+        let needed = match (
+            Self::rerun_estimate(self.drawn, bytes, remaining, groups),
+            self.share.checked_mul(2),
+        ) {
+            (Some(estimate), Some(twice)) => estimate.max(twice),
             _ => u64::MAX,
         };
         OpenAttempt::Short {
             share: self.share,
             needed,
         }
+    }
+
+    /// Everything an attempt drew, the charge it missed, eight bytes per byte still unread and one
+    /// byte per group, or nothing when that sum passes `u64`.
+    fn rerun_estimate(drawn: u64, missed: u64, remaining: u64, groups: u32) -> Option<u64> {
+        remaining
+            .checked_mul(8)?
+            .checked_add(drawn)?
+            .checked_add(missed)?
+            .checked_add(u64::from(groups))
     }
 }
 
