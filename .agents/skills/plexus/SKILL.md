@@ -502,6 +502,9 @@ selected domain. Read `Domains And Time` → `Duration Literals` for duration sp
 bounds, existing-model cap refusals, live installation and committed-versus-running inspection.
 A resource byte quota above any admitted node's committed `database-volume-bytes` (shown by
 `DESCRIBE CLUSTER`) is refused, naming the node; grow that volume and restart the node first.
+`NODE_UNAVAILABILITY_TIMEOUT` must exceed every admitted node's
+`control-plane-health-probe-interval` plus a tenth of itself, or it is refused, naming the node;
+raise the timeout before lengthening a node's interval.
 Seed flags belong only to the first bootstrap, including when their value equals the default.
 Later starts, including the returning bootstrap node, omit them.
 `HTTP_HEADER_FIELDS` ranges from 1 to 16,384, leaving capacity for client and transport headers. Committed header byte and field caps also protect
@@ -906,7 +909,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   overhead. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by the guest. Choose
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
   only clamps a batch, and the flush tuning guidance in the docs records which emitters benefit from
-  larger batches.
+  larger batches. A flush deadline bounds the hold from above and is never a minimum delay: a
+  failover, forced recovery, move, alteration, drain, stop or backup sends held rows early.
 - Use delivery-mode `MAX <n>` with `ACK PARALLEL` or an endpoint's `ACK`; an ingestor's `NO ACK`
   and an emitter's `NO ACK` have no in-flight ACK window and never accept `MAX`.
 - `STOP` is graceful and has no time limit: it stops intake and waits for the work in motion,

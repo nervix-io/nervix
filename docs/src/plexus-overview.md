@@ -515,6 +515,14 @@ buffer and deadline. `FLUSH EACH` measures its duration on the domain clock, beg
 first enters an empty buffer. Window processors use `WIDTH` and `STEP`, and WASM processors use
 guest-owned output cadence instead of `FLUSH`.
 
+A route's flush deadline is an upper bound on how long the route holds rows, and an unguaranteed
+one: it never promises that rows wait that long. Anything that forces a flush sends what a route
+holds before its deadline: a failover, forced recovery, move or alteration anywhere in the domain,
+an entity gate, a drain, a domain stop or a backup; see
+[Incremental Changes And Rebuilds](execution-plans.md#incremental-changes-and-rebuilds).
+Early delivery is correct behavior. On an overloaded host a route can also send slightly after its
+deadline. Sending early or late does not by itself lose or repeat a row.
+
 This is the authoritative `FLUSH IMMEDIATE` timing rule.
 During normal processing, `FLUSH IMMEDIATE` starts a system-owned physical 100 µs minimum batching
 timeout when data first enters an empty route buffer. Domain pacing never scales this monotonic
