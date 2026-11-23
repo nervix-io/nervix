@@ -1279,8 +1279,11 @@ impl RestoredMaterializedSnapshot {
                 let capacity = executor.memory(MemoryClass::StateRead).capacity_bytes;
                 match cursor.scanned_retained_bytes(header.groups, section_limit) {
                     // A container in memory declares exactly what its sections keep, so its open
-                    // takes exactly that share and never runs again.
-                    Some(sections) => metadata_bytes.saturating_add(sections).min(capacity),
+                    // takes exactly that share and never runs again. A total past `u64` is past
+                    // the class too, so it takes the whole class.
+                    Some(sections) => metadata_bytes
+                        .checked_add(sections)
+                        .map_or(capacity, |total| total.min(capacity)),
                     None => RetainedShare::first(
                         metadata_bytes,
                         cursor.remaining(),
@@ -1458,12 +1461,14 @@ impl RetainedShare {
     /// header declares, and twice the bytes still to read, which covers the decoded columns that
     /// make up most containers, within the whole class.
     fn first(metadata_bytes: u64, remaining: u64, groups: u32, capacity: u64) -> u64 {
-        // The estimate is clamped to the class: an attempt that needs more finds out, and asks
-        // for the whole class before it reports that even that is too little.
-        metadata_bytes
-            .saturating_add(remaining.saturating_mul(2))
-            .saturating_add(u64::from(groups))
-            .min(capacity)
+        // The estimate is clamped to the class, and a total past `u64` is past the class too: an
+        // attempt that needs more finds out, and asks for the whole class before it reports that
+        // even that is too little.
+        remaining
+            .checked_mul(2)
+            .and_then(|columns| columns.checked_add(metadata_bytes))
+            .and_then(|total| total.checked_add(u64::from(groups)))
+            .map_or(capacity, |total| total.min(capacity))
     }
 
     /// Wait for a share of `share` bytes while the open holds nothing of the class.
@@ -1512,14 +1517,18 @@ impl RetainedShare {
     /// of row metadata per byte of record identities, more than any column keeps, and one byte
     /// per group. So an open runs at most twice, and at least twice its last share.
     fn short(self, bytes: u64, remaining: u64, groups: u32) -> OpenAttempt {
-        // The bound saturates: the class bounds every share, and a share larger than the class is
-        // refused as one.
-        let needed = self
-            .drawn
-            .saturating_add(bytes)
-            .saturating_add(remaining.saturating_mul(8))
-            .saturating_add(u64::from(groups))
-            .max(self.share.saturating_mul(2));
+        // The class bounds every share, and a share larger than the class is refused as one. A
+        // bound past `u64` is past every class, so the next attempt then asks for the most a share
+        // can be and is refused.
+        let most = remaining
+            .checked_mul(8)
+            .and_then(|rest| rest.checked_add(self.drawn))
+            .and_then(|total| total.checked_add(bytes))
+            .and_then(|total| total.checked_add(u64::from(groups)));
+        let needed = match (most, self.share.checked_mul(2)) {
+            (Some(most), Some(twice)) => most.max(twice),
+            _ => u64::MAX,
+        };
         OpenAttempt::Short {
             share: self.share,
             needed,
@@ -1960,6 +1969,13 @@ impl<'a> SealedSource<'a> {
 
     /// Read the next section with the bulk scratch its decoder needs, `scratch` of the section's
     /// length, as one charge; refuses a section that names another kind or overstates its limit.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the scratch its section's decoder needs for the \
+                      section's length, a size computation without effects"
+        )
+    )]
     async fn take_section_with_scratch(
         &mut self,
         executor: &Executor,

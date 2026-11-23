@@ -652,7 +652,14 @@ impl ProcessorPartitionMoves {
                     None => false,
                 };
                 if !still_released {
-                    drop(built);
+                    // Neither the built branch nor a failed build is owed to anyone once the slot
+                    // it resumed ended, but a failure still leaves a trace.
+                    if let Err(error) = built {
+                        debug!(
+                            error = %format_args!("{error:#}"),
+                            "a retained branch's build failed after its released slot ended"
+                        );
+                    }
                     self.locate(runtime, domain, template, key, holder, &mut released);
                     return released;
                 }
@@ -735,12 +742,7 @@ impl ProcessorPartitionMoves {
             .builds
             .child_token()
             .run_until_cancelled_owned(async move {
-                let built = nervix_primitives::expect_lint!(
-                    nervix::lifecycle_call,
-                    "an installed claim builds its key's branch once",
-                    attempt.outcome()
-                )
-                .await;
+                let built = attempt.outcome().await;
                 commands
                     .send(ProcessorNodeCommand::PartitionClaim(ClaimProgress::Built {
                         install,

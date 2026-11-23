@@ -1480,14 +1480,11 @@ impl FirstBatch {
         let task = prepared.start(VecDeque::new());
         let state =
             instances.insert_changed(key.clone(), accepted_at, ProcessorBranchSlot::Live(task));
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the concrete branch creation transition registers its one metric identity",
-            runtime_handle.observe_branch_instance_created(
-                domain,
-                template.parametrizer.as_ref(),
-                &key
-            )
+        // The concrete branch creation transition registers its one metric identity.
+        runtime_handle.observe_branch_instance_created(
+            domain,
+            template.parametrizer.as_ref(),
+            &key,
         );
         debug!(
             domain = domain.as_str(),
@@ -1510,12 +1507,8 @@ impl FirstBatch {
         // branch to them now, rather than on the next lifecycle snapshot, keeps the branch's first
         // checkpoint from waiting on that snapshot.
         if template.owner.node.kind == ModelKind::WasmProcessor
-            && let Err(error) = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "a new WASM branch offers the entity's lifecycle to its replicas once, when the \
-                 branch is created",
+            && let Err(error) =
                 publish_branch_instance_lru_snapshot(runtime_handle, domain, template, instances)
-            )
         {
             warn!(
                 domain = domain.as_str(),
