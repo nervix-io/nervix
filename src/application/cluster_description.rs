@@ -541,8 +541,8 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         .join(" ");
     format!(
         "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} \
-         database-volume-bytes={} {} {} {} {} drain-timeout={} shutdown-timeout={} \
-         task-grace-period={} listeners={:?} {operational}",
+         database-volume-bytes={} {} {} {} {} shutdown-timeout={} task-grace-period={} \
+         listeners={:?} {operational}",
         record.identity,
         capabilities.database_volume_bytes,
         bounds_line(capabilities.receive),
@@ -555,7 +555,6 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
             .map(|(name, value)| format!("{name}={value}"))
             .collect::<Vec<_>>()
             .join(" "),
-        timing_text(capabilities.shutdown.drain_timeout),
         timing_text(capabilities.shutdown.shutdown_timeout),
         timing_text(capabilities.shutdown.task_grace_period),
         capabilities.listeners,
@@ -564,7 +563,7 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
 
 fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
     format!(
-        "{}={} {}={} {}={} {}={} {}={} {}={} wasm-parallel-compilation={} {}={}",
+        "{}={} {}={} {}={} {}={} {}={} {}={} {}={} {}={} wasm-parallel-compilation={} {}={}",
         nervix_vm::VmInlineRowLimit::NAME,
         values.vm_inline_row_limit,
         nervix_vm::VmRegexSearchCacheBytes::NAME,
@@ -577,6 +576,10 @@ fn engine_capability_line(values: nervix_models::EngineCapabilities) -> String {
         values.wasm_stack_bytes,
         nervix_wasm::WasmMemoryReservationBytes::NAME,
         values.wasm_memory_reservation_bytes,
+        nervix_wasm::WasmMemoryGuardBytes::NAME,
+        values.wasm_memory_guard_bytes,
+        nervix_wasm::WasmMemoryGrowthReservationBytes::NAME,
+        values.wasm_memory_growth_reservation_bytes,
         values.wasm_parallel_compilation,
         nervix_roto::UdfWatchdog::NAME,
         timing_text(values.udf_watchdog),

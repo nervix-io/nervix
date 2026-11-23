@@ -299,7 +299,7 @@ run_stale_follower() {
         "${pumba_image_id}" --dry-run --log-level info \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=node \
-        stop --time 60 --limit 1 "${container_name}" \
+        stop --time 720 --limit 1 "${container_name}" \
         >"${case_dir}/pumba-dry-run.txt" 2>&1
     [[ "$(grep -Fc 'msg="stopping container"' "${case_dir}/pumba-dry-run.txt")" -eq 1 ]] \
         && grep -Fq "dryrun=true id=${container_id}" "${case_dir}/pumba-dry-run.txt" \
@@ -317,17 +317,17 @@ run_stale_follower() {
         --arg container_id "${container_id}" \
         --arg run_id "${run_id}" \
         --arg stop_since "${stop_since}" \
-        '{pumba_image_id:$image,command:["pumba","--label","io.nervix.chaos.run="+$run_id,"--label","io.nervix.chaos.role=node","stop","--time","60","--limit","1",$target],target:$target,container_id:$container_id,stop_since:$stop_since,grace_seconds:60}' \
+        '{pumba_image_id:$image,command:["pumba","--label","io.nervix.chaos.run="+$run_id,"--label","io.nervix.chaos.role=node","stop","--time","720","--limit","1",$target],target:$target,container_id:$container_id,stop_since:$stop_since,grace_seconds:720}' \
         >"${case_dir}/fault-command.json"
     recovery_node_stopped "${container_id}"
-    run_bounded 75 docker run --rm \
+    run_bounded 735 docker run --rm \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=fault \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" --log-level info \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=node \
-        stop --time 60 --limit 1 "${container_name}" \
+        stop --time 720 --limit 1 "${container_name}" \
         >"${case_dir}/pumba.txt" 2>&1
     local stop_completed_ms
     stop_completed_ms="$(epoch_ms)"
@@ -343,7 +343,7 @@ run_stale_follower() {
     if ! "${script_dir}/verify-drain-evidence.sh" "${follower_host}" "${case_dir}/shutdown.log" \
         2>"${case_dir}/drain-verdict.txt"; then
         recovery_finding "${case_dir}" \
-            "${follower_host} did not complete its graceful drain while live replacement nodes existed: $(head -n 1 "${case_dir}/drain-verdict.txt")"
+            "${follower_host} did not move all of its units while live replacement nodes existed: $(head -n 1 "${case_dir}/drain-verdict.txt")"
     fi
     # The follower logs the last index its own log held as it stopped.
     local follower_shutdown_index

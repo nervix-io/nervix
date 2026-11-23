@@ -2307,7 +2307,7 @@ Feature: Web console Plexus REPL
       CREATE VHOST edge api.example.com;
       CREATE HTTP ENDPOINT raw_events_endpoint ON edge PATH '/raw';
       CREATE HTTP ENDPOINT INGESTOR ingest_events FROM raw_events_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING event_codec TO raw_events INHERIT ALL UNBRANCHED FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE WASM PROCESSOR filter_events FROM raw_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO filtered_events SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_events FROM raw_events USING RESOURCE wasm_filter VERSION 1 FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 UNBRANCHED TO filtered_events SET value = value ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"

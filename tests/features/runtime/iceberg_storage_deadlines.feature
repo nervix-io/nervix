@@ -48,6 +48,10 @@ Feature: Iceberg storage deadlines and retry ownership
       status: OK
       """
     When the stallable endpoint "iceberg_objects" is paused
+    # The retry backoff bounds the emitter's wait from above only: a node that applies a newer
+    # runtime revision meanwhile, as every node does after a failover, flushes the emitter, which
+    # publishes what its retry holds at once.
+    And the runtime revision each node applied is recorded
     And http payload is posted to host "iceberg-storage-{{test_id}}.example.com" path "/notifications"
       """
       {"user_id":73}
@@ -62,7 +66,7 @@ Feature: Iceberg storage deadlines and retry ownership
       reconnect backoff: 2s
       """
     When the stallable endpoint "iceberg_objects" is resumed
-    Then within "60s" the Iceberg table "storage_timeout_{{test_id}}" contains a row no sooner than "3s" after it was published
+    Then within "60s" the Iceberg table "storage_timeout_{{test_id}}" contains a row no sooner than "3s" after it was published, unless a node applied a newer runtime revision
       """
       {"user_id":73}
       """

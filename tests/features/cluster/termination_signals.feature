@@ -14,7 +14,10 @@ Feature: Process termination signals
       | SIGTERM |
 
   Scenario Outline: A repeated termination signal forces termination while graceful shutdown is stalled
-    Given a nervix-server process is started with drain timeout "45s"
+    # The emitter's destination accepts its connection and never answers, so its publish stays on
+    # the wire for the client's ten-minute timeout, and the save waits for it.
+    Given a silent endpoint "stalled_api" is listening
+    And a nervix-server process is started
     And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -38,24 +41,21 @@ Feature: Process termination signals
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE SYSLOG CLIENT unreachable_sink CONFIG {
-        'protocol' = 'tcp',
-        'addr' = '{{syslog_emit_addr}}'
+      CREATE HTTP CLIENT stalled_api CONFIG {
+        'endpoint' = 'http://{{stalled_api}}', 'timeout_ms' = 600000
       };
-      CREATE SYSLOG COLLECTOR EMITTER held_output FROM held_events
-        TO unreachable_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        ENCODE USING held_event_codec
-        INHERIT ALL
-        FLUSH IMMEDIATE
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG;
+      CREATE HTTP REQUEST EMITTER held_output FROM held_events
+        TO stalled_api METHOD 'POST' PATH '/events'
+          MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     When http payload is posted to the server process with host "held-{{test_id}}.example.com" path "/events"
       """
       {"sequence":1}
       """
-    And the server process receives <first>
+    Then the silent endpoint "stalled_api" eventually accepts a connection
+    When the server process receives <first>
     Then the server process log eventually contains "termination signal received; requesting graceful shutdown signal=<first>"
     When the server process receives <second>
     Then the server process exits with status <status> within "10s" of the last signal

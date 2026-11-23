@@ -2477,16 +2477,16 @@ the consumer and hand the retained positions to recovery. This prevents broker r
 overtaking downstream work admitted on the preceding connection. A stop ends those waits and
 reports every still-unconfirmed retained or pending position.
 
-The host reports progress for a batch only once acknowledging it returns. Until then the
-ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
-the batch's acknowledgement roots to resolve keeps counting against its domain and ingestor until
-the ingestor loop drops the batch acknowledgement after `acknowledge` or `reject` returns. A drain or
-an ownership handoff that waits for admitted acknowledgement roots therefore also waits for the
+The host reports progress for a batch only once acknowledging it returns. Until then the ingestor's
+transient status stays as it was, and the batch's work stays outstanding: the last of the batch's
+acknowledgement roots to resolve keeps counting against its domain and ingestor until the ingestor
+loop drops the batch acknowledgement after `acknowledge` or `reject` returns. A drain or an
+ownership handoff that waits for admitted acknowledgement roots therefore also waits for the
 ingestor's confirmation, and a node's graceful stop completes outstanding acknowledgements before
-the ingestor closes, within the drain timeout. A root that waits only on what a drain does not wait
-for, such as a `REQUIRED WAIT` dependency or a window that retains its row, still does not hold
-the drain, and neither do the resolved roots of the batch it belongs to, because the batch cannot
-be acknowledged until it resolves.
+the ingestor closes, during its save, which has no limit of its own. A root that waits only on what
+a drain does not wait for, such as a `REQUIRED WAIT` dependency or a window that retains its row,
+still does not hold the drain, and neither do the resolved roots of the batch it belongs to, because
+the batch cannot be acknowledged until it resolves.
 
 A confirmation that fails is the ingestor's transient status, which `DESCRIBE INGESTOR` shows until
 a later acknowledgement is confirmed, and the host rejects the positions for their position class to
@@ -2797,8 +2797,8 @@ emitter holds at once, a record a retry holds included, and retries inline with 
 the destination takes it, the stop deadline passes or the task shuts down; once the domain begins
 stopping, it hands the records to its retry schedule instead. The stopping execution
 gives every emitter its deadline before
-it signals the shutdown: the domain drain timeout from that moment, and no later than the node's
-shutdown deadline when the node is stopping. A task whose relay interaction ends without a stop or
+it signals the shutdown: the domain drain timeout from that moment, whether the domain or the node
+stops. A task whose relay interaction ends without a stop or
 a teardown drains its buffer and finishes the emitter by the stop deadline it holds; a task that holds
 none, because its execution was dropped without stopping, leaves the emitter unfinished. Teardown can cancel a publish before it reports its
 records: their acknowledgements end unresolved, so an acknowledged ingestor delivers them again, and

@@ -165,6 +165,17 @@ impl<'a> Messages<'a> {
         }
     }
 
+    /// One handoff refusal of either kind a participant answers with.
+    fn handoff_failure(&mut self) -> OwnershipHandoffFailure {
+        if self.arbitrary.entropy().flag() {
+            OwnershipHandoffFailure::rejected(self.arbitrary.string())
+        } else {
+            OwnershipHandoffFailure::DestinationTerminating {
+                node: self.arbitrary.cluster_node(),
+            }
+        }
+    }
+
     fn handoff_selection(&mut self) -> crate::OwnershipHandoffSelection {
         if self.arbitrary.entropy().flag() {
             crate::OwnershipHandoffSelection::Unit
@@ -437,7 +448,7 @@ impl<'a> Messages<'a> {
                 let response = if self.arbitrary.entropy().flag() {
                     Ok(self.checkpoints())
                 } else {
-                    Err(OwnershipHandoffFailure::rejected(self.arbitrary.string()))
+                    Err(self.handoff_failure())
                 };
                 Message::CaptureResponse(response)
             }

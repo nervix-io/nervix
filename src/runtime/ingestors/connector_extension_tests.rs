@@ -106,9 +106,7 @@ impl UnfoldingDomain {
         for entrypoint in &self.entrypoints {
             entrypoint.shutdown(self.runtime.task_stop_grace()).await;
         }
-        self.runtime
-            .shutdown(self.runtime.domain_drain_timeout())
-            .await;
+        self.runtime.shutdown().await;
     }
 
     /// A second host for the fixture's ingestor, beside the endpoint ingestor the fixture runs, which

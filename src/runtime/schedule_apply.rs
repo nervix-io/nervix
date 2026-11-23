@@ -87,23 +87,27 @@ impl ScheduleApplication {
 }
 
 impl Runtime {
+    /// Applies `schedule` the way the control plane applies a committed one, planning each domain's
+    /// change against the schedule its execution runs, and starting ingestors directly.
     #[cfg(test)]
     pub(in crate::runtime) async fn apply_cluster_schedule(
         &self,
         local_node_id: &ClusterNodeName,
         schedule: &ClusterSchedule,
     ) -> error_stack::Result<(), RuntimeError> {
+        let mut installed = self.inner.test_installed_schedule.lock().await;
         let _application = self.inner.schedule_application.lock().await;
-        let applied = self.inner.test_applied_schedule.load_full();
-        let revision_plan = PlannedClusterRevision::between(applied.as_deref(), schedule)
+        let revision_plan = installed
+            .plan(schedule)
             .change_context(RuntimeError::PlanScheduleRevision)?;
-        Box::pin(self.apply_cluster_schedule_locked(local_node_id, revision_plan, true)).await?;
-        self.inner
-            .test_applied_schedule
-            .store(Some(StdArc::new(schedule.clone())));
-        Ok(())
+        let application =
+            Box::pin(self.apply_cluster_schedule_locked(local_node_id, &revision_plan, true)).await;
+        installed.record_attempt(&revision_plan, schedule, &self.installed_revision_digests());
+        application
     }
 
+    /// Applies one committed cluster state the way the control plane does, planning each domain's
+    /// change against the schedule its execution runs.
     #[cfg(test)]
     pub(in crate::runtime) async fn apply_cluster_state(
         &self,
@@ -113,21 +117,31 @@ impl Runtime {
         domain_clock_authorities: &BTreeMap<DomainName, DomainClockAuthority>,
         schedule: &ClusterSchedule,
     ) -> error_stack::Result<(), RuntimeError> {
-        let applied = self.inner.test_applied_schedule.load_full();
-        let revision_plan = PlannedClusterRevision::between(applied.as_deref(), schedule)
+        let mut installed = self.inner.test_installed_schedule.lock().await;
+        let revision_plan = installed
+            .plan(schedule)
             .change_context(RuntimeError::PlanScheduleRevision)?;
-        self.apply_planned_cluster_state(
-            local_node_id,
-            revision,
-            domains,
-            domain_clock_authorities,
-            revision_plan,
-        )
-        .await?;
-        self.inner
-            .test_applied_schedule
-            .store(Some(StdArc::new(schedule.clone())));
-        Ok(())
+        let application = self
+            .apply_planned_cluster_state(
+                local_node_id,
+                revision,
+                domains,
+                domain_clock_authorities,
+                &revision_plan,
+            )
+            .await;
+        installed.record_attempt(&revision_plan, schedule, &self.installed_revision_digests());
+        application
+    }
+
+    /// The source digest of the revision each domain execution on this node runs, which the
+    /// control plane plans that domain's next change against.
+    pub(crate) fn installed_revision_digests(&self) -> BTreeMap<DomainName, [u8; 32]> {
+        let mut digests = BTreeMap::new();
+        for execution in self.inner.executions.iter() {
+            digests.insert(execution.key().clone(), execution.revision.source_digest);
+        }
+        digests
     }
 
     pub(crate) async fn apply_planned_cluster_state(
@@ -136,7 +150,7 @@ impl Runtime {
         revision: u64,
         domains: &BTreeMap<DomainName, DomainState>,
         domain_clock_authorities: &BTreeMap<DomainName, DomainClockAuthority>,
-        revision_plan: PlannedClusterRevision,
+        revision_plan: &PlannedClusterRevision,
     ) -> error_stack::Result<(), RuntimeError> {
         let mut application = self.inner.schedule_application.lock().await;
         if !application.advances_beyond_applied(revision) {
@@ -155,7 +169,7 @@ impl Runtime {
     pub(super) async fn apply_cluster_schedule_locked(
         &self,
         local_node_id: &ClusterNodeName,
-        revision_plan: PlannedClusterRevision,
+        revision_plan: &PlannedClusterRevision,
         start_ingestors: bool,
     ) -> error_stack::Result<(), RuntimeError> {
         // Delta application and full rebuild each own substantial state. Poll them indirectly so
@@ -209,9 +223,11 @@ impl Runtime {
 
         for (domain_id, change) in &revision_plan.domains {
             let domain = &change.revision;
-            // An earlier attempt at this revision may have applied it to this domain before a
-            // later domain failed. The domain then runs its desired schedule already and takes no
-            // change, although it no longer matches the predecessor the delta was planned against.
+            // The control plane plans each domain's change against the schedule its execution
+            // runs, so the predecessor matches unless the execution was installed outside schedule
+            // application. Such an execution that already runs the desired schedule takes no
+            // change; any other one is rebuilt rather than given a delta planned for another
+            // predecessor.
             let (already_applied, predecessor_matches) = match self.inner.executions.get(domain_id)
             {
                 Some(execution) => (
@@ -314,7 +330,7 @@ impl Runtime {
                 self.release_domain_stop_intake(&domain.domain);
             }
         }
-        self.retain_assigned_wasm_modules(local_node_id, &revision_plan);
+        self.retain_assigned_wasm_modules(local_node_id, revision_plan);
         // Every domain of the revision now publishes its routes, so the endpoint listener answers
         // a route none of them publishes as missing rather than as not yet installed.
         self.inner.endpoint_intake_routes.mark_installed();
@@ -1808,3 +1824,7 @@ mod tests;
 #[cfg(test)]
 #[path = "schedule_apply_failure_tests.rs"]
 mod failure_tests;
+
+#[cfg(all(test, feature = "testing"))]
+#[path = "schedule_apply_failed_attempt_tests.rs"]
+mod failed_attempt_tests;

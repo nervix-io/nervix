@@ -511,8 +511,9 @@ including endpoint ingestors, which serve on every node, and ingestors whose sch
 move. It also ignores `ON QUIESCE`. Already admitted payloads continue through their routes, route
 buffers are force-flushed whatever their `FLUSH EACH` cadence, and Nervix waits for their ACK roots
 to resolve before the ingestor session stops, so offsets, acknowledgements, and deletes complete for
-work that reached its emitters. A root still unresolved when the drain timeout passes is negatively
-acknowledged, and the ingestor's redelivery contract applies. A raw quiesce buffer is outside runtime
+work that reached its emitters. The save waits for those roots with no limit of its own; a root
+that waits on held work with no saved form yet is cut with that work and negatively acknowledged,
+and the ingestor's redelivery contract applies. A raw quiesce buffer is outside runtime
 graph work, so a shutdown discards what it retained instead of replaying it. See
 [Planned Ownership Handoffs And Failover](control-plane.md#planned-ownership-handoffs-and-failover)
 and [Shutdown And Recovery](shutdown.md#connector-contracts) for the per-ingestor acknowledgement and
@@ -1712,8 +1713,9 @@ positions and reports progress for the batch only once the group's coordinator a
 That costs one commit round trip per batch, which `ACK PARALLEL` spreads over every message of a
 batch. A commit the broker refuses, or does not answer within thirty seconds, is the ingestor's
 transient status in `DESCRIBE INGESTOR`, and the ingestor reads the batch again, so its output can
-repeat; the status clears once a later commit is answered. A graceful stop or an ownership move
-waits for the answer to every commit of the work it drains, within the drain timeout.
+repeat; the status clears once a later commit is answered. A graceful stop's save and an ownership
+move wait for the answer to every commit of the work they drain, the move within its entity gate
+deadline.
 
 Under `OFFSET BY CONSUMER GROUP`, a consumer that stops heartbeating without leaving its group,
 because its node was killed, paused or cut off from the broker, keeps its partitions until the group

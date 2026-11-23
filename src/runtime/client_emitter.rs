@@ -39,7 +39,7 @@ use nervix_recovery::NoReceiver as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use uuid::Uuid;
 
-use super::{BranchKey, DomainNodeRef, Runtime};
+use super::{BranchKey, DomainClock, DomainNodeRef, Runtime};
 use crate::metrics::ClientEmitterSeries;
 
 /// A reservation for Arrow bytes still awaiting application processing.
@@ -191,6 +191,10 @@ pub(crate) struct ClientEmitterDelivery {
 pub(crate) enum ClientEmitterResult {
     Acknowledged,
     Rejected(String),
+    /// No consumer was attached to take the delivery while its domain stopped, so nothing but a
+    /// consumer that attaches could move it on. It returns to its emitter, which holds it for a
+    /// retry, so a stop or a node's save cuts it as held work instead of waiting for it.
+    Unconsumed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -313,13 +317,14 @@ impl ClientEmitterEndpoint {
         description: ClientEmitterDescription,
         budget: ClientEmitterBudget,
         series: ClientEmitterSeries,
+        clock: DomainClock,
     ) -> Self {
         let span = tracing::debug_span!(
             "client_emitter",
             domain = domain.as_str(),
             emitter = emitter.as_str()
         );
-        Self::new_with_references(description, budget, series, Uuid::now_v7, true, span)
+        Self::new_with_references(description, budget, series, Uuid::now_v7, true, span, clock)
     }
 
     #[cfg(test)]
@@ -328,6 +333,22 @@ impl ClientEmitterEndpoint {
         budget: ClientEmitterBudget,
         series: ClientEmitterSeries,
     ) -> Self {
+        Self::new_on(
+            description,
+            budget,
+            series,
+            super::test_domain_clock(&super::domain("test")),
+        )
+    }
+
+    /// An endpoint whose delivery owner reads `clock`, as a running or stopping domain's would.
+    #[cfg(test)]
+    pub(crate) fn new_on(
+        description: ClientEmitterDescription,
+        budget: ClientEmitterBudget,
+        series: ClientEmitterSeries,
+        clock: DomainClock,
+    ) -> Self {
         Self::new_with_references(
             description,
             budget,
@@ -335,6 +356,7 @@ impl ClientEmitterEndpoint {
             Uuid::now_v7,
             true,
             tracing::Span::none(),
+            clock,
         )
     }
 
@@ -345,6 +367,7 @@ impl ClientEmitterEndpoint {
         references: R,
         deadline_wakes: bool,
         span: tracing::Span,
+        clock: DomainClock,
     ) -> Self
     where
         R: FnMut() -> Uuid + Send + 'static,
@@ -369,6 +392,7 @@ impl ClientEmitterEndpoint {
                 series: series.clone(),
                 references,
                 deadline_wakes,
+                clock,
             }
             .run(),
             span,
@@ -474,6 +498,14 @@ impl ClientEmitterEndpoint {
             .means_shutdown("replaced client emitter delivery owner");
     }
 
+    /// Has the delivery owner look at its domain clock again, after the domain began or stopped
+    /// stopping on this node.
+    pub(in crate::runtime) fn observe_domain_lifecycle(&self) {
+        self.commands
+            .send(Command::Lifecycle)
+            .means_shutdown("ended client emitter delivery owner");
+    }
+
     pub(crate) fn metric_lines(&self) -> Vec<String> {
         self.series.describe_lines()
     }
@@ -551,6 +583,8 @@ enum Command {
     End {
         reset_metrics: bool,
     },
+    /// Whether the domain stops may have changed, so the owner looks at its clock again.
+    Lifecycle,
 }
 
 struct Consumer {
@@ -608,12 +642,16 @@ struct Owner<R> {
     series: ClientEmitterSeries,
     references: R,
     deadline_wakes: bool,
+    /// The emitter's bound domain clock, which reads as stopping during a stop of the domain or
+    /// the save of the node it runs on.
+    clock: DomainClock,
 }
 
 impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
     async fn run(mut self) {
         loop {
             self.expire();
+            self.return_unconsumable();
             self.dispatch();
             let wake = self.next_wake();
             let command = match wake {
@@ -671,6 +709,7 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
                 }
             }
             Command::Detach(id) => self.detach(id),
+            Command::Lifecycle => {}
             Command::Publish {
                 payload,
                 reservation,
@@ -789,6 +828,29 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
         self.attempts.insert(reference, history);
         self.remember_result(reference);
         Ok(())
+    }
+
+    /// Returns every waiting delivery to its emitter as unconsumed while the domain stops and no
+    /// consumer is attached, because only a consumer that attaches could take it. A delivery waits
+    /// as long as any consumer is attached, even one whose window is full, since that consumer
+    /// takes it once it answers the batches it holds.
+    fn return_unconsumable(&mut self) {
+        if !self.consumers.is_empty() || !self.clock.is_stopping() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.pending);
+        for identity in waiting {
+            let Some(delivery) = self.deliveries.get(&identity) else {
+                continue;
+            };
+            if let DeliveryPhase::Pending { .. } = delivery.phase {
+                tracing::debug!(
+                    %identity,
+                    "returned a client emitter delivery no consumer can take while its domain stops"
+                );
+                self.complete(identity, ClientEmitterResult::Unconsumed);
+            }
+        }
     }
 
     fn complete(&mut self, identity: Uuid, result: ClientEmitterResult) {
@@ -1116,6 +1178,91 @@ mod tests {
         assert!(budget.try_grant(credit).is_none());
         drop(grant);
         assert!(budget.try_grant(credit).is_some());
+    }
+
+    fn test_payload() -> ClientEmitterPayload {
+        ClientEmitterPayload {
+            identity: Uuid::now_v7(),
+            source: RelayName::parse("orders").assured("literal relay name"),
+            branch: None,
+            body: Bytes::from_static(b"arrow ipc test bytes"),
+            members: 1,
+            execution_now: Timestamp::now(),
+        }
+    }
+
+    /// A clock bound to a domain that stops on this node, as a stopping node's save makes it.
+    fn stopping_clock() -> DomainClock {
+        let domain = super::super::domain("stopping");
+        let lifecycle = super::super::DomainClockLifecycle::new(domain.clone());
+        lifecycle.mark_node_saving();
+        lifecycle.synchronize(
+            &super::super::unpaced_domain_state(domain.as_str()),
+            &super::super::test_domain_clock_authority(),
+        );
+        lifecycle
+            .bind()
+            .assured("the fixture installs an unpaced domain clock")
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_delivery_no_consumer_can_take_while_its_domain_stops_returns_to_its_emitter() {
+        let endpoint = ClientEmitterEndpoint::new_on(
+            description(AckWindow::Sequential, Duration::from_secs(2)),
+            ClientEmitterBudget::default(),
+            series(),
+            stopping_clock(),
+        );
+
+        let result = nervix_primitives::time::timeout(
+            Duration::from_secs(60),
+            endpoint.publish(test_payload()),
+        )
+        .await
+        .expect("a stopping domain's delivery with no consumer returns at once");
+
+        assert_eq!(result, Ok(ClientEmitterResult::Unconsumed));
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_running_domain_keeps_a_delivery_until_a_consumer_takes_it() {
+        let endpoint = Arc::new(ClientEmitterEndpoint::new(
+            description(AckWindow::Sequential, Duration::from_secs(2)),
+            ClientEmitterBudget::default(),
+            series(),
+        ));
+        let publisher = nervix_primitives::task::spawn({
+            let endpoint = endpoint.clone();
+            async move { endpoint.publish(test_payload()).await }
+        });
+        nervix_primitives::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            !publisher.is_finished(),
+            "a running domain's delivery waits for a consumer"
+        );
+
+        let mut consumer = endpoint
+            .open(
+                &fields(),
+                1,
+                NonZeroU64::new(1024).assured("literal credit"),
+                false,
+            )
+            .await
+            .expect("consumer opens");
+        let attempt = consumer
+            .deliveries
+            .recv()
+            .await
+            .expect("the waiting delivery reaches the consumer that attached");
+        consumer
+            .answer(attempt.reference, ClientEmitterAnswer::Ack)
+            .await
+            .expect("acknowledgement confirmed");
+        assert_eq!(
+            publisher.await.expect("publisher runs"),
+            Ok(ClientEmitterResult::Acknowledged)
+        );
     }
 
     #[nervix_primitives::test]
