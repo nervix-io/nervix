@@ -11,11 +11,51 @@ use crate::graph::layout::{Layout, LayoutEdge, LayoutEdgeKind, LayoutItem};
 
 /// Every processing node is drawn at one size, so a card's shape says nothing about its traffic
 /// or its state.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the live graph's designed card width, the one width every processing node is \
+                  drawn at so its shape says nothing about its traffic or state"
+    )
+)]
 pub const NODE_WIDTH: i32 = 176;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the live graph's designed card height, the one height every processing node is \
+                  drawn at so its shape says nothing about its traffic or state"
+    )
+)]
 pub const NODE_HEIGHT: i32 = 64;
 /// Relays are capsules sized to their name, within bounds that keep a relay column narrow.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the live graph's designed relay capsule height; only a capsule's width follows \
+                  its name"
+    )
+)]
 pub const RELAY_HEIGHT: i32 = 26;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the live graph's designed narrowest relay capsule, which a short name does not \
+                  shrink"
+    )
+)]
 pub const RELAY_MIN_WIDTH: i32 = 72;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the live graph's designed widest relay capsule, which keeps a relay column \
+                  narrow and truncates a longer name"
+    )
+)]
 pub const RELAY_MAX_WIDTH: i32 = 220;
 
 /// How the live graph names one of its edges: the items it joins and what travels along it. Two
@@ -48,6 +88,14 @@ pub type LiveGraphLayout = Layout<String, GraphEdgeId, String>;
 pub struct GraphSearch(String);
 
 impl GraphSearch {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a graph search needs two characters, so a single keystroke never lights up \
+                      the whole graph"
+        )
+    )]
     const MIN_CHARACTERS: usize = 2;
 
     /// The search a reader typed, or none while the input is too short to search with.

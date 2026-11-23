@@ -101,6 +101,7 @@ impl Default for ShutdownSettings {
 }
 
 impl ShutdownTimeout {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(10 * 60);
 }
 impl ShutdownSettings {

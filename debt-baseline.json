@@ -3,7 +3,6 @@
   "branch_inversions": 151,
   "files_over_3000_lines": 8,
   "functions_over_complexity_30": 110,
-  "hidden_tunables": 508,
   "non_aws_lc_crypto": 60,
   "testing_feature_struct_fields": 0,
   "branch_inversion_sites": [

@@ -34,8 +34,10 @@ use tracing::info;
 mod settings;
 pub use settings::{ShutdownSettings, ShutdownTimeout, TaskGracePeriod};
 
-/// How long a stopping node's work may take to move to other nodes once the node has saved it.
-pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = nervix_models::ShutdownTimeout::DEFAULT;
+/// The shutdown timeout's default, which the application's argument tests compare with: how long a
+/// stopping node's work may take to move to other nodes once the node has saved it.
+#[cfg(test)]
+pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = ShutdownTimeout::DEFAULT;
 
 /// The deadline of a stopping node's moves: the shutdown timeout, counted from the moment the node
 /// finished saving what it holds.
@@ -268,10 +270,8 @@ impl std::fmt::Debug for ShutdownCoordinator {
 
 impl Default for ShutdownCoordinator {
     fn default() -> Self {
-        Self::new(
-            DEFAULT_SHUTDOWN_TIMEOUT,
-            ShutdownSettings::default().task_grace_period(),
-        )
+        let settings = ShutdownSettings::default();
+        Self::new(settings.shutdown_timeout(), settings.task_grace_period())
     }
 }
 

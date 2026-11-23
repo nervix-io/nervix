@@ -154,6 +154,8 @@ pub enum AppError {
     InvalidConnectorHostSettings,
     #[error("invalid WASM engine capabilities")]
     InvalidWasmEngineSettings,
+    #[error("invalid UDF capabilities")]
+    InvalidUdfSettings,
     #[error("failed to read the node settings")]
     ReadSettings,
     #[error("failed to initialize memory pressure monitor")]

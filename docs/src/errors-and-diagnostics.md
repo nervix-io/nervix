@@ -2072,8 +2072,7 @@ twelve of it do not fit the milliseconds consensus counts an election timeout in
 `RaftTimingError` beneath `AppError::InvalidRaftTimings`. A gossip interval or a clock-skew
 tolerance below one millisecond, or a gossip interval twenty of which do not fit a duration, is a
 `MembershipSettingsError` beneath `AppError::InvalidMembershipSettings`, and a memory limit of zero
-a `CapacitySettingsError` beneath `AppError::InvalidCapacitySettings`. A drain timeout above the
-shutdown timeout is a `ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A
+a `CapacitySettingsError` beneath `AppError::InvalidCapacitySettings`. A
 setting that a test names for a node but that the server's command line does not read keeps clap's
 error beneath `AppError::ReadSettings`.
 
@@ -3812,11 +3811,13 @@ driver and interrupted compiler keep distinct diagnoses.
 [Architecture enforcement](architecture-enforcement.md) owns the matrix, shared admission protocol
 and cache evidence that produce these tooling reports.
 
-The isolated architecture compiler emits sixteen ordinary Rust tool diagnostics:
+The isolated architecture compiler emits nineteen ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`; the four failure diagnostics above; the six architecture diagnostics
+`nervix::invalid_contract`; the five failure diagnostics above; the six architecture diagnostics
 [Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries) describes;
-and `nervix::clamped_arithmetic` and `nervix::combinator_control_flow`. The
+`nervix::clamped_arithmetic` and `nervix::combinator_control_flow`; `nervix::branch_inversion`; and
+`nervix::hidden_tunable`, which [Hidden Tunables](./architecture-enforcement.md#hidden-tunables)
+describes. The
 [architecture rule matrix](./architecture-enforcement.md#rule-contracts) lists them by family.
 Source contracts and narrow reason-bearing expectations own the architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with

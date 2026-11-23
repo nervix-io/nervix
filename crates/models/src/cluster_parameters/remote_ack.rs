@@ -12,6 +12,7 @@ use crate::ClusterParameters;
 
 pub struct RemoteAckAliveInterval;
 impl RemoteAckAliveInterval {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_millis(100);
 }
 impl SettingDefinition for RemoteAckAliveInterval {
@@ -30,6 +31,7 @@ impl SettingDefinition for RemoteAckAliveInterval {
 }
 pub struct RemoteAckDispatchTimeout;
 impl RemoteAckDispatchTimeout {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(5);
 }
 impl SettingDefinition for RemoteAckDispatchTimeout {
@@ -48,6 +50,7 @@ impl SettingDefinition for RemoteAckDispatchTimeout {
 }
 pub struct RemoteAckSilenceTimeout;
 impl RemoteAckSilenceTimeout {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(15);
 }
 impl SettingDefinition for RemoteAckSilenceTimeout {
@@ -66,6 +69,7 @@ impl SettingDefinition for RemoteAckSilenceTimeout {
 }
 pub struct RemoteAckSweepInterval;
 impl RemoteAckSweepInterval {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(1);
 }
 impl SettingDefinition for RemoteAckSweepInterval {
@@ -84,6 +88,7 @@ impl SettingDefinition for RemoteAckSweepInterval {
 }
 pub struct RemoteRelayTotalTimeout;
 impl RemoteRelayTotalTimeout {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(300);
 }
 impl SettingDefinition for RemoteRelayTotalTimeout {
@@ -102,6 +107,7 @@ impl SettingDefinition for RemoteRelayTotalTimeout {
 }
 pub struct RemoteRelayInstantiationWait;
 impl RemoteRelayInstantiationWait {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(5);
 }
 impl SettingDefinition for RemoteRelayInstantiationWait {
@@ -142,13 +148,25 @@ pub struct RemoteAckTiming {
     pub remote_relay_instantiation_wait: Duration,
 }
 impl RemoteAckTiming {
+    /// The shortest retry and instantiation poll cadence, which keeps a deadline too short to
+    /// divide into two hundred opportunities from rounding its cadence to zero.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest \
+                      cadence that is not zero"
+        )
+    )]
+    const CADENCE_FLOOR: Duration = Duration::from_nanos(1);
+
     /// At most two hundred poll opportunities in one owning deadline. A one-nanosecond floor
     /// keeps sub-microsecond policies from rounding the internal retry cadence to zero.
     pub fn retry_interval(self) -> Duration {
-        (self.remote_ack_dispatch_timeout / 200).max(Duration::from_nanos(1))
+        (self.remote_ack_dispatch_timeout / 200).max(Self::CADENCE_FLOOR)
     }
     pub fn instantiation_poll(self) -> Duration {
-        (self.remote_relay_instantiation_wait / 200).max(Duration::from_nanos(1))
+        (self.remote_relay_instantiation_wait / 200).max(Self::CADENCE_FLOOR)
     }
 
     /// How long a sender leaves a relay channel without a batch before its next batch opens a

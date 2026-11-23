@@ -137,6 +137,15 @@ impl SessionServiceImpl {
                             "START waits until a cluster node satisfies the node rules of every unit"
                         );
                     }
+                    #[cfg(feature = "testing")]
+                    self.inner
+                        .runtime
+                        .pause_start_placement_if_armed(
+                            self.inner.consensus.local_node_id(),
+                            domain,
+                            crate::fault_injection::StartPlacementBoundary::Waiting,
+                        )
+                        .await;
                     self.wait_for_start_placement(domain).await?;
                 }
                 Ok(StartPlacement::Misplaced { units }) => {
@@ -166,6 +175,15 @@ impl SessionServiceImpl {
                                      and looks again"
                                 );
                             }
+                            #[cfg(feature = "testing")]
+                            self.inner
+                                .runtime
+                                .pause_start_placement_if_armed(
+                                    self.inner.consensus.local_node_id(),
+                                    domain,
+                                    crate::fault_injection::StartPlacementBoundary::Deferred,
+                                )
+                                .await;
                             self.wait_for_start_placement(domain).await?;
                         }
                     }

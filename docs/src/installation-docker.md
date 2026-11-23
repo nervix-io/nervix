@@ -109,7 +109,6 @@ docker run --detach \
   --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
   --env NERVIX_INTERCONNECT_TLS_CERT=/etc/nervix/interconnect/node.pem \
   --env NERVIX_INTERCONNECT_TLS_KEY=/etc/nervix/interconnect/node-key.pem \
-  --env NERVIX_REPLICA_COUNT=3 \
   --env NERVIX_ALLOW_BOOTSTRAP=true \
   --env NERVIX_INIT_DEFAULT_USER_PASSWORD \
   "$NERVIX_IMAGE"
@@ -153,7 +152,6 @@ docker run --detach \
   --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
   --env NERVIX_INTERCONNECT_TLS_CERT=/etc/nervix/interconnect/node.pem \
   --env NERVIX_INTERCONNECT_TLS_KEY=/etc/nervix/interconnect/node-key.pem \
-  --env NERVIX_REPLICA_COUNT=3 \
   --env NERVIX_CLUSTER_BOOTSTRAP_HOST=nervix-1:47395 \
   "$NERVIX_IMAGE"
 
@@ -183,7 +181,6 @@ docker run --detach \
   --env NERVIX_INTERCONNECT_TLS_CA=/etc/nervix/interconnect/ca.pem \
   --env NERVIX_INTERCONNECT_TLS_CERT=/etc/nervix/interconnect/node.pem \
   --env NERVIX_INTERCONNECT_TLS_KEY=/etc/nervix/interconnect/node-key.pem \
-  --env NERVIX_REPLICA_COUNT=3 \
   --env NERVIX_CLUSTER_BOOTSTRAP_HOST=nervix-1:47395 \
   "$NERVIX_IMAGE"
 ```
@@ -205,6 +202,20 @@ SHOW CLUSTER STATUS;
 
 The cluster status should show one local node, two live peer nodes, and all three nodes in the Raft
 membership. The CLI follows leader redirects through the three published gRPC ports.
+
+From the same session, ask for two replicas of each piece of runtime state, so that it is
+replicated to both other nodes:
+
+```text
+ALTER CLUSTER SET REPLICA_COUNT = 2;
+```
+
+`REPLICA_COUNT` is a cluster parameter: the whole cluster holds one committed value of it, which
+`DESCRIBE CLUSTER` reports with the value each node runs. The containers deliberately carry no
+cluster parameter option such as `NERVIX_REPLICA_COUNT`. Such an option seeds a parameter only on
+the very first start of the bootstrapping node and refuses every other start, so the joining nodes
+would not start and `nervix-1` could not restart. [Sizing A Node](sizing.md#cluster-parameters)
+lists every parameter.
 
 Each node advertises its container name, such as `nervix-1:47395`, and finds its peers by those
 names through Docker's embedded DNS, which Docker names in the container's `/etc/resolv.conf`. A
@@ -250,7 +261,6 @@ x-nervix-common: &nervix-common
     NERVIX_INTERCONNECT_TLS_CA: /etc/nervix/interconnect/ca.pem
     NERVIX_INTERCONNECT_TLS_CERT: /etc/nervix/interconnect/node.pem
     NERVIX_INTERCONNECT_TLS_KEY: /etc/nervix/interconnect/node-key.pem
-    NERVIX_REPLICA_COUNT: "3"
   networks:
     - nervix
 
@@ -340,7 +350,8 @@ docker compose up --detach
 ```
 
 Set `NERVIX_IMAGE` before `docker compose up` to use a pinned tag or digest instead of
-`debian-latest`.
+`debian-latest`. Once the nodes have joined, set the replica count once with
+`ALTER CLUSTER SET REPLICA_COUNT = 2;`, as for the `docker run` cluster above.
 
 Inspect the containers and follow their logs:
 
@@ -360,3 +371,43 @@ seconds, each node's ten-minute shutdown timeout and two more minutes for its sa
 for graceful shutdown to finish before it kills a container. When every node stops at once, no node
 can take another's units, so each saves what it holds and stops without waiting for its shutdown
 timeout. To permanently delete all three nodes' persisted state, add `--volumes`.
+
+## Size The Containers
+
+A node sizes its worker pools, memory budgets, client credit and memory-pressure watermarks from
+the CPUs and memory its container may use, as [Sizing A Node](sizing.md) describes. The examples
+above set no container limits, so each node counts every CPU of the Docker host and the host's
+physical memory, and the three nodes on one host each size themselves for all of it. Give each
+container its share with Docker's limits, which the node detects as its CPU count and memory
+limit: add `--cpus 2 --memory 2g` to each `docker run` command, or `cpus: 2` and `mem_limit: 2g` to
+each Compose service. With 2 GiB, a node derives 963 MiB of execution budgets, 128 MiB of client
+credit and 64 MiB of database caches, and pauses its ingestors at 1,792 MiB of allocated memory. A
+memory limit that cannot hold a node's budgets refuses its start.
+
+To size a node for a capacity its limits do not express, set `NERVIX_CPU_COUNT` and
+`NERVIX_MEMORY_LIMIT`, such as `--env NERVIX_MEMORY_LIMIT=2GiB`. They change what the node sizes
+itself from and the claim it announces, and limit nothing: the container's limits still apply.
+Every other node setting takes its environment variable the same way, and the
+[nervix-server Reference](nervix-server-reference.md) lists them.
+
+## Change Settings And Images
+
+To change a node setting or the image, recreate one container at a time on its own volume: stop
+and remove it, then run it again with the changed setting or image and the same `--volume`. With
+Compose, edit one service and run `docker compose up --detach --no-deps nervix-3`, naming that
+service. Before recreating the next node, check with `DESCRIBE CLUSTER` that the recreated node's
+capabilities are committed for its new incarnation and that every node runs the committed parameter
+revision; [Reading DESCRIBE CLUSTER During A Roll](sizing.md#reading-describe-cluster-during-a-roll)
+explains the lines.
+
+- A node capability, such as `NERVIX_MEMORY_LIMIT` or an execution pool, may differ between nodes.
+- A prerequisite timing, `NERVIX_RAFT_HEARTBEAT_INTERVAL`, `NERVIX_GOSSIP_INTERVAL` or
+  `NERVIX_CLOCK_SKEW_TOLERANCE`, moves by less than a factor of two in each round of restarts.
+- The image's build fixes the node-to-node wire contract, the consensus floors and the durability
+  promise. A node on a build that differs from its peers in one of them is refused as it joins and
+  exits with status `1`; run it again on the previous image.
+- A cluster parameter never changes with a container. Change it with `ALTER CLUSTER SET`, and keep
+  its option out of every container's environment.
+
+[Rolling Changes](sizing.md#rolling-changes) gives the guarantees that hold while nodes run
+different values.

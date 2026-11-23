@@ -56,13 +56,6 @@ pub enum SourceError {
         line: usize,
         column: usize,
     },
-    #[error("invalid fixed-constant contract at {path}:{line}:{column}: {problem}")]
-    ConstantContract {
-        path: String,
-        line: usize,
-        column: usize,
-        problem: &'static str,
-    },
     #[error("cannot parse authored Rust at {path}:{line}:{column}")]
     Syntax {
         path: String,
@@ -93,7 +86,6 @@ pub fn scan(files: Vec<SourceInput>) -> Result<Vec<SourceSite>, error_stack::Rep
             sites: &mut sites,
         }
         .visit_file(&parsed);
-        sites.extend(tunables::scan(&input.path, &parsed)?);
         sites.extend(crypto::scan(&input.path, &parsed));
     }
     Ok(sites.into_iter().collect())
@@ -385,7 +377,6 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
 }
 
 mod crypto;
-mod tunables;
 
 #[cfg(test)]
 mod crypto_tests;

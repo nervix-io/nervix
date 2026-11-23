@@ -390,6 +390,7 @@ pub(super) async fn attach_loopback_cluster(
         recovered_members: Default::default(),
         interconnect: interconnect.clone(),
         membership: crate::cluster::MembershipSettings::default(),
+        session_notice_capacity: nervix_models::SessionCapabilities::default().notice_capacity(),
         prerequisites: interconnect.local_prerequisites(),
         fault_injection: Default::default(),
     })
@@ -509,6 +510,20 @@ pub(super) fn publish_state_identity(
             checkpoint_owners: None,
         },
     );
+}
+
+/// Commits `interval` as the cluster's `REMOTE_ACK_ALIVE_INTERVAL` on `runtime`, through the same
+/// installation a committed `ALTER CLUSTER SET` reaches.
+pub(super) fn commit_remote_ack_alive_interval(runtime: &super::Runtime, interval: Duration) {
+    let committed = nervix_models::ClusterParameterValues::default()
+        .changed(
+            &nervix_models::ClusterParameterUpdates::try_from(vec![
+                nervix_models::ClusterParameterChange::RemoteAckAliveInterval(interval),
+            ])
+            .assured("one assignment is a complete cluster parameter update"),
+        )
+        .assured("the fixture interval keeps the default silence bound above two report windows");
+    runtime.install_cluster_parameters(committed);
 }
 
 pub(super) fn test_domain_clock_authority() -> nervix_models::DomainClockAuthority {
@@ -798,9 +813,14 @@ pub(super) async fn wasm_input_for_records(
     let batch = super::RelayRecordBatch::from_messages(Arc::clone(schema), messages)
         .expect("test relay batch must build");
     let mut next_token = 1;
-    wasm_envelope_from_relay_batch(&Executor::default(), &batch, &mut next_token)
-        .await
-        .expect("WASM input envelope must build")
+    wasm_envelope_from_relay_batch(
+        &Executor::default(),
+        &SharedRemoteAckTiming::default(),
+        &batch,
+        &mut next_token,
+    )
+    .await
+    .expect("WASM input envelope must build")
 }
 
 pub(super) async fn wasm_input_for_values(
@@ -1451,6 +1471,7 @@ pub(super) fn emitter_context() -> EmitterConnectorContext {
             None,
             nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic),
         ),
+        remote_ack_timing: runtime.remote_ack_timing().clone(),
         runtime,
         clock: test_domain_clock(&domain),
         domain,

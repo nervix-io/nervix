@@ -630,7 +630,9 @@ jq -e --slurpfile manifest "${crash_setup_dir}/manifest.json" '
 for script in "${chaos_dir}"/*.sh "${chaos_dir}"/tests/*.sh; do
     bash -n "${script}"
 done
-sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh" "${chaos_dir}/observe-clock.sh"
+for script in continuous-load.sh observe-nodes.sh observe-clock.sh node-launch.sh; do
+    sh -n "${chaos_dir}/${script}"
+done
 
 # Every tool image a run starts is pinned in tool-images.sh by a registry-qualified digest.
 qualified_digest_reference='^[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$'
@@ -738,6 +740,60 @@ jq -e '
     and ([.services | to_entries[] | select(.key | test("^nervix-[123]$") | not)
           | .value.networks // {} | to_entries[] | .value.ipv4_address // empty] | length == 0)
 ' "${compose_json}" >/dev/null || fail "Compose does not fix node addresses outside the dynamic range"
+
+# A node-settings run starts every node through the launcher, which reads only its own node's
+# directory, and changes nothing else of the deployment.
+mkdir -p "${tmp_dir}/node-launch/nervix-1" "${tmp_dir}/node-launch/nervix-2" "${tmp_dir}/node-launch/nervix-3"
+node_settings_compose_json="${tmp_dir}/compose-node-settings.json"
+NERVIX_IMAGE="${placeholder_image}" \
+CHAOS_RUN_ID="self-test" \
+CHAOS_CLUSTER_ID="chaos-self-test" \
+CHAOS_TLS_DIR="${tmp_dir}" \
+CHAOS_PASSWORD="self-test-password" \
+CHAOS_KAFKA_IMAGE="${chaos_kafka_image}" \
+CHAOS_KCAT_IMAGE="${chaos_kcat_image}" \
+CHAOS_PROBE_IMAGE="${chaos_probe_image}" \
+CHAOS_SCRIPT_DIR="${chaos_dir}" \
+CHAOS_LOAD_FILE="${expected}" \
+CHAOS_LOAD_INTERVAL_MS="1000" \
+CHAOS_TRAFFIC_DIR="${tmp_dir}" \
+CHAOS_NODE_COUNT="3" \
+CHAOS_NODE_LAUNCH_DIR="${tmp_dir}/node-launch" \
+CHAOS_SUBNET="10.213.7.0/24" \
+CHAOS_DYNAMIC_RANGE="10.213.7.128/25" \
+CHAOS_NODE_1_ADDRESS="10.213.7.11" \
+CHAOS_NODE_2_ADDRESS="10.213.7.12" \
+CHAOS_NODE_3_ADDRESS="10.213.7.13" \
+CHAOS_PYTHON_IMAGE="${chaos_python_image}" \
+CHAOS_BINDING_IMAGE="${test_image_id}" \
+CHAOS_POSTGRES_IMAGE="${chaos_postgres_image}" \
+CHAOS_ENDPOINT_DIR="${tmp_dir}" \
+CHAOS_ENDPOINT_INTERVAL_MS="250" \
+CHAOS_STATE_LOAD_FILE="${expected}" \
+CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
+CHAOS_PACED_LOAD_FILE="${expected}" \
+CHAOS_PACED_LOAD_INTERVAL_MS="250" \
+CHAOS_LIFE_LOAD_FILE="${expected}" \
+CHAOS_LIFE_LOAD_INTERVAL_MS="500" \
+    docker compose -f "${chaos_dir}/compose.yaml" --profile tools --profile three-node --profile rolling \
+    --profile events -f "${chaos_dir}/compose.node-settings.yaml" config --format json \
+    >"${node_settings_compose_json}"
+jq -e --arg image "${placeholder_image}" --arg scripts "${chaos_dir}" --arg launch "${tmp_dir}/node-launch" '
+    [.services | to_entries[] | select(.key | test("^nervix-[123]$"))] as $nodes
+    | ($nodes | length) == 3
+    and all($nodes[];
+        .key as $service
+        | .value.image == $image
+        and .value.init == true
+        and .value.command == ["/bin/sh", "/opt/chaos/node-launch.sh", "/opt/chaos/node-launch/settings.env",
+                               "/usr/local/bin/nervix-server"]
+        and ([.value.volumes[] | select(.target == "/opt/chaos/node-launch.sh" or .target == "/opt/chaos/node-launch")
+              | {source, target, read_only}]
+             == [{source: ($scripts + "/node-launch.sh"), target: "/opt/chaos/node-launch.sh", read_only: true},
+                 {source: ($launch + "/" + $service), target: "/opt/chaos/node-launch", read_only: true}])
+        and ([.value.volumes[] | select(.target == "/var/lib/nervix")] | length) == 1)
+' "${node_settings_compose_json}" >/dev/null \
+    || fail "the node-settings overlay does not start each node through the launcher with its own read-only directory"
 
 # A controller killed while Pumba owns the pause cannot run its EXIT trap.
 # The external cleanup path must unpause that exact labeled node before removal.
@@ -924,6 +980,7 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/rate-probe-self-test.sh"
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
+"${script_dir}/node-settings-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
 "${script_dir}/endpoint-self-test.sh"
 "${script_dir}/lifetimes-self-test.sh"

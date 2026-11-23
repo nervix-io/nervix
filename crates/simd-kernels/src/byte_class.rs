@@ -27,10 +27,27 @@ use crate::{LEVEL, WORD_LANES};
 
 /// The most bytes a class may exclude, and separately list. Each one costs one vector compare per
 /// register of every block, and the scalar definition looks each up in a list this short.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a ByteClass kernel spends one vector compare per register of every block on \
+                  each named byte and its scalar definition scans the list per byte, so the API \
+                  bounds that cost at four excluded and four listed bytes per class"
+    )
+)]
 pub const MAX_NAMED_BYTES: usize = 4;
 
 /// The lanes of the narrowest register every level offers, which reads a buffer shorter than a
 /// block. A buffer shorter than this register is classified byte by byte.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the narrowest byte register every SIMD level offers, fearless_simd's u8x16, \
+                  holds 16 lanes"
+    )
+)]
 const NARROW_LANES: usize = 16;
 
 /// A set of byte values that vector compares recognize at every SIMD level: every byte outside an

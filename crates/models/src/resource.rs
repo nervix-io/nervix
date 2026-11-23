@@ -33,6 +33,14 @@ impl ResourceCatalogKey {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client implementation manual's upload rule U-2 limits an upload identity to \
+                  1 to 128 ASCII bytes"
+    )
+)]
 const MAX_UPLOAD_IDENTITY_BYTES: usize = 128;
 
 /// An administrative upload attempt chosen by the client and reused across redirects and retries.

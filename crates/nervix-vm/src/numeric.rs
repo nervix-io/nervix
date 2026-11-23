@@ -74,6 +74,14 @@ pub(crate) use decimal_rounding::{DecimalRounding, IntegerRounding, RoundingDigi
 
 /// The lanes whose failure bytes one call to the kernel crate packs: sixteen bitmap words, so the
 /// call is paid once per 1,024 lanes rather than once per word.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the VM Functions and SIMD Kernels chapters pack checked lanes in blocks of up \
+                  to 1,024 lanes, sixteen whole failure words per packing call"
+    )
+)]
 const BLOCK_LANES: usize = 16 * WORD_LANES;
 
 /// The values a lane operation computed for every lane of a batch, and which lanes failed.
@@ -1177,9 +1185,25 @@ impl F64Operand {
 }
 
 /// The `F64` nearest to π/180, the radians in one degree.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter has radians multiply by the F64 nearest to \
+                  π/180"
+    )
+)]
 const RADIANS_PER_DEGREE: f64 = 0.017_453_292_519_943_295;
 
 /// The `F64` nearest to 180/π, the degrees in one radian.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter has degrees multiply by the F64 nearest to \
+                  180/π"
+    )
+)]
 const DEGREES_PER_RADIAN: f64 = 57.295_779_513_082_32;
 
 /// A math builtin of one argument, evaluated in `f64`.

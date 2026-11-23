@@ -6,11 +6,13 @@
 //! - **Must not know.** Archive encodings, graph execution or consensus retention policy.
 
 use nervix_interconnect::backup::RestoreStateInventory;
+use nervix_models::SettingDefinition as _;
 
 use super::{
     tests::{authority, placement, stage, store},
     *,
 };
+use crate::runtime::RestoreStagingMaxBytes;
 
 #[path = "active_restore_writers.rs"]
 mod writers;
@@ -51,7 +53,10 @@ fn publish(store: &RuntimeStateStore, placement: &RuntimeStatePlacement, payload
 #[test]
 pub(super) fn ordinary_replacement_reclaims_chunks_and_keeps_complete_snapshot_readers() {
     let directory = tempfile::tempdir().assured("the test directory opens");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let checkpoint = placement("orders");
     let payload = vec![7; RESTORE_STATE_CHUNK_BYTES * 3 + 13];
     publish(&store, &checkpoint, &payload);
@@ -123,7 +128,10 @@ pub(super) fn ordinary_replacement_reclaims_chunks_and_keeps_complete_snapshot_r
 pub(super) fn entity_purge_reclaims_chunks_after_reopen() {
     let directory = tempfile::tempdir().assured("the test directory opens");
     let checkpoint = placement("orders");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let payload = vec![9; RESTORE_STATE_CHUNK_BYTES * 2];
     publish(&store, &checkpoint, &payload);
     store
@@ -139,7 +147,10 @@ pub(super) fn entity_purge_reclaims_chunks_after_reopen() {
         .persist(PersistMode::SyncAll)
         .assured("the purge is durable");
     drop(store);
-    let reopened = self::store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let reopened = self::store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let swept = reopened
         .reclaim_restore_staging(|_, _| false, || Ok(()))
         .assured("startup maintenance reclaims purged chunks");
@@ -171,7 +182,10 @@ pub(super) fn entity_purge_reclaims_chunks_after_reopen() {
 #[test]
 pub(super) fn active_reclamation_retains_future_installations_and_exact_publication_retries() {
     let directory = tempfile::tempdir().assured("the test directory opens");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let checkpoint = placement("orders");
     publish(&store, &checkpoint, b"restored");
     stage(&store, 20, &checkpoint, b"future");
@@ -228,7 +242,10 @@ pub(super) fn active_reclamation_retains_future_installations_and_exact_publicat
 pub(super) fn cancellation_during_active_deletion_preserves_snapshot_and_resumes_after_restart() {
     let directory = tempfile::tempdir().assured("the test directory opens");
     let checkpoint = placement("orders");
-    let store = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let store = store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let payload = vec![5; RESTORE_STATE_CHUNK_BYTES * 1200];
     publish(&store, &checkpoint, &payload);
     let reader = store.db.snapshot();
@@ -282,7 +299,10 @@ pub(super) fn cancellation_during_active_deletion_preserves_snapshot_and_resumes
         .persist(PersistMode::SyncAll)
         .assured("partial cleanup is durable");
     drop(store);
-    let reopened = self::store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+    let reopened = self::store(
+        directory.path(),
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
+    );
     let swept = reopened
         .reclaim_restore_staging(|_, _| false, || Ok(()))
         .assured("restart completes remaining active cleanup");

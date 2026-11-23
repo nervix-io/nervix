@@ -108,6 +108,8 @@ async fn receive_bound_refusal_creates_no_attempt_and_a_revised_claim_is_adopted
                 nervix_arbitrary::Domain::Vocabulary,
             )
             .node_connector_host_capabilities(),
+            membership: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
+                .node_membership_capabilities(),
             listeners: nervix_arbitrary::Arbitrary::new(&[], nervix_arbitrary::Domain::Vocabulary)
                 .listener_bounds(),
             cpu_count: None,

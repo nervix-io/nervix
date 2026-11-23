@@ -298,8 +298,6 @@ pub struct Application {
         setter(skip)
     )]
     pub shutdown: ShutdownCoordinator,
-    #[builder(default = true)]
-    pub graceful_shutdown_drain: bool,
 }
 
 impl Application {
@@ -328,7 +326,7 @@ impl Application {
             web_console_https_listen_addr,
         )
         .change_context(AppError::BuildConsoleAdvertiseUrl)?;
-        let graceful_shutdown_drain = self.graceful_shutdown_drain;
+        let graceful_shutdown_drain = self.fault_injection.runs_shutdown_drain();
         let cluster_id = self.identity.cluster_id.clone();
         let node_id = self.identity.node_id.clone();
         let node_tags = self.identity.tags.clone();
@@ -758,6 +756,7 @@ impl Application {
             recovered_members: recovered_endpoints,
             interconnect: interconnect.clone(),
             membership: settings.membership,
+            session_notice_capacity: settings.operational.session.notice_capacity(),
             prerequisites: interconnect.local_prerequisites(),
             fault_injection: fault_injection.clone(),
         })

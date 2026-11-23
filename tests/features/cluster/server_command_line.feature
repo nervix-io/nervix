@@ -50,6 +50,30 @@ Feature: Server command-line values
     And the server process log contains "otel-otlp-endpoint"
     And the server process log does not contain "panicked"
 
+  Scenario Outline: A node refuses a gossip or MQTT read-ahead capability <option> outside its bounds and names it
+    When a nervix-server process is started with command-line option "<option>" set to "<value>"
+    Then the server process exits with status 1
+    And the server process log contains "<refusal>"
+    And the server process log does not contain "panicked"
+
+    Examples:
+      | option                          | value               | refusal                                                                                                   |
+      | --gossip-receive-queue-capacity | 2305843009213693952 | gossip-receive-queue-capacity (2305843009213693952) exceeds the 2305843009213693951 items a channel holds |
+      | --gossip-tombstone-grace-period | 0s                  | gossip-tombstone-grace-period (0ns) must be positive and at most 4294967295s                              |
+      | --mqtt-read-ahead-headroom      | 2305843009213693952 | mqtt-read-ahead-headroom (2305843009213693952) exceeds the 2305843009213628416 publishes                  |
+
+  Scenario Outline: A node refuses a capacity of no items for <option> as a value it cannot read
+    When a nervix-server process is started with command-line option "<option>" set to "0"
+    Then the server process exits with status 2
+    And the server process log contains "invalid value '0' for '<option>"
+    And the server process log contains "number would be zero for non-zero type"
+    And the server process log does not contain "panicked"
+
+    Examples:
+      | option                          |
+      | --gossip-receive-queue-capacity |
+      | --mqtt-read-ahead-headroom      |
+
   Scenario Outline: A native node refuses an execution capacity that cannot back its runtime
     When a nervix-server process is started with command-line option "<option>" set to "<value>"
     Then the server process exits with status 1

@@ -197,6 +197,41 @@ fn fixed_contract_diagnostics_keep_cardinality_and_primary_lines() {
 }
 
 #[test]
+fn hidden_tunables_are_diagnosed_once_at_the_constant_name_or_the_policy_call() {
+    assert_eq!(
+        Case::new("tunables_rejected").snippets("nervix::hidden_tunable"),
+        [
+            "EVERY",
+            "LIMIT",
+            "MINIMUM",
+            "SPLICED",
+            "TIMEOUT",
+            "WORKERS",
+            "add_permits",
+            "channel",
+            "from_millis",
+            "from_secs",
+            "new",
+            "with_capacity"
+        ]
+    );
+    assert_eq!(
+        Case::new("tunables_resolution").snippets("nervix::hidden_tunable"),
+        ["CAPACITY", "TIMEOUT", "WORKERS"]
+    );
+    assert_eq!(
+        Case::new("tunables_definitions").snippets("nervix::hidden_tunable"),
+        ["CEILING", "MAXIMUM"]
+    );
+    assert_eq!(
+        Case::new("tunables_invalid")
+            .diagnostics("nervix::invalid_contract")
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn arithmetic_combinator_and_invalid_contract_spans_keep_their_exact_operations() {
     assert_eq!(
         Case::new("api_arithmetic").snippets("nervix::clamped_arithmetic"),

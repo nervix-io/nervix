@@ -28,7 +28,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    net::SocketAddr,
+    net::{Ipv6Addr, SocketAddr, SocketAddrV6},
+    num::{NonZeroU64, NonZeroUsize},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -39,7 +40,7 @@ use chitchat::{
     Serializable as _, spawn_chitchat,
     transport::{Socket as GossipSocket, Transport as GossipTransport},
 };
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use futures_util::future::join_all;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{GossipNode, GossipState};
@@ -79,8 +80,8 @@ pub(crate) use membership::MembershipChange;
 use peer_health_watcher::PeerHealthStateWatcher;
 pub use prerequisites::{ClockSkew, PrerequisitesView, register_clock_probe_handler};
 pub use settings::{
-    ClockSkewTolerance, GossipInterval, MembershipSettings, MembershipSettingsError,
-    MembershipValues, NodeUnavailabilityTimeout,
+    ClockSkewTolerance, GossipInterval, GossipReceiveQueueCapacity, GossipTombstoneGracePeriod,
+    MembershipSettings, MembershipSettingsError, MembershipValues, NodeUnavailabilityTimeout,
 };
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
@@ -94,12 +95,29 @@ const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
 const KEY_CLUSTER_PARAMETERS: &str = "cluster_parameters";
 const KEY_TERMINATING: &str = "terminating";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
-/// How many cluster changes a session can fall behind before the bus drops the oldest.
-const CLUSTER_EVENT_CAPACITY: usize = 256;
-const GOSSIP_QUEUE_CAPACITY: usize = 1024;
 /// A slow destination can retain only this many unsent datagrams behind its one exchange worker.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Cluster Interconnect chapter gives each gossip destination a four-message \
+                  queue that drops its newest datagram when full, for the next gossip round to \
+                  retry"
+    )
+)]
 const GOSSIP_OUTGOING_QUEUE_CAPACITY: usize = 4;
-/// Leaves room for the typed request fields inside the 64-KiB management-event limit.
+/// Leaves room for the typed request fields inside the 64-KiB management-event limit. Startup
+/// refuses a node whose management-event bound cannot carry the largest exchange, its typed
+/// request fields and envelope included: [`GossipExchange::check_fits`].
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "both peers of a gossip exchange hold its payload to this bound, which keeps the \
+                  exchange and its typed request fields inside the 64 KiB management-event bound \
+                  every member must share"
+    )
+)]
 const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
 #[cfg_attr(
@@ -223,16 +241,27 @@ impl SubscriptionInterestPublication {
 /// Offering goes through [`Self::offer`] rather than through the sender directly. The membership
 /// task records each change in its own `info` line first, with the node and its incarnation as
 /// fields, and that line is the record: it is written whether or not anyone is attached.
-/// Subscribers here are live sessions only, so a node serving none is the ordinary case rather than
-/// a failure, and an undelivered offer costs the operator nothing.
+/// The bus's one subscriber is the relay that republishes each change as exactly one `Membership`
+/// session notice. An offer made before that relay subscribes, or after it stopped, finds no
+/// receiver, which costs the operator nothing.
 #[derive(Clone)]
 struct ClusterEvents {
     sender: broadcast::Sender<MembershipChange>,
 }
 
 impl ClusterEvents {
-    fn new() -> Self {
-        let (sender, _) = broadcast::channel(CLUSTER_EVENT_CAPACITY);
+    /// How many changes its relay has not taken yet the bus of a node whose session notices keep
+    /// `session_notice_capacity` notices keeps before it drops the oldest. Its one subscriber, the
+    /// relay, republishes each change as exactly one session notice, so the bus keeps that
+    /// backlog: the notices it feeds keep no more than that either.
+    fn capacity_for(session_notice_capacity: NonZeroU64) -> usize {
+        usize::try_from(session_notice_capacity.get()).assured(
+            "session-notice-capacity's definition bounds it by the portable channel capacity",
+        )
+    }
+
+    fn for_session_notices(session_notice_capacity: NonZeroU64) -> Self {
+        let (sender, _) = broadcast::channel(Self::capacity_for(session_notice_capacity));
         Self { sender }
     }
 
@@ -821,6 +850,9 @@ pub struct ClusterSettings {
     pub recovered_members: BTreeMap<ClusterNodeName, NodeEndpoint>,
     pub interconnect: InterconnectTransport,
     pub membership: MembershipSettings,
+    /// This node's resolved `session-notice-capacity`, the backlog its session notices keep, from
+    /// which the membership event bus takes its capacity.
+    pub session_notice_capacity: NonZeroU64,
     pub prerequisites: NodePrerequisites,
     pub fault_injection: crate::ConfiguredFaultInjection,
 }
@@ -852,7 +884,51 @@ enum GossipExchangeRefusal {
     ReceiverClosed,
 }
 
+/// Why this node cannot gossip: the management-event bound every member shares cannot carry the
+/// largest exchange both peers accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+enum GossipExchangeBoundError {
+    #[error(
+        "the largest gossip exchange, a {gossip_bytes}-byte payload with its typed request \
+         fields, cannot travel as one management request within the {management_event_bytes}-byte \
+         management-event bound"
+    )]
+    LargestExchange {
+        gossip_bytes: u64,
+        management_event_bytes: u64,
+    },
+}
+
 impl GossipExchange {
+    /// The largest exchange either peer accepts: a payload of the gossip bound, from an address of
+    /// the widest form an exchange can name.
+    fn largest() -> Self {
+        Self {
+            from: SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::UNSPECIFIED,
+                u16::MAX,
+                u32::MAX,
+                u32::MAX,
+            )),
+            payload: vec![0; MAX_GOSSIP_MESSAGE_BYTES],
+        }
+    }
+
+    /// Refuses a node whose management-event bound of `management_event_bytes` cannot carry the
+    /// largest exchange as one typed request, its fields and envelope included, measured by
+    /// `interconnect` as a send encodes it.
+    fn check_fits(
+        interconnect: &InterconnectTransport,
+        management_event_bytes: u64,
+    ) -> Result<(), Report<GossipExchangeBoundError>> {
+        interconnect
+            .check_request_fits(&Self::largest())
+            .change_context(GossipExchangeBoundError::LargestExchange {
+                gossip_bytes: MAX_GOSSIP_MESSAGE_BYTES.arch_into(),
+                management_event_bytes,
+            })
+    }
+
     /// Refuses a message larger than one gossip exchange may carry.
     fn check_size(&self) -> Result<(), GossipExchangeRefusal> {
         if self.payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
@@ -933,14 +1009,17 @@ enum GossipExchangeFailure {
 }
 
 impl InterconnectGossipTransport {
+    /// Registers the exchange handler on `interconnect`, with a queue of `receive_queue_capacity`
+    /// incoming datagrams between that handler and Chitchat.
     fn build(
         interconnect: InterconnectTransport,
         advertise_addr: SocketAddr,
         seed_routes: BTreeMap<SocketAddr, GossipRoute>,
         local_node_id: ClusterNodeName,
         fault_injection: crate::ConfiguredFaultInjection,
+        receive_queue_capacity: NonZeroUsize,
     ) -> io::Result<Self> {
-        let (incoming_tx, incoming_rx) = mpsc::channel(GOSSIP_QUEUE_CAPACITY);
+        let (incoming_tx, incoming_rx) = mpsc::channel(receive_queue_capacity.get());
         let routes = DashMap::new();
         for (addr, route) in seed_routes {
             routes.insert(addr, route);
@@ -1273,6 +1352,14 @@ impl InterconnectGossipSocket {
 }
 
 pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandle> {
+    GossipExchange::check_fits(
+        &settings.interconnect,
+        settings
+            .prerequisites
+            .consensus_floors
+            .largest_management_event_bytes,
+    )
+    .map_err(|report| io::Error::other(report.into_error()))?;
     let node_id = settings.node_id.clone();
     // Gossip tells one run of a node from the next by this generation, and a peer ignores any
     // key-value whose version is below what it already holds for the same generation. A restart
@@ -1375,6 +1462,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         seed_routes,
         node_id.clone(),
         settings.fault_injection,
+        settings.membership.gossip_receive_queue_capacity(),
     )?;
     let chitchat_id = ChitchatId {
         node_id: node_id.to_string(),
@@ -1389,7 +1477,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         listen_addr: settings.interconnect.local_addr(),
         seed_nodes: seed_nodes.into_iter().collect(),
         failure_detector_config: settings.membership.failure_detector_config(),
-        marked_for_deletion_grace_period: Duration::from_secs(60),
+        marked_for_deletion_grace_period: settings.membership.gossip_tombstone_grace_period(),
         catchup_callback: None,
         extra_liveness_predicate: None,
     };
@@ -1428,7 +1516,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         .await
         .map_err(|err| io::Error::other(format!("failed to start chitchat: {err}")))?;
 
-    let events = ClusterEvents::new();
+    let events = ClusterEvents::for_session_notices(settings.session_notice_capacity);
     let chitchat_state = chitchat.chitchat();
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
     let subscription_interest = StdArc::new(SubscriptionInterestPublication::new());

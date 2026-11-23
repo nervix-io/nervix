@@ -68,6 +68,7 @@ async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() 
         BTreeMap::from([(address, seed)]),
         node.clone(),
         crate::ConfiguredFaultInjection::default(),
+        MembershipSettings::default().gossip_receive_queue_capacity(),
     )
     .assured("the gossip handler is registered once");
 
@@ -80,6 +81,97 @@ async fn gossip_reconnects_a_known_route_after_its_outbound_target_is_retired() 
         .exchange(address, vec![2])
         .await
         .assured("a retained gossip route reconnects after its peer left the live set");
+
+    interconnect.shutdown().await;
+}
+
+#[nervix_primitives::test]
+async fn the_configured_receive_queue_capacity_bounds_incoming_gossip() {
+    let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let interconnect = crate::application::test_fixtures::test_interconnect("test", &node).await;
+    let address = interconnect.local_addr();
+    let membership = MembershipSettings::resolve(MembershipValues {
+        gossip_receive_queue_capacity: NonZeroUsize::new(3),
+        ..MembershipValues::default()
+    })
+    .assured("three queued datagrams are a valid gossip receive queue");
+    let gossip = InterconnectGossipTransport::build(
+        interconnect.clone(),
+        address,
+        BTreeMap::new(),
+        node,
+        crate::ConfiguredFaultInjection::default(),
+        membership.gossip_receive_queue_capacity(),
+    )
+    .assured("the gossip handler is registered once");
+
+    assert_eq!(gossip.inner.incoming_tx.max_capacity(), 3);
+    assert_eq!(
+        MembershipSettings::default()
+            .gossip_receive_queue_capacity()
+            .get(),
+        1024,
+        "a node given no capacity keeps the queue it ran with"
+    );
+
+    interconnect.shutdown().await;
+}
+
+#[test]
+fn the_membership_event_bus_keeps_the_session_notice_backlog() {
+    let default = nervix_models::SessionCapabilities::default().notice_capacity();
+    assert_eq!(
+        ClusterEvents::capacity_for(default),
+        256,
+        "the bus keeps the 256 changes it ran with"
+    );
+    let configured = NonZeroU64::new(3).assured("three is nonzero");
+    assert_eq!(ClusterEvents::capacity_for(configured), 3);
+}
+
+#[nervix_primitives::test]
+async fn the_largest_gossip_exchange_fits_one_management_request_and_a_wider_one_does_not() {
+    let node = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+    let interconnect = crate::application::test_fixtures::test_interconnect("test", &node).await;
+    let management_event_bytes = interconnect
+        .local_prerequisites()
+        .consensus_floors
+        .largest_management_event_bytes;
+    assert_eq!(management_event_bytes, 64 << 10);
+
+    GossipExchange::check_fits(&interconnect, management_event_bytes)
+        .assured("a 60 KiB exchange and its typed request fields fit the 64 KiB bound");
+
+    let from = GossipExchange::largest().from;
+    let exchange_of = |payload_bytes: usize| GossipExchange {
+        from,
+        payload: vec![0; payload_bytes],
+    };
+    let refused = interconnect
+        .check_request_fits(&exchange_of(64 << 10))
+        .err()
+        .assured("a payload of the whole bound leaves no room for its typed request fields");
+    assert!(matches!(
+        refused.current_context(),
+        nervix_interconnect::RequestFitError::Payload { request, limit, .. }
+            if *request == GossipExchange::NAME && *limit == management_event_bytes
+    ));
+
+    // Just below the whole bound the exchange's own archive fits, and only the request envelope
+    // around it no longer does: the check counts the envelope too.
+    let mut envelope_refusals = 0_u32;
+    for payload_bytes in (64 << 10) - 128..64 << 10 {
+        let Err(refused) = interconnect.check_request_fits(&exchange_of(payload_bytes)) else {
+            continue;
+        };
+        if let nervix_interconnect::RequestFitError::Body { .. } = refused.current_context() {
+            envelope_refusals += 1;
+        }
+    }
+    assert!(
+        envelope_refusals > 0,
+        "an archive that fits can still need a control body above the bound"
+    );
 
     interconnect.shutdown().await;
 }

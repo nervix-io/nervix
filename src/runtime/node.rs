@@ -301,6 +301,8 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
     pub(in crate::runtime) connector_host: super::ConnectorHostSettings,
     pub(in crate::runtime) vm_settings: nervix_vm::VmSettings,
+    /// The UDF settings every domain's compiled UDFs keep on this node.
+    pub(in crate::runtime) udf_settings: nervix_roto::UdfSettings,
     /// The guest-requested branch state resets this node's branch tasks are waiting for. A branch
     /// fences itself and leaves its request here; the control-plane coordinator drains them.
     pub(in crate::runtime) guest_wasm_state_resets: PendingGuestWasmStateResets,

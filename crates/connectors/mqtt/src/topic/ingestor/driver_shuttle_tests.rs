@@ -52,9 +52,15 @@ fn default_admission() -> NonZeroU32 {
         .assured("an address alone is a valid MQTT client configuration")
         .max_packet_size()
 }
+
+/// The read-ahead headroom a node runs with when it is not given one.
+fn default_headroom() -> NonZeroUsize {
+    MqttReadAheadSettings::default().headroom()
+}
 use crate::topic::ingestor::{
-    IngestorAcknowledgement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorPosition,
-    PublishRead as _, PublishReadOutcome, overflow_fixture::ReadAheadOverflowFixture,
+    IngestorAcknowledgement, MqttReadAheadSettings, MqttTopicIngestor, MqttTopicIngestorError,
+    MqttTopicIngestorPosition, PublishRead as _, PublishReadOutcome,
+    overflow_fixture::ReadAheadOverflowFixture,
 };
 
 const CHECK_TASK_JOINS: &str =
@@ -161,6 +167,7 @@ fn connection(
         events,
         IngestorAcknowledgement::Manual {
             receive_maximum: read_ahead,
+            headroom: default_headroom(),
         },
         None,
         default_admission(),
@@ -298,6 +305,7 @@ fn an_acknowledgement_stays_writable_during_qos_zero_overflow() {
             IngestorAcknowledgement::Manual {
                 receive_maximum: NonZeroU16::new(65)
                     .assured("the sequential window includes headroom"),
+                headroom: default_headroom(),
             },
             None,
             default_admission(),

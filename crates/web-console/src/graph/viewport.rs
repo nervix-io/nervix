@@ -99,13 +99,51 @@ pub struct Viewport {
 
 impl Viewport {
     /// The zoom range the stage allows, shared by the buttons, the wheel and the fit control.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the web console chapter keeps graph zoom at 25% or more, which the \
+                      execution-graph scenario checks"
+        )
+    )]
     pub const MIN_ZOOM: f64 = 0.25;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the web console chapter keeps graph zoom at 300% or less, which the \
+                      execution-graph scenario checks"
+        )
+    )]
     pub const MAX_ZOOM: f64 = 3.0;
     /// One press of a zoom button.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the web console chapter has the zoom buttons step in tens of percent"
+        )
+    )]
     pub const ZOOM_STEP: f64 = 0.1;
     /// Fitting never enlarges: a small graph is shown at its natural size, centred.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "fitting never enlarges a graph past its natural size, which is a zoom of one"
+        )
+    )]
     pub const FIT_MAX_ZOOM: f64 = 1.0;
     /// Clearance kept around the graph when framing it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the designed clearance, in stage pixels, a framed graph keeps from the \
+                      stage's edges"
+        )
+    )]
     const FIT_PADDING: f64 = 48.0;
 
     /// The zoom and pan that centre `bounds` of a canvas on the stage, as large as fits without
