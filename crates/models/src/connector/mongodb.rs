@@ -84,6 +84,14 @@ pub const MONGODB_MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 pub const MONGODB_NAMESPACE_MAX_BYTES: usize = 120;
 
 // A database is nonempty and its separator is one byte.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a namespace joins a nonempty database and a one-byte separator to its \
+                  collection, which keeps the namespace budget less those two bytes"
+    )
+)]
 const MAX_COLLECTION_BYTES: usize = MONGODB_NAMESPACE_MAX_BYTES - 2;
 const _: () = assert!(MAX_COLLECTION_BYTES > 0);
 

@@ -40,6 +40,15 @@ use tokio_tungstenite::{
 };
 
 /// How much of a rejection value is carried into the failure reason.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Ingestors manual has a signaling rejection's reason quote at most 512 bytes \
+                  of the peer-chosen FAIL JAQ value, cut on a character boundary, so a peer \
+                  cannot grow the diagnostic without bound"
+    )
+)]
 const MAX_REJECTION_REASON_BYTES: usize = 512;
 
 type SignalingFrameEncodeResult<T> = Result<T, Report<SignalingFrameEncodeError>>;

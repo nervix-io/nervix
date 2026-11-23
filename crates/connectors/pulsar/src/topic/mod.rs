@@ -70,7 +70,9 @@ use nervix_connector::{
     EmitterWriteError, PerRecordOutcome, RecordEmitter, RecordKey, RejectedEmitterMember,
     optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ConnectorKind, PulsarTopicName, Timestamp};
+use nervix_models::{
+    ClientConfigEntry, ConnectorKind, PULSAR_OUTBOUND_CAPACITY, PulsarTopicName, Timestamp,
+};
 use nervix_primitives::{
     sync::{
         Arc, StdArc,
@@ -89,8 +91,17 @@ use pulsar::{
 use thiserror::Error;
 
 const PULSAR: ConnectorKind = ConnectorKind::Pulsar;
-const PULSAR_OUTBOUND_CAPACITY: usize = 100;
-const _: () = assert!(PULSAR_OUTBOUND_CAPACITY > 0);
+const _: () = assert!(
+    PULSAR_OUTBOUND_CAPACITY > 0,
+    "make_room reads a receipt only from a full receipt set"
+);
+
+/// The entity's declared outbound bound, in the width the driver's channel and the receipt set
+/// count in: how many messages the client queues for its connection and how many receipts a NO ACK
+/// emitter holds.
+fn outbound_capacity() -> usize {
+    PULSAR_OUTBOUND_CAPACITY.arch_into()
+}
 
 /// The name the broker knows `topic` by: a fully qualified name as written, or a local name placed
 /// in its client's namespace, whose default the Pulsar client declaration writes.
@@ -353,7 +364,7 @@ where
 {
     fn retain(&mut self, receipt: A) {
         assert!(
-            self.receipts.len() < PULSAR_OUTBOUND_CAPACITY,
+            self.receipts.len() < outbound_capacity(),
             "make_room provides a slot before the emitter hands another record over"
         );
         self.receipts.push(receipt);
@@ -364,7 +375,7 @@ where
     /// completion point. The driver's operation timeout bounds each outstanding receipt.
     async fn make_room(&mut self) {
         self.collect_ready();
-        if self.receipts.len() == PULSAR_OUTBOUND_CAPACITY {
+        if self.receipts.len() == outbound_capacity() {
             let answer =
                 self.receipts.next().await.verified(
                     "the receipt set holds the nonzero outbound capacity before this read",

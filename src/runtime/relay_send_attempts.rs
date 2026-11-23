@@ -16,7 +16,7 @@
 
 use nervix_interconnect::RelayGrantRefusal;
 
-use super::{remote_dispatch::RemoteDispatchError, *};
+use super::{entity_gate::SHORTEST_WAIT, remote_dispatch::RemoteDispatchError, *};
 
 /// What a delivery does while its receiver refuses its grant for capacity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl RelaySendAttempts {
     /// bound, so a held delivery notices that room returned at most that late, and asks at most
     /// once in that time while it waits.
     pub(super) fn capacity_wait_ceiling(timing: nervix_models::RemoteAckTiming) -> Duration {
-        (timing.remote_ack_dispatch_timeout / 2).max(Duration::from_nanos(1))
+        (timing.remote_ack_dispatch_timeout / 2).max(SHORTEST_WAIT)
     }
 
     /// The instant the next attempt must end by.

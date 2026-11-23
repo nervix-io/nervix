@@ -694,12 +694,43 @@ pub enum DatetimeFunctionName {
     ParseDatetime,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "a microsecond is a thousand nanoseconds")
+)]
 const NANOSECONDS_PER_MICROSECOND: i64 = 1_000;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "a millisecond is a thousand microseconds")
+)]
 const NANOSECONDS_PER_MILLISECOND: i64 = 1_000 * NANOSECONDS_PER_MICROSECOND;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "a second is a thousand milliseconds")
+)]
 const NANOSECONDS_PER_SECOND: i64 = 1_000 * NANOSECONDS_PER_MILLISECOND;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a DATETIME has no leap seconds, so every minute is sixty seconds"
+    )
+)]
 const NANOSECONDS_PER_MINUTE: i64 = 60 * NANOSECONDS_PER_SECOND;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "an hour is sixty minutes")
+)]
 const NANOSECONDS_PER_HOUR: i64 = 60 * NANOSECONDS_PER_MINUTE;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a DATETIME has no leap seconds, so every UTC day is 24 hours"
+    )
+)]
 const NANOSECONDS_PER_DAY: i64 = 24 * NANOSECONDS_PER_HOUR;
+#[cfg_attr(nervix_lint, nervix::constant(fixed, reason = "a week is seven days"))]
 const NANOSECONDS_PER_WEEK: i64 = 7 * NANOSECONDS_PER_DAY;
 
 /// A unit of fixed length that datetime arithmetic counts in.

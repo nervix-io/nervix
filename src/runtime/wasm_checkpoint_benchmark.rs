@@ -9,14 +9,15 @@ use fjall::Database;
 use meticulous::ResultExt as _;
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{
-    DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,
+    DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, SettingDefinition as _,
+    WasmStateGeneration,
 };
 use nervix_primitives::sync::Arc;
 use tempfile::TempDir;
 
 use super::{
-    BranchKey, ReplicatedWasmProcessorState, RuntimeState, RuntimeStatePlacement,
-    RuntimeStateStore, WasmCheckpointBoundary,
+    BranchKey, ReplicatedWasmProcessorState, RestoreStagingMaxBytes, RuntimeState,
+    RuntimeStatePlacement, RuntimeStateStore, WasmCheckpointBoundary,
 };
 use crate::runtime_schema::RuntimeValue;
 
@@ -46,7 +47,7 @@ impl WasmCheckpointBenchmark {
             RuntimeStateStore::from_database(
                 database,
                 executor.clone(),
-                crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+                RestoreStagingMaxBytes::default_value(&()).as_u64(),
             )
             .assured("a fresh database opens as a runtime state store"),
         );

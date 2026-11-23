@@ -36,8 +36,24 @@ pub struct DomainAdmissionWindow {
 
 impl DomainAdmissionWindow {
     /// The number of reached logical tick centers retained for ingestion admission.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the Domain Clock and Domains And Time chapters admit events against the \
+                      newest 256 reached tick centers"
+        )
+    )]
     pub const RETAINED_POSITION_COUNT: u32 = 256;
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the retained centers end at the frontier itself, so one fewer of them \
+                      precedes it"
+        )
+    )]
     const RETAINED_PRECEDING_POSITION_COUNT: u32 = Self::RETAINED_POSITION_COUNT - 1;
 
     /// Before the origin there are no eligible centers. At the origin position zero is eligible.

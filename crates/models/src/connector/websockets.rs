@@ -35,6 +35,15 @@ pub use upgrade_headers::{
 };
 
 /// The existing transport budget shared by ping writes and the close handshake.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how long a ping or close write may take depends on the peer's link; it stays \
+                  fixed until its repair task bounds those writes by the client's timeout_ms \
+                  https://app.clickup.com/t/86bd5vvdj"
+    )
+)]
 pub const WEBSOCKETS_CONTROL_FRAME_BUDGET: Duration = Duration::from_secs(1);
 
 use super::{

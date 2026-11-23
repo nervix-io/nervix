@@ -32,6 +32,14 @@ use nervix_recovery::Discarded as _;
 use crate::{ConsoleRequest, RequestRefusal};
 
 /// The most requests waiting for the session loop.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter's bounded buffers let at most 64 requests of the \
+                  console's controls wait for its session"
+    )
+)]
 pub(crate) const MAX_WAITING_REQUESTS: usize = 64;
 /// The most text the waiting requests carry together: one frame's worth, so every request a
 /// session frame can carry fits while nothing else waits.

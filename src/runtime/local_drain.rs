@@ -43,7 +43,7 @@
 
 #[cfg(all(test, any(feature = "shuttle", feature = "loom")))]
 use super::relay_boundary::RelayConsumerFanout;
-use super::*;
+use super::{entity_gate::SHORTEST_WAIT, *};
 
 /// Whether this node still admits new work into its graphs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,7 +327,7 @@ impl Runtime {
                 }
                 return LocalGraphDrainOutcome::Abandoned;
             }
-            sleep(remaining.min((timeout / 1500).max(Duration::from_nanos(1)))).await;
+            sleep(remaining.min((timeout / 1500).max(SHORTEST_WAIT))).await;
         }
     }
 

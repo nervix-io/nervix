@@ -513,6 +513,14 @@ buffer and deadline. `FLUSH EACH` measures its duration on the domain clock, beg
 first enters an empty buffer. Window processors use `WIDTH` and `STEP`, and WASM processors use
 guest-owned output cadence instead of `FLUSH`.
 
+A route's flush deadline is an upper bound on how long the route holds rows, and an unguaranteed
+one: it never promises that rows wait that long. Anything that forces a flush sends what a route
+holds before its deadline: a failover, forced recovery, move or alteration anywhere in the domain,
+an entity gate, a drain, a domain stop or a backup; see
+[Incremental Changes And Rebuilds](execution-plans.md#incremental-changes-and-rebuilds).
+Early delivery is correct behavior. On an overloaded host a route can also send slightly after its
+deadline. Sending early or late does not by itself lose or repeat a row.
+
 This is the authoritative `FLUSH IMMEDIATE` timing rule.
 During normal processing, `FLUSH IMMEDIATE` starts a system-owned physical 100 µs minimum batching
 timeout when data first enters an empty route buffer. Domain pacing never scales this monotonic
@@ -987,7 +995,7 @@ nodes whose Raft heartbeat, gossip interval or clock-skew tolerance differs from
 no leader or no record the leader published. Each live node's newest run follows in node name
 order, with its incarnation and its committed capacity claim: the capability line, ending with its
 [control-plane, session and client-link capabilities](node-settings.md#control-plane-and-session-capabilities),
-then its interconnect, DNS, database and consensus capacities, or what the claim awaits. A node
+then its interconnect, membership, DNS, database and consensus capacities, or what the claim awaits. A node
 that publishes its running cluster parameters shows its interconnect liveness timings next, and
 every prerequisite follows in the order nodes compare them. A timing that differs from the leader's
 carries the leader's value beside it, and a node that has not published a record this node can
@@ -1003,8 +1011,9 @@ cluster created: 2026-11-08T12:00:00Z
 timing drift: node-2
 node: node-1 (leader)
   incarnation: 3
-  capabilities: committed node-1#3 cpu-count=8 memory-bytes=17179869184 database-volume-bytes=536870912000 relay-batch-bytes=33554432 relay-decoded-bytes=33554432 bulk-chunk-bytes=65536 bulk-window-bytes=1048576 vm-inline-row-limit=1024 vm-regex-search-cache-bytes=2097152 vm-dynamic-pattern-cache-capacity=64 vm-pattern-sets-per-batch=64 wasm-stack-bytes=524288 wasm-memory-reservation-bytes=4294967296 wasm-parallel-compilation=false connector-retry-multiplier=2 connector-retry-jitter-percent=0 kafka-domain-assignment-retry=100ms syslog-intake-queue-capacity=64 syslog-read-chunk-bytes=8192 listeners=ListenerBounds { max_connections: 1024, buffer_bytes: 417792, header_bytes: 16384, header_timeout: 30s, tls_timeout: 10s, idle_timeout: 60s, accept_retry_delay: 100ms, http_keepalive: true, http_body_bytes: 33554432, http_body_copy_bytes: 65536, http_body_timeout: 30s, http_refusal_drain_timeout: 5s, websocket_message_bytes: 67108864, websocket_frame_bytes: 16777216, grpc_header_bytes: 16384, grpc_concurrency: 128, grpc_request_timeout: 120s, grpc_max_streams: 256, grpc_keepalive_interval: 30s, grpc_keepalive_timeout: 20s, tcp_keepalive_time: 60s, tcp_keepalive_interval: 10s, tcp_keepalive_retries: 3 } <control-plane, session and client-link capabilities as name=value pairs>
+  capabilities: committed node-1#3 cpu-count=8 memory-bytes=17179869184 database-volume-bytes=536870912000 relay-batch-bytes=33554432 relay-decoded-bytes=33554432 bulk-chunk-bytes=65536 bulk-window-bytes=1048576 vm-inline-row-limit=1024 vm-regex-search-cache-bytes=2097152 vm-dynamic-pattern-cache-capacity=64 vm-pattern-sets-per-batch=64 wasm-stack-bytes=524288 wasm-memory-reservation-bytes=4294967296 wasm-parallel-compilation=false udf-watchdog=5s connector-retry-multiplier=2 connector-retry-jitter-percent=0 kafka-domain-assignment-retry=100ms syslog-intake-queue-capacity=64 syslog-read-chunk-bytes=8192 mqtt-read-ahead-headroom=64 listeners=ListenerBounds { max_connections: 1024, buffer_bytes: 417792, header_bytes: 16384, header_timeout: 30s, tls_timeout: 10s, idle_timeout: 60s, accept_retry_delay: 100ms, http_keepalive: true, http_body_bytes: 33554432, http_body_copy_bytes: 65536, http_body_timeout: 30s, http_refusal_drain_timeout: 5s, websocket_message_bytes: 67108864, websocket_frame_bytes: 16777216, grpc_header_bytes: 16384, grpc_concurrency: 128, grpc_request_timeout: 120s, grpc_max_streams: 256, grpc_keepalive_interval: 30s, grpc_keepalive_timeout: 20s, tcp_keepalive_time: 60s, tcp_keepalive_interval: 10s, tcp_keepalive_retries: 3 } <control-plane, session and client-link capabilities as name=value pairs>
   interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0
+  membership: gossip-receive-queue-capacity=1024 gossip-tombstone-grace-period=1m
   dns: cache-entries=4096 positive-max-ttl=1h negative-max-ttl=30s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=64
   database: cache-bytes=33554432 journal-bytes=536870912 workers=4
   raft database: cache-bytes=33554432 journal-bytes=536870912 workers=4

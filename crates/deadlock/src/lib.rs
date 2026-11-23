@@ -66,11 +66,27 @@ pub use summary::EvidenceSummary;
 
 /// The status a diagnostic process ends with once it has reported an active deadlock: its
 /// description is on standard error, and in the evidence directory when the run has one.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the shutdown chapter's exit status for a diagnostic node that reported an \
+                  active deadlock and recorded it is 3"
+    )
+)]
 pub const ACTIVE_DEADLOCK_EXIT_STATUS: i32 = 3;
 
 /// The status a diagnostic process ends with when its diagnostic execution failed: a finding could
 /// not be recorded, findings were lost, or recording outlived its budget. Whether the process
 /// deadlocked is then unknown, or known and not recorded; it is never taken for a clean run.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the shutdown chapter's exit status for a diagnostic node that could not record \
+                  a deadlock, lost findings or outlived its recording budget is 4"
+    )
+)]
 pub const DIAGNOSTIC_FAILURE_EXIT_STATUS: i32 = 4;
 
 #[cfg(test)]

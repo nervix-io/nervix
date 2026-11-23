@@ -631,7 +631,18 @@ impl RabbitMqBroker {
         stream: BrokerStream,
         budget: &OpeningBudget,
     ) -> RabbitMqConnectResult<Connection> {
-        let handed_over = ConcurrentQueue::bounded(1);
+        // The transports one handshake hands Lapin's transport hook: the stream established
+        // above, which the hook takes once.
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "lapin asks its transport hook for a stream once per connection, and a \
+                          handshake hands it the one stream it established"
+            )
+        )]
+        const HANDED_OVER_TRANSPORTS: usize = 1;
+        let handed_over = ConcurrentQueue::bounded(HANDED_OVER_TRANSPORTS);
         handed_over
             .push(stream)
             .ok()

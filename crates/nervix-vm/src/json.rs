@@ -48,10 +48,26 @@ use crate::{
 type TapeEntry<'input> = simd_json::Node<'input>;
 
 /// The longest document an extraction reads, in bytes. A longer one is a defect of that document.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits a JSON document an extraction reads to \
+                  16,777,216 bytes"
+    )
+)]
 pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 
 /// The deepest an extraction's document may nest objects and arrays. A document nested deeper is
 /// a defect of that document.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Expression Functions chapter limits a JSON document an extraction reads to \
+                  128 levels of nesting"
+    )
+)]
 pub const MAX_DOCUMENT_DEPTH: usize = 128;
 
 /// The type a `JSON_VALUE` declares for the value it reads.

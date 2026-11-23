@@ -15,6 +15,7 @@
 
 use std::{
     io::SeekFrom,
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -42,6 +43,19 @@ use crate::{
     outcome::Routing,
     upload::expand_user_path,
 };
+
+/// The frames a download call's request stream queues: its one opening request, which the stream
+/// holds before its sender is dropped.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client implementation manual (rule A-2) sends exactly one \
+                  BackupDownloadRequest per DownloadBackup call, and one slot holds it before its \
+                  sender is dropped"
+    )
+)]
+const DOWNLOAD_REQUEST_FRAMES: usize = 1;
 
 /// Why a backup's archive was not downloaded.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -184,7 +198,8 @@ impl Client {
             Err(report) => return Err(report.change_context(BackupDownloadError::EncodeRequest)),
         };
         let mut source = DownloadSource::Session;
-        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+        let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+        for attempt in 0..routing_attempts.get() {
             nervix_primitives::task::consume_budget().await;
             file.restart().await?;
             let ended = self
@@ -194,7 +209,8 @@ impl Client {
                 Ok(AttemptEnd::Complete) => return file.persist(&destination).await,
                 Ok(AttemptEnd::NotLeader(redirect)) => {
                     source = DownloadSource::Session;
-                    self.follow_download_redirect(&redirect, attempt).await?;
+                    self.follow_download_redirect(&redirect, attempt, routing_attempts)
+                        .await?;
                     continue;
                 }
                 Ok(AttemptEnd::Holder(holder)) => match holder.grpc_uri {
@@ -210,8 +226,8 @@ impl Client {
             };
             // Once the archive's retry validity ends the server refuses it as expired, which is
             // not retried, so the attempts end with the archive's retention.
-            let retry_permitted =
-                failure.current_context().is_retryable() && self.await_retry(attempt).await;
+            let retry_permitted = failure.current_context().is_retryable()
+                && self.await_retry(attempt, routing_attempts).await;
             if !retry_permitted {
                 return Err(failure);
             }
@@ -244,10 +260,11 @@ impl Client {
     async fn follow_download_redirect(
         &self,
         redirect: &LeaderRedirect,
-        attempt: usize,
+        attempt: u32,
+        routing_attempts: NonZeroU32,
     ) -> Result<(), Report<BackupDownloadError>> {
         let Routing::Redirect(leader) = Routing::for_redirect(redirect) else {
-            if self.await_retry(attempt).await {
+            if self.await_retry(attempt, routing_attempts).await {
                 return Ok(());
             }
             return Err(Report::new(BackupDownloadError::NoLeader));
@@ -342,7 +359,8 @@ impl Client {
                 crate::session_open::ready(&mut channel)
                     .await
                     .map_err(|error| Status::from_error(Box::new(error)))?;
-                let (frames, outbound) = nervix_primitives::sync::mpsc::channel(1);
+                let (frames, outbound) =
+                    nervix_primitives::sync::mpsc::channel(DOWNLOAD_REQUEST_FRAMES);
                 frames
                     .send(request)
                     .await

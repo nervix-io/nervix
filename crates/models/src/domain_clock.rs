@@ -381,6 +381,18 @@ pub struct DomainClockProgress {
 }
 
 impl DomainClockState {
+    /// The shortest physical wait a positive logical delta converts to, so rounding never turns a
+    /// wait that has to happen into none.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "a Duration counts whole nanoseconds, so one nanosecond is the shortest wait \
+                      that is not zero"
+        )
+    )]
+    const SHORTEST_WALL_WAIT: Duration = Duration::from_nanos(1);
+
     pub const fn new(
         wall_started_at: Timestamp,
         logical_start: Timestamp,
@@ -468,7 +480,7 @@ impl DomainClockState {
                 operation: "rate conversion",
             })
         })?;
-        Ok(Duration::from_nanos(wall_nanos.max(1)))
+        Ok(Duration::from_nanos(wall_nanos).max(Self::SHORTEST_WALL_WAIT))
     }
 
     pub fn tick_boundary(

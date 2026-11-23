@@ -81,10 +81,37 @@ use self::{
 nervix_primitives::product_binary!("nervix-cli");
 
 const HISTORY_FILE: &str = ".nervix_client_history";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the CLI chapter has the REPL queue at most 128 event lines"
+    )
+)]
 const EVENT_BUFFER_RECORDS: usize = 128;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(fixed, reason = "the CLI chapter cuts each queued event line at 8 KiB")
+)]
 const EVENT_LINE_BYTES: usize = 8 * 1024;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client session protocol bounds the CLI's terminal output at 1 MiB, its 128 \
+                  event lines of at most 8 KiB each"
+    )
+)]
 const EVENT_BUFFER_BYTES: usize = EVENT_BUFFER_RECORDS * EVENT_LINE_BYTES;
 const EVENT_LINE_SUFFIX: &str = "… [line truncated]";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a cut event line keeps the CLI chapter's 8 KiB bound once its truncation marker \
+                  is appended"
+    )
+)]
 const EVENT_LINE_PREFIX_BYTES: usize = EVENT_LINE_BYTES - EVENT_LINE_SUFFIX.len();
 const _: () = assert!(EVENT_LINE_BYTES > EVENT_LINE_SUFFIX.len());
 const _: () = assert!(EVENT_BUFFER_BYTES == 1024 * 1024);
@@ -1805,7 +1832,7 @@ mod tests {
         let options = connect_options_from_args(&args).assured("default options are valid");
         assert_eq!(
             options.backup_wait_timeout,
-            std::time::Duration::from_secs(10 * 60)
+            <nervix_client_core::capabilities::ClientBackupWaitTimeout as nervix_models::SettingDefinition>::default_value(&())
         );
     }
 

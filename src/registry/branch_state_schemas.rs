@@ -18,6 +18,7 @@ use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_backup::{BranchLifecycleRecord, WindowStateDescriptor};
 use nervix_models::{
     CreateDeduplicator, CreateWindowProcessor, DomainName, Model, ModelIndex, ModelKind, ModelName,
@@ -179,7 +180,17 @@ fn deduplicator_key_schema(
     };
     let input_schema = schema_for_ack_model(domain, identifier, models, input)?;
     let key_types = deduplicator_key_types(domain, identifier, models, deduplicator, input_schema)?;
-    let mut fields = Vec::with_capacity(key_types.len() + 1);
+    // The columns after the key columns: when each key was first seen.
+    let trailing_columns = [Field::new(
+        nervix_backup::DEDUPLICATOR_SEEN_AT_COLUMN,
+        seen_at_data_type(),
+        false,
+    )];
+    let columns = key_types
+        .len()
+        .checked_add(trailing_columns.len())
+        .assured("a vector holds at most isize::MAX key types, so its trailing columns fit usize");
+    let mut fields = Vec::with_capacity(columns);
     for (index, key) in key_types.into_iter().enumerate() {
         // A key part records a null for any value its type does not normalize, so every key
         // column admits nulls whatever its expression's nullability.
@@ -189,11 +200,7 @@ fn deduplicator_key_schema(
             true,
         ));
     }
-    fields.push(Field::new(
-        nervix_backup::DEDUPLICATOR_SEEN_AT_COLUMN,
-        seen_at_data_type(),
-        false,
-    ));
+    fields.extend(trailing_columns);
     Ok(StdArc::new(ArrowSchema::new(fields)))
 }
 

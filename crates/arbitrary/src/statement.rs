@@ -389,6 +389,9 @@ impl Arbitrary<'_> {
                 self.entropy.between(1..=256),
             ),
             nervix_models::ClusterParameterChange::UdfCodeBytes(self.entropy.between(1..=256)),
+            nervix_models::ClusterParameterChange::UdfCompileBudget(
+                std::time::Duration::from_millis(self.entropy.between(1..=1000)),
+            ),
             nervix_models::ClusterParameterChange::EntityLabelsMaxCount(
                 self.entropy.between(0..=256),
             ),

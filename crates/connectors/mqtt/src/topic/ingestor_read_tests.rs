@@ -24,9 +24,9 @@ use nervix_primitives::{
 use rumqttc::{Publish, QoS};
 
 use super::{
-    GatherPublishOutcome, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
-    MqttTopicIngestorPlan, MqttTopicIngestorResult, MqttTopicIngestorSettings, PublishRead,
-    PublishReadOutcome,
+    GatherPublishOutcome, MqttReadAheadSettings, MqttTopicIngestor, MqttTopicIngestorError,
+    MqttTopicIngestorMessage, MqttTopicIngestorPlan, MqttTopicIngestorResult,
+    MqttTopicIngestorSettings, PublishRead, PublishReadOutcome,
 };
 use crate::topic::{
     ingestor::overflow_fixture::ReadAheadOverflowFixture,
@@ -348,7 +348,16 @@ fn acknowledged_plan_at(
         acknowledgement_window: Some(window),
         dns,
         read_ahead_overflow: ReadAheadOverflowFixture::new().report(),
+        read_ahead: MqttReadAheadSettings::default(),
     })
+}
+
+/// The acknowledgement of a plan whose client acknowledges every publish on receipt, reading the
+/// node's default headroom ahead.
+fn on_receipt() -> super::IngestorAcknowledgement {
+    super::IngestorAcknowledgement::OnReceipt {
+        headroom: MqttReadAheadSettings::default().headroom(),
+    }
 }
 
 /// An ingestor of `plan` that `broker` granted its subscription at QoS 1, and the broker's end of
@@ -438,7 +447,7 @@ async fn oversized_publishes_are_counted_and_acknowledged_before_the_next_publis
         let broker = ScriptedBroker::start().await;
         let mut plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN);
         if !manual {
-            plan.acknowledgement = super::IngestorAcknowledgement::OnReceipt;
+            plan.acknowledgement = on_receipt();
         }
         let (mut ingestor, mut connection) = subscribed(&plan, &broker).await;
         let maximum = default_admission_bytes();
@@ -996,7 +1005,7 @@ async fn every_downgraded_subscription_fails_before_the_ingestor_is_ready() {
                 requested,
             );
             if !manual {
-                plan.acknowledgement = super::IngestorAcknowledgement::OnReceipt;
+                plan.acknowledgement = on_receipt();
             }
             let mut ingestor = MqttTopicIngestor::open(&plan, 0)
                 .await
