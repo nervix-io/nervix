@@ -206,6 +206,8 @@ fn restored_work_placements(world: &ScenarioWorld) -> BTreeSet<String> {
         )
         .assured("each scheduled entry has its public placement");
         replicas.sort_unstable();
+        // The fingerprint writes a unit no node owns the way the status does.
+        let owner = owner.unwrap_or("-");
         placements.insert(format!(
             "kind={} name={} owner={} replicas={}",
             placement.kind,

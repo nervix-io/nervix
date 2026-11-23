@@ -9784,7 +9784,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 "counting_guest",
             )
             .is_some_and(|scheduled| match placement {
-                WasmStateResetGraphPlacement::NodeOne => scheduled.owner == "node-1",
+                WasmStateResetGraphPlacement::NodeOne => scheduled.owner == Some("node-1"),
                 WasmStateResetGraphPlacement::AwayFromNodeOne => {
                     scheduled.is_owned_by_node_other_than("node-1")
                         && !scheduled.replicas.is_empty()
@@ -23362,13 +23362,16 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
                 .unwrap_or_else(|error| {
                     panic!("failed to inspect ingestor logic schedule: {error:#}")
                 });
-            if let Some(scheduled) = ScheduledPlacement::from_status(
+            let scheduled = ScheduledPlacement::from_status(
                 &output,
                 &world.domain,
                 "ingestor",
                 "logic_ingestor",
-            ) {
-                break scheduled.owner.to_string();
+            );
+            if let Some(scheduled) = scheduled
+                && let Some(owner) = scheduled.owner
+            {
+                break owner.to_string();
             }
             last_output = Some(output);
             placement.pause(Duration::from_millis(50)).await;
@@ -27545,7 +27548,7 @@ async fn observe_healthy_peers(
                     &placement.name,
                 );
                 assert_eq!(
-                    current.map(|current| current.owner),
+                    current.and_then(|current| current.owner),
                     Some(placement.owner.as_str()),
                     "'{source}' moved healthy work while another peer was unavailable: {status}"
                 );
@@ -27649,7 +27652,9 @@ async fn then_last_command_output_owner_is_saved_as_placeholder(
         .as_deref()
         .expect("a command output must exist before saving its owner");
     let owner = described_owner(output)
-        .unwrap_or_else(|| panic!("last command output must contain an owner line, got: {output}"))
+        .unwrap_or_else(|| {
+            panic!("last command output must name the node that owns its unit, got: {output}")
+        })
         .to_string();
     world.placeholders.insert(placeholder, owner);
 }
@@ -27697,14 +27702,13 @@ async fn then_last_cluster_status_scheduled_owner_is_saved_as_placeholder(
                 world.domain
             )
         });
-    assert_ne!(
-        placement.owner, "-",
-        "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
-        world.domain
-    );
-    world
-        .placeholders
-        .insert(placeholder, placement.owner.to_string());
+    let Some(owner) = placement.owner else {
+        panic!(
+            "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
+            world.domain
+        );
+    };
+    world.placeholders.insert(placeholder, owner.to_string());
 }
 
 #[then(
@@ -27810,8 +27814,9 @@ async fn then_last_command_output_owner_equals_placeholder(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before owner assertion");
-    let actual = described_owner(output)
-        .unwrap_or_else(|| panic!("last command output must contain an owner line, got: {output}"));
+    let actual = described_owner(output).unwrap_or_else(|| {
+        panic!("last command output must name the node that owns its unit, got: {output}")
+    });
     assert_eq!(
         actual, expected,
         "expected owner placeholder '{placeholder}' to match last command output owner"
@@ -28441,8 +28446,8 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for deduplicator '{deduplicator}' owner to differ from \
-             '{unexpected}'. last output: {:?}, last error: {:?}",
+            "timed out waiting for a node other than '{unexpected}' to own deduplicator \
+             '{deduplicator}'. last output: {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
         );
@@ -28486,7 +28491,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
                 if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|scheduled| scheduled.owner == expected)
+                    .is_some_and(|scheduled| scheduled.owner == Some(expected.as_str()))
                 {
                     return;
                 }
@@ -28535,13 +28540,13 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
                 )
             });
         world.last_command_output = Some(output.clone());
-        let owner = ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
-            .map(|scheduled| scheduled.owner.to_string())
+        let scheduled = ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
             .unwrap_or_else(|| {
                 panic!("scheduled {kind} {name} must remain in the schedule, got: {output}")
             });
         assert_eq!(
-            owner, expected,
+            scheduled.owner,
+            Some(expected.as_str()),
             "scheduled {kind} {name} must keep owner '{expected}', got: {output}"
         );
         observation.pause(Duration::from_millis(250)).await;
@@ -28575,8 +28580,8 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
         nervix_primitives::task::consume_budget().await;
         assert!(
             !placement.has_passed(),
-            "timed out waiting for scheduled {kind} {name} owner to differ from '{unexpected}'. \
-             last output: {:?}, last error: {:?}",
+            "timed out waiting for a node other than '{unexpected}' to own scheduled {kind} \
+             {name}. last output: {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
         );
@@ -28629,7 +28634,7 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner(
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
                 if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|scheduled| scheduled.owner == expected)
+                    .is_some_and(|scheduled| scheduled.owner == Some(expected.as_str()))
                 {
                     return;
                 }

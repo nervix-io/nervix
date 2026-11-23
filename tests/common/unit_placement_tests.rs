@@ -34,6 +34,28 @@ fn counting_guest(status: &str) -> ScheduledPlacement<'_> {
 }
 
 #[test]
+fn a_status_reports_no_owner_for_a_unit_no_node_owns() {
+    assert_eq!(
+        counting_guest(STATUS_BETWEEN_OWNERS),
+        ScheduledPlacement {
+            owner: None,
+            replicas: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn a_status_reports_the_node_that_owns_a_unit_and_its_replicas() {
+    assert_eq!(
+        counting_guest(STATUS_AFTER_TAKEOVER),
+        ScheduledPlacement {
+            owner: Some("node-2"),
+            replicas: vec!["node-3"],
+        }
+    );
+}
+
+#[test]
 fn a_unit_no_node_owns_has_not_moved_to_another_node() {
     let placement = counting_guest(STATUS_BETWEEN_OWNERS);
     assert!(
