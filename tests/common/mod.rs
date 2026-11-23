@@ -64,5 +64,6 @@ pub(crate) mod suite_watchdog;
 pub(crate) mod syslog_tls;
 pub(crate) mod tcp_forwarder;
 pub(crate) mod unaccepted_address;
+pub(crate) mod unit_placement;
 pub(crate) mod unread_session;
 pub(crate) mod websocket_close;

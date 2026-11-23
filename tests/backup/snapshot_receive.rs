@@ -60,8 +60,8 @@ async fn restored_inferencer_replicas(world: &mut ScenarioWorld, file: String, i
         .run_command(&leader, &world.domain, "SHOW CLUSTER STATUS;")
         .await
         .assured("the restored schedule is publicly visible");
-    let (owner, replicas) =
-        scheduled_node_placement_from_status(&status, &world.domain, "inferencer", &inferencer)
+    let ScheduledPlacement { owner, replicas } =
+        ScheduledPlacement::from_status(&status, &world.domain, "inferencer", &inferencer)
             .assured("the restored inference unit is scheduled");
     assert!(
         !replicas.is_empty(),
