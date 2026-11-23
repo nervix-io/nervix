@@ -230,7 +230,7 @@ without adding a prerequisite or changing graph acceptance.
 | `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
 | `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
 | `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
-| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection |
+| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection, at least 65,535 bytes |
 | `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
 | `--interconnect-request-timeout` | 10s | Transport request budget and the base of typed RPC deadlines |
 | `--interconnect-progress-timeout` | 5s | Time without transfer progress |
@@ -253,7 +253,15 @@ without adding a prerequisite or changing graph acceptance.
 | `--raft-database-max-open-files` | Derived | Same platform derivation, independently overridable |
 
 Counts, receive windows and deadlines must be positive and fit their engines. HTTP/2 windows
-are at most 2³¹−1 bytes. The options are validated before opening stores or binding listeners.
+are at most 2³¹−1 bytes. The connection receive window is also at least 65,535 bytes, the window
+RFC 9113 gives every new HTTP/2 connection. A receiver can raise a connection's window but never
+lower it, so a smaller value would claim a bound the connection does not have, and the node refuses
+to start with one. The node raises each new connection from 65,535 bytes to the declared window
+with a `WINDOW_UPDATE` frame, which h2, its HTTP/2 implementation, sends once the raise is at least
+half the current window. A declared window of 98,302 bytes or more is therefore advertised as soon
+as the connection opens, and a smaller one is reached as the node reads its first input; either way
+a peer never has more than the declared window unread. The options are validated before opening
+stores or binding listeners.
 Database cache capacities count alongside executor budgets in the startup memory check.
 
 Each database keeps at most its `max-open-files` table files open. When it needs another, it closes
