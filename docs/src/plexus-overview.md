@@ -1017,8 +1017,8 @@ node: node-1 (leader)
   interconnect: max-peers=64 request-quota=128 health-probes=64 max-connections=768 handshakes=32 queue=1024 completion=4 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0
   membership: gossip-receive-queue-capacity=1024 gossip-tombstone-grace-period=1m
   dns: cache-entries=4096 positive-max-ttl=1h negative-max-ttl=30s hook-budget=30s families=dual-stack trust-negative=true concurrent-lookups=64
-  database: cache-bytes=33554432 journal-bytes=536870912 workers=4
-  raft database: cache-bytes=33554432 journal-bytes=536870912 workers=4
+  database: cache-bytes=33554432 journal-bytes=536870912 workers=4 max-open-files=900
+  raft database: cache-bytes=33554432 journal-bytes=536870912 workers=4 max-open-files=900
   consensus events: capacity=256
   consensus: append-batch-entries=256 outstanding-append-batches=16 outstanding-append-bytes=16777216 append-idle-bound=5s snapshot-transfer-timeout=30s membership-mutation-timeout=10s retention-interval=5s retention-admission-timeout=30s retention-admission-poll=50ms purge-batch-entries=1 api-channel-capacity=65536 notification-channel-capacity=65536 state-machine-channel-capacity=1024 api-batch-capacity=4096 snapshot-chunk-bytes=65536 replication-backoff=200ms replication-backoff-maximum=1s membership-step-down-delay=150ms replication-lag-threshold=20000
   interconnect liveness: ping-interval=5s ping-timeout=2s 500ms probe-timeout=1s

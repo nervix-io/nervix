@@ -1359,6 +1359,12 @@ impl RuntimeStatePlacement {
     }
 }
 
+/// The options a keyspace of this store is created with. The engine records them on creation
+/// and reuses the recorded memtable size on every later open.
+fn keyspace_options() -> KeyspaceCreateOptions {
+    KeyspaceCreateOptions::default().max_memtable_size(nervix_models::KEYSPACE_MEMTABLE_BYTES)
+}
+
 impl RuntimeStateStore {
     pub(in crate::runtime) fn from_database(
         db: Database,
@@ -1366,31 +1372,22 @@ impl RuntimeStateStore {
         restore_staging_max_bytes: u64,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let latest = db
-            .keyspace("runtime_state_latest", KeyspaceCreateOptions::default)
+            .keyspace("runtime_state_latest", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let lsm_index = db
-            .keyspace("runtime_state_lsm", KeyspaceCreateOptions::default)
+            .keyspace("runtime_state_lsm", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let restore_staging = db
-            .keyspace(
-                "runtime_state_restore_staging",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_restore_staging", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let restore_publications = db
-            .keyspace(
-                "runtime_state_restore_publications",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_restore_publications", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let checkpoint_chunks = db
-            .keyspace(
-                "runtime_state_checkpoint_chunks",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_checkpoint_chunks", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let format = db
-            .keyspace("runtime_state_format", KeyspaceCreateOptions::default)
+            .keyspace("runtime_state_format", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         match format
             .get(b"encoding")
@@ -1421,27 +1418,21 @@ impl RuntimeStateStore {
             }
         }
         let handoff_preparations = db
-            .keyspace(
-                "runtime_state_handoff_preparations",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_handoff_preparations", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let handoff_activations = db
-            .keyspace(
-                "runtime_state_handoff_activations",
-                KeyspaceCreateOptions::default,
-            )
+            .keyspace("runtime_state_handoff_activations", keyspace_options)
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let forced_recovery_preparations = db
             .keyspace(
                 "runtime_state_forced_recovery_preparations",
-                KeyspaceCreateOptions::default,
+                keyspace_options,
             )
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let forced_recovery_completions = db
             .keyspace(
                 "runtime_state_forced_recovery_completions",
-                KeyspaceCreateOptions::default,
+                keyspace_options,
             )
             .change_context(RuntimePersistenceError::OpenKeyspace)?;
         Ok(Self {

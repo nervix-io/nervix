@@ -544,8 +544,18 @@ impl<'bytes> GeneratedSettings<'bytes> {
             } else {
                 None
             },
+            max_open_files: if self.entropy.flag() {
+                Some(
+                    std::num::NonZeroU64::new(self.entropy.boundary_biased(10..=1 << 20))
+                        .assured("generated open-file limits are at least ten"),
+                )
+            } else {
+                None
+            },
         })
-        .assured("the generated cache, journal and worker inputs satisfy database bounds")
+        .assured(
+            "the generated cache, journal, worker and open-file inputs satisfy database bounds",
+        )
     }
 
     fn consensus_operations(&mut self) -> nervix_consensus::RaftOperationSettings {
