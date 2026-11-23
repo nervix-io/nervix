@@ -1633,4 +1633,5 @@ pub(super) fn append_filter_map_nested_value(
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
+#[path = "filter_map_tests.rs"]
 mod tests;

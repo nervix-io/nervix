@@ -805,7 +805,9 @@ async fn ordered_set_error_reports_operation_index_and_previous_partial_value() 
     );
 }
 
+#[path = "filter_map/tests/planned_failure_tests.rs"]
 mod planned_failure_tests;
+#[path = "filter_map/tests/typed_operation_tests.rs"]
 mod typed_operation_tests;
 
 #[test]
