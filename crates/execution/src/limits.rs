@@ -47,17 +47,18 @@ const _: () = assert!(
 );
 
 /// One management or discovery event, its typed request fields and envelope included. The largest
-/// is a gossip exchange: one message of the gossip library, which sizes every message it builds to
-/// the largest IPv4 UDP payload, 65,507 bytes, whatever carries it. The event keeps 4 KiB above
-/// that message for the exchange's other fields and its request envelope, and a node refuses to
-/// start when its bound cannot carry the largest exchange.
+/// is a gossip exchange: one message of the gossip library, at most 65,510 bytes whatever carries
+/// it, the largest IPv4 UDP payload the library budgets each message that carries state to and the
+/// 3-byte header it writes outside that budget. The event leaves 4 KiB beyond that message for the
+/// exchange's other fields and its request envelope, and a node refuses to start when its bound
+/// cannot carry the largest exchange.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
         reason = "the Cluster Interconnect chapter carries each gossip message, at most the \
-                  65,507-byte largest IPv4 UDP payload the gossip library builds, as one \
-                  management event with 4 KiB for its typed request fields and envelope"
+                  65,510 bytes the gossip library builds, as one management event with 4 KiB for \
+                  its typed request fields and envelope"
     )
 )]
 const MANAGEMENT_EVENT_BYTES: ByteUnit = ByteUnit::Kibibyte(68);

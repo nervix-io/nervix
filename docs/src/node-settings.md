@@ -1426,7 +1426,7 @@ change takes effect when that node restarts.
 
 | Server option | Default | Owner and bound |
 | --- | --- | --- |
-| `--gossip-receive-queue-capacity` | 1,024 datagrams | positive, within the native channel permit bound; incoming gossip datagrams queued between the interconnect handler and Chitchat, each at most the 65,507-byte gossip bound, so the queue retains up to its capacity times 65,507 bytes |
+| `--gossip-receive-queue-capacity` | 1,024 datagrams | positive, within the native channel permit bound; incoming gossip datagrams queued between the interconnect handler and Chitchat, each at most the 65,510-byte gossip bound, so the queue retains up to its capacity times 65,510 bytes |
 | `--gossip-tombstone-grace-period` | 60 s | positive, at most `u32::MAX` whole seconds, so Chitchat can add it to the instant a key was deleted; how long a deleted gossip key's tombstone stays before Chitchat collects it |
 
 Each has the environment twin `NERVIX_` followed by its uppercase name with underscores. Both are
