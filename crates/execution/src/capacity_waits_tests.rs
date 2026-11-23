@@ -4,16 +4,13 @@
 use std::{future::Future, num::NonZeroUsize, pin::pin, task::Poll, time::Duration};
 
 use error_stack::Report;
-use nervix_primitives::{
-    sync::{blocking, oneshot},
-    task::JoinHandle,
-    time::timeout,
-};
+use nervix_primitives::{task::JoinHandle, time::timeout};
 
 use super::*;
 use crate::{
     ConnectorStorageWorkers, CpuClass, ExecutionConfig, Executor, MemoryClass, PendingJobCounts,
     QueueAdmission, StorageClass, WorkerCounts,
+    workers::{HeldWorker, WorkerPool},
 };
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -70,70 +67,53 @@ impl Class {
         }
     }
 
-    fn pending(self, executor: &Executor) -> usize {
-        let snapshot = executor.snapshot();
+    /// The workers this class runs its jobs on.
+    fn pool(self, executor: &Executor) -> &WorkerPool {
         match self {
-            Self::Cpu(class) => snapshot.cpu_class(class).pending,
-            Self::Storage(StorageClass::Filesystem) => snapshot.filesystem_storage.pending,
-            Self::Storage(StorageClass::Consensus) => snapshot.consensus_storage.pending,
-            Self::Storage(StorageClass::Connector) => snapshot.connector_storage.pending,
+            Self::Cpu(class) => executor.cpu_pool(class),
+            Self::Storage(class) => executor.storage_pool(class),
         }
+    }
+
+    fn pending(self, executor: &Executor) -> usize {
+        self.pool(executor).snapshot().pending
     }
 }
 
-/// The only worker and the only waiting place of one class, each held by a job until the test
-/// releases them.
+/// The only worker and the only waiting place of one class, held until the test releases them:
+/// the worker by the pool's owner hold, the place by a job queued behind it.
+///
+/// The hold parks no thread. In the Turmoil build a CPU job runs as one step of the simulated
+/// scheduler, so a job that blocked until the test released it would stop the only thread the
+/// release can run on.
 struct FullClass {
-    release: blocking::mpsc::Sender<()>,
-    holder: JoinHandle<()>,
+    worker: HeldWorker,
     queued: JoinHandle<()>,
 }
 
 impl FullClass {
     async fn fill(executor: &Executor, class: Class) -> Self {
-        let (release, held) = blocking::mpsc::channel::<()>();
-        let (started, has_started) = oneshot::channel();
-        let holding = executor.clone();
-        let holder = nervix_primitives::task::spawn(async move {
-            class
-                .run(&holding, QueueAdmission::RefuseWhenFull, move || {
-                    started.send(()).expect("the test awaits the held worker");
-                    // Releasing the fill disconnects the channel, which is the release.
-                    match held.recv() {
-                        Ok(()) | Err(blocking::mpsc::RecvError) => {}
-                    }
-                })
-                .await
-                .expect("the holding job takes the idle worker");
-        });
-        has_started.await.expect("the class's only worker is held");
+        let worker = HeldWorker::new(class.pool(executor));
         let queueing = executor.clone();
         let queued = nervix_primitives::task::spawn(async move {
             class
                 .run(&queueing, QueueAdmission::RefuseWhenFull, || ())
                 .await
-                .expect("the queued job runs once the holder leaves");
+                .expect("the queued job runs once the held worker is released");
         });
         while class.pending(executor) < 1 {
             nervix_primitives::task::yield_now().await;
         }
-        Self {
-            release,
-            holder,
-            queued,
-        }
+        Self { worker, queued }
     }
 
-    /// Let both held jobs finish, which frees the class's place.
+    /// Release the held worker, which then runs the queued job, and wait for that job to end, which
+    /// frees the class's place.
     async fn release(self) {
-        drop(self.release);
-        timeout(WAIT, self.holder)
-            .await
-            .expect("the holding job ends after its release")
-            .expect("the holding job is joined");
+        drop(self.worker);
         timeout(WAIT, self.queued)
             .await
-            .expect("the queued job ends after the holder")
+            .expect("the queued job ends once the held worker is released")
             .expect("the queued job is joined");
     }
 }
