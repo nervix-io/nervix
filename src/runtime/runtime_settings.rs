@@ -100,6 +100,10 @@ impl RuntimeSettings {
             vm_pattern_sets_per_batch: positive(self.vm.pattern_sets_per_batch().get()),
             wasm_stack_bytes: positive(self.wasm_engine.stack_bytes()),
             wasm_memory_reservation_bytes: self.wasm_engine.memory_reservation_bytes(),
+            wasm_memory_guard_bytes: self.wasm_engine.memory_guard_bytes(),
+            wasm_memory_growth_reservation_bytes: self
+                .wasm_engine
+                .memory_growth_reservation_bytes(),
             wasm_parallel_compilation: self.wasm_engine.parallel_compilation(),
             udf_watchdog: self.udf.watchdog(),
         }

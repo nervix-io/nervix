@@ -80,6 +80,7 @@ CREATE WASM PROCESSOR rust_filter_even_rows
   FILE 'nervix_wasm_processor_rust_guest.wasm'
   MAX FUEL 1000000000
   MAX MEMORY 64MiB
+  MAX TABLE ELEMENTS 4096
   UNBRANCHED
   TO rust_filtered_metrics
     SET value = value
@@ -98,6 +99,7 @@ CREATE WASM PROCESSOR go_filter_even_rows
   FILE 'nervix_wasm_processor_go_guest.wasm'
   MAX FUEL 1000000000
   MAX MEMORY 64MiB
+  MAX TABLE ELEMENTS 4096
   UNBRANCHED
   TO go_filtered_metrics
     SET value = value

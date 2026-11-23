@@ -28,6 +28,7 @@ CREATE WASM PROCESSOR chaos_padded
   FILE 'processors/padded-state.wat'
   MAX FUEL 1000000000
   MAX MEMORY 96MiB
+  MAX TABLE ELEMENTS 0
   BRANCHED BY chaos_branch
   TO chaos_padded_out
     SET event_id = event_id,

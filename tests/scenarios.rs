@@ -9686,6 +9686,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
           FILE 'processors/filter_even.wasm'
           MAX FUEL 1000000000
           MAX MEMORY 64MiB
+          MAX TABLE ELEMENTS 4096
           {processor_branching}
           TO counted_secondary_events
           SET tenant = {tenant_expression},
@@ -9722,6 +9723,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
           FILE 'processors/filter_even.wasm'
           MAX FUEL 1000000000
           MAX MEMORY 64MiB
+          MAX TABLE ELEMENTS 4096
           {processor_branching}
           TO {output_relay}
           SET tenant = {tenant_expression},
@@ -11378,6 +11380,54 @@ async fn given_node_has_invalid_wasm_processor_fixture_resource_directory(
 }
 
 #[given(
+    regex = r#"^node "([^"]+)" has a WASM fixture defining two (memories|tables) in resource directory "([^"]+)"$"#
+)]
+async fn given_node_has_two_objects_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    objects: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        two_objects_wasm_fixture(&objects),
+    )
+    .await;
+}
+
+/// A guest that implements every export the host requires and defines two linear memories or
+/// two tables, where the guest contract allows one of each.
+fn two_objects_wasm_fixture(objects: &str) -> Vec<u8> {
+    let declarations = match objects {
+        "memories" => "(memory (export \"memory\") 1) (memory 1)",
+        "tables" => "(memory (export \"memory\") 1) (table 1 funcref) (table 1 funcref)",
+        other => panic!("unsupported defined objects '{other}'"),
+    };
+    format!(
+        r#"(module
+      {declarations}
+      (func (export "nervix_buffer_ptr") (result i32) (i32.const 0))
+      (func (export "nervix_buffer_len") (result i32) (i32.const 0))
+      (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
+      (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
+      (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+      (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+      (func (export "nervix_process_batch") (param i32 i32) (result i32) (i32.const 0))
+      (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
+      (func (export "nervix_flush") (result i32) (i32.const 0))
+      (func (export "nervix_read_emit") (result i32) (i32.const 0))
+      (func (export "nervix_dump_state") (result i32) (i32.const 0))
+      (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
+      (func (export "nervix_reset_state") (result i32) (i32.const 0))
+      (func (export "nervix_describe_state") (result i32) (i32.const 0))
+    )"#
+    )
+    .into_bytes()
+}
+
+#[given(
     expr = "node {string} has a WASM fixture emitting a {int} byte malformed envelope in resource \
             directory {string}"
 )]
@@ -12612,6 +12662,9 @@ enum WasmLifecycleFailureFixture {
     Fuel,
     /// An input over the large threshold grows linear memory past `MAX MEMORY`.
     Memory,
+    /// An input over the large threshold grows the guest's one-slot table past
+    /// `MAX TABLE ELEMENTS`.
+    Table,
     /// A branch whose key names [`INIT_REFUSED_TENANT`] refuses its branch configuration.
     Initialization,
     /// An input over the large threshold requests a timeout whose callback fails.
@@ -12650,6 +12703,7 @@ impl WasmLifecycleFailureFixture {
         match name {
             "fuel" => Self::Fuel,
             "memory" => Self::Memory,
+            "table" => Self::Table,
             "initialization" => Self::Initialization,
             "timeout" => Self::Timeout,
             "state snapshot" => Self::StateSnapshot,
@@ -12675,6 +12729,7 @@ impl WasmLifecycleFailureFixture {
             ),
             Self::Fuel
             | Self::Memory
+            | Self::Table
             | Self::Timeout
             | Self::StateSnapshot
             | Self::StateRestore
@@ -12695,6 +12750,10 @@ impl WasmLifecycleFailureFixture {
             Self::Memory => format!(
                 "local.get $size i32.const {large} i32.gt_u
                  if i32.const 1 memory.grow drop end"
+            ),
+            Self::Table => format!(
+                "local.get $size i32.const {large} i32.gt_u
+                 if ref.null func i32.const 1 table.grow $guest_table drop end"
             ),
             Self::Timeout => format!(
                 "local.get $size i32.const {large} i32.gt_u
@@ -12725,6 +12784,7 @@ impl WasmLifecycleFailureFixture {
             ),
             Self::Fuel
             | Self::Memory
+            | Self::Table
             | Self::Initialization
             | Self::StateSnapshot
             | Self::StateRestore
@@ -12756,6 +12816,7 @@ impl WasmLifecycleFailureFixture {
             .to_string(),
             Self::Fuel
             | Self::Memory
+            | Self::Table
             | Self::Initialization
             | Self::Timeout
             | Self::StateDescription
@@ -12773,6 +12834,7 @@ impl WasmLifecycleFailureFixture {
             ),
             Self::Fuel
             | Self::Memory
+            | Self::Table
             | Self::Initialization
             | Self::Timeout
             | Self::StateSnapshot
@@ -12792,6 +12854,7 @@ impl WasmLifecycleFailureFixture {
             ),
             Self::Fuel
             | Self::Memory
+            | Self::Table
             | Self::Initialization
             | Self::Timeout
             | Self::StateSnapshot
@@ -12831,12 +12894,30 @@ impl WasmLifecycleFailureFixture {
             }
             Self::Fuel
             | Self::Memory
+            | Self::Table
             | Self::Initialization
             | Self::Timeout
             | Self::StateSnapshot
             | Self::StateRestore
             | Self::StateDescription
             | Self::MissingStateDescriptionExport => (1, String::new()),
+        }
+    }
+
+    /// The one table the table mode grows, and no table for every other mode, so their limit can
+    /// be zero.
+    fn table_declaration(self) -> &'static str {
+        match self {
+            Self::Table => "(table $guest_table 1 funcref)",
+            Self::Fuel
+            | Self::Memory
+            | Self::Initialization
+            | Self::Timeout
+            | Self::StateSnapshot
+            | Self::StateRestore
+            | Self::StateDescription
+            | Self::MissingStateDescriptionExport
+            | Self::OversizedStateDescription => "",
         }
     }
 
@@ -12870,6 +12951,7 @@ impl WasmLifecycleFailureFixture {
         let load_state_body = self.load_state_body();
         let describe_state_export = self.describe_state_export();
         let (pages, described_data) = self.described_state();
+        let table_declaration = self.table_declaration();
         let init_refusal = Self::INIT_REFUSAL;
         let snapshot_refusal = Self::SNAPSHOT_REFUSAL;
         let timeout_refusal = Self::TIMEOUT_REFUSAL;
@@ -12880,6 +12962,7 @@ impl WasmLifecycleFailureFixture {
             r#"(module
           (import "env" "nervix_timeout_after_nanos" (func $timeout (param i64) (result i64)))
           (memory (export "memory") {pages})
+          {table_declaration}
           (global $emitted (mut i32) (i32.const 0))
           (global $read_ptr (mut i32) (i32.const 0))
           (global $poisoned (mut i32) (i32.const 0))
