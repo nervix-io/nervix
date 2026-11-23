@@ -268,6 +268,10 @@ Feature: Domain-paced emitter cadence
         ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 20.0;
       """
+    # The flush and the commit cadence bound the emitter's hold from above only: a node that
+    # applies a newer runtime revision during the hold, as every node does after a failover,
+    # flushes the emitter early.
+    And the runtime revision each node applied is recorded
     And http payload is posted to host "iceberg-cadence-{{test_id}}.example.com" path "/events"
       """
       {"user_id":11,"action":"paced"}
@@ -277,7 +281,7 @@ Feature: Domain-paced emitter cadence
     # sooner than four seconds after it was posted, and long before the 80 seconds the two
     # boundaries would take on the physical clock. BATCH divides the staged rows into data files
     # and leaves both boundaries where they are.
-    Then within "30s" the Iceberg table "cadence_notifications_{{test_id}}" contains a row no sooner than "4s" after it was published
+    Then within "30s" the Iceberg table "cadence_notifications_{{test_id}}" contains a row no sooner than "4s" after it was published, unless a node applied a newer runtime revision
       """
       {"user_id":11,"action":"paced"}
       """

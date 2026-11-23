@@ -289,6 +289,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-processor-file" is filled with "processors/filter_even.wasm"
     And selector ".create-wasm-max-fuel" is filled with "1000000000"
     And selector ".create-wasm-max-memory" is filled with "64MiB"
+    And selector ".create-wasm-max-table-elements" is filled with "4096"
     # A refused snapshot is preserved unless the processor opts in to one reset per refusal.
     Then selector ".create-wasm-rejected-state [data-policy='preserve'].active" exists
     And selector ".create-wasm-rejected-state-consequence" contains "keeps the snapshot"
@@ -320,7 +321,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     Then selector ".create-wasm-guest-fields [data-value='bucket']" exists
     When selector ".create-wasm-guest-fields [data-value='bucket']" is clicked
     And selector ".create-processor-message-error [data-error='log']" is clicked
-    Then selector ".create-preview" contains "USING RESOURCE visual_wasm_bundle VERSION LATEST FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB BRANCHED BY visual_wasm_tenant"
+    Then selector ".create-preview" contains "USING RESOURCE visual_wasm_bundle VERSION LATEST FILE 'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096 BRANCHED BY visual_wasm_tenant"
     And selector ".create-preview" contains "SET value = value, tenant = tenant, bucket = bucket ON MESSAGE ERROR LOG ON REJECTED STATE RESET ON GLOBAL ERROR LOG"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
@@ -653,6 +654,9 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-submit" is clicked
     Then selector ".create-validation" contains "MAX MEMORY"
     When selector ".create-wasm-max-memory" is filled with "32MiB"
+    And selector ".create-submit" is clicked
+    Then selector ".create-validation" contains "MAX TABLE ELEMENTS"
+    When selector ".create-wasm-max-table-elements" is filled with "4096"
     And selector ".create-processor-route-relay .create-choice-search" is filled with "visual_check_filtered"
     Then selector ".create-processor-route-relay [data-value='visual_check_filtered']" exists
     When selector ".create-processor-route-relay [data-value='visual_check_filtered']" is clicked
@@ -681,7 +685,7 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     And selector ".create-error" contains "visual_check_wasm"
     And selector ".create-processor-file" has value "processors/filter_even.wasm"
     When selector ".create-processor-assignment-expression" is filled with "value"
-    Then selector ".create-preview" contains "MAX FUEL 500000000 MAX MEMORY 32MiB UNBRANCHED"
+    Then selector ".create-preview" contains "MAX FUEL 500000000 MAX MEMORY 32MiB MAX TABLE ELEMENTS 4096 UNBRANCHED"
     And selector ".create-preview" contains "ON REJECTED STATE PRESERVE ON GLOBAL ERROR IGNORE"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
@@ -693,6 +697,10 @@ Feature: Web console visual generator, inferencer and WASM processor creation
     Then the last command output contains
       """
       MAX MEMORY 32MiB
+      """
+    And the last command output contains
+      """
+      MAX TABLE ELEMENTS 4096
       """
     And the last command output contains
       """

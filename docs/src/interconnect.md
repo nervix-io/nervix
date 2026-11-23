@@ -544,7 +544,9 @@ That claim carries the size of the volume holding the node's database directory 
 limit of each of the node's databases, and a parameter conflict can carry the typed refusal of a
 resource quota above an admitted node's volume or of a node-unavailability timeout that an admitted
 node's health-probe interval does not fit. Its listener bounds carry the gRPC listener's HTTP/2
-windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer.
+windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer, and
+its operational capabilities carry the web console pacing the node announces to its console
+sessions.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup. The fingerprint also covers
 the opening of a client consumer stream with the largest delivery chunk its serving node announces.
@@ -572,13 +574,15 @@ descriptors, so checkpoint identity and inspection operations advance as one wir
 Emitter statements exchanged through the control plane use explicit `KEY` expressions and
 `PARTITION FROM BRANCH`, and SQS FIFO groups have one expression shape. The current
 `WIRE_CONTRACT` fingerprint identifies that archived Model layout, including the `parametrizer`
-Model kind, an inferencer's required `WORKING MEMORY` policy, the typed `payload` expression scope,
+Model kind, an inferencer's required `WORKING MEMORY` policy, a WASM processor's required
+`MAX TABLE ELEMENTS`, the typed `payload` expression scope,
 typed materialized relay inspection, ingestor read interactions,
 corridor/domain-wide placement coverage, pace-only domain configuration, exact partition/instance
 relocation selections, ingestor acknowledgement and connector lifecycle observations, and the current
 transaction operation and commit-step alternatives, durable licensing rotation/release effects and
 consensus commands with their exact request and independent binding records, the engine and
-connector host capabilities in each node's incarnation-bound claim, the ordered `RATE LIMIT`
+connector host capabilities in each node's incarnation-bound claim (the WASM memory guard and growth
+reserve among them), the ordered `RATE LIMIT`
 clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
 rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
 carries for a unit whose ingestor writes `RATE LIMIT`. The fingerprint also includes the

@@ -148,7 +148,11 @@ input on a node, 1 GiB at the defaults. Nor are the databases' memtables, the bu
 new writes before they reach disk. Each of the 15 keyspaces, 11 in the node database and 4 in the
 consensus database, fills one up to 64 MiB, and a keyspace whose writes outpace its disk writes
 keeps up to four full ones waiting before its writers pause. Nervix does not limit them, so a
-write-heavy node leaves headroom for them beside its checked total.
+write-heavy node leaves headroom for them beside its checked total. Nor is a WASM guest's memory.
+It takes address space, `--wasm-memory-reservation-bytes` for a memory that fits in it, or its
+current size and `--wasm-memory-growth-reservation-bytes` for one that has to move to grow, with
+`--wasm-memory-guard-bytes` of unmapped guard on each side, and what it commits stays within its
+processor's `MAX MEMORY` ([WASM Processor Guests](wasm-processor-guests.md)).
 
 ## What A Node Needs To Start
 

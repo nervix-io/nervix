@@ -1309,8 +1309,9 @@ succeeds.
 After admission, the control plane converts the committed schedule into a complete typed execution
 revision before runtime installation. Running and stopped domains use that same revision for local
 placement, state identities, passive recovery, and ownership handoff. The handoff fingerprint keeps
-the committed schedule's exact bytes. If an installation fails, the next attempt is planned from
-the last successfully applied schedule; the failed revision is not recorded as applied.
+the committed schedule's exact bytes. If an installation fails, the failed revision is not recorded
+as applied, and the next attempt plans each domain's change from the schedule that domain's
+execution runs, including a domain the failed attempt had already brought to the revision.
 
 The background installation supervisor retries a failed application on the admission loop's
 half-second cadence without requiring another committed change. Schedule and domain updates wake

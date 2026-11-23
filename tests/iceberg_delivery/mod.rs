@@ -89,10 +89,12 @@ async fn then_the_catalog_gate_holds_a_commit(world: &mut ScenarioWorld, bound: 
 
 /// Waits for the commit that follows a refusal, and requires that it arrived at least `delay` after
 /// the refusal. Load delays the commit and the step's observation of it alike, so the measured gap
-/// only grows on a busy machine.
+/// only grows on a busy machine. A node that applies a runtime revision newer than the ones the
+/// scenario recorded before the refusal force-flushes the domain, which publishes what a retry
+/// holds at once; see [`crate::delivery_lower_bounds`].
 #[then(
     expr = "within {string} the Iceberg catalog gate holds a commit no sooner than {string} after \
-            it refused one"
+            it refused one, unless a node applied a newer runtime revision"
 )]
 async fn then_the_catalog_gate_holds_a_commit_after_its_refusal(
     world: &mut ScenarioWorld,
@@ -108,10 +110,13 @@ async fn then_the_catalog_gate_holds_a_commit_after_its_refusal(
     let Some(gap) = held.arrived_at.checked_duration_since(refused_at) else {
         panic!("the held commit arrived before the commit the gate refused");
     };
-    assert!(
-        gap >= delay,
-        "the commit after the refusal arrived {gap:?} after it, sooner than {delay:?}"
-    );
+    if gap < delay {
+        let early =
+            format!("the commit after the refusal arrived {gap:?} after it, sooner than {delay:?}");
+        crate::delivery_lower_bounds::EarlyArrival::ReleasedByNewerRuntimeRevision
+            .judge(world, refused_at, &early)
+            .await;
+    }
 }
 
 #[when("the Iceberg catalog gate refuses the commit it holds")]

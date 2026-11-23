@@ -576,6 +576,84 @@ impl PlannedClusterRevision {
     }
 }
 
+/// The committed schedule this node's runtime runs, domain by domain: for each domain with an
+/// installed execution, the committed schedule that execution was built from.
+///
+/// A node applies a cluster revision one domain after another and records the revision as applied
+/// only once every domain took it. An attempt that fails part way leaves the domains it already
+/// reached running the new revision. Each domain's next change is planned against the schedule
+/// that domain runs, never against the last revision the node applied in full, so a later revision
+/// reaches a domain a failed attempt moved forward in place, as it reaches every other domain.
+#[derive(Debug, Default)]
+pub(crate) struct InstalledSchedule {
+    domains: ClusterSchedule,
+}
+
+/// What one attempt to apply a planned revision left installed.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct InstalledAttempt {
+    /// The domains whose execution the attempt brought to the planned revision.
+    pub(crate) advanced: Vec<DomainName>,
+    /// The domains whose execution runs a revision neither the planned change nor its predecessor
+    /// produced, which schedule application did not install. Their next change is planned as for
+    /// a domain the node does not run yet, so it replaces their execution.
+    pub(crate) unplanned: Vec<DomainName>,
+}
+
+impl InstalledSchedule {
+    /// Plans `desired` against the schedule each domain's execution runs.
+    pub(crate) fn plan(
+        &self,
+        desired: &ClusterSchedule,
+    ) -> error_stack::Result<PlannedClusterRevision, ExecutionRevisionError> {
+        PlannedClusterRevision::between(Some(&self.domains), desired)
+    }
+
+    /// Records the schedule each domain's execution runs once an attempt to apply `planned` has
+    /// ended, whether it applied every domain or failed part way. `planned` is what [`Self::plan`]
+    /// returned for `desired`, and `installed` holds the source digest of every domain execution
+    /// the runtime holds now.
+    ///
+    /// A domain whose execution runs the planned revision records `desired`'s schedule, and one
+    /// whose execution still runs its predecessor keeps the schedule it had, as does a domain
+    /// `desired` no longer holds while its execution still runs. A domain without an execution
+    /// records nothing, and neither does one whose execution runs a revision neither schedule
+    /// produced.
+    pub(crate) fn record_attempt(
+        &mut self,
+        planned: &PlannedClusterRevision,
+        desired: &ClusterSchedule,
+        installed: &BTreeMap<DomainName, [u8; 32]>,
+    ) -> InstalledAttempt {
+        let mut domains = BTreeMap::new();
+        let mut attempt = InstalledAttempt::default();
+        for (domain, digest) in installed {
+            let runs = match planned.domains.get(domain) {
+                Some(change) if change.revision.source_digest == *digest => {
+                    if change.predecessor_digest != Some(*digest) {
+                        attempt.advanced.push(domain.clone());
+                    }
+                    desired.domain(domain)
+                }
+                Some(change) if change.predecessor_digest == Some(*digest) => {
+                    self.domains.domain(domain)
+                }
+                Some(_) => {
+                    attempt.unplanned.push(domain.clone());
+                    None
+                }
+                // A domain the desired schedule no longer holds runs until its removal succeeds.
+                None => self.domains.domain(domain),
+            };
+            if let Some(schedule) = runs {
+                domains.insert(domain.clone(), schedule.clone());
+            }
+        }
+        self.domains = ClusterSchedule { domains };
+        attempt
+    }
+}
+
 /// The exact runtime changes chosen while both committed schedule shapes are still available in
 /// the decision layer. No executable Model crosses the application boundary.
 pub(crate) enum ExecutionDelta {
@@ -749,6 +827,11 @@ mod tests {
     use crate::registry::test_fixtures::named;
 
     fn schedule(capacity: std::num::NonZeroUsize) -> DomainSchedule {
+        domain_schedule("testing", capacity)
+    }
+
+    /// A relay of `capacity` and its schema in `domain`.
+    fn domain_schedule(domain: &str, capacity: std::num::NonZeroUsize) -> DomainSchedule {
         let fingerprint = SchemaFingerprint::from_digest([7; 32]);
         let schema = ScheduledNode::new(
             Model::Schema(CreateSchema {
@@ -775,7 +858,7 @@ mod tests {
             fingerprint,
         )
         .with_resolved_branching(Some(ResolvedBranching::unbranched()));
-        DomainSchedule::new(named("testing"), vec![schema, relay], Vec::new())
+        DomainSchedule::new(named(domain), vec![schema, relay], Vec::new())
     }
 
     #[test]
@@ -1052,6 +1135,179 @@ mod tests {
                 .delta,
             ExecutionDelta::Unchanged
         ));
+    }
+
+    /// The source digest of every domain execution of `plan`, as the runtime reports them once it
+    /// applied the whole plan.
+    fn every_revision_of(plan: &PlannedClusterRevision) -> BTreeMap<DomainName, [u8; 32]> {
+        let mut installed = BTreeMap::new();
+        for (domain, change) in &plan.domains {
+            installed.insert(domain.clone(), change.revision.source_digest);
+        }
+        installed
+    }
+
+    fn change_of<'plan>(
+        plan: &'plan PlannedClusterRevision,
+        domain: &str,
+    ) -> &'plan PlannedDomainChange {
+        plan.domains
+            .get(&named::<DomainName>(domain))
+            .assured("the fixture plans every domain it names")
+    }
+
+    /// An application that fails part way leaves the domains it already reached at its revision,
+    /// so their next change is planned from that revision, while a domain the failure kept at its
+    /// predecessor is planned from the predecessor.
+    #[test]
+    fn a_failed_attempt_records_each_domain_at_the_revision_its_execution_runs() {
+        let mut installed = InstalledSchedule::default();
+        let first = ClusterSchedule::from_iter([
+            domain_schedule("moving", nonzero!(2usize)),
+            domain_schedule("moving_late", nonzero!(2usize)),
+        ]);
+        let first_plan = installed
+            .plan(&first)
+            .assured("the first schedule has complete plans");
+        assert!(
+            first_plan
+                .domains
+                .values()
+                .all(|change| change.predecessor_digest.is_none()),
+            "a node that runs nothing plans every domain from nothing"
+        );
+        installed.record_attempt(&first_plan, &first, &every_revision_of(&first_plan));
+
+        let second = ClusterSchedule::from_iter([
+            domain_schedule("moving", nonzero!(4usize)),
+            domain_schedule("moving_late", nonzero!(4usize)),
+        ]);
+        let second_plan = installed
+            .plan(&second)
+            .assured("the second schedule has complete plans");
+        // The attempt applied the first domain and failed on the second, which kept running its
+        // predecessor.
+        let partly = BTreeMap::from([
+            (
+                named::<DomainName>("moving"),
+                change_of(&second_plan, "moving").revision.source_digest,
+            ),
+            (
+                named::<DomainName>("moving_late"),
+                change_of(&first_plan, "moving_late").revision.source_digest,
+            ),
+        ]);
+        let attempt = installed.record_attempt(&second_plan, &second, &partly);
+        assert_eq!(
+            attempt,
+            InstalledAttempt {
+                advanced: vec![named("moving")],
+                unplanned: Vec::new(),
+            }
+        );
+
+        let third = ClusterSchedule::from_iter([
+            domain_schedule("moving", nonzero!(8usize)),
+            domain_schedule("moving_late", nonzero!(4usize)),
+        ]);
+        let third_plan = installed
+            .plan(&third)
+            .assured("the third schedule has complete plans");
+        let moving = change_of(&third_plan, "moving");
+        assert_eq!(
+            moving.predecessor_digest,
+            Some(change_of(&second_plan, "moving").revision.source_digest),
+            "the moving domain's change is planned from the revision the failed attempt installed"
+        );
+        assert!(
+            matches!(&moving.delta,
+                ExecutionDelta::Dynamic(updates)
+                    if matches!(updates.as_slice(), [DynamicExecutionUpdate::RelayCapacity { relay, capacity }]
+                        if relay == &named("events") && *capacity == nonzero!(8usize))),
+            "the moving domain takes only the change from the revision it runs"
+        );
+        let late = change_of(&third_plan, "moving_late");
+        assert_eq!(
+            late.predecessor_digest,
+            Some(change_of(&first_plan, "moving_late").revision.source_digest),
+            "the domain the failure kept is planned from the revision it still runs"
+        );
+        assert!(
+            matches!(&late.delta,
+                ExecutionDelta::Dynamic(updates)
+                    if matches!(updates.as_slice(), [DynamicExecutionUpdate::RelayCapacity { capacity, .. }]
+                        if *capacity == nonzero!(4usize))),
+            "the domain the failure kept takes the change it has not applied yet"
+        );
+
+        // A retry of the same revision changes nothing in the domain that already runs it.
+        let retry = installed
+            .plan(&second)
+            .assured("the second schedule remains plannable");
+        assert!(matches!(
+            change_of(&retry, "moving").delta,
+            ExecutionDelta::Unchanged
+        ));
+    }
+
+    /// A domain without an execution, or whose execution runs a revision schedule application did
+    /// not install, has no recorded predecessor, while a domain the desired schedule dropped keeps
+    /// its schedule while its execution still runs.
+    #[test]
+    fn a_domain_records_only_a_schedule_its_execution_runs() {
+        let mut installed = InstalledSchedule::default();
+        let first = ClusterSchedule::from_iter([
+            domain_schedule("dropped", nonzero!(2usize)),
+            domain_schedule("replaced", nonzero!(2usize)),
+            domain_schedule("absent", nonzero!(2usize)),
+        ]);
+        let first_plan = installed
+            .plan(&first)
+            .assured("the first schedule has complete plans");
+        installed.record_attempt(&first_plan, &first, &every_revision_of(&first_plan));
+
+        let second = ClusterSchedule::from_iter([
+            domain_schedule("replaced", nonzero!(4usize)),
+            domain_schedule("absent", nonzero!(4usize)),
+        ]);
+        let second_plan = installed
+            .plan(&second)
+            .assured("the second schedule has complete plans");
+        let foreign_digest = [9; 32];
+        let after = BTreeMap::from([
+            (
+                named::<DomainName>("dropped"),
+                change_of(&first_plan, "dropped").revision.source_digest,
+            ),
+            (named::<DomainName>("replaced"), foreign_digest),
+        ]);
+        let attempt = installed.record_attempt(&second_plan, &second, &after);
+        assert_eq!(
+            attempt,
+            InstalledAttempt {
+                advanced: Vec::new(),
+                unplanned: vec![named("replaced")],
+            }
+        );
+
+        let next = installed
+            .plan(&first)
+            .assured("the first schedule remains plannable");
+        assert_eq!(
+            change_of(&next, "dropped").predecessor_digest,
+            Some(change_of(&first_plan, "dropped").revision.source_digest),
+            "a dropped domain whose execution still runs keeps its schedule"
+        );
+        assert_eq!(
+            change_of(&next, "replaced").predecessor_digest,
+            None,
+            "an execution schedule application did not install has no recorded predecessor"
+        );
+        assert_eq!(
+            change_of(&next, "absent").predecessor_digest,
+            None,
+            "a domain without an execution has no recorded predecessor"
+        );
     }
 
     #[test]

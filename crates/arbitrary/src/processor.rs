@@ -346,6 +346,7 @@ impl Arbitrary<'_> {
             limits: WasmProcessorLimits {
                 max_fuel: self.positive_u64(),
                 max_memory_bytes: self.positive_u64(),
+                max_table_elements: self.entropy.any_u64(),
             },
             global_error_policy: self.general_error_policy(),
             rejected_state_policy: self.entropy.pick([

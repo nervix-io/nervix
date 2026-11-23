@@ -468,8 +468,9 @@ draft, its tensors included, stays editable.
 
 A WASM processor form follows the same branch, input, filter, acknowledgement, state and relay
 rules, and the same resource, version and `FILE` choices for its guest module. `MAX FUEL` is a
-whole number of fuel units and `MAX MEMORY` a byte size such as `64MiB`; both are required and
-positive. `ON REJECTED STATE` starts at `PRESERVE`, and the form states the consequence of each
+positive whole number of fuel units, `MAX MEMORY` a positive byte size such as `64MiB`, and
+`MAX TABLE ELEMENTS` a whole number of table slots, zero for a guest without a table; all three are
+required. `ON REJECTED STATE` starts at `PRESERVE`, and the form states the consequence of each
 choice: `PRESERVE` keeps a snapshot the recreated guest refused and reports the refusal until an
 operator acts, while `RESET` replaces that branch's state lifetime once through the coordinated
 reset, starting it from the guest's initial state. `ON GLOBAL ERROR` requires `LOG` or `IGNORE`.

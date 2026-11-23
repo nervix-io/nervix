@@ -48,7 +48,7 @@ const SETTINGS_HEADINGS: [&str; 22] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 269] = [
+const SETTING_NAMES: [&str; 271] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -83,6 +83,8 @@ const SETTING_NAMES: [&str; 269] = [
     "mqtt-read-ahead-headroom",
     "wasm-stack-bytes",
     "wasm-memory-reservation-bytes",
+    "wasm-memory-guard-bytes",
+    "wasm-memory-growth-reservation-bytes",
     "vm-inline-row-limit",
     "vm-regex-search-cache-bytes",
     "vm-dynamic-pattern-cache-capacity",

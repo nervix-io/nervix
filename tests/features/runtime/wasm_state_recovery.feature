@@ -44,6 +44,7 @@ Feature: Recovery from a rejected WASM guest snapshot
         FILE 'processors/filter_even.wasm'
         MAX FUEL 100000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -143,6 +144,7 @@ Feature: Recovery from a rejected WASM guest snapshot
         FILE 'processors/filter_even.wasm'
         MAX FUEL 100000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,
@@ -241,6 +243,7 @@ Feature: Recovery from a rejected WASM guest snapshot
         FILE 'processors/filter_even.wasm'
         MAX FUEL 100000
         MAX MEMORY 1MiB
+        MAX TABLE ELEMENTS 4096
         BRANCHED BY by_limited_tenant
         TO limited_events
         SET tenant = branch.tenant,

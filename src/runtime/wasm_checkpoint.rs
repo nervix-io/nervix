@@ -113,8 +113,8 @@ impl WasmCallbackReporting<'_> {
             .verified("a guest callback only runs on a branch that holds an instance")
             .module;
         let reported = module.guest_failure(failure, None);
-        // A guest that exhausted MAX FUEL or MAX MEMORY ran into a declared limit; any other
-        // failed callback, a trap among them, is the guest breaking its contract.
+        // A guest that exhausted MAX FUEL, MAX MEMORY or MAX TABLE ELEMENTS ran into a declared
+        // limit; any other failed callback, a trap among them, is the guest breaking its contract.
         let class = if resource_limit_exceeded {
             MessageErrorClass::LIMIT
         } else {
