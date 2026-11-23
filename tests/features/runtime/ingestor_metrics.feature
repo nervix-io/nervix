@@ -181,11 +181,14 @@ Feature: Ingestor metrics
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       START;
       """
+    # The route's flush bounds its hold from above only: a node that applies a newer runtime
+    # revision during the hold, as every node does after a failover, flushes the route early.
+    And the runtime revision each node applied is recorded
     And http payload is posted to node "node-1" with host "payload-size-{{test_id}}.example.com" path "/payload-size"
       """
       {"user_id":42}
       """
-    Then the relay subscription receives a payload no sooner than "3s" after it was published
+    Then the relay subscription receives a payload no sooner than "3s" after it was published, unless a node applied a newer runtime revision
       """
       "user_id":42
       """
