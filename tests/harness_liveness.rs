@@ -158,6 +158,10 @@ mod runner_observation_tests;
 mod runner_offload;
 #[path = "common/runner_offload_tests.rs"]
 mod runner_offload_tests;
+#[path = "common/runtime_applications.rs"]
+mod runtime_applications;
+#[path = "common/runtime_applications_tests.rs"]
+mod runtime_applications_tests;
 #[path = "common/scenario_phase.rs"]
 #[allow(
     dead_code,
