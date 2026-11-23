@@ -146,13 +146,14 @@ impl Cluster {
             let hold = PhaseDeadline::after(std::time::Duration::from_secs(60))
                 .poll_until(
                     std::time::Duration::from_millis(10),
-                    |_| async { try_hold_snapshot_receive_memory(&executor, 4096) },
+                    |_| async { try_hold_snapshot_receive_memory(&executor, 0) },
                     |_| true,
                 )
                 .await
                 .assured("the snapshot probe admits its bounded bulk hold");
-            // The receive's decoding waits for room while the probe holds all but a few bytes of
-            // the class: a full class holds the receive back and never refuses it.
+            // A receive charges exactly what its body and decoding take, which a small checkpoint
+            // keeps to a few hundred bytes, so the probe holds the whole class: every charge the
+            // receive takes waits for room, and a full class holds it back without refusing it.
             let mut held = Box::pin(probe.fetch(node, request, &snapshot));
             if let Ok(ended) =
                 nervix_primitives::time::timeout(std::time::Duration::from_secs(2), held.as_mut())
