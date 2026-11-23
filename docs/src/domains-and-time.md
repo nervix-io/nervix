@@ -134,6 +134,13 @@ Domain lifecycle commands apply to the active domain:
 - `STOP ENFORCE AFTER <duration>;`
 - `STOP CANCEL AFTER <duration>;`
 
+`START` and `STOP` switch the domain's processing on and off; they change none of its
+configuration, so they never run inside a transaction. Between `BEGIN` and `COMMIT`, queuing either
+is refused at once with `START cannot be queued in a transaction; START and STOP run on their own,
+after COMMIT` (or the same for `STOP`), and the open transaction keeps every statement it already
+holds. Each runs on its own as one command under its own execution reference, after `COMMIT` or
+`REVERT`.
+
 Important runtime consequences:
 
 - `START;` resumes from persisted domain-owned runtime state when an ingestor supports it
@@ -183,7 +190,7 @@ A `STOP` that finds the domain stopping joins its stop as a request of its own. 
 request. The licensing stop is one more request, forced 60 seconds after the expiry in committed
 licensing time, which no `CANCEL` withdraws. While a domain stops, it refuses every other change:
 `START`, `ALTER`, transactions, `DROP`, `BACKUP` and relocation wait until the stop ends or is
-called off. A transaction's `STOP` step makes the same request and applies until its stop ends.
+called off.
 
 Every answer says how the stop ended and what it cut, node by node and entity by entity. A stop
 that cut nothing answers `stopped domain '<domain>': every message in motion finished`; an enforced
@@ -201,6 +208,13 @@ Successful lifecycle commands are completion boundaries. `START` returns after e
 node has prepared the same revision and every configured listener and assigned ingestor has completed
 startup. `STOP` returns once its stop ended and every node that ran the domain reported what its
 teardown cut, including when it is the last running domain.
+
+`START` holds the domain's mutation lease from its admission until it answers. It first refuses a
+domain that cannot start: one that is already running, paused by a model alteration, or stopping;
+one whose restore has not finished installing its state; and every domain while the licensing stop
+gate is closed. A domain left paused by an alteration whose command no longer exists is resumed,
+and then answered as already running. The restore and the licensing gate are checked again in the
+same replicated write that starts the domain.
 
 Before it commits, `START` places every unit of a stopped domain on a node its node rules admit,
 moving a unit stored elsewhere with its state. While some unit has no admitted node, `START` waits
@@ -225,10 +239,14 @@ dependent connection, observation, or publish can follow immediately through any
 
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
 authority identifies a concrete incarnation of a named cluster node and carries a revision that
-advances whenever ownership changes or is revoked. After leader failover, reconciliation uses that
-committed state; a completed transactional `START` therefore remains effective without
-re-executing its commit step, and leadership transfer alone does not establish a new anchor or
-authority.
+advances whenever ownership changes or is revoked. `START` resolves its start point, paced mapping
+and authority and commits them in the one replicated write that starts the domain, and that write
+records its revision in the command's execution. After leader failover, reconciliation uses that
+committed state: the next leader resumes an applying `START` under its execution reference, waits
+for the domain to become ready at the recorded revision when the start already committed, and
+otherwise checks, places and commits it afresh, since nothing ran under an uncommitted decision.
+A committed `START` is never committed again, and leadership transfer alone does not establish a
+new anchor or authority.
 
 Every live node installs that committed mapping before it builds executable work for the domain.
 The installed capability is bound to the domain name and `START` generation. A joining node uses
