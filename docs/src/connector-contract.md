@@ -2258,11 +2258,35 @@ The node resolver and the ordinary MQTT dialer remain in use.
 
 Cleanup of the preceding endpoint is best-effort and reports every failure. A replacement
 independently prepares each changed identity at its own endpoint, so an unreachable preceding
-endpoint cannot pin the input there or make the replacement inherit its filter. Failure to prepare
-the replacement remains a runtime installation failure. Matching sessions keep their queues;
-retired subscriptions lose theirs. Each phase runs at most its declared instance count of
-connections concurrently, and keeps no discovery-map guard while awaiting a connection.
-The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
+endpoint cannot pin the input there or make the replacement inherit its filter. Matching sessions
+keep their queues; retired subscriptions lose theirs. Each phase runs at most its declared instance
+count of connections concurrently, and keeps no discovery-map guard while awaiting a connection.
+
+An entity swap orders these steps around the point after which it can no longer be undone. Before
+that point the host only prepares the replacement's changed sessions at a broker session the
+preceding input never connects: another endpoint, transport or client identity. A failure there
+fails the swap, and the restored previous ingestor finds every session it left, with what the broker
+queued in them meanwhile. Once nothing else of the swap can fail, and before the revision publishes
+and the replacement starts, the host retires the preceding sessions, including one the replacement
+shares: the same broker, transport and client identity under another filter or quality of service.
+Every instance of a persistent replacement whose shared session may still hold the preceding
+subscription carries an `MqttSessionRetirement` on the node that starts it. Its first resume then
+retires the session in the retirement phase a refused subscription uses before it subscribes, and
+completes the retirement once subscribed; a setup lost before `SUBACK` returns to that phase, and a
+retirement no instance finished stays outstanding for the unit's next instance. The host completes
+it beforehand when its own cleanup on that node retired the session, so only a failed cleanup or an
+instance started on another node pays the extra connection. The node keeps an outstanding
+retirement beyond its domain execution, so a stop, a start or a rebuild hands it to the instance
+that starts there next. A swap or a rebuild that would let an instance owing one run elsewhere, or
+nowhere, under the same session and subscription first retires that session while it can still
+fail, and its failure fails the change on that node: the instance's next node cannot know what the
+session holds, and a move waits for that node as it waits for any node that has not prepared the
+revision. A retirement is forgotten once no instance on that node can owe it any more: the new
+revision runs the instance elsewhere under another subscription of the same session, whose next node
+records a retirement of its own, or under another session, which holds nothing of the preceding one,
+or it no longer runs the instance or declares the ingestor. A domain rebuild, which never puts a previous
+execution back, runs both steps at once, and a failure to prepare the replacement there remains a
+runtime installation failure. The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
 
 ### Pulsar received metadata
 
@@ -2298,7 +2322,9 @@ creates an absent subscription before unsubscribing it.
 The plan of an input whose subscription its ingestor owns requires retirement when that ingestor
 changes or disappears. The same retirement step as MQTT's runs on the node the installed revision
 assigned the ingestor to, once that ingestor's exact tasks stopped, before its replacement
-starts; a stopped domain's passive plan participates too. The composition root resolves both
+starts; a stopped domain's passive plan participates too. In an entity swap it runs only once
+nothing else of the swap can fail, so a failed swap restores the previous ingestor on its
+subscription and backlog. The composition root resolves both
 clients through their pinned mounts. The connector compares service URL scheme, host and effective
 port, the topic qualified through the client's namespace, and subscription name, without connecting
 or resolving DNS. Implicit ports mean 6650 for `pulsar` and 6651 for `pulsar+ssl`; different host

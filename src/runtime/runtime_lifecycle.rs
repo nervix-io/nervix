@@ -149,6 +149,7 @@ impl Runtime {
                 dns,
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),
+                mqtt_session_retirements: DashMap::default(),
                 memory_pressure: MemoryPressurePause::default(),
                 ingestor_statuses: DashMap::default(),
                 ingestor_readiness: DashMap::default(),

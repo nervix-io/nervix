@@ -9,8 +9,9 @@
 //!   connects with and the conflict among identities its instances render alike, the batches a read
 //!   gathers from its connection's read-ahead and how a read ends when the host cancels it, manual
 //!   acknowledgement of publishes and its confirmation once written, the local replay of publishes
-//!   the host rejected, retirement of obsolete broker sessions and ownership of pending SUBACK
-//!   across cancellation of the host's wait.
+//!   the host rejected, retirement of obsolete broker sessions, the retirement an instance owes a
+//!   session its preceding input left with another subscription before it first connects, and
+//!   ownership of pending SUBACK across cancellation of the host's wait.
 //! - **Depends on.** The connector contract, the crate's connection options and its broker
 //!   connection through the node DNS resolver, the driver task that keeps each connection's event
 //!   loop polled, the vocabulary's typed client configuration, `error-stack`, Tokio and `rumqttc`.
@@ -56,7 +57,10 @@ use nervix_models::{
     MqttBroker, MqttClientConfig, MqttQos, MqttSession,
 };
 use nervix_primitives::{
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Instant, timeout, timeout_at},
 };
 use rumqttc::{
@@ -222,6 +226,72 @@ impl MqttTopicIngestorSessions<'_> {
         }
         instances.into_iter().collect()
     }
+
+    /// The instances of this plan whose broker session the other plan never connects: another
+    /// broker, transport or client identity. Retiring one of them cannot reach a session of the
+    /// other plan.
+    pub fn unshared_instances(&self, other: Option<&Self>) -> BTreeSet<u64> {
+        let mut instances = BTreeSet::new();
+        for (identity, instance) in &self.identities {
+            if let Some(other) = other
+                && other.identities.contains_key(identity)
+            {
+                continue;
+            }
+            instances.insert(*instance);
+        }
+        instances
+    }
+
+    /// The instances of this plan that connect the broker session of one of `other`'s
+    /// `instances`.
+    pub fn instances_sharing(&self, other: &Self, instances: &BTreeSet<u64>) -> BTreeSet<u64> {
+        let mut sharing = BTreeSet::new();
+        for (identity, instance) in &other.identities {
+            if !instances.contains(instance) {
+                continue;
+            }
+            if let Some(own) = self.identities.get(identity) {
+                sharing.insert(*own);
+            }
+        }
+        sharing
+    }
+}
+
+/// A broker session an instance retires before it first connects, because the session may still
+/// hold a subscription its plan no longer declares.
+///
+/// The host keeps one for each instance of a replacement whose broker session the preceding input
+/// used with another subscription, and hands it to every unit it starts for that instance until an
+/// instance has retired the session and subscribed in its place. An instance that stops before
+/// then leaves the retirement outstanding for the next one.
+#[derive(Debug, Clone)]
+pub struct MqttSessionRetirement {
+    /// Whether no instance has retired the session yet. The flag publishes nothing else: an
+    /// instance completes it from its own task, and the host reads it when it starts the unit's
+    /// next instance, after the previous instance's task ended.
+    outstanding: Arc<AtomicBool>,
+}
+
+impl MqttSessionRetirement {
+    /// A session no instance has retired yet.
+    pub fn outstanding() -> Self {
+        Self {
+            outstanding: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// Whether an instance must still retire the session before it connects.
+    pub fn is_outstanding(&self) -> bool {
+        self.outstanding.load(Ordering::Relaxed)
+    }
+
+    /// Records that the session holds no subscription its plan does not declare: an instance
+    /// retired it and subscribed, or the host retired it before an instance connected.
+    pub fn complete(&self) {
+        self.outstanding.store(false, Ordering::Relaxed);
+    }
 }
 
 /// What one MQTT ingestor subscribes with.
@@ -331,6 +401,9 @@ pub struct MqttTopicIngestorPlan {
     client_id_conflict: Option<MqttClientIdError>,
     dns: DnsResolver,
     read_ahead_overflow: IngestorReadAheadOverflow,
+    /// The retirement the executing unit's instance owes its broker session before it first
+    /// connects, absent when it owes none.
+    first_connection_retirement: Option<MqttSessionRetirement>,
 }
 
 /// One instance's client and the event loop that carries its session, before a driver owns the
@@ -483,6 +556,14 @@ impl MqttTopicIngestorPlan {
         self
     }
 
+    /// Makes the executing unit's instance retire its broker session before it first connects
+    /// while `retirement` is outstanding, and complete `retirement` once the instance has
+    /// subscribed in its place.
+    pub fn with_first_connection_retirement(mut self, retirement: MqttSessionRetirement) -> Self {
+        self.first_connection_retirement = Some(retirement);
+        self
+    }
+
     pub fn new(settings: MqttTopicIngestorSettings) -> Self {
         let MqttTopicIngestorSettings {
             instances,
@@ -513,6 +594,7 @@ impl MqttTopicIngestorPlan {
             client_id_conflict,
             dns,
             read_ahead_overflow,
+            first_connection_retirement: None,
         }
     }
 
@@ -909,6 +991,19 @@ impl MqttTopicIngestor {
         self.replay.clear();
     }
 
+    /// The phase an instance takes when its subscription setup ends without an answer. While the
+    /// instance still owes its broker session a first-connection retirement, the session that
+    /// setup created may hold no subscription, so the next attempt retires it again instead of
+    /// resuming it.
+    fn phase_after_lost_setup(&self) -> MqttIngestorConnection {
+        if let Some(retirement) = &self.plan.first_connection_retirement
+            && retirement.is_outstanding()
+        {
+            return MqttIngestorConnection::RetiringSubscription;
+        }
+        MqttIngestorConnection::Disconnected
+    }
+
     /// Reads one batch from `publishes`: its first publish, and under a batch timeout the
     /// publishes that follow it, until the batch holds `request.max_messages` or the timeout,
     /// counted from the first publish, passes. A discard ends the ordinary prefix before its
@@ -1011,10 +1106,18 @@ impl IngestorConnector for MqttTopicIngestor {
     type Plan = MqttTopicIngestorPlan;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> IngestorResult<Self> {
+        // A session the preceding input left with another subscription is retired before the
+        // first connection, through the phase a refused subscription retires its session in.
+        let connection = match &plan.first_connection_retirement {
+            Some(retirement) if retirement.is_outstanding() => {
+                MqttIngestorConnection::RetiringSubscription
+            }
+            Some(_) | None => MqttIngestorConnection::Disconnected,
+        };
         Ok(Self {
             plan: plan.clone(),
             instance_index,
-            connection: MqttIngestorConnection::Disconnected,
+            connection,
             replay: VecDeque::new(),
         })
     }
@@ -1078,12 +1181,16 @@ impl IngestorConnector for MqttTopicIngestor {
                             MqttTopicIngestorError::SubscriptionRefused
                             | MqttTopicIngestorError::SubscriptionDowngraded { .. },
                         ) => MqttIngestorConnection::RetiringSubscription,
-                        _ => MqttIngestorConnection::Disconnected,
+                        _ => self.phase_after_lost_setup(),
                     };
                     return Err(error.change_context(IngestorError::Resume { connector: MQTT }));
                 }
             };
             self.install_connection(connection);
+        }
+        // A subscribed instance owes its broker session nothing more, whichever phase it began in.
+        if let Some(retirement) = &self.plan.first_connection_retirement {
+            retirement.complete();
         }
         Ok(IngestorResume::Ready)
     }
@@ -1513,6 +1620,61 @@ mod tests {
         let mut repeated_identity = explicit.clone();
         repeated_identity.instances = vec![repeated_identity.instances[0].clone(); 2].into();
         assert_eq!(retiring_instances(&repeated_identity, None), vec![0]);
+    }
+
+    #[nervix_primitives::test]
+    async fn sessions_tell_one_the_other_input_connects_from_one_it_never_connects() {
+        let fixture = DnsFixture::start().await;
+        let mut declared = settings(
+            "mqtt://127.0.0.1:1883",
+            MqttSession::Persistent,
+            fixture.dns.clone(),
+        );
+        declared.default_client_id = "domain~events".to_string();
+        let previous = MqttTopicIngestorPlan::new(declared);
+        let mut retopic = previous.clone();
+        retopic.subscribe_filter = "$share/domain~events/replacement".to_string();
+        let mut moved = retopic.clone();
+        moved.instances = vec![vec![entry("addr", "mqtt://127.0.0.2:1883")]].into();
+        let previous_sessions = previous
+            .sessions()
+            .assured("the preceding fixture has valid session identities");
+        let retopic_sessions = retopic
+            .sessions()
+            .assured("the re-topiced fixture has valid session identities");
+        let moved_sessions = moved
+            .sessions()
+            .assured("the moved fixture has valid session identities");
+        let first = BTreeSet::from([0]);
+
+        // The same broker and client identity under another filter: both inputs connect one
+        // session, whose retirement by either reaches the other.
+        assert!(
+            retopic_sessions
+                .unshared_instances(Some(&previous_sessions))
+                .is_empty()
+        );
+        assert_eq!(
+            retopic_sessions.instances_sharing(&previous_sessions, &first),
+            first
+        );
+        // Another broker: a session the preceding input never connects.
+        assert_eq!(
+            moved_sessions.unshared_instances(Some(&previous_sessions)),
+            first
+        );
+        assert!(
+            moved_sessions
+                .instances_sharing(&previous_sessions, &first)
+                .is_empty()
+        );
+        // Without another input every session is its own, and an instance not named shares nothing.
+        assert_eq!(previous_sessions.unshared_instances(None), first);
+        assert!(
+            retopic_sessions
+                .instances_sharing(&previous_sessions, &BTreeSet::new())
+                .is_empty()
+        );
     }
 
     #[nervix_primitives::test]

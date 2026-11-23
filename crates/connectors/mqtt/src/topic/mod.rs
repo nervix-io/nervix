@@ -68,9 +68,9 @@ pub use connection::MqttConnectionError;
 use error_stack::{Report, ResultExt as _};
 use futures_util::FutureExt as _;
 pub use ingestor::{
-    MqttClientIdError, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
-    MqttTopicIngestorPlan, MqttTopicIngestorPosition, MqttTopicIngestorSessions,
-    MqttTopicIngestorSettings,
+    MqttClientIdError, MqttSessionRetirement, MqttTopicIngestor, MqttTopicIngestorError,
+    MqttTopicIngestorMessage, MqttTopicIngestorPlan, MqttTopicIngestorPosition,
+    MqttTopicIngestorSessions, MqttTopicIngestorSettings,
 };
 use meticulous::OptionExt as _;
 #[cfg(test)]

@@ -1721,6 +1721,26 @@ fn when_stallable_endpoint_resets_its_connections(world: &mut ScenarioWorld, nam
         .reset_connections();
 }
 
+/// Every connection the endpoint holds is reset, and the step returns once each has ended. A
+/// paused endpoint that resumes afterwards forwards nothing a client wrote on those connections,
+/// so a client that gave up on one while the endpoint was paused leaves no trace at the
+/// dependency.
+#[when(expr = "the stallable endpoint {string} resets its connections and each one ends")]
+async fn when_stallable_endpoint_resets_its_connections_and_each_one_ends(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
+        .reset_and_wait_for_ends(Duration::from_secs(60))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the connections stallable endpoint '{name}' reset did not end: {error}")
+        });
+}
+
 /// Stand a stallable endpoint in front of the dependency whose URL placeholder `endpoint` holds,
 /// and record that URL in placeholder `name` with the endpoint's loopback address in place of the
 /// dependency's host and port.
