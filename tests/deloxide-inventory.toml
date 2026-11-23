@@ -1141,19 +1141,19 @@ coverage = "Actual outer and nested snapshot decoders, their execution worker FI
 examples = 4
 feature = "tests/features/cluster/snapshot_receive_admission.feature"
 id = "scenario.snapshot-receive-admission"
-invariant = "On one and three nodes, outer and nested receive overlap returns 503, capacity release permits an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
+invariant = "On one and three nodes, a receive that overlaps a full bulk class waits for room instead of answering 503, capacity release lets an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
 invocation = "scenarios"
-scenario = "A snapshot receive refuses overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
+scenario = "A snapshot receive waits for overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Under scheduling stress: actual snapshot decode worker admission and completion beside refused receive memory, public backup and native checkpoint reads. Semaphore waits remain outside the detector; queued decode cancellation remains covered by Shuttle."
+coverage = "Under scheduling stress: actual snapshot decode worker admission and completion beside receive memory that waits for room, public backup and native checkpoint reads. Semaphore waits remain outside the detector; queued decode cancellation remains covered by Shuttle."
 examples = 4
 feature = "tests/features/cluster/snapshot_receive_admission.feature"
 id = "stress.snapshot-receive-admission"
-invariant = "On one and three nodes, outer and nested receive overlap returns 503, capacity release permits an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
+invariant = "On one and three nodes, a receive that overlaps a full bulk class waits for room instead of answering 503, capacity release lets an exact complete checkpoint transfer for both interleaved branches, and every receive charge returns."
 invocation = "stress-restore-scenarios"
-scenario = "A snapshot receive refuses overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
+scenario = "A snapshot receive waits for overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
