@@ -183,3 +183,39 @@ Feature: Verification of licensing decisions
       | cluster_size |
       | 1            |
       | 3            |
+
+  # An activation's decision is checked by the node that received it, before it is proposed; a
+  # refresh's decision is checked when the cluster applies it. Both refusals name the reason once.
+  Scenario Outline: A <tamper> decision is refused with its reason named once on <cluster_size> nodes
+    Given an HTTPS licensing test service is available
+    And a <cluster_size> node nervix cluster is started
+    And the next licensing response has "<tamper>" tampering
+    When these Plexus commands fail with "licensing decision was rejected: <reason>"
+      """
+      ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the last command error message contains "<reason>" exactly once
+    And node "node-1" eventually describes this license without a selected domain
+      """
+      mode: free
+      policy: free
+      """
+    And the licensing request outcome "rejected_by_cluster" was reported
+    When these Plexus commands are executed on the leader node
+      """
+      ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
+      """
+    Then the licensing service holds exactly one authenticated notification stream
+    Given the next licensing response has "<tamper>" tampering
+    When an explicit license refresh is refused by decision verification
+    Then the last command output contains
+      """
+      licensing decision was rejected: <reason>
+      """
+
+    Examples:
+      | cluster_size | tamper    | reason                                                    |
+      | 1            | signature | the decision envelope or signing authorization is invalid |
+      | 3            | signature | the decision envelope or signing authorization is invalid |
+      | 1            | service   | the decision names a different licensing service          |
+      | 3            | service   | the decision names a different licensing service          |

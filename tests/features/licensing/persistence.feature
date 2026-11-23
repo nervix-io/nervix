@@ -49,6 +49,7 @@ Feature: Durable signed licensing state
       mode: activated
       policy: degraded
       warning: decision_unverifiable
+      rejection: licensing decision was rejected: the decision envelope or signing authorization is invalid
       quota cluster.nodes: <cluster_size> of unlimited
       """
     When the licensing service becomes reachable
