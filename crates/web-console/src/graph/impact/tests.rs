@@ -1023,11 +1023,6 @@ fn every_role_is_attached_to_the_item_it_names() {
                 attribution: ops(&[1]),
             },
         ]),
-        lifecycle: CanonicalImpactSet::new([nervix_models::DomainLifecycleImpact {
-            domain: domain(),
-            action: DomainLifecycleAction::Stop,
-            attribution: ops(&[1]),
-        }]),
         resource_catalog: CanonicalImpactSet::new([ResourceCatalogImpact {
             resource: named("model_bundle"),
             action: ResourceCatalogAction::Create,
@@ -1078,12 +1073,6 @@ fn every_role_is_attached_to_the_item_it_names() {
             .domain
             .flushed_elsewhere
             .contains_key(&node(ModelKind::Emitter, "elsewhere"))
-    );
-    assert!(
-        graph
-            .domain
-            .lifecycle
-            .contains_key(&DomainLifecycleAction::Stop)
     );
     let bundle = ImpactItemId::Resource(named("model_bundle"));
     assert_eq!(graph.items[&bundle].presence, TopologyPresence::After);

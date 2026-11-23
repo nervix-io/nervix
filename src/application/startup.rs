@@ -96,6 +96,10 @@ impl ApplicationStartup {
                             usize::try_from(capacity.workers.get())
                                 .assured("resolved database workers fit this node"),
                         )
+                        .max_cached_files(Some(
+                            usize::try_from(capacity.max_open_files.get())
+                                .assured("validated open-file limits fit this platform"),
+                        ))
                         .open()
                         .change_context(NodeDatabaseOpenError::Open)?;
                     if db

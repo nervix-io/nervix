@@ -520,8 +520,10 @@ the same fingerprint as every other consensus and prerequisite shape.
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
 It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
-record retains, the typed `LicensingStop` refusal of a change that would run a domain, the
-transaction refusal of a `START` step under the gate, and the `stopped` admission refusal state.
+record retains, the typed `LicensingStop` refusal of a change that would run a domain, the start of
+a domain included, and the `stopped` admission refusal state. It fences the domain start a `START`
+command commits on its own, with the start revision its execution records, and transaction commit
+plans and step effects that carry no lifecycle step.
 
 The fingerprint also covers the `DURATION` type: the Models that declare it or write a duration
 literal, and the duration values branch keys, relay payloads, materialized records and other
@@ -542,9 +544,11 @@ The current fingerprint includes the conditional orphaned model-pause recovery c
 mutation lease, typed recovery reply and typed mutation-fence and restore-installation conflicts.
 It also covers the node record announcement: the `consensus.announce_node_record` request and the
 Raft command that commit a node's capacity claim, detected properties and tags as one record.
-That claim carries the size of the volume holding the node's database directory, and a parameter
-conflict can carry the typed refusal of a resource quota above an admitted node's volume or of a
-node-unavailability timeout that an admitted node's health-probe interval does not fit.
+That claim carries the size of the volume holding the node's database directory and the open-file
+limit of each of the node's databases, and a parameter conflict can carry the typed refusal of a
+resource quota above an admitted node's volume or of a node-unavailability timeout that an admitted
+node's health-probe interval does not fit. Its listener bounds carry the gRPC listener's HTTP/2
+windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup. The fingerprint also covers
 the opening of a client consumer stream with the largest delivery chunk its serving node announces.

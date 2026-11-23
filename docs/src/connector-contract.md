@@ -3711,6 +3711,22 @@ sequenceDiagram
   reply, so it adds no network wait and never delays the host's reconnect; a write the transport
   refuses is recovered and reported at `debug`.
   Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
+  The outgoing direction is declared too. The transport collects outgoing frames until it holds
+  more than `write_buffer_size` bytes (default 128 KiB). Its cap, `max_write_buffer_size`, is that
+  buffer plus one frame of the largest message the client sends: `max_message_size` or the 125
+  bytes of a control frame (RFC 6455 section 5.5), whichever is larger, plus 14 bytes, the header of
+  a masked frame with a 64-bit length (sections 5.2 and 5.3). The transport writes its buffer out
+  whenever it holds more than the write buffer, so while the peer reads, every frame within that
+  size fits. When the peer stops reading, the transport still buffers the automatic pong to each
+  ping it reads. At the cap, a pong waits as the one pending reply instead; section 5.5.3 lets an
+  endpoint answer only the latest ping. The client's own frames first flush what the transport
+  holds, within the budget that bounds them, so a buffer the pongs filled holds them back instead
+  of refusing them. Those frames are its ping, its Close on suspend and close, and the Close a
+  failure offers. The offered Close keeps its single poll, so a transport that cannot take what it
+  already holds takes no Close either. A `SEND JAQ` output is checked against `max_message_size`
+  before it is written. Only the client's signaling session carries that bound, and the endpoint's
+  carries none. A larger output fails the handshake with `SendTooLarge`, which names the program,
+  the output's size and the bound.
   Every failed read keeps the transport's typed cause beneath the host's read failure, and the
   connection classifies that cause before it is released. A frame the client refuses earns the
   peer the Close RFC 6455 section 7.1.7 asks for, offered exactly like the idle verdict's:
@@ -3726,13 +3742,14 @@ sequenceDiagram
   the protocol's `TIMEOUT` earns `1001` (going away), the idle verdict's status, since the peer
   left the handshake unfinished and the client leaves for another connection. A failure of the
   client's own handshake programs earns `1011` (internal error): a `SEND JAQ` program that does
-  not produce exactly one value, an output the wire format cannot encode, or a `CAPTURE` program
-  that fails or produces no object. RFC 6455 erratum 3227 extends `1011` from servers to clients. A handshake
+  not produce exactly one value, an output the wire format cannot encode, an output larger than
+  `max_message_size`, or a `CAPTURE` program that fails or produces no object. RFC 6455 erratum 3227 extends `1011` from servers to clients. A handshake
   whose own write failed or whose TCP ended can carry no frame and is released without one. A
   failed handshake still drops its attempt's handoff, so frames it accepted never reach a read.
   A peer's Close during signaling is a distinct typed failure carrying its status and reason, or
   the explicit absence of a status. Before returning that resume failure, the connection flushes
-  the transport's queued reply within the existing one-second control-frame budget, preserving
+  what the transport holds and then its queued reply within the existing one-second control-frame
+  budget, preserving
   the peer's exact Close rather than sending a new failure status. Cancellation drops that exact
   transport. An ended stream queues no reply.
   The host reconnects on its policy. Suspension closes the connection while retaining successful

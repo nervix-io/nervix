@@ -141,7 +141,14 @@ credits another 1/16, so a node's budgets come to a little over half of its memo
 
 These are ceilings that admission charges work against, not memory allocated at startup. Graph
 state, engines and thread stacks need memory beside them; the 8 MiB `--runtime-thread-stack-size`
-of each runtime thread, for example, is not part of any pool.
+of each runtime thread, for example, is not part of any pool. Neither are the public listeners'
+transport buffers, which their [listener bounds](node-settings.md#listener-bounds) cap instead:
+gRPC clients hold at most `--listener-max-connections` times `--grpc-connection-window-bytes` of
+input on a node, 1 GiB at the defaults. Nor are the databases' memtables, the buffers that collect
+new writes before they reach disk. Each of the 15 keyspaces, 11 in the node database and 4 in the
+consensus database, fills one up to 64 MiB, and a keyspace whose writes outpace its disk writes
+keeps up to four full ones waiting before its writers pause. Nervix does not limit them, so a
+write-heavy node leaves headroom for them beside its checked total.
 
 ## What A Node Needs To Start
 

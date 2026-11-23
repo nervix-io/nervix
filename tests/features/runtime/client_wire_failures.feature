@@ -326,11 +326,64 @@ Feature: Client wire failure regressions
       """
 
     Examples:
-      | cluster_size | append_kind  | append                             |
-      | 1            | resource     | CREATE RESOURCE replayed_resource; |
-      | 1            | domain start | START;                             |
-      | 3            | resource     | CREATE RESOURCE replayed_resource; |
-      | 3            | domain start | START;                             |
+      | cluster_size | append_kind | append                             |
+      | 1            | resource    | CREATE RESOURCE replayed_resource; |
+      | 3            | resource    | CREATE RESOURCE replayed_resource; |
+
+  @client_wire_duplicate_append @slots_2
+  Scenario Outline: Replaying a START sent to a transaction refuses it again and appends nothing on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When these Plexus commands are executed on the active session
+      """
+      BEGIN;
+      """
+    And this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "transaction_id"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When the active session sends this Plexus command request with execution reference "append-{{test_id}}" without reading its response
+      """
+      START;
+      """
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the command response delivery pause on node "{{leader}}" is released
+    And a new session attaches to transaction "{{transaction_id}}" and executes this Plexus command with execution reference "append-{{test_id}}" at transaction position 0
+      """
+      START;
+      """
+    Then the last command error contains
+      """
+      START cannot be queued in a transaction; START and STOP run on their own, after COMMIT
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      id={{transaction_id}}
+      """
+    And the last command output contains
+      """
+      pending=0
+      """
+    When these Plexus commands are executed on the active session
+      """
+      REVERT;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @client_wire_duplicate_append @slots_2
   Scenario: A replay session that reaches a former leader attaches the transaction where the redirect leads
@@ -398,7 +451,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE leader_batch_resource;
-      START;
+      CREATE SCHEMA leader_batch_record (value I64);
       COMMIT;
       """
     Then the command response delivery pause on node "{{old_leader}}" is reached
@@ -410,7 +463,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE leader_batch_resource;
-      START;
+      CREATE SCHEMA leader_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded
@@ -441,7 +494,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE finalized_batch_resource;
-      START;
+      CREATE SCHEMA finalized_batch_record (value I64);
       COMMIT;
       """
     Then the command finalization pause on node "{{old_leader}}" is reached
@@ -461,7 +514,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE finalized_batch_resource;
-      START;
+      CREATE SCHEMA finalized_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded
@@ -469,7 +522,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE finalized_batch_resource;
-      START;
+      CREATE SCHEMA finalized_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded
@@ -584,7 +637,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE restart_batch_resource;
-      START;
+      CREATE SCHEMA restart_batch_record (value I64);
       COMMIT;
       """
     Then the command response delivery pause on node "{{leader}}" is reached
@@ -595,7 +648,7 @@ Feature: Client wire failure regressions
       """
       BEGIN;
       CREATE RESOURCE restart_batch_resource;
-      START;
+      CREATE SCHEMA restart_batch_record (value I64);
       COMMIT;
       """
     Then the last command request succeeded

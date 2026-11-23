@@ -1,6 +1,7 @@
 //! Real-transport checks of how the outbound connection ends when its signaling handshake fails:
-//! the Close each failure earns its peer, the resume failure and its typed causes, and the frames
-//! the failed attempt accepted.
+//! the Close each failure earns its peer, the messages the client wrote before it, the resume
+//! failure and its typed causes, and the frames the failed attempt accepted; and the largest
+//! signaling message the client still writes.
 //!
 //! Layer: test harness.
 //! - **Owns.** Playing the peer of a failing handshake through a local protocol peer, and reading
@@ -14,6 +15,7 @@
     nervix::layer(harness, reason = "owns the test boundary declared above")
 )]
 
+use futures_util::SinkExt as _;
 use nervix_models::{
     ModelName, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
     SignalingWireFormat,
@@ -83,11 +85,22 @@ enum UnreadEnding {
     WithoutClose,
 }
 
+/// What the client wrote on a connection whose peer stopped reading it.
+struct UnreadConnection {
+    /// The handshake messages before the connection's ending.
+    messages: usize,
+    ending: UnreadEnding,
+}
+
+async fn unread_ending(peer: WebSocketStream<TcpStream>) -> UnreadEnding {
+    unread_connection(peer).await.ending
+}
+
 /// Reads everything TCP delivered to a peer that stopped reading its connection, once the client
 /// has released it, then reads it again through the WebSocket driver: the client's handshake
-/// frames, then how the connection ended. Nothing is written back. The calling test bounds the
+/// messages, then how the connection ended. Nothing is written back. The calling test bounds the
 /// wait for the client's release.
-async fn unread_ending(mut peer: WebSocketStream<TcpStream>) -> UnreadEnding {
+async fn unread_connection(mut peer: WebSocketStream<TcpStream>) -> UnreadConnection {
     let mut delivered = Vec::new();
     peer.get_mut()
         .read_to_end(&mut delivered)
@@ -99,19 +112,24 @@ async fn unread_ending(mut peer: WebSocketStream<TcpStream>) -> UnreadEnding {
         None,
     )
     .await;
+    let mut messages = 0_usize;
     loop {
         nervix_primitives::task::consume_budget().await;
-        match replay.next().await {
-            Some(Ok(Message::Close(frame))) => return UnreadEnding::Closed(frame),
+        let ending = match replay.next().await {
+            Some(Ok(Message::Close(frame))) => UnreadEnding::Closed(frame),
             // The subscription the client sent before its handshake failed.
-            Some(Ok(Message::Text(_))) => {}
+            Some(Ok(Message::Text(_))) => {
+                messages += 1;
+                continue;
+            }
             Some(Err(WebsocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => {
-                return UnreadEnding::WithoutClose;
+                UnreadEnding::WithoutClose
             }
             other => {
                 panic!("a failed handshake carries its subscription and a Close, not {other:?}")
             }
-        }
+        };
+        return UnreadConnection { messages, ending };
     }
 }
 
@@ -134,6 +152,9 @@ struct FailedHandshake {
     answers: Vec<Message>,
     /// Whether the resume failure keeps this typed handshake cause.
     cause: fn(&WebsocketSignalingError) -> bool,
+    /// The messages the client writes before its Close: its subscription, unless a failure of its
+    /// own program comes first.
+    messages: usize,
     /// The status of the Close the peer reads before TCP ends.
     status: CloseCode,
 }
@@ -156,6 +177,7 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
                         if matcher == ".error" && reason == "subscription refused"
                 )
             },
+            messages: 1,
             status: CloseCode::Policy,
         },
         FailedHandshake {
@@ -171,17 +193,19 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
                         if unsatisfied == &[".ready".to_string()]
                 )
             },
+            messages: 1,
             status: CloseCode::Away,
         },
         FailedHandshake {
             failure: "a message beyond max_message_size",
+            // The 19-byte subscription fits the limit, and the peer's 32-byte answer does not.
             config: vec![ClientConfigEntry {
                 key: "max_message_size".to_string(),
-                value: "4".to_string(),
+                value: "19".to_string(),
             }],
             format: SignalingWireFormat::Json,
             on_connect: subscribing(subscription, &[], None, "5s"),
-            answers: vec![Message::Binary(vec![0; 8])],
+            answers: vec![Message::Binary(vec![0; 32])],
             cause: |cause| {
                 let WebsocketSignalingError::Receive(failure) = cause else {
                     return false;
@@ -189,11 +213,12 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
                 matches!(
                     **failure,
                     WebsocketError::Capacity(CapacityError::MessageTooLong {
-                        size: 8,
-                        max_size: 4,
+                        size: 32,
+                        max_size: 19,
                     })
                 )
             },
+            messages: 1,
             status: CloseCode::Size,
         },
         FailedHandshake {
@@ -211,6 +236,7 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
                     WebsocketError::Protocol(ProtocolError::NonZeroReservedBits)
                 )
             },
+            messages: 1,
             status: CloseCode::Protocol,
         },
         FailedHandshake {
@@ -229,6 +255,7 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
                 };
                 matches!(**failure, WebsocketError::Utf8)
             },
+            messages: 1,
             status: CloseCode::Invalid,
         },
         FailedHandshake {
@@ -243,6 +270,7 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
                     WebsocketSignalingError::Capture { capture, .. } if capture == ".session"
                 )
             },
+            messages: 1,
             status: CloseCode::Error,
         },
         FailedHandshake {
@@ -252,6 +280,7 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
             on_connect: subscribing("empty", &[], None, "5s"),
             answers: Vec::new(),
             cause: |cause| matches!(cause, WebsocketSignalingError::SendProgram { index: 1, .. }),
+            messages: 0,
             status: CloseCode::Error,
         },
         FailedHandshake {
@@ -261,6 +290,29 @@ fn failed_handshakes() -> Vec<FailedHandshake> {
             on_connect: subscribing(subscription, &[], None, "5s"),
             answers: Vec::new(),
             cause: |cause| matches!(cause, WebsocketSignalingError::SendEncode { index: 1, .. }),
+            messages: 0,
+            status: CloseCode::Error,
+        },
+        FailedHandshake {
+            failure: "a SEND JAQ output above max_message_size",
+            config: vec![ClientConfigEntry {
+                key: "max_message_size".to_string(),
+                value: "18".to_string(),
+            }],
+            format: SignalingWireFormat::Json,
+            on_connect: subscribing(subscription, &[], None, "5s"),
+            answers: Vec::new(),
+            cause: |cause| {
+                matches!(
+                    cause,
+                    WebsocketSignalingError::SendTooLarge {
+                        index: 1,
+                        bytes: 19,
+                        maximum: 18,
+                    }
+                )
+            },
+            messages: 0,
             status: CloseCode::Error,
         },
     ]
@@ -282,9 +334,9 @@ async fn a_failed_handshake_reads_the_close_its_failure_earns_before_the_connect
                     .await
                     .assured("the peer's transport writes its answer as given");
             }
-            unread_ending(peer).await
+            unread_connection(peer).await
         };
-        let (resumed, ending) = timeout(Duration::from_secs(60), async {
+        let (resumed, connection) = timeout(Duration::from_secs(60), async {
             tokio::join!(ingestor.resume(), peer)
         })
         .await
@@ -292,6 +344,12 @@ async fn a_failed_handshake_reads_the_close_its_failure_earns_before_the_connect
         let Err(report) = resumed else {
             panic!("{} fails the handshake", case.failure);
         };
+        assert_eq!(
+            connection.messages, case.messages,
+            "the messages {} lets the client write before its Close",
+            case.failure
+        );
+        let ending = connection.ending;
         assert!(
             matches!(report.current_context(), IngestorError::Resume { .. }),
             "{}: {report:#}",
@@ -554,6 +612,48 @@ async fn a_failed_handshake_never_waits_for_a_transport_that_cannot_take_its_clo
     assert!(ingestor.needs_resume());
 }
 
+#[nervix_primitives::test]
+async fn a_signaling_message_of_exactly_max_message_size_is_written() {
+    let config = vec![ClientConfigEntry {
+        key: "max_message_size".to_string(),
+        value: "19".to_string(),
+    }];
+    let protocol = compiled(
+        SignalingWireFormat::Json,
+        subscribing("{op: \"subscribe\"}", &[], None, "5s"),
+    );
+    let (mut ingestor, listener) = tests::signaling_ingestor(config, protocol).await;
+    let answering = async {
+        let (stream, _) = listener.accept().await.assured("the ingestor connects");
+        let mut peer = tokio_tungstenite::accept_async(stream)
+            .await
+            .assured("the upgrade succeeds");
+        let subscription = peer
+            .next()
+            .await
+            .assured("the client sends its subscription")
+            .assured("the subscription is a valid frame");
+        // Exactly the limit: JSON writes a space after the colon.
+        assert_eq!(
+            subscription,
+            Message::Text("{\"op\": \"subscribe\"}".to_string())
+        );
+        peer.send(Message::Text("{\"ready\":true}".to_string()))
+            .await
+            .assured("the peer answers the subscription");
+        peer
+    };
+    let (resumed, _answering_peer) = timeout(Duration::from_secs(60), async {
+        tokio::join!(ingestor.resume(), answering)
+    })
+    .await
+    .assured("the handshake completes within the budget");
+    assert_eq!(
+        resumed.assured("a message within max_message_size completes the handshake"),
+        IngestorResume::Ready
+    );
+}
+
 #[test]
 fn every_handshake_failure_names_the_close_it_earns() {
     let close_bearing = [
@@ -604,6 +704,14 @@ fn every_handshake_failure_names_the_close_it_earns() {
                 index: 1,
                 format: "RAW",
                 reason: "RAW frames carry strings".to_string(),
+            },
+            CloseCode::Error,
+        ),
+        (
+            WebsocketSignalingError::SendTooLarge {
+                index: 1,
+                bytes: 19,
+                maximum: 18,
             },
             CloseCode::Error,
         ),

@@ -8,10 +8,13 @@
     nervix_lint,
     nervix::layer(edge, reason = "owns database capacity arguments")
 )]
+use std::num::NonZeroU64;
+
 use error_stack::Report;
 use nervix_models::{
-    ConsensusDatabase, DatabaseCacheBytes, DatabaseJournalBytes, DatabaseSettingValues,
-    DatabaseSettings, DatabaseSettingsError, DatabaseWorkers, NodeDatabase, SettingDefinition as _,
+    ConsensusDatabase, DatabaseCacheBytes, DatabaseJournalBytes, DatabaseMaxOpenFiles,
+    DatabaseSettingValues, DatabaseSettings, DatabaseSettingsError, DatabaseWorkers, NodeDatabase,
+    SettingDefinition as _,
 };
 
 use super::settings::CommandLine;
@@ -25,12 +28,16 @@ pub struct DatabaseArgs {
     pub journal_bytes: Option<HumanBytes>,
     #[arg(long = DatabaseWorkers::<NodeDatabase>::NAME, env = "NERVIX_DATABASE_WORKERS", help = super::settings::capability_help::<DatabaseWorkers::<NodeDatabase>>("Workers", "derived"))]
     pub workers: Option<usize>,
+    #[arg(long = DatabaseMaxOpenFiles::<NodeDatabase>::NAME, env = "NERVIX_DATABASE_MAX_OPEN_FILES", help = super::settings::capability_help::<DatabaseMaxOpenFiles::<NodeDatabase>>("Table files kept open", DatabaseMaxOpenFiles::<NodeDatabase>::default_value(&())))]
+    pub max_open_files: Option<NonZeroU64>,
     #[arg(long = DatabaseCacheBytes::<ConsensusDatabase>::NAME, env = "NERVIX_RAFT_DATABASE_CACHE_BYTES", help = super::settings::capability_help::<DatabaseCacheBytes::<ConsensusDatabase>>("Raft cache bytes", HumanBytes(DatabaseCacheBytes::<ConsensusDatabase>::default_value(&()))))]
     pub raft_cache_bytes: Option<HumanBytes>,
     #[arg(long = DatabaseJournalBytes::<ConsensusDatabase>::NAME, env = "NERVIX_RAFT_DATABASE_JOURNAL_BYTES", help = super::settings::capability_help::<DatabaseJournalBytes::<ConsensusDatabase>>("Raft journal bytes", HumanBytes(DatabaseJournalBytes::<ConsensusDatabase>::default_value(&()))))]
     pub raft_journal_bytes: Option<HumanBytes>,
     #[arg(long = DatabaseWorkers::<ConsensusDatabase>::NAME, env = "NERVIX_RAFT_DATABASE_WORKERS", help = super::settings::capability_help::<DatabaseWorkers::<ConsensusDatabase>>("Raft workers", "derived"))]
     pub raft_workers: Option<usize>,
+    #[arg(long = DatabaseMaxOpenFiles::<ConsensusDatabase>::NAME, env = "NERVIX_RAFT_DATABASE_MAX_OPEN_FILES", help = super::settings::capability_help::<DatabaseMaxOpenFiles::<ConsensusDatabase>>("Raft table files kept open", DatabaseMaxOpenFiles::<ConsensusDatabase>::default_value(&())))]
+    pub raft_max_open_files: Option<NonZeroU64>,
 }
 impl DatabaseArgs {
     pub(super) fn node(
@@ -40,6 +47,7 @@ impl DatabaseArgs {
             cache_bytes: self.cache_bytes.map(|v| v.0),
             journal_bytes: self.journal_bytes.map(|v| v.0),
             workers: self.workers,
+            max_open_files: self.max_open_files,
         })
     }
     pub(super) fn consensus(
@@ -49,6 +57,7 @@ impl DatabaseArgs {
             cache_bytes: self.raft_cache_bytes.map(|v| v.0),
             journal_bytes: self.raft_journal_bytes.map(|v| v.0),
             workers: self.raft_workers,
+            max_open_files: self.raft_max_open_files,
         })
     }
     pub(super) fn from_settings(
@@ -59,9 +68,11 @@ impl DatabaseArgs {
             cache_bytes: Some(HumanBytes(*node.cache_bytes.value())),
             journal_bytes: Some(HumanBytes(*node.journal_bytes.value())),
             workers: *node.workers.value(),
+            max_open_files: Some(*node.max_open_files.value()),
             raft_cache_bytes: Some(HumanBytes(*consensus.cache_bytes.value())),
             raft_journal_bytes: Some(HumanBytes(*consensus.journal_bytes.value())),
             raft_workers: *consensus.workers.value(),
+            raft_max_open_files: Some(*consensus.max_open_files.value()),
         }
     }
     pub(super) fn render(&self, line: &mut CommandLine) {
@@ -71,6 +82,10 @@ impl DatabaseArgs {
             self.journal_bytes,
         );
         line.optional(DatabaseWorkers::<NodeDatabase>::NAME, self.workers);
+        line.optional(
+            DatabaseMaxOpenFiles::<NodeDatabase>::NAME,
+            self.max_open_files,
+        );
         line.optional(
             DatabaseCacheBytes::<ConsensusDatabase>::NAME,
             self.raft_cache_bytes,
@@ -82,6 +97,10 @@ impl DatabaseArgs {
         line.optional(
             DatabaseWorkers::<ConsensusDatabase>::NAME,
             self.raft_workers,
+        );
+        line.optional(
+            DatabaseMaxOpenFiles::<ConsensusDatabase>::NAME,
+            self.raft_max_open_files,
         );
     }
 }

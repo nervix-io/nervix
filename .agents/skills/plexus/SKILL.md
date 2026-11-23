@@ -396,7 +396,8 @@ configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`
 administration outside the transaction. Plan restore capacity for independently admitted archive
 metadata and streamed checkpoint I/O, following the backup guidance in `references/configuring-nervix.md`.
 Size node memory for every execution pool, including active snapshots and optional retained materialized-source reads;
-the default startup requirement is 2,787 MiB, including both database caches. Read [Node Settings](https://docs.nervix.io/node-settings.html)
+the default startup requirement is 2,787 MiB, including both database caches but not their memtables, which need
+headroom of their own ([Capacity Planning](https://docs.nervix.io/capacity-planning.html)). Read [Node Settings](https://docs.nervix.io/node-settings.html)
 for the complete prerequisite checks.
 For Nervix transport, DNS, database or consensus sizing, read
 [Node Settings → Transport, Resolver And Database Capacities](../../../docs/src/node-settings.md#transport-resolver-and-database-capacities).
@@ -1072,7 +1073,8 @@ Use its class and live-change rules before suggesting server options or an `ALTE
 statement. Related remote acknowledgement timings must form one valid committed group.
 Preserve the distinction between omitted disk-quota defaults and explicit capacity requests.
 
-For Nervix public listener connection, HTTP body, WebSocket frame, TLS/header/idle and gRPC
-keepalive limits, read [Node Settings → Listener Bounds](../../../docs/src/node-settings.md#listener-bounds)
+For Nervix public listener connection, HTTP body and header-count, WebSocket frame and write
+buffer, TLS/header/idle, and gRPC keepalive, receive window, send buffer and reset limits, read
+[Node Settings → Listener Bounds](../../../docs/src/node-settings.md#listener-bounds)
 and the HTTP endpoint section of Ingestors. Consult the committed per-node capability claims
 before suggesting local tuning or diagnosing a 413, 408, 431 or 503 response.

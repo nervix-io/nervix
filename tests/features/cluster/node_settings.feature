@@ -37,3 +37,18 @@ Feature: Node settings
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: A node given an interconnect connection receive window below the 65,535 bytes HTTP/2 opens every connection with refuses to start on a cluster of <cluster_size>
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-<cluster_size>" is stopped
+    And node-<cluster_size> starts with interconnect-connection-receive-window = 16KiB
+    When node "node-<cluster_size>" attempts to start
+    Then node "node-<cluster_size>" refused to start because "interconnect-connection-receive-window (16KiB) must be from 65535 through 2147483647 bytes"
+    Given node-<cluster_size> starts with interconnect-connection-receive-window = 65535B
+    When node "node-<cluster_size>" is started
+    Then node "node-<cluster_size>" eventually observes a stable leader
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

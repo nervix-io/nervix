@@ -63,6 +63,7 @@ Each public listener enforces its own connection ceiling, independently of place
 | --- | --- | --- |
 | `--listener-max-connections` | 1,024 | Each public TCP listener, including upgraded WebSockets and TLS handshakes |
 | `--listener-header-bytes` | 16 KiB | HTTP/1 request head and chunked trailers |
+| `--listener-max-headers` | 100, or fewer when `--listener-header-bytes` holds fewer header lines | Headers in one HTTP/1 request head or chunked trailer section |
 | `--listener-buffer-bytes` | 408 KiB | HTTP/1 read buffer, and the largest body copy made on the connection; minimum 8 KiB |
 | `--listener-header-timeout` | 30 s | Complete HTTP/1 request head |
 | `--listener-tls-timeout` | 10 s | HTTPS, console TLS and gRPC TLS handshake |
@@ -75,10 +76,16 @@ Each public listener enforces its own connection ceiling, independently of place
 | `--http-refusal-drain-timeout` | 5 s | Transport drain after a completed HTTP input refusal |
 | `--websocket-message-bytes` | 64 MiB | Ingest endpoint WebSocket message |
 | `--websocket-frame-bytes` | 16 MiB | Ingest endpoint WebSocket frame |
+| `--websocket-write-buffer-bytes` | 128 KiB | Outgoing bytes an endpoint or console WebSocket collects before writing |
 | `--grpc-header-bytes` | 16 KiB | HTTP/2 header list |
 | `--grpc-concurrency` | 128 | Concurrent request handlers per gRPC connection |
 | `--grpc-request-timeout` | 120 s | gRPC handler response deadline; an established streaming response keeps its lifetime |
 | `--grpc-max-streams` | 256 | HTTP/2 streams per gRPC connection |
+| `--grpc-stream-window-bytes` | 1 MiB | HTTP/2 receive window of one gRPC stream |
+| `--grpc-connection-window-bytes` | 1 MiB | HTTP/2 receive window of one gRPC connection |
+| `--grpc-send-buffer-bytes` | 400 KiB | Response bytes one gRPC stream queues before it waits |
+| `--grpc-max-pending-reset-streams` | 20 | Client-reset gRPC streams that may wait unaccepted |
+| `--grpc-max-error-reset-streams` | 1,024 | gRPC streams the listener resets for a client's protocol errors |
 | `--grpc-keepalive-interval` | 30 s | HTTP/2 server ping interval |
 | `--grpc-keepalive-timeout` | 20 s | HTTP/2 ping acknowledgement budget |
 | `--listener-tcp-keepalive-time` | 60 s | Kernel TCP keepalive idle time |
@@ -91,8 +98,40 @@ are positive and must fit their native protocol/admission representation. Deadli
 and representable by the monotonic clock. Kernel keepalive durations are whole seconds from 1
 through 32,767; the probe count is from 1 through 127, matching the native socket-option ranges.
 The HTTP/1 header default preserves the transport's 16 KiB trailer ceiling. Request heads also
-fit the configured read-buffer capacity. The shared HTTP/1 parser refuses a request head with more
-than 100 headers, including a WebSocket upgrade request.
+fit the configured read-buffer capacity.
+
+The shared HTTP/1 parser refuses a request head with more than `--listener-max-headers` headers
+with 431, including a WebSocket upgrade request; a chunked trailer section has the same count. The
+parser reserves one slot per allowed header for every request it reads, so the count is at most
+the header lines `--listener-header-bytes` holds at three bytes each, a one-byte name, its colon and
+a line feed, the shortest line RFC 9112 allows. A larger value refuses startup. The default is 100,
+or that number of lines when it is smaller: a request with more headers already exceeds the byte
+bound, so the default refuses nothing the byte bound admits.
+
+The gRPC listener sets every HTTP/2 limit itself rather than inheriting a library default. Its
+receive windows bound what clients send ahead of the listener's reading: one stream at most
+`--grpc-stream-window-bytes`, one connection across all of its streams at most
+`--grpc-connection-window-bytes`. Both are at most 2,147,483,647 bytes, the largest window HTTP/2
+can advertise, and the connection window is at least 65,535 bytes, the window RFC 9113 gives every
+new connection, which a receiver can only raise. Clients of the gRPC listener therefore hold at
+most `--listener-max-connections` connection windows of input on a node, 1 GiB at the defaults. Each
+stream queues at most `--grpc-send-buffer-bytes` of responses before it waits for its client, at
+most 4,294,967,295 bytes, so one connection queues at most `--grpc-max-streams` times that. These
+bounds are declared rather than charged to the intake pool, and the startup memory check does not
+add them. The windows never adapt to measured bandwidth, which would grow them past their declared
+size. The listener accepts HTTP/2 frames of up to 16 KiB, the frame every HTTP/2 peer must accept;
+the windows, not the frame size, bound what a connection buffers. HTTP/2's rapid-reset protection
+ends a connection with `ENHANCE_YOUR_CALM` when its client resets more than
+`--grpc-max-pending-reset-streams` streams the listener has not accepted yet, or makes the listener
+reset more than `--grpc-max-error-reset-streams` streams for its protocol errors.
+
+An endpoint or console WebSocket collects up to `--websocket-write-buffer-bytes` of outgoing frames
+before writing them to its connection. A peer that stops reading holds at most that buffer, one
+more message and its 14-byte frame header: an endpoint socket's messages are at most
+`--websocket-message-bytes`, a console socket's one session frame. The socket refuses a message
+beyond that, and startup refuses a write buffer whose capacity does not fit the address space.
+Incoming frames are read in fixed 4 KiB chunks into storage that grows only to the frame being
+assembled, which the frame and message limits cap.
 The startup preflight requires the intake pool to hold two body limits plus the declared initial
 read scratch and collection metadata. An explicit inconsistent pair refuses startup before stores
 or listeners open.
@@ -230,7 +269,7 @@ without adding a prerequisite or changing graph acceptance.
 | `--interconnect-incoming-queue-capacity` | 1,024 | General request and relay admission capacity |
 | `--interconnect-request-quota` | Derived | Independent ordinary and append reserves: two requests per declared peer, bounded by the incoming queue |
 | `--interconnect-stream-receive-window` | 64 KiB | Advertised HTTP/2 receive credit per non-bulk stream |
-| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection |
+| `--interconnect-connection-receive-window` | 256 KiB | Advertised HTTP/2 receive credit per non-bulk connection, at least 65,535 bytes |
 | `--interconnect-connection-setup-timeout` | 5s | One DNS, TCP, TLS and binding budget |
 | `--interconnect-request-timeout` | 10s | Transport request budget and the base of typed RPC deadlines |
 | `--interconnect-progress-timeout` | 5s | Time without transfer progress |
@@ -246,13 +285,34 @@ without adding a prerequisite or changing graph acceptance.
 | `--database-cache-bytes` | 32 MiB | Node database cache |
 | `--database-journal-bytes` | 512 MiB | Node database journal capacity, at least 64 MiB |
 | `--database-workers` | Derived | Available CPU count capped at four; one when unknown |
+| `--database-max-open-files` | Derived | Table files the node database keeps open, at least 10: 900, or 400 on Windows and 150 on macOS |
 | `--raft-database-cache-bytes` | 32 MiB | Dedicated consensus database cache |
 | `--raft-database-journal-bytes` | 512 MiB | Consensus database journal capacity, at least 64 MiB |
 | `--raft-database-workers` | Derived | Same CPU derivation, independently overridable |
+| `--raft-database-max-open-files` | Derived | Same platform derivation, independently overridable |
 
 Counts, receive windows and deadlines must be positive and fit their engines. HTTP/2 windows
-are at most 2³¹−1 bytes. The options are validated before opening stores or binding listeners.
+are at most 2³¹−1 bytes. The connection receive window is also at least 65,535 bytes, the window
+RFC 9113 gives every new HTTP/2 connection. A receiver can raise a connection's window but never
+lower it, so a smaller value would claim a bound the connection does not have, and the node refuses
+to start with one. The node raises each new connection from 65,535 bytes to the declared window
+with a `WINDOW_UPDATE` frame, which h2, its HTTP/2 implementation, sends once the raise is at least
+half the current window. A declared window of 98,302 bytes or more is therefore advertised as soon
+as the connection opens, and a smaller one is reached as the node reads its first input; either way
+a peer never has more than the declared window unread. The options are validated before opening
+stores or binding listeners.
 Database cache capacities count alongside executor budgets in the startup memory check.
+
+Each database keeps at most its `max-open-files` table files open. When it needs another, it closes
+the one it used least recently, and a later read opens that file again. Every keyspace of both
+databases writes through a fixed 64 MiB memtable, the in-memory buffer that collects new writes. A
+memtable starts empty and grows with each write until it reaches 64 MiB; the engine then seals it,
+writes it to disk as a table in the background and starts an empty one. This size is not a
+setting: the engine records it when it creates a keyspace and reuses the recorded size on every
+later open, so a different value would reach only new databases. The engine sets no total
+memtable cap, and Nervix does not limit the databases at runtime. Memtable memory is therefore
+outside the startup memory check; [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start)
+describes the headroom it needs.
 
 Connection capacity derives from both directions of every pool: twelve connections per declared
 peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
@@ -709,9 +769,9 @@ While the gate is closed:
   that holds a domain paused when the gate closes still completes, and its pause ends in the
   licensing stop's request instead of a resume. A domain another operation holds begins its
   licensing stop once that operation releases it, still forced at the same instant.
-- Planning refuses `START`, a transactional `START` and `RESTORE ... RESUME` with
-  `licensing stopped processing`. Consensus refuses every other change that would make a domain
-  run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
+- `START` and `RESTORE ... RESUME` are refused with `licensing stopped processing`, and consensus
+  checks the gate again in the write that starts a domain. Consensus refuses every other change
+  that would make a domain run: resuming a paused domain and writing a domain record that runs. A restore whose gate closed
   while it applied leaves its domains stopped with the licensing cause, and its report shows them
   stopped by licensing.
 - Sessions, `DESCRIBE`, `SHOW`, `BACKUP`, `ALTER`, `UPLOAD RESOURCE`, `CREATE USER` and the
@@ -942,7 +1002,8 @@ It refuses to start at the first check that fails, exiting with status `1` and
    against the CPU claim and the executor's workers, and the consensus append window against the
    largest replication batch. Every memory pool counts once, including independent active state
    reads and retained state-read cache. Their total plus producer and consumer node credit and the
-   configured node and consensus database caches must fit known memory.
+   configured node and consensus database caches must fit known memory. The databases' memtables
+   are not part of this total.
    A failed detector leaves capacity unknown and uses the declared capacity-independent defaults.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each

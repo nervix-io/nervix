@@ -787,7 +787,7 @@ generation, and only then clears the domain's in-memory state handles; [Generati
 Storage](#generation-storage) describes the sequence.
 
 The installation gate is a replicated record per restored domain, from the step that creates it.
-While it is closed, consensus refuses `START`, direct or transactional, and every replicated
+While it is closed, consensus refuses `START` and every replicated
 domain or schedule change that would make the domain anything but stopped, so the domain cannot run
 on any node until every node published its complete set. It survives failure, lease
 release and node restart. Recording the apply-models step together with the installed authority

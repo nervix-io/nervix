@@ -2,9 +2,10 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Cancelled openings, replacement payload delivery, established-reset assertions,
-//!   scripted subprotocol answers, ping reports ordered around a held signaling handshake, and how
-//!   a silent, oversized-message or failed-handshake peer reads the ending of the connection it
-//!   never read and of its replacement.
+//!   scripted subprotocol answers, ping reports ordered around a held signaling handshake, how a
+//!   silent, oversized-message or failed-handshake peer reads the ending of the connection it never
+//!   read and of its replacement, and what a peer that never reads reports the client wrote on each
+//!   connection.
 //! - **Depends on.** The shared WebSocket peer, execution primitives and the public protocol.
 //! - **Must not know.** Scenario state, connector internals or runtime ownership handles.
 
@@ -570,6 +571,73 @@ async fn a_failed_handshake_peer_reports_the_failed_connection_ending_before_the
                     .assured("the peer ends once the client closes its replacement");
             }
         }
+    })
+    .await
+    .assured("the fixture qualifies within its existing budget");
+}
+
+/// Reads the two reports a peer that never reads makes for one connection the client released.
+async fn replayed_connection(peer: &mut WebsocketPeer) -> crate::websocket_peer::UnreadConnection {
+    assert!(matches!(peer.next().await, PeerEvent::Connected(_)));
+    let PeerEvent::UnreadConnectionReplayed(connection) = peer.next().await else {
+        panic!("the peer reports what the client wrote once the client released the connection");
+    };
+    connection
+}
+
+#[nervix_primitives::test]
+async fn an_unread_connections_peer_reports_what_the_client_wrote_on_every_connection() {
+    timeout(PEER_WAIT, async {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the fixture binds");
+        let address = listener.local_addr().assured("the listener has an address");
+        let mut peer = WebsocketPeer::unread_connections(listener);
+        let internal_error = CloseFrame {
+            code: CloseCode::Error,
+            reason: "".into(),
+        };
+
+        // A message, then the Close that ends the connection.
+        let mut subscribed = open_silent(address).await;
+        subscribed
+            .send(Message::Text("{\"op\":\"subscribe\"}".to_string()))
+            .await
+            .assured("the client sends its subscription");
+        subscribed
+            .close(Some(internal_error.clone()))
+            .await
+            .assured("the client sends its Close");
+        drop(subscribed);
+        let connection = replayed_connection(&mut peer).await;
+        assert_eq!(connection.messages, 1);
+        let UnreadEnding::Closed(Some(frame)) = connection.ending else {
+            panic!("the peer reads the client's Close behind its subscription");
+        };
+        assert_eq!(frame.code, CloseCode::Error);
+
+        // The peer keeps accepting: a Close with no message before it.
+        let mut closed = open_silent(address).await;
+        closed
+            .close(Some(internal_error))
+            .await
+            .assured("the client sends its Close");
+        drop(closed);
+        let connection = replayed_connection(&mut peer).await;
+        assert_eq!(connection.messages, 0);
+        let UnreadEnding::Closed(Some(frame)) = connection.ending else {
+            panic!("the peer reads the client's Close");
+        };
+        assert_eq!(frame.code, CloseCode::Error);
+
+        // TCP ends with neither a message nor a Close.
+        drop(open_silent(address).await);
+        let connection = replayed_connection(&mut peer).await;
+        assert_eq!(connection.messages, 0);
+        assert!(
+            matches!(connection.ending, UnreadEnding::WithoutClose),
+            "a connection ended without a Close is reported as such"
+        );
     })
     .await
     .assured("the fixture qualifies within its existing budget");

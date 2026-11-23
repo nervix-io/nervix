@@ -164,6 +164,7 @@ mod configured_choices;
 mod describe_output;
 mod domain_clock;
 mod domain_lifecycle;
+mod domain_start;
 mod domain_stop;
 mod entity_gate;
 mod entity_labels;

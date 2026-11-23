@@ -849,40 +849,77 @@ Feature: Plexus transactions
       );
       """
 
-  @command_completion
-  Scenario: Transactional START and STOP remain applying through activation
-    Given a 1 node nervix cluster is started
+  # START and STOP switch a domain's processing on and off; they change none of its configuration,
+  # so they never run inside a transaction. Queuing one is refused at once, and the transaction
+  # keeps what it already holds for its COMMIT.
+  @domain_lifecycle_outside_transactions
+  Scenario Outline: START and STOP queued in a transaction are refused, and the transaction keeps its other statements on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    Given client "owner" is connected to node "node-1"
-    And client "observer" is connected to node "node-1"
-    When client "owner" executes these Plexus commands
+    Given client "owner" is connected to the leader node
+    When client "owner" fails to execute these Plexus commands
       """
       BEGIN;
+      CREATE SCHEMA queued_before_start (value I64);
       START;
       """
-    Then client "owner" transaction id is saved as placeholder "start_transaction_id"
-    Given transaction commit on node "node-1" pauses after 1 statement
-    When client "owner" begins executing these Plexus commands in the background
+    Then the last command error contains
+      """
+      START cannot be queued in a transaction; START and STOP run on their own, after COMMIT
+      """
+    And client "owner" transaction state is "OPEN"
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
-    Then the transaction commit pause on node "node-1" after 1 statement is reached
-    And transaction "{{start_transaction_id}}" eventually has state "COMMITTING"
-    Then the background Plexus execution is discarded
-    When client "owner" closes its session cleanly
-    Given client "resumed" is connected to node "node-1"
-    When client "resumed" attaches to transaction "{{start_transaction_id}}"
-    And client "resumed" begins executing these Plexus commands in the background
+    Then client "owner" transaction state is "COMMITTED"
+    When client "owner" executes these Plexus commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: stopped
+      """
+    When client "owner" executes these Plexus commands
+      """
+      SHOW CREATE SCHEMA queued_before_start;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA queued_before_start (
+        value I64
+      );
+      """
+    When client "owner" executes these Plexus commands
+      """
+      START;
+      """
+    Then the last command output contains
+      """
+      starting domain '{{domain}}'
+      """
+    When client "owner" fails to execute these Plexus commands
+      """
+      BEGIN;
+      CREATE SCHEMA queued_before_stop (value I64);
+      STOP;
+      """
+    Then the last command error contains
+      """
+      STOP cannot be queued in a transaction; START and STOP run on their own, after COMMIT
+      """
+    And client "owner" transaction state is "OPEN"
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
-    And the transaction commit pause on node "node-1" after 1 statement is released
-    Then the background Plexus execution succeeds
-    When client "observer" executes these Plexus commands
+    Then client "owner" transaction state is "COMMITTED"
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE DOMAIN;
       """
@@ -890,28 +927,66 @@ Feature: Plexus transactions
       """
       status: running
       """
-    When client "resumed" executes these Plexus commands
+    When client "owner" executes these Plexus commands
       """
-      BEGIN;
+      SHOW CREATE SCHEMA queued_before_stop;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA queued_before_stop (
+        value I64
+      );
+      """
+    When client "owner" executes these Plexus commands
+      """
       STOP;
-      """
-    Then client "resumed" transaction id is saved as placeholder "stop_transaction_id"
-    Given transaction commit on node "node-1" pauses after 1 statement
-    When client "resumed" begins executing these Plexus commands in the background
-      """
-      COMMIT;
-      """
-    Then the transaction commit pause on node "node-1" after 1 statement is reached
-    And transaction "{{stop_transaction_id}}" eventually has state "COMMITTING"
-    When the transaction commit pause on node "node-1" after 1 statement is released
-    Then the background Plexus execution succeeds
-    When client "observer" executes these Plexus commands
-      """
       DESCRIBE DOMAIN;
       """
     Then the last command output contains
       """
       status: stopped
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # A START whose execution leadership moved away from right after admission is resumed by the
+  # next leader under the same execution reference, and starts the domain exactly once.
+  @domain_start_recovery @command_reference_recovery
+  Scenario: A START resumed by the next leader starts its domain once
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA resumed_start_record (value I64);
+      CREATE RELAY resumed_start_records SCHEMA resumed_start_record UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "start_leader"
+    And a node other than placeholder "start_leader" is saved as placeholder "start_successor"
+    Given leadership moves from node "{{start_leader}}" to node "{{start_successor}}" under its next durably admitted command
+    When these Plexus commands are executed on the active session
+      """
+      START;
+      """
+    Then the leadership move under the durably admitted command completed
+    And the last command output contains
+      """
+      starting domain '{{domain}}'
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command output contains
+      """
+      status: running
+      """
+    And the last command output contains
+      """
+      start version: 1
       """
 
   @command_completion
@@ -928,23 +1003,23 @@ Feature: Plexus transactions
     When client "owner" executes these Plexus commands
       """
       BEGIN;
-      START;
+      CREATE RESOURCE resumed_commit_resource;
       """
-    Then client "owner" transaction id is saved as placeholder "start_transaction_id"
+    Then client "owner" transaction id is saved as placeholder "resumed_transaction_id"
     Given transaction commit on node "{{leader}}" pauses after 1 statement
     When client "owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
     Then the transaction commit pause on node "{{leader}}" after 1 statement is reached
-    And transaction "{{start_transaction_id}}" eventually has state "COMMITTING"
+    And transaction "{{resumed_transaction_id}}" eventually has state "COMMITTING"
     Then the background Plexus execution is discarded
     When client "owner" closes its session cleanly
     Given client "resumed" is connected to node "{{leader}}"
-    When client "resumed" attaches to transaction "{{start_transaction_id}}"
+    When client "resumed" attaches to transaction "{{resumed_transaction_id}}"
     Given transaction tombstone cleanup for domain "{{domain}}" pauses on every node
     When the transaction commit pause on node "{{leader}}" after 1 statement is released
-    Then transaction "{{start_transaction_id}}" eventually has state "COMMITTED"
+    Then transaction "{{resumed_transaction_id}}" eventually has state "COMMITTED"
     And transaction tombstone cleanup for domain "{{domain}}" is paused on node "{{leader}}"
     When transaction tombstone cleanup for domain "{{domain}}" is released on every node
     And client "resumed" executes these Plexus commands
@@ -954,11 +1029,11 @@ Feature: Plexus transactions
     Then client "resumed" transaction state is "COMMITTED"
     When client "observer" executes these Plexus commands
       """
-      DESCRIBE DOMAIN;
+      DESCRIBE RESOURCE resumed_commit_resource;
       """
     Then the last command output contains
       """
-      status: running
+      resource: resumed_commit_resource
       """
 
     Examples:
@@ -979,22 +1054,22 @@ Feature: Plexus transactions
     When client "owner" executes these Plexus commands
       """
       BEGIN;
-      START;
+      CREATE RESOURCE reattached_resource;
       """
-    Then client "owner" transaction id is saved as placeholder "start_transaction_id"
+    Then client "owner" transaction id is saved as placeholder "reattached_transaction_id"
     Given transaction commit on node "{{leader}}" pauses after 1 statement
     When client "owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
     Then the transaction commit pause on node "{{leader}}" after 1 statement is reached
-    And transaction "{{start_transaction_id}}" eventually has state "COMMITTING"
+    And transaction "{{reattached_transaction_id}}" eventually has state "COMMITTING"
     Then the background Plexus execution is discarded
     When client "owner" closes its session cleanly
     Given client "resumed" is connected to node "{{leader}}"
-    When client "resumed" attaches to transaction "{{start_transaction_id}}"
+    When client "resumed" attaches to transaction "{{reattached_transaction_id}}"
     And the transaction commit pause on node "{{leader}}" after 1 statement is released
-    Then transaction "{{start_transaction_id}}" eventually has state "COMMITTED"
+    Then transaction "{{reattached_transaction_id}}" eventually has state "COMMITTED"
     Given the leader node forgets its transaction session bindings
     When client "resumed" executes these Plexus commands
       """
@@ -1026,7 +1101,7 @@ Feature: Plexus transactions
     When client "owner" executes these Plexus commands
       """
       BEGIN;
-      START;
+      CREATE RESOURCE reclaimed_binding_resource;
       """
     Then client "owner" transaction id is saved as placeholder "finished_transaction"
     Given transaction commit on node "{{leader}}" pauses after 1 statement
@@ -1502,7 +1577,7 @@ Feature: Plexus transactions
       | 3            |
 
   @transaction_ordered_planning
-  Scenario Outline: Atomic model runs use their base-to-final effect and ordered lifecycle state
+  Scenario Outline: Atomic model runs use their base-to-final effect
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these Plexus commands
@@ -1558,37 +1633,8 @@ Feature: Plexus transactions
     When client "owner" executes these Plexus commands
       """
       COMMIT;
-      BEGIN;
-      STOP;
-      ALTER SCHEMA ordered_effective_schema
-        ADD FIELD stopped_change STRING OPTIONAL;
       """
-    Then the last command output contains
-      """
-      quiesce level: DYNAMIC
-      """
-    When client "owner" executes these Plexus commands
-      """
-      START;
-      ALTER SCHEMA ordered_effective_schema
-        DROP FIELD stopped_change;
-      """
-    Then the last command output contains
-      """
-      quiesce level: DOMAIN_PAUSE
-      """
-    When client "owner" executes these Plexus commands
-      """
-      CREATE IF NOT EXISTS SCHEMA ordered_effective_schema (
-        value STRING,
-        changed STRING OPTIONAL
-      );
-      COMMIT;
-      """
-    Then the last command output contains
-      """
-      quiesce level: DOMAIN_PAUSE
-      """
+    Then client "owner" transaction state is "COMMITTED"
 
     Examples:
       | cluster_size |

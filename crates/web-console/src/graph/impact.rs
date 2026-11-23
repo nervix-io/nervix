@@ -24,11 +24,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{
     ActivationAction, AffectedTopology, ClusterNodeName, ConcreteBranchCoverage,
-    ConfigurationTransition, DomainLifecycleAction, DomainName, ExecutionStepImpactReport,
-    ImpactAttribution, ImpactEdgeKind, ImpactEffects, ImpactTopology, ModelKind, NodeRef,
-    OperationImpactReport, ParametrizerName, PauseRequirement, QuiescenceOutcome, RebuildReason,
-    RequestedResourceVersion, ResourceCatalogAction, ResourceName, StatePurge,
-    TransactionImpactReport, TransactionOperationNumber, TransactionOperationRange,
+    ConfigurationTransition, DomainName, ExecutionStepImpactReport, ImpactAttribution,
+    ImpactEdgeKind, ImpactEffects, ImpactTopology, ModelKind, NodeRef, OperationImpactReport,
+    ParametrizerName, PauseRequirement, QuiescenceOutcome, RebuildReason, RequestedResourceVersion,
+    ResourceCatalogAction, ResourceName, StatePurge, TransactionImpactReport,
+    TransactionOperationNumber, TransactionOperationRange,
 };
 
 use crate::graph::{
@@ -392,7 +392,6 @@ pub struct DomainOutline {
 #[derive(Debug, Clone, Default)]
 pub struct DomainImpact {
     pub pauses: Vec<DomainPause>,
-    pub lifecycle: BTreeMap<DomainLifecycleAction, Contributors>,
     /// Execution nodes whose buffered work is flushed although the affected graph does not hold
     /// them: a flush that precedes a pause reaches every execution node of the domain.
     pub flushed_elsewhere: BTreeMap<NodeRef, Contributors>,
@@ -624,13 +623,6 @@ impl Projection {
                 role,
                 &Contributors::of(&moved.attribution),
             );
-        }
-        for lifecycle in &effects.lifecycle {
-            self.domain
-                .lifecycle
-                .entry(lifecycle.action)
-                .or_default()
-                .add(&Contributors::of(&lifecycle.attribution));
         }
         for activation in &effects.activations {
             let role = ImpactRole::Activation {
