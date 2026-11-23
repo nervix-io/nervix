@@ -534,7 +534,7 @@ generation as committed. Successful replies build no failure context.
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Client ingestor endpoint | Whether a submitted batch is a canonical Arrow IPC stream of the input schema (`ClientBatchError`), whether the node had capacity to validate it, and how its acknowledgement root resolved | Answer the batch as not admitted with its defect or a temporary refusal, or with its terminal outcome, and end a producer with the reason its attachment ended. |
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
-| Runtime installation | A committed revision this node cannot plan or apply, a domain execution it cannot build or change (`RuntimeError::BuildDomainExecution` above the `ExecutionBuildError` step that failed), and ingestors that do not start once their revision is prepared | Keep the previously applied schedule as the predecessor for a retry, and report the whole chain with the failed command, the domain's instantiation error and the runtime event. |
+| Runtime installation | A committed revision this node cannot plan or apply, a domain execution it cannot build or change (`RuntimeError::BuildDomainExecution` above the `ExecutionBuildError` step that failed), and ingestors that do not start once their revision is prepared | Plan the retry of each domain from the schedule its execution runs, and report the whole chain with the failed command, the domain's instantiation error and the runtime event. |
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, models that bind no restored version, and archived branch keys that are not keys of the branching their restored entity declares | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model, or the archive section, entry, entity, branch and field of the key. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
@@ -1792,9 +1792,9 @@ wire definition, a relay missing its branch or carrying an invalid branch TTL, a
 missing its VHOST or signaling protocol. The report identifies the owning relay, codec, or
 endpoint and the missing reference. The control plane builds activation, resources, entrypoints,
 emitters, processors, message-error routes, placement and the ownership fingerprint as one typed
-revision before runtime installation. A planning failure leaves the previously applied schedule as
-the predecessor for a retry; runtime installation adds domain context and never selects a fallback
-configuration.
+revision before runtime installation. A planning failure installs nothing, so each domain keeps the
+schedule its execution runs as the predecessor for a retry; runtime installation adds domain
+context and never selects a fallback configuration.
 
 The background runtime-installation supervisor logs a failed application's complete typed report and
 retries on the admission loop's half-second cadence, or sooner when the committed schedule or domain
@@ -1884,7 +1884,7 @@ answer or apply keep their own reports directly beneath the domain context, beca
 name what failed.
 
 Each admitted runtime revision is applied by the session service. A committed revision that cannot
-be planned against the one applied before it is `RuntimeError::PlanScheduleRevision`, with the
+be planned against the schedule each domain runs is `RuntimeError::PlanScheduleRevision`, with the
 decision layer's report beneath. A revision this node cannot apply fails as
 `RuntimeError::ApplyRevision`, naming the revision, above the runtime's report, and an ingestor of a
 running domain that does not start once the revision is prepared fails as

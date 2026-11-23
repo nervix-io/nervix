@@ -21,16 +21,26 @@ use std::time::Duration;
 use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusRuntimeState, Observer};
-use nervix_models::{ClusterNodeName, ClusterSchedule};
+use nervix_models::{ClusterNodeName, DomainName};
 use nervix_primitives::sync::{
     CancellationToken, Mutex, OwnedMutexGuard, StdArc, blocking::OnceLock,
 };
 use tracing::{info, warn};
 
 use crate::{
-    registry::PlannedClusterRevision,
+    registry::InstalledSchedule,
     runtime::{Runtime, RuntimeError},
 };
+
+/// What this node's runtime applied of the committed schedule.
+#[derive(Debug, Default)]
+struct AppliedSchedule {
+    /// The last revision this node applied to every domain; none before its first.
+    revision: Option<u64>,
+    /// The committed schedule each domain's execution runs, which that domain's next change is
+    /// planned against.
+    installed: InstalledSchedule,
+}
 
 /// The process-start barrier and runtime-installation sequencer shared by every installation path.
 pub(in crate::application) struct RuntimeAdmission {
@@ -45,9 +55,10 @@ pub(in crate::application) struct RuntimeAdmission {
     /// The installation turn terminal teardown took for good, so that no installation begins once
     /// the runtime stops.
     finished: OnceLock<OwnedMutexGuard<()>>,
-    /// The last schedule this node applied successfully. A failed revision compares against the
-    /// same predecessor when it is retried, including after a local WASM reset application.
-    applied_schedule: Mutex<Option<(u64, ClusterSchedule)>>,
+    /// What this node applied of the committed schedule. A failed revision is retried, and a later
+    /// one applied, against the schedule each domain's execution runs, including after a local WASM
+    /// reset application.
+    applied_schedule: Mutex<AppliedSchedule>,
 }
 
 impl RuntimeAdmission {
@@ -62,7 +73,7 @@ impl RuntimeAdmission {
             attempt: Mutex::new(()),
             installation: StdArc::new(Mutex::new(())),
             finished: OnceLock::new(),
-            applied_schedule: Mutex::new(None),
+            applied_schedule: Mutex::new(AppliedSchedule::default()),
         }
     }
 
@@ -85,26 +96,61 @@ impl RuntimeAdmission {
     ) -> error_stack::Result<(), RuntimeError> {
         let mut applied = self.applied_schedule.lock().await;
         if applied
-            .as_ref()
-            .is_some_and(|(revision, _)| state.revision <= *revision)
+            .revision
+            .is_some_and(|revision| state.revision <= revision)
         {
             return Ok(());
         }
-        let planned = PlannedClusterRevision::between(
-            applied.as_ref().map(|(_, schedule)| schedule),
-            &state.schedule,
-        )
-        .change_context(RuntimeError::PlanScheduleRevision)?;
-        runtime
+        let planned = applied
+            .installed
+            .plan(&state.schedule)
+            .change_context(RuntimeError::PlanScheduleRevision)?;
+        let application = runtime
             .apply_planned_cluster_state(
                 local_node_id,
                 state.revision,
                 &state.domains,
                 &state.domain_clock_authorities,
-                planned,
+                &planned,
             )
-            .await?;
-        *applied = Some((state.revision, state.schedule.clone()));
+            .await;
+        // An attempt that fails part way has still brought the domains before the failing one to
+        // this revision, so each domain's next change is planned from what its execution runs now.
+        let attempt = applied.installed.record_attempt(
+            &planned,
+            &state.schedule,
+            &runtime.installed_revision_digests(),
+        );
+        if application.is_err() && !attempt.advanced.is_empty() {
+            let domains = attempt
+                .advanced
+                .iter()
+                .map(DomainName::as_str)
+                .collect::<Vec<_>>();
+            info!(
+                %local_node_id,
+                revision = state.revision,
+                ?domains,
+                "a failed application brought these domains to its revision; the next change of \
+                 each is planned from the revision it runs"
+            );
+        }
+        if !attempt.unplanned.is_empty() {
+            let domains = attempt
+                .unplanned
+                .iter()
+                .map(DomainName::as_str)
+                .collect::<Vec<_>>();
+            warn!(
+                %local_node_id,
+                revision = state.revision,
+                ?domains,
+                "these domains run a revision schedule application did not install; their next \
+                 change replaces their execution"
+            );
+        }
+        application?;
+        applied.revision = Some(state.revision);
         Ok(())
     }
 
@@ -266,7 +312,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::{
-        CreateRelay, DomainSchedule, Model, RelayBranching, ScheduledNode, SchemaFingerprint,
+        ClusterSchedule, CreateRelay, DomainSchedule, Model, RelayBranching, ScheduledNode,
+        SchemaFingerprint,
     };
     use nonzero_ext::nonzero;
 
@@ -326,7 +373,7 @@ mod tests {
             .await
             .assured("a stale state does not plan or replace its predecessor");
         let applied = admission.applied_schedule.lock().await;
-        assert_eq!(applied.as_ref().map(|(revision, _)| *revision), Some(2));
+        assert_eq!(applied.revision, Some(2));
     }
 
     /// A section runs in a task of its own, where a panic would end only that task. The caller

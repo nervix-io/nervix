@@ -577,11 +577,14 @@ removes read-side contention without weakening those transition contracts.
 The control plane classifies each committed schedule change and builds a complete typed execution
 revision before handing it to the runtime. The revision keeps placement, state identity, handoff
 fingerprint, and all node plans together. Runtime application reads that revision for incremental
-swaps, relocation, remote consumer edges, and full or passive rebuilds. A failed application keeps
-the last successfully applied schedule as the predecessor for its retry; a stale revision cannot
-replace that predecessor. Each planned domain also carries that predecessor's source identity. If
-an earlier attempt left a domain partly or wholly installed at another revision, the runtime
-rebuilds it instead of applying a delta against the wrong predecessor.
+swaps, relocation, remote consumer edges, and full or passive rebuilds. Application plans each
+domain's change against the committed schedule that domain's execution runs, which it records after
+every attempt from the source identities of the installed executions. A failed application's
+retry, or a later revision, therefore applies incrementally to a domain the failed attempt had
+already brought to its revision, and a stale revision cannot replace a recorded predecessor. Each
+planned domain also carries that predecessor's source identity. A domain whose execution runs a
+revision schedule application did not install has no recorded predecessor, and the runtime rebuilds
+it instead of applying a delta against the wrong predecessor.
 
 Schedule application prepares every changed local processor plan before publication. A preparation
 failure leaves the preceding routing revision observable. Publication swaps the complete typed
