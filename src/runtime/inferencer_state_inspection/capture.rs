@@ -64,11 +64,6 @@ impl Runtime {
                     .checkpoint_owners
                     .as_ref()
                     .ok_or_else(|| Report::new(ProcessorStatePageError::Unavailable))?;
-                // A retained publication can outlive the owning task's next replacement. Charge
-                // its complete native payload and shape footprint before retaining that handle.
-                let retained_bytes = plan
-                    .snapshot_bytes()
-                    .change_context(ProcessorStatePageError::Admission)?;
                 let mut captured = Vec::new();
                 // A read during repartitioning asks for every key this unit holds, with the
                 // inherited origin of each, so the reader can place keys the transition moves.
@@ -76,6 +71,8 @@ impl Runtime {
                     Some(_) => nervix_models::StateInspectionKeyCatalog::requested(),
                     None => nervix_models::StateInspectionKeyCatalog::Unrequested,
                 };
+                // The first pass counts and identifies every selected branch and retains none of
+                // their publications, which only the branches the page returns tensors from need.
                 runtime
                     .inner
                     .state_replication_routing
@@ -87,13 +84,7 @@ impl Runtime {
                             return Ok(());
                         };
                         let placement = &state.placement;
-                        if placement.domain != expected.domain
-                            || placement.kind != expected.kind
-                            || placement.identifier != expected.identifier
-                            || placement.unit != unit
-                            || placement.state != expected.state
-                            || !selected(selection.branch, &placement.branch_key)
-                        {
+                        if !inspected(placement, &expected, unit, selection.branch) {
                             return Ok(());
                         }
                         let generation = state.generations.load();
@@ -129,7 +120,7 @@ impl Runtime {
                         reserve(
                             &mut memory,
                             checked_add(
-                                checked_add(retained_bytes, key_bytes)?,
+                                key_bytes,
                                 u64::try_from(std::mem::size_of::<CapturedBranch>())
                                     .assured("resident type sizes fit u64")
                                     .checked_mul(4)
@@ -140,17 +131,72 @@ impl Runtime {
                         )?;
                         captured.push(CapturedBranch::capture(
                             state,
-                            generation,
+                            &generation,
                             &owners.replicas,
                         )?);
                         Ok(())
                     })?;
                 captured.sort_by(|left, right| BranchKey::canonical_order(&left.key, &right.key));
-                page::build(captured, plan, catalog, after, bounds, memory, cancellation)
+                let captured = page::CapturedBranches {
+                    branches: captured,
+                    catalog,
+                };
+                // The second pass reads again, with its publication, each branch the page returns
+                // tensors from, once the page has charged for retaining it.
+                let retain = |wanted: &page::WantedBranches| {
+                    let mut retained = Vec::with_capacity(wanted.len());
+                    runtime
+                        .inner
+                        .state_replication_routing
+                        .visit_inferencers(|state| {
+                            cancellation
+                                .check()
+                                .change_context(ProcessorStatePageError::Admission)?;
+                            let Some(state) = state else {
+                                return Ok(());
+                            };
+                            let placement = &state.placement;
+                            if !inspected(placement, &expected, unit, selection.branch) {
+                                return Ok(());
+                            }
+                            let key = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+                            if !wanted.contains(&key) {
+                                return Ok(());
+                            }
+                            let generation = state.generations.load();
+                            if generation.value.is_none() {
+                                return Ok(());
+                            }
+                            retained.push(RetainedBranch::retain(
+                                state,
+                                generation,
+                                &owners.replicas,
+                            )?);
+                            Ok(())
+                        })?;
+                    Ok(retained)
+                };
+                page::build(captured, retain, plan, after, bounds, memory, cancellation)
             })
             .await
             .change_context(ProcessorStatePageError::Admission)?
     }
+}
+
+/// Whether `placement` is a branch of the inspected unit's state, `expected`, that `selection`
+/// selects.
+fn inspected(
+    placement: &RuntimeStatePlacement,
+    expected: &RuntimeStatePlacement,
+    unit: Unit,
+    selection: StateInspectionBranchSelection,
+) -> bool {
+    placement.domain == expected.domain
+        && placement.kind == expected.kind
+        && placement.identifier == expected.identifier
+        && placement.unit == unit
+        && placement.state == expected.state
+        && selected(selection, &placement.branch_key)
 }
 
 fn selected(selection: StateInspectionBranchSelection, key: &Option<BranchKey>) -> bool {
@@ -164,9 +210,10 @@ fn selected(selection: StateInspectionBranchSelection, key: &Option<BranchKey>) 
 }
 
 impl CapturedBranch {
+    /// `state`'s identity at `generation`, its current publication, without retaining it.
     fn capture(
         state: &ReplicatedInferencerState,
-        generation: StdArc<Generation<Option<InferencerGeneration>>>,
+        generation: &Generation<Option<InferencerGeneration>>,
         replicas: &BTreeSet<ClusterNodeName>,
     ) -> ReadResult<Self> {
         let confirmed = state
@@ -177,13 +224,25 @@ impl CapturedBranch {
             registration: state
                 .inspection_identity()
                 .ok_or_else(|| Report::new(ProcessorStatePageError::Unrestored))?,
+            revision: generation.revision,
             persisted: state
                 .generations
                 .last_persisted_lsm()
                 .min(generation.revision),
             confirmed: u64::try_from(confirmed).assured("a resident replica count fits u64"),
             replicas: u64::try_from(replicas.len()).assured("a resident replica set fits u64"),
-            generation,
         })
+    }
+}
+
+impl RetainedBranch {
+    /// `state`'s identity at `generation`, with that publication retained.
+    fn retain(
+        state: &ReplicatedInferencerState,
+        generation: StdArc<Generation<Option<InferencerGeneration>>>,
+        replicas: &BTreeSet<ClusterNodeName>,
+    ) -> ReadResult<Self> {
+        let branch = CapturedBranch::capture(state, &generation, replicas)?;
+        Ok(Self { branch, generation })
     }
 }

@@ -4130,7 +4130,10 @@ the read as `owner_unavailable` rather than waiting. The command channel's capac
 what the request queues, and the inspection read deadline, `StateInspectionReadTimeout`, bounds the
 reader's whole wait, from the unit selection to the last branch's answer; a reply to a reader that
 left is discarded. Gathering the copies into Arrow columns runs on the bounded Bulk executor after
-the branch tasks answered, admitted before any column is built.
+the branch tasks answered. Before any column is built, the page admits the copied rows in order:
+each row after the first takes the bytes of its columns, and for a page another node reads the
+bytes of its body, from the bulk class at once, and the page ends before the first row the class
+cannot hold. The page keeps that charge until its rows are presented or carried.
 
 Answering takes the branch task time proportional to the batches a reorderer's routes hold and the
 records a correlator's sides hold, plus the copied rows: a reorderer counts the rows of each held

@@ -388,7 +388,11 @@ it handled, so a page resumed after any branch took another batch, released rows
 refused as `stale_continuation`. A branch that is stopping refuses the read as `owner_unavailable`.
 A unit that has not yet installed every branch its node held, while it restores them after its
 task starts or takes the unit over, refuses the read as `not_ready` instead of reporting the
-branches it has not restored as empty.
+branches it has not restored as empty. Gathering the copied rows' columns charges the owner's bulk
+memory the rows' bytes, and a page read through another node also sets each row's body aside, so a
+page ends before a row the bulk memory left cannot hold, with complete counts and a continuation,
+as a [window page](#inspect-retained-window-state) does. The read is refused as `not_ready` only
+when not even its first row can be held.
 
 `DESCRIBE REORDERER` reports, for each execution unit, the concrete branches the reorderer runs and
 the rows and bytes they hold, after its placement lines:
@@ -755,7 +759,12 @@ preserved. If any input or branch-key field is sensitive, the entire `values` ce
 port names, shape and lifecycle metadata remain visible. There is no implicit leakage exception.
 
 Complete row counts, `LIMIT` and continuation offsets count tensor rows. Header rows consume
-the reply's section and byte bounds separately. A continuation names the complete selected
+the reply's section and byte bounds separately. A page retains the publication of each branch it
+returns tensors from only while it copies them, charging the owner's bulk memory the publication's
+footprint, and building a tensor row takes four times its bytes; a page read through another node
+also sets each row's bytes aside for the body that carries it. A page therefore ends before a row
+the bulk memory left cannot hold, with complete counts and a continuation, and the read is refused
+as `not_ready` only when not even its first row can be held. A continuation names the complete selected
 publication cut, owner incarnations, committed revision and selector. Changed tensors, branch
 membership, ownership or configuration make it stale. Start a new read after
 `stale_continuation`; do not combine rows from different cuts. During repartitioning, the

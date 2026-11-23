@@ -11111,7 +11111,7 @@ async fn given_node_has_large_resource_file(
 }
 
 /// The generated ONNX models a fixture resource directory carries under `models/`.
-const ONNX_FIXTURE_MODELS: [&str; 9] = [
+const ONNX_FIXTURE_MODELS: [&str; 10] = [
     "simple_score.onnx",
     "alternate_score.onnx",
     "batch_score.onnx",
@@ -11121,6 +11121,7 @@ const ONNX_FIXTURE_MODELS: [&str; 9] = [
     "f64_score.onnx",
     "running_sum.onnx",
     "checked_running_sum.onnx",
+    "wide_running_sum.onnx",
 ];
 
 fn onnx_fixture_path(fixture: &str) -> PathBuf {
@@ -32401,6 +32402,37 @@ async fn when_large_tenant_http_payload_is_posted(
     .to_string();
     append_cucumber_log_line(&format!(
         "http publish large tenant payload: node=node-1 host={host} path={path} \
+         message_size={message_size}"
+    ));
+    world
+        .cluster()
+        .publish_http("node-1", &host, &path, &payload)
+        .await
+        .expect("failed to post large tenant http payload");
+}
+
+#[when(
+    expr = "http payload for tenant {string} with value {int} and a {int} byte message is posted \
+            to host {string} path {string}"
+)]
+async fn when_large_tenant_value_http_payload_is_posted(
+    world: &mut ScenarioWorld,
+    tenant: String,
+    value: i64,
+    message_size: usize,
+    host: String,
+    path: String,
+) {
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = serde_json::json!({
+        "tenant": tenant,
+        "value": value,
+        "message": "x".repeat(message_size),
+    })
+    .to_string();
+    append_cucumber_log_line(&format!(
+        "http publish large tenant payload: node=node-1 host={host} path={path} value={value} \
          message_size={message_size}"
     ));
     world

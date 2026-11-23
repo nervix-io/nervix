@@ -2813,18 +2813,16 @@ coordinator writes Row frames at the session reporting boundary, as for material
 The inspection deadline controls stream admission and setup through
 `request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
 
-A deduplicator or window owner that serves a page to another node sets aside, before it admits
-any row, what encoding the descriptor and each section body's Arrow framing take, and every row it
-admits sets its bytes aside once more for the body that carries it. The page therefore ends where
-the bulk pool cannot hold a row's columns and its body together, with complete counts and a
-continuation. The owner encodes the bodies and the descriptor from that memory and never waits for
-room the page itself holds: a body the set-aside memory falls short of takes the rest from the pool
-at once, or the page is refused as `not_ready`. The memory that held the rows goes back to the pool
-as soon as the bodies carry them. Other kinds take their bodies' memory from the pool: a section's
-first body waits for room there, as each section's one body did before a section could travel in
-more than one, while a further body of a split section, and the descriptor of a page with a split
-section, takes its memory at once or refuses the page as `not_ready`, so the owner never waits
-while it holds a split section's bodies.
+An owner that serves a processor page to another node sets aside, before it admits any row, what
+encoding the descriptor and each section body's Arrow framing take, and every row it admits sets
+aside the bytes of the body that carries it. The page therefore ends where the bulk pool cannot
+hold a row's working memory and its body together, with complete counts and a continuation. The
+owner encodes the bodies and the descriptor from that memory and never waits for memory while the
+reply holds a body: a body the set-aside memory falls short of takes the rest from the pool at once,
+or the page is refused as `not_ready`, and so does the descriptor of a reply that holds bodies but
+set nothing aside. Only a reply that holds no body, a refusal or a page that returns no row, waits
+for room for its descriptor. The memory that held the rows goes back to the pool as soon as the
+bodies carry them.
 
 Duplex setup selects its budget through `DuplexSetupDeadline`. Client producer and consumer
 links select the active transport connection-setup budget. Engine operations retain their

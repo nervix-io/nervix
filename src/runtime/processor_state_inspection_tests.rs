@@ -554,6 +554,322 @@ async fn a_unit_still_restoring_its_branches_refuses_its_page_without_reading_a_
     );
 }
 
+/// The bytes of every note a wide fixture row carries.
+const ROW_NOTE: usize = 1024 * 1024;
+
+/// The byte bound a session transfer gives every page, as a page read at the default limit has.
+const TRANSFER_BOUND: u64 = 64 * 1024 * 1024;
+
+/// One batch of `rows` rows whose sequences, and order keys, continue at `first`, each with a note
+/// of `width` bytes after its sequence.
+fn wide_batch(first: u64, rows: u64, width: usize) -> (RelayRecordBatch, Arc<Vec<ReordererRowOrder>>) {
+    let schema = test_schema(&[
+        ("sequence", ParseAsType::U64),
+        ("note", ParseAsType::String),
+    ]);
+    let mut messages = Vec::new();
+    let mut order = Vec::new();
+    for sequence in first..first + rows {
+        messages.push(RelayMessage {
+            key: None,
+            record: test_runtime_row([
+                ("sequence".to_string(), RuntimeValue::U64(sequence)),
+                (
+                    "note".to_string(),
+                    RuntimeValue::String(format!("{sequence:08}{}", "n".repeat(width))),
+                ),
+            ]),
+            acks: AckSet::empty(),
+        });
+        order.push(ReordererRowOrder {
+            key: vec![ReorderKeyPart::UInt64(sequence)],
+            arrival_sequence: sequence,
+        });
+    }
+    let batch = RelayRecordBatch::from_messages(schema, messages)
+        .assured("every fixture row matches the fixture schema");
+    (batch, Arc::new(order))
+}
+
+/// A buffer holding `rows` rows of `width`-byte notes, one batch each, whose sequences run on from
+/// zero.
+fn wide_buffer(rows: u64, width: usize) -> ReordererOutputBuffer {
+    let mut buffer = ReordererOutputBuffer::default();
+    for sequence in 0..rows {
+        let (batch, order) = wide_batch(sequence, 1, width);
+        buffer.push(batch, order, Timestamp::from_unix_nanos(1_000));
+    }
+    buffer
+}
+
+/// Answers every read its branch is asked with the production bounded copy of `buffer`, as a
+/// reorderer branch task copies what it holds, until the branch's commands close.
+fn answer_reads(
+    buffer: ReordererOutputBuffer,
+    mut commands: mpsc::Receiver<ProcessorBranchCommand>,
+) -> nervix_primitives::task::JoinHandle<()> {
+    nervix_primitives::task::spawn(async move {
+        while let Some(command) = commands.recv().await {
+            nervix_primitives::task::consume_budget().await;
+            let ProcessorBranchCommand::Inspect { read, response } = command else {
+                panic!("an inspection asks its branch only for the rows it holds");
+            };
+            let (copied, budget) = copy(&buffer, read);
+            answer_branch_state(
+                response,
+                7,
+                HandledEvents::default(),
+                Ok(HeldBranchRows {
+                    rows: buffer.held_rows(),
+                    bytes: buffer.estimated_bytes(),
+                    copied_bytes: budget.copied_bytes,
+                    kind: HeldRowsKind::Reorderer {
+                        key_fields: vec![StdArc::new(Field::new(
+                            "order_key",
+                            DataType::UInt64,
+                            false,
+                        ))],
+                        rows: copied,
+                    },
+                }),
+            );
+        }
+    })
+}
+
+/// A running reorderer unit of `runtime` whose one unbranched branch holds what `buffer` holds.
+struct HoldingReorderer {
+    domain: DomainName,
+    processor: NodeRef,
+    answering: nervix_primitives::task::JoinHandle<()>,
+}
+
+impl HoldingReorderer {
+    fn install(runtime: &Runtime, name: &str, buffer: ReordererOutputBuffer) -> Self {
+        let domain = domain(name);
+        install_test_domain_execution(
+            runtime,
+            &domain,
+            Vec::new(),
+            DomainRoutingSnapshot::default(),
+        );
+        let processor = NodeRef::new(
+            ModelKind::Reorderer,
+            named::<ModelName>("held_notifications"),
+        );
+        let (branch, branch_commands) = branch_channels();
+        runtime
+            .inner
+            .executions
+            .get_mut(&domain)
+            .assured("the test installed the domain's execution")
+            .node_tasks
+            .insert(
+                NodeUnitRef::new(processor.clone(), Unit::SINGLE),
+                selecting_unit(branch, false),
+            );
+        Self {
+            domain,
+            processor,
+            answering: answer_reads(buffer, branch_commands),
+        }
+    }
+
+    /// One page of the unit's held rows at the default row bound and a session's transfer bound,
+    /// for the reader `reply` names.
+    async fn page(
+        &self,
+        runtime: &Runtime,
+        after: Option<(Option<BranchKeyFingerprint>, u64)>,
+        reply: PageReply,
+    ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
+        timeout(
+            ANSWERS_WITHIN,
+            runtime.local_processor_state_page(
+                &self.domain,
+                &self.processor,
+                Unit::SINGLE,
+                StateInspectionBranchSelection::All.into(),
+                after,
+                ProcessorStatePageBounds {
+                    rows: 1024,
+                    bytes: TRANSFER_BOUND,
+                    reply,
+                },
+            ),
+        )
+        .await
+        .assured("an owner page of held rows answers within the inspection deadline")
+    }
+
+    /// Ends the unit, and with it the branch it answered for.
+    async fn end(self, runtime: &Runtime) {
+        let unit = runtime
+            .inner
+            .executions
+            .get_mut(&self.domain)
+            .assured("the test installed the domain's execution")
+            .node_tasks
+            .remove(&NodeUnitRef::new(self.processor.clone(), Unit::SINGLE))
+            .assured("the test installed the unit");
+        drop(unit.commands);
+        timeout(ANSWERS_WITHIN, unit.task)
+            .await
+            .assured("the unit ends once nothing can send it a command")
+            .assured("the unit task ends without a panic");
+        timeout(ANSWERS_WITHIN, self.answering)
+            .await
+            .assured("the branch ends once its unit has ended")
+            .assured("the branch answered every read without a panic");
+    }
+}
+
+/// The sequences of the held rows a reorderer page returned, in page order.
+fn returned_sequences(page: &ProcessorStatePage) -> Vec<u64> {
+    let [section] = page.sections.as_slice() else {
+        panic!("a reorderer page carries its one held-row section");
+    };
+    match section.payload.first() {
+        Some(sequence) => sequence.as_primitive::<UInt64Type>().values().to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// A reorderer page whose copied rows the bulk class cannot hold whole ends before the row it can
+/// no longer hold, with complete counts and a continuation, and the pages that follow return every
+/// other held row once, in order. The read is never refused while a row can be returned.
+#[nervix_primitives::test]
+async fn a_reorderer_page_beyond_the_bulk_class_ends_where_it_runs_out_and_the_rest_follow() {
+    let runtime = Runtime::default();
+    let capacity = runtime.inner.executor.snapshot().bulk_memory.capacity_bytes;
+    let note = u64::try_from(ROW_NOTE).assured("a fixture note fits u64");
+    // Rows of 1 MiB notes, eight more of them than the whole bulk class holds.
+    let held = capacity / note + 8;
+    let reorderer = HoldingReorderer::install(&runtime, "paged", wide_buffer(held, ROW_NOTE));
+    let mut after = None;
+    let mut sequences = Vec::new();
+    let mut pages = 0_usize;
+    loop {
+        let page = reorderer
+            .page(&runtime, after, PageReply::Local)
+            .await
+            .assured("a page the bulk class cannot hold whole ends early instead of being refused");
+        assert_eq!(
+            page.counts.rows, held,
+            "every page reports the complete counts"
+        );
+        let returned = returned_sequences(&page);
+        assert!(!returned.is_empty(), "every page returns at least one row");
+        sequences.extend(returned);
+        pages += 1;
+        if !page.more {
+            break;
+        }
+        after = Some((page.last_branch, page.offset));
+    }
+    assert!(pages > 1, "the bulk class holds no page of every row");
+    assert_eq!(
+        sequences,
+        (0..held).collect::<Vec<_>>(),
+        "the pages return every held row once, in order"
+    );
+    reorderer.end(&runtime).await;
+}
+
+/// A reorderer page another node reads sets aside, as it admits its rows, the bound on its
+/// descriptor, its one section body's framing and every returned row's body, beside the charge of
+/// the rows' columns, which it keeps until its rows are carried. It therefore ends before the page
+/// its owner presents under the same bulk class.
+#[nervix_primitives::test]
+async fn a_reorderer_page_another_node_reads_sets_aside_its_reply_and_ends_sooner() {
+    let runtime = Runtime::default();
+    let capacity = runtime.inner.executor.snapshot().bulk_memory.capacity_bytes;
+    let note = u64::try_from(ROW_NOTE).assured("a fixture note fits u64");
+    // Rows of 1 MiB notes filling five eighths of the bulk class: its owner presents them in one
+    // page, while their bodies as well do not fit.
+    let held = capacity / note * 5 / 8;
+    let reorderer = HoldingReorderer::install(&runtime, "remote", wide_buffer(held, ROW_NOTE));
+    let local = reorderer
+        .page(&runtime, None, PageReply::Local)
+        .await
+        .assured("the owner presents a first page");
+    let local_rows = returned_sequences(&local).len();
+    assert_eq!(
+        u64::try_from(local_rows).assured("a bounded row count fits u64"),
+        held,
+        "the owner presents every held row in one page"
+    );
+    let local_memory = local
+        .memory
+        .as_ref()
+        .assured("a page keeps the charge of the columns it gathered");
+    assert!(
+        local_memory.reply.is_none(),
+        "a page its owner presents sets nothing aside for a reply"
+    );
+    drop(local);
+    let reply = PageReply::remote(&runtime.inner.executor);
+    let PageReply::Remote {
+        descriptor,
+        framing,
+    } = reply
+    else {
+        panic!("a reply to another node sets memory aside");
+    };
+    let mut remote = reorderer
+        .page(&runtime, None, reply)
+        .await
+        .assured("the owner answers another node with a first page");
+    let remote_rows = returned_sequences(&remote).len();
+    assert!(remote_rows > 0, "the first page returns at least one row");
+    assert!(
+        remote_rows < local_rows,
+        "a page another node reads ends sooner ({remote_rows} rows) than one its owner presents \
+         ({local_rows} rows)"
+    );
+    // Every returned row's body: its payload, and its route, order key and two deadlines.
+    let appended = u64::try_from(
+        std::mem::size_of::<u32>() + std::mem::size_of::<u64>() + 2 * std::mem::size_of::<i64>(),
+    )
+    .assured("fixed widths fit u64");
+    let [section] = remote.sections.as_slice() else {
+        panic!("a reorderer page carries its one held-row section");
+    };
+    let rows = arrow_array::RecordBatch::try_new(
+        StdArc::new(arrow_schema::Schema::new(vec![
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("note", DataType::Utf8, false),
+        ])),
+        section.payload.clone(),
+    )
+    .assured("the payload columns are the fixture's");
+    let mut bodies = framing;
+    for row in 0..rows.num_rows() {
+        let payload = crate::runtime_schema::batch_payload_bytes(&rows.slice(row, 1));
+        bodies = bodies + payload + appended;
+    }
+    let memory = remote
+        .memory
+        .as_mut()
+        .assured("a page another node reads keeps its memory with the rows");
+    let set_aside = memory
+        .take_reply()
+        .assured("a page another node reads sets its reply aside");
+    assert_eq!(
+        set_aside.descriptor.bytes(),
+        descriptor,
+        "the page sets aside the bound on one descriptor"
+    );
+    assert_eq!(
+        set_aside.bodies.bytes(),
+        bodies,
+        "the page sets aside its section's framing and every returned row's body"
+    );
+    assert_eq!(set_aside.framing, framing);
+    drop(remote);
+    reorderer.end(&runtime).await;
+}
+
 #[test]
 fn a_key_part_outside_its_column_type_fails_the_section() {
     let mut copy = held_reorderer_branch(None, &[1], 1);

@@ -979,10 +979,9 @@ async fn a_page_holding_most_of_the_pool_is_answered_without_waiting_for_room() 
     .assured("the page's reply is framed");
 }
 
-/// A page that set nothing aside for its reply waits for room only for each section's first body,
-/// as before a section could travel in more than one. A further body of a split section takes its
-/// memory at once or the page is refused as not ready, since waiting would hold the section's
-/// earlier bodies.
+/// A page that set nothing aside for its reply takes each body's memory at once. A further body of
+/// a split section without room refuses the page as not ready, since waiting would hold the
+/// section's earlier bodies.
 #[nervix_primitives::test]
 async fn a_split_section_of_a_page_without_reply_memory_never_waits_for_a_further_body() {
     let executor = narrow_sections();
@@ -1022,6 +1021,78 @@ async fn a_split_section_of_a_page_without_reply_memory_never_waits_for_a_furthe
     assert!(
         matches!(reply, Err(StateInspectionRejection::NotReady)),
         "a further body without room refuses the page as not ready, found {reply:?}"
+    );
+    assert!(bodies.is_empty(), "a refused page names no body");
+    drop(held_memory);
+}
+
+/// A page that set nothing aside for its reply never waits for room while it holds a body it
+/// already encoded: the next section's body takes its memory at once, and without room for it the
+/// page is refused as not ready, so the owner never waits for memory only it could free.
+#[nervix_primitives::test]
+async fn a_page_without_reply_memory_never_waits_for_a_body_while_it_holds_another() {
+    let executor = Executor::default();
+    let capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    // Room for the first section's body, its 1 MiB row and its framing, but not for the second's.
+    let left = 3 * 1024 * 1024 / 2;
+    let held_memory = executor
+        .try_reserve(
+            MemoryClass::Bulk,
+            capacity
+                .checked_sub(left)
+                .assured("the bulk pool holds more than one and a half MiB"),
+        )
+        .assured("an idle pool admits the held memory");
+    let first = wide_rows(&declared_fields(), &[1], 1024 * 1024);
+    let second = wide_rows(&declared_fields(), &[2], 1024 * 1024);
+    // A correlator page returning one row on each side, each side its own section.
+    let mut page = whole_page(2);
+    page.runs = vec![
+        run(ProcessorStateSection::Left, 1),
+        run(ProcessorStateSection::Right, 1),
+    ];
+    page.sections = vec![
+        ProcessorStateSectionTransfer {
+            section: ProcessorStateSection::Left,
+            rows: 1,
+            fields: declared_fields(),
+            bodies: Vec::new(),
+        },
+        ProcessorStateSectionTransfer {
+            section: ProcessorStateSection::Right,
+            rows: 1,
+            fields: declared_fields(),
+            bodies: Vec::new(),
+        },
+    ];
+    let mut request = read(2);
+    // A reply bound that holds both bodies, so only the memory decides.
+    request.max_bytes = 16 * 1024 * 1024;
+    let PageReplyParts { reply, bodies, .. } = nervix_primitives::time::timeout(
+        std::time::Duration::from_secs(30),
+        processor_page_reply(
+            &executor,
+            Ok((
+                page,
+                vec![
+                    ProcessorPageSection {
+                        batches: vec![first],
+                    },
+                    ProcessorPageSection {
+                        batches: vec![second],
+                    },
+                ],
+            )),
+            request.max_bytes,
+            None,
+        ),
+    )
+    .await
+    .assured("the owner never waits for a body's room while it holds another body")
+    .assured("the owner answers");
+    assert!(
+        matches!(reply, Err(StateInspectionRejection::NotReady)),
+        "a body without room refuses the page as not ready, found {reply:?}"
     );
     assert!(bodies.is_empty(), "a refused page names no body");
     drop(held_memory);

@@ -222,18 +222,19 @@ pub(crate) async fn stream_processor_page(
         reply,
         bodies,
         descriptor,
-        split,
     } = processor_page_reply(executor, result, max_bytes, set_aside).await?;
     // The bodies now carry the page's rows, so the memory that held them goes back to the pool
     // before the descriptor is encoded.
     drop(memory);
     let limit = PoolClass::Bulk.payload_limit(executor);
-    let descriptor = match (descriptor, split) {
+    let descriptor = match (descriptor, bodies.is_empty()) {
         (Some(charge), _) => Some(charge),
-        (None, false) => None,
-        // A page whose sections travel in more bodies than one each takes no memory it would wait
-        // for while it holds them: without room for its descriptor now, it is not ready.
-        (None, true) => match executor.try_reserve(MemoryClass::Bulk, limit) {
+        // A reply that holds no body, a refusal or a page that returns no row, holds nothing
+        // while it waits for room for its descriptor.
+        (None, true) => None,
+        // A reply that holds bodies takes no memory it would wait for while it holds them:
+        // without room for its descriptor now, the page is not ready.
+        (None, false) => match executor.try_reserve(MemoryClass::Bulk, limit) {
             Ok(charge) => Some(charge),
             Err(_refused) => {
                 drop(bodies);
@@ -299,8 +300,6 @@ struct PageReplyParts {
     /// What the page set aside for encoding the reply's descriptor; absent for a page that set
     /// nothing aside, and for a refusal.
     descriptor: Option<Reservation>,
-    /// Whether a section travels in more than one body.
-    split: bool,
 }
 
 impl PageReplyParts {
@@ -310,7 +309,6 @@ impl PageReplyParts {
             reply: Err(reason),
             bodies: Vec::new(),
             descriptor: None,
-            split: false,
         }
     }
 }
@@ -318,10 +316,10 @@ impl PageReplyParts {
 /// The reply a processor page stream frames and the bodies it names: each section that returns
 /// rows as one or more native Arrow snapshot sections, in row order and each within the node's
 /// section bound, in the descriptor's section order. The bodies take their memory from what the
-/// page set aside in `set_aside`, or from the bulk pool for a page that set nothing aside. A page
-/// whose bodies exceed `max_bytes`, or that returns a row whose own body exceeds the section
-/// bound, is refused as too large, and one whose bodies its set-aside memory and the pool cannot
-/// hold at once is not ready. A refusal names no body.
+/// page set aside in `set_aside`, and what that lacks from the bulk pool at once. A page whose
+/// bodies exceed `max_bytes`, or that returns a row whose own body exceeds the section bound, is
+/// refused as too large, and one whose bodies its set-aside memory and the pool cannot hold at
+/// once is not ready. A refusal names no body.
 async fn processor_page_reply(
     executor: &Executor,
     result: Result<
@@ -343,29 +341,26 @@ async fn processor_page_reply(
     let (descriptor_charge, mut charges) = match set_aside {
         Some(reply) => (
             Some(reply.descriptor),
-            BodyCharges::SetAside {
+            BodyCharges {
                 remaining: Some(reply.bodies),
                 framing: reply.framing,
             },
         ),
         None => (
             None,
-            BodyCharges::Pool {
+            BodyCharges {
+                remaining: None,
                 framing: PageReply::body_framing(executor),
             },
         ),
     };
     let mut bodies = Vec::new();
     let mut bytes = 0_u64;
-    let mut split = false;
     for (transfer, section) in descriptor.sections.iter_mut().zip(sections) {
         let encoded = match section_bodies(executor, section.batches, &mut charges).await? {
             Ok(encoded) => encoded,
             Err(reason) => return Ok(PageReplyParts::refused(reason)),
         };
-        if encoded.len() > 1 {
-            split = true;
-        }
         for body in encoded {
             bytes = bytes
                 .checked_add(u64::try_from(body.len()).assured("resident allocations fit u64"))
@@ -384,23 +379,18 @@ async fn processor_page_reply(
         reply: Ok(descriptor),
         bodies,
         descriptor: descriptor_charge,
-        split,
     })
 }
 
-/// Where a page's Arrow bodies take their memory.
-enum BodyCharges {
-    /// What the page set aside for its bodies when it admitted their rows. Each body takes its
-    /// rows' bytes and `framing` from it, and only what it lacks from the bulk pool, at once.
-    SetAside {
-        remaining: Option<Reservation>,
-        framing: u64,
-    },
-    /// The bulk pool, for a page that set nothing aside. A section's first body waits for room
-    /// there, as every section's one body did before sections could travel in more than one; a
-    /// further body of the same section takes its rows' bytes and `framing` at once or not at
-    /// all, since it would otherwise wait while holding the section's earlier bodies.
-    Pool { framing: u64 },
+/// Where a page's Arrow bodies take their memory: what the page set aside for them when it admitted
+/// their rows, and only what that lacks from the bulk pool, at once. Each body takes its rows'
+/// bytes and `framing`. A body never waits for room, since it would wait while the reply holds the
+/// bodies before it and the rows' own memory.
+struct BodyCharges {
+    /// What is left of the memory the page set aside; absent once it is spent, or for a page that
+    /// set nothing aside.
+    remaining: Option<Reservation>,
+    framing: u64,
 }
 
 /// What encoding one part of a section's rows came to.
@@ -414,50 +404,23 @@ enum PartBody {
 }
 
 impl BodyCharges {
-    /// Encodes `part`, whose columns take `payload` bytes, as one body within `limit`. `first`
-    /// says whether it is its section's first body.
+    /// Encodes `part`, whose columns take `payload` bytes, as one body within `limit`.
     async fn encode(
         &mut self,
         executor: &Executor,
         part: RuntimeRecordBatch,
         payload: u64,
         limit: u64,
-        first: bool,
     ) -> Result<PartBody, Report<StreamHandlerError>> {
+        let wanted = body_charge(payload, self.framing, limit);
+        let Some(charge) = take_body_charge(executor, &mut self.remaining, wanted)? else {
+            return Ok(PartBody::Declined);
+        };
         // The part holds rows the owner already read, so a full bulk queue holds its encoding
         // back; the caller's reset of the page stream ends the wait.
-        let encoded = match self {
-            Self::Pool { framing } => {
-                if first {
-                    part.encode_arrow_snapshot_section(executor, QueueAdmission::WaitForPlace)
-                        .await
-                } else {
-                    let wanted = body_charge(payload, *framing, limit);
-                    let charge = match executor.try_reserve(MemoryClass::Bulk, wanted) {
-                        Ok(charge) => charge,
-                        Err(_refused) => return Ok(PartBody::Declined),
-                    };
-                    part.encode_arrow_snapshot_section_within(
-                        executor,
-                        QueueAdmission::WaitForPlace,
-                        charge,
-                    )
-                    .await
-                }
-            }
-            Self::SetAside { remaining, framing } => {
-                let wanted = body_charge(payload, *framing, limit);
-                let Some(charge) = take_body_charge(executor, remaining, wanted)? else {
-                    return Ok(PartBody::Declined);
-                };
-                part.encode_arrow_snapshot_section_within(
-                    executor,
-                    QueueAdmission::WaitForPlace,
-                    charge,
-                )
-                .await
-            }
-        };
+        let encoded = part
+            .encode_arrow_snapshot_section_within(executor, QueueAdmission::WaitForPlace, charge)
+            .await;
         match encoded {
             Ok(body) => Ok(PartBody::Encoded(body)),
             Err(error) => {
@@ -539,10 +502,7 @@ async fn section_bodies(
             let encoded = if payload <= limit {
                 let part = RuntimeRecordBatch::from_record_batch(part.schema(), part)
                     .map_err(StreamHandlerError::with_cause)?;
-                let first = bodies.is_empty();
-                charges
-                    .encode(executor, part, payload, limit, first)
-                    .await?
+                charges.encode(executor, part, payload, limit).await?
             } else {
                 PartBody::PastLimit
             };

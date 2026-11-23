@@ -26,6 +26,7 @@ OUTPUT_OPTIONS = (
     "scalar-output",
     "running-sum-output",
     "checked-running-sum-output",
+    "wide-running-sum-output",
 )
 
 

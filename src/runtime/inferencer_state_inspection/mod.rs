@@ -19,7 +19,7 @@
     nervix::input(plans, reason = "reads installed inference state plans only")
 )]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use arrow_array::builder::{Float32Builder, ListBuilder, StringBuilder, UInt64Builder};
 use error_stack::{Report, ResultExt as _};
@@ -32,12 +32,12 @@ use nervix_models::{
 use nervix_primitives::sync::StdArc;
 
 use super::{
-    BranchKey, RelayProcessorOperationTemplate, Runtime, RuntimeStateKind,
+    BranchKey, RelayProcessorOperationTemplate, Runtime, RuntimeStateKind, RuntimeStatePlacement,
     inferencer_state::{InferencerGeneration, ReplicatedInferencerState},
     processor_state_inspection::{
-        ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
+        PageReply, ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
         ProcessorStatePageMemory, ProcessorStateRun, ProcessorStateSectionColumns,
-        ProcessorStateSelection, extend_runs,
+        ProcessorStateSelection, ReplyMemory, extend_runs,
     },
     published_generation::Generation,
 };
@@ -52,14 +52,25 @@ mod tests;
 
 type ReadResult<T> = error_stack::Result<T, ProcessorStatePageError>;
 
+/// What a page reads of one selected branch without retaining its publication: the branch's
+/// identity, the revision of its current publication and how far that revision is persisted and
+/// confirmed by replicas.
 #[derive(Clone)]
 struct CapturedBranch {
     key: Option<BranchKey>,
     registration: [u8; 16],
-    generation: StdArc<Generation<Option<InferencerGeneration>>>,
+    revision: u64,
     persisted: u64,
     confirmed: u64,
     replicas: u64,
+}
+
+/// A branch a page returns tensors from, read again with the publication the page retains while
+/// it copies them, so its identity and its tensors come from one cut.
+#[derive(Clone)]
+struct RetainedBranch {
+    branch: CapturedBranch,
+    generation: StdArc<Generation<Option<InferencerGeneration>>>,
 }
 
 #[derive(Clone, Copy, strum::AsRefStr)]
@@ -72,7 +83,7 @@ enum PersistenceStage {
 
 impl CapturedBranch {
     fn stage(&self) -> PersistenceStage {
-        if self.persisted < self.generation.revision {
+        if self.persisted < self.revision {
             PersistenceStage::Published
         } else if self.replicas != 0 && self.confirmed == self.replicas {
             PersistenceStage::ReplicaConfirmed
@@ -80,7 +91,9 @@ impl CapturedBranch {
             PersistenceStage::Persisted
         }
     }
+}
 
+impl RetainedBranch {
     fn value(&self) -> ReadResult<&InferencerGeneration> {
         self.generation
             .value
