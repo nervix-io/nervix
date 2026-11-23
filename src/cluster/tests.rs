@@ -319,13 +319,9 @@ async fn a_peer_learns_gossip_state_larger_than_one_exchange_carries() {
     let authority = crate::application::test_fixtures::TestCertificateAuthority::generate();
     let first_interconnect = authority.interconnect("test", &first).await;
     let second_interconnect = authority.interconnect("test", &second).await;
-    let first_cluster = start_cluster(loopback_member_settings(
-        &first,
-        &first_interconnect,
-        None,
-    ))
-    .await
-    .assured("the first member starts on its loopback interconnect");
+    let first_cluster = start_cluster(loopback_member_settings(&first, &first_interconnect, None))
+        .await
+        .assured("the first member starts on its loopback interconnect");
     let second_cluster = start_cluster(loopback_member_settings(
         &second,
         &second_interconnect,
