@@ -610,7 +610,7 @@ pub(super) async fn run_processor_node_runtime(
         }
 
         let maintenance_timeout = if ownership_frozen {
-            Some((runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1)))
+            Some(runtime_handle.ownership_freeze_recheck())
         } else if restore_attempt.is_some() {
             // The attempt's own progress wakes the task, and nothing else falls due while its
             // restore is pending.
@@ -2097,7 +2097,7 @@ async fn run_processor_branch_task(
                     break;
                 }
             }
-            _ = sleep((runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))), if ownership_frozen => {}
+            _ = sleep(runtime_handle.ownership_freeze_recheck()), if ownership_frozen => {}
         }
     }
     while let Ok(ProcessorBranchInput { relay, batch, work }) = input.try_recv() {

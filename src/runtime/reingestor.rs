@@ -68,6 +68,9 @@ pub(super) struct ReingestorDispatchContext<'a> {
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     pub(super) domain_clock: &'a DomainClock,
     pub(super) execution_now: Timestamp,
+    /// The node's installed remote acknowledgement timing, kept from the reingestor task's start.
+    /// Programs the reingestor runs over a batch report its acknowledgements alive by it.
+    pub(super) remote_ack_timing: &'a SharedRemoteAckTiming,
 }
 
 impl<'a> ReingestorDispatchContext<'a> {
@@ -330,7 +333,11 @@ impl Runtime {
         ),
         PlannedGeneralFailure,
     > {
-        let ReingestorDispatchContext { reingestor, .. } = context;
+        let ReingestorDispatchContext {
+            reingestor,
+            remote_ack_timing,
+            ..
+        } = context;
         let operation = MessageErrorOperation::Set;
         let program = &output.program;
         let Some(output_schema) = scope.output_schemas[output_index].clone() else {
@@ -344,6 +351,7 @@ impl Runtime {
             ProgramRun {
                 executor: self.executor(),
                 now: execution_now,
+                ack_timing: remote_ack_timing,
             },
             program,
             FilterMapBatchInputs {
@@ -438,19 +446,23 @@ impl Runtime {
                         .iter()
                         .map(|row| batch.keys[*row].clone())
                         .collect::<Vec<_>>();
-                    let outcomes = batch
-                        .keep_alive_while_pending(evaluate_output_branch_program(
-                            ProgramRun {
-                                executor: self.executor(),
-                                now: execution_now,
-                            },
-                            branch_program,
-                            &input_batch,
-                            &output_batch,
-                            &input_keys,
-                            &scope.side_inputs,
-                            None,
-                        ))
+                    let outcomes = remote_ack_timing
+                        .keep_alive_while_pending(
+                            batch,
+                            evaluate_output_branch_program(
+                                ProgramRun {
+                                    executor: self.executor(),
+                                    now: execution_now,
+                                    ack_timing: remote_ack_timing,
+                                },
+                                branch_program,
+                                &input_batch,
+                                &output_batch,
+                                &input_keys,
+                                &scope.side_inputs,
+                                None,
+                            ),
+                        )
                         .await
                         .map_err(|error| PlannedGeneralFailure::new(error, batch.acks.clone()))?;
                     // A row whose branch cannot be constructed fails the reingestor's whole
@@ -926,12 +938,14 @@ impl Runtime {
             error_policies,
             execution_now,
             routing,
+            remote_ack_timing,
             ..
         } = context;
         let plan = match plan_filter_map_messages(
             ProgramRun {
                 executor: self.executor(),
                 now: execution_now,
+                ack_timing: remote_ack_timing,
             },
             "reingestor",
             reingestor,
@@ -1019,6 +1033,7 @@ impl Runtime {
                 }
             };
             let mut routing = DomainRoutingCache::new(shared_routing);
+            let remote_ack_timing = runtime.remote_ack_timing().clone();
             let domain_clock = match runtime.bind_domain_clock(&task_domain) {
                 Ok(clock) => clock,
                 Err(error) => {
@@ -1206,6 +1221,7 @@ impl Runtime {
                                     branched_senders: &task_branched_senders,
                                     domain_clock: &domain_clock,
                                     execution_now,
+                                    remote_ack_timing: &remote_ack_timing,
                                 },
                                 &input,
                                 &mut task_output_buffers,
@@ -1470,6 +1486,7 @@ mod tests {
                     branched_senders: &senders,
                     domain_clock: &clock,
                     execution_now: clock.snapshot().assured("the clock is running").now(),
+                    remote_ack_timing: &SharedRemoteAckTiming::default(),
                 },
                 &program,
                 MessageErrorOperation::FilterWhere,
@@ -1555,6 +1572,7 @@ mod tests {
         let mut instances = BranchInstanceRegistry::new();
         let (branch_sender, _) = mpsc::channel(1);
         let route_task = IngestorRouteTask {
+            remote_ack_timing: runtime.remote_ack_timing().clone(),
             runtime_handle: runtime.clone(),
             domain: domain.clone(),
             ingestor: named("tenant_partition"),
@@ -1795,6 +1813,7 @@ mod tests {
             ),
         );
         let error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
+        let remote_ack_timing = SharedRemoteAckTiming::default();
         let mut context = ReingestorDispatchContext {
             routing: &routing,
             domain: &domain,
@@ -1807,6 +1826,7 @@ mod tests {
                 .snapshot()
                 .expect("the fixture's clock remains installed")
                 .now(),
+            remote_ack_timing: &remote_ack_timing,
         };
         let mut output_buffers =
             ReingestorOutputBuffers::new(input.routes.len(), output_counters.clone());

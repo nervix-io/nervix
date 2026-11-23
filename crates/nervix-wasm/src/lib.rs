@@ -57,7 +57,22 @@ use wasmtime::{
 
 const ENV_MODULE: &str = "env";
 const EXPORT_MEMORY: &str = "memory";
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM guest ABI's fallible exports return 0 on success"
+    )
+)]
 const SUCCESS: i32 = 0;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Processor Guests chapter has nervix_timeout_after_nanos answer a \
+                  negative delay with -1, which no granted handle, a count from one, can be"
+    )
+)]
 const ERR_INVALID_SIZE: i32 = -1;
 
 pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
@@ -72,6 +87,15 @@ nervix_primitives::unmodeled::task_local! {
 /// What compiling one module is charged. Wasmtime allocates the code it generates itself and keeps
 /// it for as long as the processor holds the module, which no transient budget can stand for, so
 /// the charge only admits the compilation onto the bulk workers.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the charge is an admission token for the bulk workers, not a memory estimate, \
+                  since the processor keeps the code Wasmtime generates, so it is the least \
+                  nonzero reservation: a zero request takes no permit and never waits"
+    )
+)]
 const COMPILE_RESERVATION_BYTES: u64 = 1;
 
 /// Why the Wasmtime engine could not start, or why a module could not be compiled and linked.
@@ -965,6 +989,17 @@ impl CapacityHint {
 
 impl WasmBranchInit {
     fn serialized_capacity_hint(&self) -> usize {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over a BranchInit \
+                          message's worst-case FlatBuffers framing (size prefix, identifier, root \
+                          offset, Message and BranchInit tables and vtables, and its string and \
+                          vector prefixes); an underestimate only spills and regrows the buffer, \
+                          so it bounds nothing"
+            )
+        )]
         const BRANCH_INIT_OVERHEAD: usize = 512;
 
         let branch_key = match &self.branch_key {
@@ -1001,6 +1036,16 @@ impl WasmBranchInit {
 
 impl WasmProcessorSchema {
     fn serialized_capacity_hint(&self) -> usize {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over a ProcessorSchema's \
+                          worst-case FlatBuffers framing (its table and vtable, its name and \
+                          field-vector prefixes and its slot in the output schemas); an \
+                          underestimate only spills and regrows the buffer, so it bounds nothing"
+            )
+        )]
         const SCHEMA_OVERHEAD: usize = 96;
 
         CapacityHint::of(self.name.len())
@@ -1027,6 +1072,16 @@ impl WasmProcessorSchema {
 
 impl WasmProcessorField {
     fn serialized_capacity_hint(&self) -> usize {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over a ProcessorField's \
+                          worst-case FlatBuffers framing (its table and vtable, its name's prefix \
+                          and terminator and its slot in the field vector); an underestimate only \
+                          spills and regrows the buffer, so it bounds nothing"
+            )
+        )]
         const FIELD_OVERHEAD: usize = 64;
 
         CapacityHint::of(self.name.len())
@@ -1046,6 +1101,16 @@ impl WasmProcessorField {
 
 impl WasmProcessorType {
     fn serialized_capacity_hint(&self) -> usize {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over a ProcessorType \
+                          table's worst-case FlatBuffers framing (its vtable offset and vtable, \
+                          kind, element offset and array length); an underestimate only spills \
+                          and regrows the buffer, so it bounds nothing"
+            )
+        )]
         const TYPE_OVERHEAD: usize = 64;
 
         match self {
@@ -1277,8 +1342,38 @@ impl WasmOutputColumnRef {
 
 impl WasmEnvelope {
     fn serialized_capacity_hint(&self) -> usize {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over an envelope's \
+                          worst-case FlatBuffers framing (size prefix, identifier, root offset, \
+                          Message and envelope tables and vtables, and its batch and output \
+                          vector prefixes); an underestimate only spills and regrows the buffer, \
+                          so it bounds nothing"
+            )
+        )]
         const ROOT_OVERHEAD: usize = 256;
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over a RoutedOutput's \
+                          worst-case FlatBuffers framing (its table and vtable, its relay name \
+                          and column-vector prefixes and its slot in the outputs); an \
+                          underestimate only spills and regrows the buffer, so it bounds nothing"
+            )
+        )]
         const ROUTED_OUTPUT_OVERHEAD: usize = 96;
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an OutputColumnRef table, its vtable offset, index and padded source \
+                          byte, and its slot in the columns vector take 16 bytes beside the \
+                          vtable FlatBuffers shares between columns"
+            )
+        )]
         const COLUMN_OVERHEAD: usize = 16;
 
         match self {
@@ -1391,7 +1486,28 @@ impl WasmEnvelope {
 
 impl WasmAckSidecar {
     fn serialized_capacity_hint(&self) -> usize {
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over an AckSidecar's \
+                          worst-case FlatBuffers framing (its table and vtable and the prefixes \
+                          of its four set vectors); an underestimate only spills and regrows the \
+                          buffer, so it bounds nothing"
+            )
+        )]
         const SIDECAR_OVERHEAD: usize = 128;
+        #[cfg_attr(
+            nervix_lint,
+            nervix::constant(
+                fixed,
+                reason = "an initial guest-buffer estimate with headroom over one token set's \
+                          worst-case FlatBuffers framing (its table and vtable, its token \
+                          vector's prefix and alignment, its reason's prefix and its slot in the \
+                          set vector); an underestimate only spills and regrows the buffer, so it \
+                          bounds nothing"
+            )
+        )]
         const SET_OVERHEAD: usize = 64;
 
         let token_count = CapacityHint::default()

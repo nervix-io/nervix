@@ -196,14 +196,17 @@ impl<'a> InferencerAdmission<'a> {
         if !mapped_rows.is_empty() {
             match vm_typed_batch_selected_rows_to_runtime_batch(&executed.batch, &mapped_rows) {
                 Ok(mapped) => {
-                    run = batch
-                        .acks
-                        .as_slice()
-                        .keep_alive_while_pending(self.session.run(
-                            self.branch.runtime.executor(),
-                            self.prepared,
-                            &mapped,
-                        ))
+                    run = self
+                        .branch
+                        .remote_ack_timing
+                        .keep_alive_while_pending(
+                            batch.acks.as_slice(),
+                            self.session.run(
+                                self.branch.runtime.executor(),
+                                self.prepared,
+                                &mapped,
+                            ),
+                        )
                         .await;
                 }
                 Err(error) => {
@@ -295,14 +298,14 @@ impl<'a> InferencerAdmission<'a> {
                 return false;
             }
         };
-        let loaded = batch
-            .acks
-            .as_slice()
-            .keep_alive_while_pending(self.session.load(
-                self.branch.runtime.executor(),
-                &path,
-                self.prepared,
-            ))
+        let loaded = self
+            .branch
+            .remote_ack_timing
+            .keep_alive_while_pending(
+                batch.acks.as_slice(),
+                self.session
+                    .load(self.branch.runtime.executor(), &path, self.prepared),
+            )
             .await;
         if let Err(error) = loaded {
             self.fail(
@@ -349,18 +352,21 @@ impl<'a> InferencerAdmission<'a> {
                 return None;
             }
         };
-        let executed = batch
-            .acks
-            .as_slice()
-            .keep_alive_while_pending(execute_program_with_selection_in_context(
-                self.branch.runtime.executor(),
-                &self.program.compiled,
-                &projected,
-                &VmExecutionContext {
-                    now: self.execution_now,
-                    injector: None,
-                },
-            ))
+        let executed = self
+            .branch
+            .remote_ack_timing
+            .keep_alive_while_pending(
+                batch.acks.as_slice(),
+                execute_program_with_selection_in_context(
+                    self.branch.runtime.executor(),
+                    &self.program.compiled,
+                    &projected,
+                    &VmExecutionContext {
+                        now: self.execution_now,
+                        injector: None,
+                    },
+                ),
+            )
             .await;
         match executed {
             Ok(executed) => Some(executed),

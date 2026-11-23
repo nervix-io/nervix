@@ -83,15 +83,11 @@ impl RelayBoundaryServices {
         branch: &RelayBranchChannels,
         producer_lifetime: Option<&CancellationToken>,
     ) -> OwnerDelivery {
-        batch
-            .keep_alive_while_pending(self.deliver_to_owner(
-                domain,
-                relay,
-                unit,
+        self.remote_ack_timing
+            .keep_alive_while_pending(
                 batch,
-                branch,
-                producer_lifetime,
-            ))
+                self.deliver_to_owner(domain, relay, unit, batch, branch, producer_lifetime),
+            )
             .await
     }
 

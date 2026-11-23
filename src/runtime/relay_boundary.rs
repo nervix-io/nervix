@@ -235,6 +235,9 @@ pub(super) struct RelayBoundaryServices {
     unit_runtime_consumers: BTreeMap<Unit, UnitRuntimeConsumers>,
     pub(super) remote_runtime_consumers: ArcSwap<Vec<RemoteRuntimeConsumer>>,
     pub(super) remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
+    /// The remote acknowledgement timing the node installed, kept from the dispatcher when these
+    /// services are built. A delivery that waits reports its records alive at its alive interval.
+    pub(super) remote_ack_timing: SharedRemoteAckTiming,
     /// How the relay's concrete keys are divided among its units, as its branch declares.
     pub(super) partitioning: RelayPartitioning,
     /// Where each unit's owner runs, published whole whenever the committed schedule moves one.
@@ -857,18 +860,19 @@ impl RelayConsumerFanout {
             })
             .assured("a relay cannot publish 2^64 branch-scoped gate leases");
         self.branch_dispatch_gates.entries.rcu(|current| {
-            let mut next = Vec::with_capacity(
-                current
-                    .len()
-                    .checked_add(1)
-                    .assured("a process cannot hold usize::MAX branch-scoped relay gates"),
-            );
-            next.extend(current.iter().cloned());
-            next.push(BranchRelayDispatchGate {
+            let engaged = [BranchRelayDispatchGate {
                 id,
                 scope,
                 gate: branch_gate.clone(),
-            });
+            }];
+            let mut next = Vec::with_capacity(
+                current
+                    .len()
+                    .checked_add(engaged.len())
+                    .assured("a process cannot hold usize::MAX branch-scoped relay gates"),
+            );
+            next.extend(current.iter().cloned());
+            next.extend(engaged);
             next
         });
         drop(publication_fence);
@@ -1396,6 +1400,13 @@ impl RelayBoundaryServices {
                 )
             })
             .collect();
+        // The dispatcher carries the timing its node installs. Services built without one reach no
+        // other node, so their deliveries keep the default timing a node holds before it installs
+        // its committed parameters.
+        let remote_ack_timing = match &remote_dispatcher {
+            Some(dispatcher) => dispatcher.registry.ack_timing().clone(),
+            None => SharedRemoteAckTiming::default(),
+        };
         Self {
             fanout,
             attached_runtime_consumer_count: AtomicUsize::new(attached_runtime_consumer_count),
@@ -1403,6 +1414,7 @@ impl RelayBoundaryServices {
             unit_runtime_consumers,
             remote_runtime_consumers: ArcSwap::from_pointee(remote_runtime_consumers),
             remote_dispatcher,
+            remote_ack_timing,
             partitioning,
             owners: ArcSwap::from_pointee(RelayOwnerRoutes::default()),
             branch_presences,
@@ -1785,13 +1797,16 @@ impl RelayBoundaryServices {
         }
         // A consumer's node reports the batch's records alive to their sources once it has admitted
         // them, and not before, so this node reports them alive while their deliveries wait.
-        batch
-            .keep_alive_while_pending(self.deliver_to_remote_runtime_consumers(
-                domain,
-                unit,
+        self.remote_ack_timing
+            .keep_alive_while_pending(
                 batch,
-                &remote_runtime_consumers,
-            ))
+                self.deliver_to_remote_runtime_consumers(
+                    domain,
+                    unit,
+                    batch,
+                    &remote_runtime_consumers,
+                ),
+            )
             .await
     }
 

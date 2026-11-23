@@ -94,13 +94,37 @@ const ONLY_ERROR_REPORTS_PROPERTY: &str = "delivery.report.only.error";
 
 /// The longest `delivery.timeout.ms` librdkafka accepts, which it holds as a C `int` of
 /// milliseconds.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "librdkafka holds delivery.timeout.ms as a C int of milliseconds, so i32::MAX \
+                  milliseconds is the longest it accepts"
+    )
+)]
 const LONGEST_MESSAGE_TIMEOUT_MILLIS: u32 = i32::MAX.unsigned_abs();
 
 /// Nanoseconds in one millisecond, the unit `delivery.timeout.ms` counts in.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a millisecond, the unit delivery.timeout.ms and a Kafka record's timestamp \
+                  count in, is a million nanoseconds"
+    )
+)]
 const NANOS_PER_MILLI: u32 = 1_000_000;
 
 /// The longest single wait inside librdkafka's flush. A finish waits in such steps until its
-/// deadline, so each step's milliseconds fit the C `int` librdkafka takes.
+/// deadline.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the connector contract publishes that a Kafka finish waits inside the driver's \
+                  flush in steps of at most a second"
+    )
+)]
 const FLUSH_STEP: Duration = Duration::from_secs(1);
 
 /// The native queue byte limit, expressed by librdkafka in kibibytes.
@@ -108,6 +132,14 @@ const QUEUE_CAPACITY_PROPERTY: &str = "queue.buffering.max.kbytes";
 
 /// A delivery callback can wake its waiter before librdkafka frees the native message's queue
 /// place. Recheck that short interval cooperatively; ACK TIMEOUT bounds the complete wait.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the connector contract publishes that a confirmed Kafka publish checks queue \
+                  admission again at one-millisecond intervals once no window answer remains"
+    )
+)]
 const QUEUE_RECHECK_INTERVAL: Duration = Duration::from_millis(1);
 
 pub struct KafkaTopicEmitterConfig {

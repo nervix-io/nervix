@@ -10,6 +10,15 @@ use thiserror::Error;
 use ubyte::ByteUnit;
 
 /// Working memory for one command's normalized state records and the database journal beside it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the consensus storage chapter gives an applied command a 16 MiB working \
+                  reservation, sixteen of its 1 MiB commands, with 8 MiB for normalized records \
+                  and the other half for the journal"
+    )
+)]
 const COMMAND_STATE_STORAGE_RESERVATION_MULTIPLIER: u64 = 16;
 const _: () = assert!(
     COMMAND_STATE_STORAGE_RESERVATION_MULTIPLIER.is_multiple_of(2),
@@ -17,7 +26,19 @@ const _: () = assert!(
 );
 
 /// Working memory every consensus vote and metadata read or write reserves from the management
-/// class, as a multiple of one management event.
+/// class, as a multiple of one management event. A durable batch charges at most half of its
+/// reservation, two events, to the records and keys it writes, which holds a record as large as a
+/// whole event while its encoding buffer doubles; the other half is kept for Fjall's journal
+/// encoding and the moving batch descriptors.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the consensus storage chapter's Management working set is four largest \
+                  management events: two for a durable batch's records and keys, two for Fjall's \
+                  journal encoding beside them"
+    )
+)]
 const MANAGEMENT_STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 const _: () = assert!(
     MANAGEMENT_STORAGE_RESERVATION_MULTIPLIER >= 1,

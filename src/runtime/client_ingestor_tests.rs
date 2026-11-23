@@ -122,7 +122,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
                 attachment: ClientAttachmentId::from_u128(1),
                 submission: submission(1),
                 body: Bytes::copy_from_slice(body.as_ref()),
-                max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
+                max_batch_rows: NonZeroU32::new(nervix_models::ClientBatchRows::DEFAULT)
                     .assured("the default row allowance is nonzero"),
                 max_batch_bytes: NonZeroU64::new(1024 * 1024)
                     .assured("the fixture grants a nonzero batch allowance"),
@@ -221,7 +221,7 @@ impl Fixture {
             user: UserName::parse("fixture_user").assured("a literal user name"),
             expected_fields: fields(&["unmatched"]),
             limits: limits(1, 1),
-            max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
+            max_batch_rows: NonZeroU32::new(nervix_models::ClientBatchRows::DEFAULT)
                 .assured("the default row allowance is nonzero"),
             max_batch_bytes: NonZeroU64::MIN,
             serving: ProducerServing::Local,
@@ -317,7 +317,7 @@ impl Fixture {
             user,
             expected_fields: expected,
             limits,
-            max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
+            max_batch_rows: NonZeroU32::new(nervix_models::ClientBatchRows::DEFAULT)
                 .assured("the default row allowance is nonzero"),
             max_batch_bytes: NonZeroU64::new(1024).assured("a literal non-zero size"),
             serving,

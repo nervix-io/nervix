@@ -18,12 +18,14 @@ use std::collections::BTreeMap;
 
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_interconnect::backup::RestoreStateInventory;
+use nervix_models::SettingDefinition as _;
 use nonzero_ext::nonzero;
 
 use super::{
     tests::{authority, store},
     *,
 };
+use crate::runtime::RestoreStagingMaxBytes;
 
 /// The domains a history stages into. Two are enough for one restore to stage beside the
 /// generation another one left unpublished.
@@ -86,7 +88,10 @@ impl History {
     fn new() -> Self {
         let directory =
             tempfile::tempdir().assured("the test host provides a writable temporary directory");
-        let opened = store(directory.path(), DEFAULT_RESTORE_STAGING_MAX_BYTES);
+        let opened = store(
+            directory.path(),
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
+        );
         Self {
             store: Some(opened),
             directory,
@@ -189,7 +194,7 @@ impl History {
         drop(self.store.take());
         self.store = Some(store(
             self.directory.path(),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            RestoreStagingMaxBytes::default_value(&()).as_u64(),
         ));
     }
 

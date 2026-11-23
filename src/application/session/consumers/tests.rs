@@ -7,9 +7,9 @@
 
 use meticulous::ResultExt as _;
 use nervix_models::{
-    AckMode, AckWindow, Assignment, AssignmentTarget, ClientConsumerEmitter, ClientEmitter,
-    DEFAULT_CLIENT_CONSUMER_SESSION_BYTES, EmitterBody, ErrorPolicies, Expression, Float64Literal,
-    Literal, ParseAsType, ProcessorInputs, RetryPolicy, RouteConstruction,
+    AckMode, AckWindow, Assignment, AssignmentTarget, ClientConsumerEmitter,
+    ClientConsumerSessionBytes, ClientEmitter, EmitterBody, ErrorPolicies, Expression,
+    Float64Literal, Literal, ParseAsType, ProcessorInputs, RetryPolicy, RouteConstruction,
 };
 
 use super::*;
@@ -79,19 +79,19 @@ fn an_interrupted_open_releases_its_session_reservation() {
     let consumers = SessionConsumers::default();
     let first = consumers
         .reserve(
-            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
-            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+            ClientConsumerSessionBytes::DEFAULT,
+            ClientConsumerSessionBytes::DEFAULT,
         )
         .assured("the empty session can reserve its full capacity");
     assert!(matches!(
-        consumers.reserve(1, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES),
+        consumers.reserve(1, ClientConsumerSessionBytes::DEFAULT),
         Err(EmitterOpenRefusal::SessionCapacityExhausted)
     ));
     drop(first);
     let replacement = consumers
         .reserve(
-            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
-            DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+            ClientConsumerSessionBytes::DEFAULT,
+            ClientConsumerSessionBytes::DEFAULT,
         )
         .assured("dropping the sole reservation releases the session's full capacity");
     drop(replacement);

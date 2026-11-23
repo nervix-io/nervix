@@ -75,6 +75,9 @@ pub(super) struct BranchRuntime {
     pub(super) relay_state_epoch: Option<u64>,
     pub(super) processors: HashMap<ModelName, RelayProcessorNode>,
     pub(super) metrics: BranchRuntimeMetrics,
+    /// The node's installed remote acknowledgement timing, kept from the branch's creation. Work the
+    /// branch holds reads its committed alive interval here once it waits.
+    pub(super) remote_ack_timing: SharedRemoteAckTiming,
 }
 
 pub(super) struct BranchRuntimeMetrics {
@@ -225,6 +228,9 @@ pub(super) struct IngestorRouteTask {
     /// Reports the depth of `pending` to this route's owning node, so a drain sees route output
     /// that has left the ingest group but has not yet reached branch execution.
     pub(super) quiesce: OutputBufferQuiesceGauge,
+    /// The node's installed remote acknowledgement timing, kept from the route task's start. Input
+    /// the route prepares for its branches reads its committed alive interval here once it waits.
+    pub(super) remote_ack_timing: SharedRemoteAckTiming,
 }
 
 pub(super) struct BranchExecutionDispatchContext<'a> {
@@ -914,6 +920,7 @@ impl IngestorRouteTask {
     ) -> Vec<RelayRecordBatch> {
         let branches = match prepare_branched_entrypoint_input(
             self.runtime_handle.executor(),
+            &self.remote_ack_timing,
             input,
             self.template.ack_boundary,
         )
@@ -1279,6 +1286,7 @@ impl IngestorRouteRuntime {
         let force_flush = runtime_handle.force_flush_participant(&domain, quiesce.counters());
         let task = nervix_primitives::task::spawn(
             IngestorRouteTask {
+                remote_ack_timing: runtime_handle.remote_ack_timing().clone(),
                 runtime_handle,
                 domain,
                 ingestor,
@@ -1843,7 +1851,7 @@ impl BranchExecutionRuntime {
                 // Maintenance wakeups are physical, so their interval is a plain monotonic sleep.
                 // The branch's own deadline is logical and is awaited on the domain clock below.
                 let maintenance_sleep = if ownership_frozen {
-                    (runtime_handle.entity_gate_deadline() / 1200).max(Duration::from_nanos(1))
+                    runtime_handle.ownership_freeze_recheck()
                 } else {
                     next_expiration_scan
                         .checked_duration_since(Instant::now())

@@ -497,11 +497,14 @@ mod tests {
                 .expect("the test's membership settings are valid"),
                 ..NodeSettings::default()
             };
+            // The node skips its shutdown drain, as a scenario node does unless its scenario
+            // enables graceful shutdown drain; a build without the test harness always drains.
+            #[cfg(feature = "testing")]
+            fault_injection.skip_shutdown_drain();
             Application::builder()
                 .identity(identity)
                 .settings(settings)
                 .fault_injection(fault_injection)
-                .graceful_shutdown_drain(false)
                 .build()
         }
 

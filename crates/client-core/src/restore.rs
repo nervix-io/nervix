@@ -61,6 +61,15 @@ use crate::{
 };
 
 /// Archive bytes one restore frame carries.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the client implementation manual (rule W-1) and Backup And Restore's limits \
+                  publish 256 KiB as the largest restore chunk the Rust client sends, which half \
+                  a smaller session frame lowers"
+    )
+)]
 const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
 
 /// The request identity of a restore's start frame. Every attempt is a stream of its own that
@@ -247,7 +256,8 @@ impl Client {
         let statement = restore.to_canonical_plexus();
         let frame_timeout = self.inner.connector.request_timeout();
         let mut next_limits = None;
-        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+        let routing_attempts = self.inner.connector.capabilities().routing_attempts();
+        for attempt in 0..routing_attempts.get() {
             nervix_primitives::task::consume_budget().await;
             let start = RestoreStart {
                 request_id: RESTORE_REQUEST_ID,
@@ -307,7 +317,8 @@ impl Client {
                     ));
                 }
                 Err(AttemptFailure::Transport(status))
-                    if upload_status_is_retryable(&status) && self.await_retry(attempt).await =>
+                    if upload_status_is_retryable(&status)
+                        && self.await_retry(attempt, routing_attempts).await =>
                 {
                     match self
                         .recover_session(RecoveryMode::Replace, RecoveryDeadline::RetryBudget)
@@ -362,7 +373,7 @@ impl Client {
                         .await?
                 }
                 Routing::AwaitElection | Routing::AwaitOutcome
-                    if self.await_retry(attempt).await => {}
+                    if self.await_retry(attempt, routing_attempts).await => {}
                 Routing::AwaitElection if history.is_uncertain() => {
                     return Err(Report::new(ClientError::RetryDeadline));
                 }

@@ -23,6 +23,8 @@ Usage:
   just chaos run stale-follower --image IMAGE [--records N]
   just chaos run former-owner-restart --image IMAGE [--isolation-seconds N] [--records N]
   just chaos run cluster-restart --image IMAGE [--nodes 1|3] [--outage-seconds N] [--records N]
+  just chaos run capability-roll|parameter-return|parameter-live|prerequisite-refusal --image IMAGE
+      [--records N]
   just chaos run stateful --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run endpoints --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run binding-endpoints --image IMAGE --binding-image IMAGE [--nodes 1|3] [--fault FAULT]
@@ -107,6 +109,18 @@ stale-follower  Offline follower, survivor log compaction and snapshot catch-up 
 former-owner-restart  Former owner restarted behind peer-side isolation before startup admission (three-node)
 cluster-restart  Every node SIGKILLed and started from its own volume
                  topologies: one-node (--nodes 1), three-node (--nodes 3, default)
+capability-roll  Every node gracefully restarted in turn, leader first, with a lower interconnect
+                 relay receive bound, so for a while its peers honour different claims of one
+                 negotiated bound, judged by an exact ledger (three-node)
+parameter-return  A follower stopped while ALTER CLUSTER SET commits a parameter change, refused when
+                  it names the parameter as its own setting, then returning to run the committed
+                  record it takes from the live cluster, never its stale log (three-node)
+parameter-live  Two ALTER CLUSTER SET changes applied live under load, each installed by every node,
+                judged strictly: no restart, ownership or leadership change, negative
+                acknowledgement or error event (three-node)
+prerequisite-refusal  A follower restarted with a Raft heartbeat outside the compatibility bound,
+                      refused at join with the prerequisite and both values while the other nodes
+                      keep serving, then restored (three-node)
 stateful  Interleaved branches through a deduplicator, a window, materialized relay state, a
           checkpointed WASM processor and a stateful inferencer, held at an observed durability
           milestone, then one fault
@@ -196,6 +210,9 @@ case "${command_name}" in
                 exec "${script_dir}/run-recovery.sh" --scenario "${scenario}" "$@"
                 ;;
             stateful | endpoints | binding-endpoints | lifetimes | domain-time | mixed-instability | backup-cycles | backup-fault | restore-fresh-cluster | restore-fault | restore-volume | graceful-stop | alteration-handover)
+                exec "${script_dir}/run-baseline.sh" --scenario "${scenario}" "$@"
+                ;;
+            capability-roll | parameter-return | parameter-live | prerequisite-refusal)
                 exec "${script_dir}/run-baseline.sh" --scenario "${scenario}" "$@"
                 ;;
             *)

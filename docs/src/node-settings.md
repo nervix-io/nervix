@@ -5,11 +5,13 @@ and a validation boundary. Values that depend on an external system belong to th
 declaration in Plexus, the Nervix graph definition language.
 
 The vocabulary provides `SettingDefinition`, three sealed classes and `Setting<D>`.
-The source ratchet counts numeric policy outside that boundary. Every option `nervix-server`
-accepts is either a declared setting in its owner's group or part of the node's identity,
-addresses and paths, which are not settings; [The Server's Settings](#the-servers-settings) lists
-them. Runtime constants that are not options keep their current wiring while their area owners
-adopt these declarations, and this chapter states the contract that adoption must satisfy. The
+The `nervix::hidden_tunable` compiler diagnostic refuses numeric policy outside that boundary.
+Every option `nervix-server` accepts is either a declared setting in its owner's group or part of
+what the node is provisioned with, its identity, addresses, paths and trace export, which are not
+settings; [The Server's Settings](#the-servers-settings) lists them. A runtime constant that is not
+an option is fixed by the contract it states, derived from typed input, or retained under a
+reason-bearing expectation that names its repair task, and this chapter states the contract each
+satisfies. The
 class API alone publishes no record, commits no parameter, detects no capacity and changes no
 running service. A node publishes, carries and verifies its prerequisites as
 [Prerequisites At Join](#prerequisites-at-join) describes, and its
@@ -163,10 +165,13 @@ while its owner reaps another completed connection.
 ## Committed Node Capabilities
 
 `--cpu-count` (`NERVIX_CPU_COUNT`) overrides the process's cgroup-aware available parallelism.
-`--memory-limit` (`NERVIX_MEMORY_LIMIT`) overrides the existing cgroup/physical-memory detector.
-Both overrides must be positive. A failed host query remains `unknown`; memory preflight and the
-committed claim use the same resolved measurement. The startup log includes these resolved values
-and the receive bounds. Worker pools, budgets and watermarks retain their own setting owners.
+`--memory-limit` (`NERVIX_MEMORY_LIMIT`) overrides the cgroup/physical-memory detector.
+Both overrides must be positive. A failed host query remains `unknown`; memory preflight, the
+derived execution settings and the committed claim use the same resolved measurement. The startup
+log includes these resolved values and the receive bounds. Worker pools, budgets, client credit and
+watermarks derive from them through their own setting owners, as
+[Execution Capabilities](#execution-capabilities) states; [Sizing A Node](sizing.md) presents every
+derivation for operators.
 
 The claim also carries the total size of the volume that holds the node's database directory, as
 the [startup preflight](#the-startup-preflight) measured it when the run started. It has no
@@ -259,11 +264,11 @@ peer, 768 by default. Health-probe fan-out and DNS lookup concurrency each equal
 `interconnect-max-peers`. Completion reserves are at least one and otherwise one per sixteen peers,
 bounded by the incoming queue.
 
-The default ordinary and append request reserves are now 128, replacing eight for the whole node.
-An append stream retains its admission throughout its lifetime, so eight cannot serve nine
-followers. Liveness admission increases from 32 to 64 with the default peer count. Each traffic
-reserve remains independent; a full general queue cannot consume health or cancellation capacity.
-An explicit lower request quota is reported as configured and refusal is a typed capacity outcome.
+With the default 64 peers, the ordinary and append request reserves are 128 each and health-probe
+fan-out is 64. An append stream retains its admission throughout its lifetime, so the derived
+reserve holds an append stream and its replacement for every declared peer. Each traffic reserve is
+independent; a full general queue cannot consume health or cancellation capacity. An explicit lower
+request quota is reported as configured, and a refusal is a typed capacity outcome.
 
 Typed RPCs derive their deadlines from the request budget: control one tenth, coordination one
 fifth, setup one half, ordinary requests one, snapshot operations three, checkpoint transfers six,
@@ -343,6 +348,8 @@ restarts. It changes neither the cluster's accepted Models nor an existing opera
 | Transaction/archive sweep and leadership-sync retry | 250ms |
 | Runtime-state admission, installation and capability-announcement retry | 500ms |
 | Restore-staging sweep and interconnect TLS reload | 1s |
+| Leader's Kafka partition watch | 1s |
+| Inferencer model inspection deadline | 30s |
 | Concurrent transaction recoveries / resource replications | 8 / 4 |
 | Session frame / transfer / string bytes | 4 MiB / 64 MiB / 64 MiB |
 | Session nesting / vector entries | 64 / 262,144 |
@@ -355,7 +362,11 @@ restarts. It changes neither the cluster's accepted Models nor an existing opera
 
 The `--control-plane-*`, `--session-*`, `--client-link-*`,
 `--authentication-attempts-per-second` and `--interconnect-tls-reload-interval` options expose
-these capabilities; the generated server reference lists each option. Values and relationships
+these capabilities; the generated server reference lists each option. The leader's partition
+topology observer polls a domain's Kafka partition sources every
+`--control-plane-kafka-partition-watch-interval` and its other sources every
+`--partition-topology-poll-interval`. `--control-plane-model-inspection-timeout` bounds the
+inspection of an inferencer's model while its binding is validated. Values and relationships
 are validated before I/O. In particular, the session transfer holds a frame, its string bound fits
 the transfer, and its queue memory holds at least one maximum-sized frame on each lane.
 Each lane's depth is `queue_memory_bytes / (2 * frame_bytes)`, giving 16 frames by default.
@@ -386,7 +397,8 @@ values have no independent flag.
 
 Local transaction-application and gate release/engagement retries, clock-progress delivery,
 backup retries and restore conversion admission have their own `--control-plane-*` capabilities.
-Their defaults remain 100ms, 200ms, 50ms, and a 30s conversion wait with 50ms retry as applicable.
+Their defaults are 100ms for transaction application and for gate release and engagement, 200ms
+for clock progress, 50ms for backups, and a 30s restore conversion wait retried every 50ms.
 `--control-plane-runtime-state-retry-interval` keeps runtime admission, installation and node
 capability publication retries at 500ms by default, independently of the Raft heartbeat. A node
 may tune that retry without changing the cluster's consensus prerequisite.
@@ -403,7 +415,7 @@ whole seconds and subsecond nanoseconds in eight bytes; every permitted duration
 The public duration values and their JSON seconds/nanoseconds encoding retain full precision.
 This keeps the inline Raft command footprint bounded while carrying the complete policy.
 
-The eight count parameters whose definitions already cap them within `u32::MAX` use four-byte
+The nine count parameters whose definitions already cap them within `u32::MAX` use four-byte
 stored projections. Their public u64 values, defaults and admitted ranges remain unchanged;
 full-width count and byte parameters retain eight bytes. Storage and JSON both validate through
 the owning definition before publishing the complete policy.
@@ -515,7 +527,7 @@ selector before using those values to choose nodes.
 committed it and the incarnation it belongs to, or `record: not announced`, then one line per
 property, the undetected ones with their reason, and one `key=value` line per tag in key order, or
 `tags: none`. A departed node's retained record follows its committed capacity claim: the
-capability line and its interconnect, DNS, database and consensus lines.
+capability line and its interconnect, membership, DNS, database and consensus lines.
 
 ```text
   record: revision 41 (incarnation 3)
@@ -806,7 +818,7 @@ policy from the policy each node has installed.
 | --- | --- | --- |
 | `DOMAIN_DRAIN_TIMEOUT` | 30s | Budget for draining a domain's admitted work |
 | `ENTITY_GATE_DEADLINE` | 30s | Budget for a coordinated entity gate |
-| `REMOTE_ACK_ALIVE_INTERVAL` | 100ms | Report cadence of a retained remote delivery |
+| `REMOTE_ACK_ALIVE_INTERVAL` | 100ms | Report cadence of a retained remote delivery and of held local work |
 | `REMOTE_ACK_DISPATCH_TIMEOUT` | 5s | Inactivity budget of a remote admission attempt |
 | `REMOTE_ACK_SILENCE_TIMEOUT` | 15s | Reporting silence allowed after admission |
 | `REMOTE_ACK_SWEEP_INTERVAL` | 1s | Cadence for counting silence and admission sweeps |
@@ -834,6 +846,15 @@ not shorten an earlier delivery's reporting window. A late sweep counts once and
 ticks. Each retained relay attempt and correlation keeps twice the admission budget of its delivery,
 and a channel watermark twice the longest budget among the deliveries it recorded; a sender rotates
 its channel before that channel's watermark can expire.
+
+Held local work reports the acknowledgements it holds alive at the same committed alive interval: a
+delivery waiting for admission, a processor's evaluation, checkpoint or inference, an ingestor's
+group, an emitter's buffered, staged or retried work and a message-error route's buffered errors.
+Each keepalive reads the interval once its work waits and keeps it until that work ends, and an
+emitter's or message-error route's recurring beat reads it again for each beat it arms after the
+previous one fired, so a change reaches a running owner at its next keepalive or beat with no
+rebuild.
+[Data-Plane Concurrency](data-plane-concurrency.md) owns how each owner keeps the installed timing.
 
 The following are node capabilities, resolved through `RuntimeSettings` and announced with the
 node's immutable incarnation-bound claim. Restart to change them. Each has its `NERVIX_`
@@ -874,7 +895,8 @@ snapshot cannot exceed the concurrent staging quota. Snapshot quotas must fit th
 the temporary directory, independently of the restore-staging quota on the database volume.
 Group size controls decoded grouping; sequential broker intake still requests exactly one message.
 A connector's declared intake capacity also applies when it is smaller than the configured group.
-Kafka partition watching stays with `--kafka-partition-watch-interval` in the connector host group.
+Kafka partition watching follows `--control-plane-kafka-partition-watch-interval`, among the
+[control-plane capabilities](#control-plane-and-session-capabilities).
 
 Materialized row-view metadata derives its ceiling from the resolved relay memory budget at both
 capture and restore. Capture metadata retains its Bulk admission; reopened metadata retains its
@@ -911,22 +933,23 @@ It refuses to start at the first check that fails, exiting with status `1` and
    of its control group and the groups above it, in the unified hierarchy or the version 1 memory
    hierarchy, or its physical memory when no group limit is smaller. It derives the execution
    settings, client byte credit, omitted receive limits and memory-pressure watermarks from these
-   capacities. Every memory pool counts once, including independent active state reads and retained
-   state-read cache. Their total plus producer and consumer node credit and the configured node and
-   consensus database caches must fit known memory.
+   capacities, and checks the listener body limits against the intake pool, the runtime threads
+   against the CPU claim and the executor's workers, and the consensus append window against the
+   largest replication batch. Every memory pool counts once, including independent active state
+   reads and retained state-read cache. Their total plus producer and consumer node credit and the
+   configured node and consensus database caches must fit known memory.
    A failed detector leaves capacity unknown and uses the declared capacity-independent defaults.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each
    lives on.
 4. It resolves its restore-staging quota against the total size of the volume that holds the
    database directory: `--restore-staging-max-bytes` when given, otherwise the smaller of 128 GiB
-   and that size. It then requires the quota, `--resource-max-archive-bytes` and
-   `--resource-max-extracted-bytes` each to fit that size. Each quota is compared with the size on
-   its own, and nothing the volume already holds is subtracted. The two snapshot staging quotas
+   and that size, and requires the quota to fit that size. The two snapshot staging quotas
    independently fit the measured temporary volume. Omitted snapshot staging is the smaller of
    128 GiB and that volume's capacity; an omitted per-transfer bound is the smaller of 64 GiB,
-   the resolved staging quota and that capacity. Explicit values are refused when they do not fit,
-   never reduced. The immutable node claim and runtime use these same resolved values.
+   the resolved staging quota and that capacity. Each quota is compared with the size on its own,
+   and nothing the volume already holds is subtracted. Explicit values are refused when they do not
+   fit, never reduced. The immutable node claim and runtime use these same resolved values.
 5. It loads its name resolver, as [Name Resolution](name-resolution.md#resolver-lifetime)
    describes.
 6. Once every check passed, it detects its [properties](#detected-properties), waiting at most its
@@ -936,7 +959,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB` |
+| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB`, for the executor pools alone, or `memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB`, for the complete total |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
@@ -944,11 +967,15 @@ Each refusal names the setting or directory it judged, with the values involved:
 | Resolver | `failed to load the name resolver configuration`, above the cause that resolver loading reports |
 
 Only the restore-staging quota, a node capability, follows the volume. The resource quotas are
-cluster parameters with fixed defaults, 4 GiB and 16 GiB. A node whose database volume is smaller
-refuses to start. Provision a larger volume, seed smaller quotas on a new cluster, or change an
-existing cluster's committed quotas through `ALTER CLUSTER SET` before joining it. The measured
-size of the database volume also enters the node's committed claim, so `ALTER CLUSTER SET` cannot
-raise a quota above it while the node stays admitted. A node that passes logs
+cluster parameters with fixed defaults, 4 GiB and 16 GiB, and the database volume must hold each of
+them too. The node judges them once it knows the policy it runs under: the bootstrapping node its
+seeds, after opening its consensus store and before its first commit, and a joining or returning
+node the live cluster's published record, before it reports ready. A node whose database volume is
+smaller refuses to start with the same refusal and exit status. Provision a larger volume, seed
+smaller quotas on a new cluster, or change an existing cluster's committed quotas through
+`ALTER CLUSTER SET` before joining it. The measured size of the database volume also enters the
+node's committed claim, so `ALTER CLUSTER SET` cannot raise a quota above it while the node stays
+admitted. A node that passes the preflight logs
 `the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
 volumes, the restore-staging quota it resolved and the properties it detected.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
@@ -1033,10 +1060,11 @@ still apply. Peer receive limits derive from these final limits before transport
 `--client-producer-node-bytes` and `--client-consumer-node-bytes` each default to 1/32 of node
 memory, holding at least the default 32 MiB session window, or 128 MiB with unknown memory.
 They reserve node admission independently; committed per-session limits keep their own policy.
-The full startup total counts both capacities as well as all ten executor pools. A 1 GiB node
-uses 555 MiB of executor ceilings plus 64 MiB of node client credit, 619 MiB in total. These are
-ceilings, not eagerly allocated buffers; graph state, engines and thread stacks need additional
-headroom. Explicit totals that exceed known memory refuse startup.
+The full startup total counts both capacities, all ten executor pools and both database caches.
+A 1 GiB node uses 555 MiB of executor ceilings, 64 MiB of node client credit and 64 MiB of database
+caches, 683 MiB in total. These are ceilings, not eagerly allocated buffers; graph state, engines
+and thread stacks need additional headroom. Explicit totals that exceed known memory refuse
+startup. [Sizing A Node](sizing.md#what-memory-sizes) shows how the totals scale with memory.
 
 The native process uses `--runtime-worker-threads` (default: resolved CPU count, or one),
 `--runtime-max-blocking-threads` (at least all executor workers, retaining a default floor of 512
@@ -1189,10 +1217,15 @@ on defaults too. Typed reports retain the definition owner's cause without flatt
 
 `nervix-server` reads its command line as one options group per area, each in its own file at the
 server's command-line edge and printed under its own heading by `--help`. One group holds the
-node's identity, its tags, listen and advertised addresses, TLS files, name resolution files,
-storage paths and the collector it exports its own traces to. Those are what a node is provisioned
-with, not settings. Every other group is the
-command-line form of one owner's class-typed group: each option is named by its definition's
+node's identity, its tags, listen and advertised addresses, the session transport mode
+(`--grpc-mode`), TLS files, name resolution files, storage paths, the collector it exports its own
+traces to, how it bootstraps or joins the cluster (`--allow-bootstrap`, `--cluster-bootstrap-host`)
+and its initial administrator (`--default-user`, `--init-default-user-password`). Those are what a
+node is provisioned with, not settings. A diagnostic build adds `--deadlock-evidence` and
+`--deadlock-active-only`, with `NERVIX_DEADLOCK_EVIDENCE` and `NERVIX_DEADLOCK_ACTIVE_ONLY`, under
+their own heading; they choose what the deadlock detector records and checks, and are not settings
+either. Every other group is the command-line form of one owner's class-typed group: each option is
+named by its definition's
 `NAME`, has the environment variable `NERVIX_` followed by that name with underscores, and shows
 the default its definition returns. Cluster-parameter help identifies it as a bootstrap default. Durations and byte quantities print in the edge's forms, such as `250ms`,
 `15m` and `64MiB`, which read back to exactly the same value.
@@ -1215,7 +1248,17 @@ describes, defaults included.
 | --- | --- | --- |
 | `--raft-heartbeat-interval` | prerequisite | Raft timings |
 | `--gossip-interval`, `--clock-skew-tolerance` | prerequisite | membership |
+| `--gossip-receive-queue-capacity`, `--gossip-tombstone-grace-period` | node capability | [membership](#membership-capabilities) |
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
+| `--raft-append-batch-entries` and the other [consensus capacities](#consensus-capacities) | node capability | consensus operations |
+| `--database-cache-bytes`, `--database-journal-bytes`, `--database-workers`, `--raft-database-cache-bytes`, `--raft-database-journal-bytes`, `--raft-database-workers` | node capability | node and consensus databases |
+| `--dns-cache-entries`, `--dns-positive-max-ttl`, `--dns-negative-max-ttl`, `--dns-hook-lookup-budget`, `--dns-address-family-policy`, `--dns-trust-negative-answers` | node capability | name resolution |
+| `--interconnect-max-peers` and the other [transport capacities](#transport-resolver-and-database-capacities) | node capability | interconnect transport |
+| `--interconnect-relay-batch-bytes`, `--interconnect-relay-decoded-bytes`, `--interconnect-bulk-chunk-bytes`, `--interconnect-bulk-receive-window` | node capability | peer receive bounds |
+| `--listener-*`, `--http-body-bytes`, `--http-body-copy-bytes`, `--http-body-timeout`, `--http-refusal-drain-timeout`, `--websocket-message-bytes`, `--websocket-frame-bytes`, `--grpc-header-bytes`, `--grpc-concurrency`, `--grpc-request-timeout`, `--grpc-max-streams`, `--grpc-keepalive-interval`, `--grpc-keepalive-timeout` | node capability | [listener bounds](#listener-bounds) |
+| `--vm-*`, `--wasm-stack-bytes`, `--wasm-memory-reservation-bytes`, `--udf-watchdog`, `--connector-retry-multiplier`, `--connector-retry-jitter-percent`, `--kafka-domain-assignment-retry`, `--partition-topology-poll-interval`, `--syslog-intake-queue-capacity`, `--syslog-read-chunk-bytes`, `--mqtt-read-ahead-headroom` | node capability | [engine and connector host](#engine-and-connector-host-capabilities) |
+| `--inspection-max-rows`, `--inspection-max-sections`, `--inspection-read-timeout` | node capability | [state inspection](#state-inspection-capabilities) |
+| `--entity-labels-max-count`, `--entity-labels-max-key-bytes`, `--entity-labels-max-value-bytes`, `--entity-labels-max-bytes` | cluster parameter | [entity label limits](#entity-label-limits) |
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
 | `--tls-cipher-suites`, `--tls-key-exchange-groups` | cluster parameter | outward TLS algorithm policy |
@@ -1225,7 +1268,7 @@ describes, defaults included.
 | `--domain-drain-timeout`, `--entity-gate-deadline`, `--remote-ack-*`, `--remote-relay-*`, `--payload-unfold-limit` | cluster parameter | cluster policy |
 | `--runtime-delivery-capacity` and the data-plane runtime options above | node capability | data-plane capacity |
 | `--forced-recovery-budget`, `--ownership-handoff-poll-interval`, `--entity-gate-poll-interval`, `--domain-drain-poll-interval`, `--runtime-readiness-propagation-bound` | cluster parameter | coordination guarantees |
-| `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
+| `--max-batch-messages`, `--client-producer-session-bytes`, `--client-consumer-session-bytes`, `--udf-code-bytes`, `--udf-compile-budget`, `--http-header-bytes`, `--http-header-fields`, `--client-batch-rows` | cluster parameter | model and session policy |
 | `--restore-staging-max-bytes` | node capability | runtime |
 | `--transaction-idle-timeout`, `--transaction-tombstone-retention`, `--transaction-max-statements`, `--transaction-max-source-bytes`, `--transaction-max-open` | cluster parameter | transaction limits |
 | `--command-retry-validity`, `--command-execution-capacity` | cluster parameter | command execution |
@@ -1242,11 +1285,14 @@ describes, defaults included.
 | `--authentication-attempts-per-second`, `--interconnect-tls-reload-interval` | node capability | authentication pacing and local TLS material refresh |
 
 Cluster-parameter options are optional seeds for the first bootstrap. An explicit command-line
-or environment value, including a value equal to the default, is refused on every later start.
-The help text names the definition's default without supplying an implicit seed option. With known memory, omitted memory watermarks derive as described below. With unknown memory and
-no explicit pair, the node runs no memory-pressure supervisor. `--memory-limit` and
-`--restore-staging-max-bytes` have no default value either: without them the node detects its
-memory limit and derives its restore-staging quota from its database volume, as
+or environment value, including a value equal to the default, refuses the start of every node that
+is not bootstrapping a new cluster, later starts of the bootstrapping node included.
+The help text names the definition's default without supplying an implicit seed option. With known
+memory, omitted memory watermarks derive as [Execution Capabilities](#execution-capabilities)
+describes. With unknown memory and no explicit pair, the node runs no memory-pressure supervisor.
+`--memory-limit` has no default value either: without it the node detects its memory limit.
+`--restore-staging-max-bytes` defaults to 128 GiB, and an omitted quota is held to the volume that
+holds the node database while a quota the operator gives is never reduced, as
 [The Startup Preflight](#the-startup-preflight) describes.
 
 ### Engine And Connector Host Capabilities
@@ -1263,12 +1309,14 @@ not alter a graph's stored execution contract. Each flag has an environment twin
 | `--vm-pattern-sets-per-batch` | 64 sets | positive, per dynamic `contains_any` call and batch |
 | `--wasm-stack-bytes` | 512 KiB | positive, addressable stack per WASM invocation |
 | `--wasm-memory-reservation-bytes` | 4 GiB on 64-bit hosts; 10 MiB on 32-bit hosts | virtual address reservation per guest memory; zero permits relocatable growth |
+| `--udf-watchdog` | 5 s | positive; each call of a compiled Roto UDF that returns later fails its whole batch |
 | `--connector-retry-multiplier` | 2 | positive multiplier applied between reconnect attempts |
 | `--connector-retry-jitter-percent` | 0 | 0 through 100 percent added to the next multiplied delay, within the declared cap |
 | `--kafka-domain-assignment-retry` | 100 ms | positive retry cadence while a domain-offset assignment is unavailable |
 | `--partition-topology-poll-interval` | 1 s | positive Pulsar partition inspection and topology observer reconciliation cadence; Kafka inspection follows `--control-plane-kafka-partition-watch-interval` |
 | `--syslog-intake-queue-capacity` | 64 frames | positive, within the native channel permit bound; stream intake backpressures when full |
 | `--syslog-read-chunk-bytes` | 8 KiB | positive, addressable bytes per stream read, further limited by the frame bound |
+| `--mqtt-read-ahead-headroom` | 64 publishes | positive, and MQTT's widest Receive Maximum, 65,535, plus it within the native channel permit bound; what every ACK-mode `CONNECT` advertises beyond the acknowledgement window, up to 65,535, the ACK-mode QoS 0 quota, whose overflow is dropped and counted, and the whole `NO ACK` read-ahead |
 
 The Kafka durations and topology polling interval accept at most `u32::MAX` whole seconds. VM programs carry the compiling
 node's resolved settings into prepared regex calls and execution. Extension calls still use
@@ -1285,11 +1333,48 @@ WASM parallel compilation is explicitly disabled: independent module compilation
 on bounded Bulk workers, so nested compilation fan-out cannot escape that admission boundary.
 Stack and address reservation do not replace a processor's declared linear-memory or fuel limits.
 
+`--udf-watchdog` is checked when a Roto UDF call returns: a call that took longer fails its whole
+batch, and each node judges the calls it runs by its own value. It cannot interrupt native code
+that never returns; [User-Defined Functions](udfs.md#nulls-errors-and-volatility) states what an
+expired watchdog reports. How long compiling a UDF may take is the `UDF_COMPILE_BUDGET` cluster
+parameter instead, because exceeding it refuses the statement that declares the function.
+
 The connector retry law preserves the initial delay and ceiling of `RETRY POLICY`; it changes
 only later delays. Kafka, MQTT and the shared ingestor/emitter host receive the same law.
 External broker timeouts, connection pools, keep-alive and request behavior remain declared client
 `CONFIG` keys or entity clauses. Read the owning connector section in
 [Ingestors](ingestors.md) or [Emitters](emitters.md) before choosing those values.
+
+The MQTT read-ahead headroom is the host's choice for every MQTT topic ingestor the node runs,
+beside each statement's `ACK PARALLEL MAX`: a larger headroom keeps a connection reading longer
+while the host holds a batch, and in an `ACK` mode lets more QoS 0 publishes wait instead of being
+dropped, at the cost of memory for that many more admitted publishes per connection, each at most
+the client's `max_packet_size`. The connector's declaration names the setting as the capacity of those
+read-ahead buffers, so the [generated capability matrix](connector-capabilities.md) shows it.
+
+### Membership Capabilities
+
+The membership group holds two local `NodeCapabilities` beside its gossip interval and clock-skew
+tolerance prerequisites. They add no prerequisite: nodes with different values run together, and a
+change takes effect when that node restarts.
+
+| Server option | Default | Owner and bound |
+| --- | --- | --- |
+| `--gossip-receive-queue-capacity` | 1,024 datagrams | positive, within the native channel permit bound; incoming gossip datagrams queued between the interconnect handler and Chitchat, each at most the 60 KiB gossip bound, so the queue retains up to its capacity times 60 KiB |
+| `--gossip-tombstone-grace-period` | 60 s | positive, at most `u32::MAX` whole seconds, so Chitchat can add it to the instant a key was deleted; how long a deleted gossip key's tombstone stays before Chitchat collects it |
+
+Each has the environment twin `NERVIX_` followed by its uppercase name with underscores. Both are
+part of the incarnation-bound capability claim, appear in the startup preflight log, and
+`DESCRIBE CLUSTER` prints them on the node's `membership:` line after its interconnect line, such as
+`membership: gossip-receive-queue-capacity=1024 gossip-tombstone-grace-period=1m`.
+[Cluster Interconnect](interconnect.md#membership-consensus-and-bulk-transfer) owns what the queue
+and the grace govern.
+
+The bus that carries each change of the live set from the membership task to the session notice
+relay has no option of its own. Its one subscriber republishes each change as exactly one
+`Membership` notice, so it never needs more room than the notice backlog: its capacity derives from
+the resolved `--session-notice-capacity`, 256 by default, among the
+[session capabilities](#control-plane-and-session-capabilities).
 
 ### Validation Before Any I/O
 
@@ -1299,8 +1384,12 @@ store, binds a listener or starts a task:
 - The Raft heartbeat interval is at least one millisecond, the resolution consensus runs timings
   at, and twelve of it, the longest election timeout, fit the milliseconds consensus counts it in.
 - The gossip interval and the clock-skew tolerance are each at least one millisecond, and twenty
-  gossip intervals fit a duration.
-- A memory limit, when one is given, is above zero, and so is the node detection timeout.
+  gossip intervals fit a duration. The gossip receive queue fits the native channel permit bound
+  and the gossip tombstone grace period is positive and at most `u32::MAX` whole seconds.
+- The MQTT read-ahead headroom, beside MQTT's widest Receive Maximum, fits the native channel permit
+  bound.
+- A memory limit and a CPU count, when one is given, are above zero, and so is the node detection
+  timeout.
 - The node's tags follow the [tag rules](#tags): at most 64, each key once.
 - The drain timeout does not exceed the shutdown timeout, which bounds every drain step. A drain
   timeout equal to it lets the drain use the whole deadline; the defaults leave time for terminal
@@ -1337,6 +1426,8 @@ A capability is a local claim; a cluster parameter retains one committed authori
 
 The alpha rule still requires one current data or message shape. Operational values coexist
 within that shape. A roll introduces no earlier schema, dual decoder or migration path.
+[Sizing A Node](sizing.md#rolling-changes) gives the operator's procedure for each class and how
+`DESCRIBE CLUSTER` reads while a roll is in progress.
 
 ### Committed Parameter Changes
 
@@ -1410,6 +1501,14 @@ to the byte count. Model admission and parameter transitions both check these re
 raising the caps permits new declarations above the defaults. Syntax and plan conversion retain
 the physical HTTP representation bounds independently of cluster policy.
 
+`UDF_COMPILE_BUDGET`, 10 seconds by default, bounds the wall-clock time of compiling one Roto UDF
+and running its `test` blocks. It is a cluster parameter rather than a node capability because
+exceeding it refuses `CREATE UDF`. Model admission compiles under the budget of the record it
+captured for validation, and each node compiles a domain's UDFs under its installed record when it
+activates or rebuilds the domain. The verdict stays the compiling node's own wall-clock
+measurement, so it depends on that node's speed and load. A transition rechecks no committed UDF;
+[User-Defined Functions](udfs.md#compile-budget) states what a lowered budget refuses later.
+
 Each live node installs the committed record before reporting that revision ready. Runtime timing
 and resource-store owners publish a new immutable policy over the same storage. Snapshot tasks
 observe interval changes at their existing bounded replication-poll boundary; a changed interval
@@ -1441,10 +1540,12 @@ can finish startup.
 
 Only the first bootstrapping node supplies parameter seed flags; another node given them
 refuses startup. Changes validate the transition at commit: existing Models must fit a lowered
-cap, and prerequisite relationships must still hold. Apply committed changes live. Rebuild an
-owner that captures settings at construction over its existing storage. The current record changes
-no OpenRaft construction setting: heartbeat and election timing remain prerequisites. Committed
-and running revisions are published together, and delayed observations cannot move them backward.
+cap, the parameters' own relationships must still hold, and every admitted node's drain and
+shutdown budgets must still hold the domain drain and entity-gate budgets. Apply committed changes
+live. Rebuild an owner that captures settings at construction over its existing storage. The
+current record changes no OpenRaft construction setting: heartbeat and election timing remain
+prerequisites. Committed and running revisions are published together, and delayed observations
+cannot move them backward.
 
 
 Outward TLS algorithms are ordered-list cluster parameters. Both bootstrap defaults are `fips`:
@@ -1496,20 +1597,19 @@ table depths the session schema's frame layouts fix, and the 64 KiB below which 
 copies a frame out of the read buffer (rule F-9). It takes each session limit's default and bounds
 from that limit's own setting definition rather than restating them.
 
-`just ratchet --show hidden_tunables` lists the temporary count's sites. It counts numeric
-`const` items of types `Duration`, `usize`, `u64`, `u32`, `u16`, `u8`, `i64`, `i32`, `f64`,
-`NonZero*` and `ByteUnit`, plus numeric literal policy calls for duration construction, channel
-and queue capacities, `with_capacity` and semaphore permits. A numeric constant counts once,
-including its initializer. Class group defaults, definition defaults and fixed constants are
-excluded. Tests, benchmarks, examples, tooling and the arbitrary, benchmark, model-harness and
-test-environment crates are outside this count.
-
-The baseline only decreases. The syntax count sees inactive source and authored macro
-fragments; it does not resolve custom types, infer business meaning, expand external procedural
-macros or discover implicit library defaults.
-[Architecture Rules And The Debt Ratchet](architecture-enforcement.md#hidden-tunables) owns
-its exact recognition and qualification limits. The settings compiler rule replaces this
-detector and its numeric entry together at cutover.
+The `nervix::hidden_tunable` compiler diagnostic enforces this section. It refuses a numeric
+constant of a governed type, such as `Duration`, an unsigned or signed integer, `f64`, `NonZero`
+or `ByteUnit`, that is neither a setting definition's default, a class group's default nor a
+fixed constant, and a numeric literal that chooses a duration, a capacity, a channel capacity or
+a permit count anywhere else. Tests, benchmarks, examples, tooling and the arbitrary, benchmark,
+model-harness and test-environment crates are outside it. A value kept outside a setting while its
+owner designs the carrier carries a narrow, reason-bearing expectation on that one declaration or
+operation, naming its repair task; the connector values that belong to a connector's Plexus
+surface and the web console's timings are retained this way.
+[Hidden Tunables](architecture-enforcement.md#hidden-tunables) owns what the rule recognizes, how
+it resolves types and callees, and which compiled configurations it sees: like every compiler rule,
+it judges only code a declared configuration compiles, and it does not discover implicit library
+defaults.
 
 ## Names And Observability
 
@@ -1568,9 +1668,9 @@ operations, without imposing value traits on the definition marker. Generic debu
 identifies the declaration; the owning settings renderer controls value exposure and redaction.
 
 The declaration API has value, default and relationship tests plus paired Rustdoc examples.
-The source count has tracked and new-source gate fixtures, pinned exclusions, inactive and
-macro syntax, compiler contract fixtures and the registered bounded `typed-hidden-tunables`
-Bolero property. The declarations alone add no Cucumber scenario and change no lock or lifecycle
+The `nervix::hidden_tunable` rule has allowed, rejected and resolution-only compiler fixtures with
+exact diagnostic spans, and fulfilled, unfulfilled, widened and invalid expectation checks.
+The declarations alone add no Cucumber scenario and change no lock or lifecycle
 path. Public behavior introduced by an area owner requires its one-node and three-node scenarios
 and the concurrency evidence its path needs.
 

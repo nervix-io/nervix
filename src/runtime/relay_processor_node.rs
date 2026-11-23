@@ -398,6 +398,7 @@ impl RelayProcessorNode {
             ProgramRun {
                 executor: branch.runtime.executor(),
                 now: execution_now,
+                ack_timing: &self.remote_ack_timing,
             },
             self.kind.as_str(),
             &self.processor,
@@ -629,16 +630,20 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    let key_result = batch
-                        .keep_alive_while_pending(execute_program_with_selection_in_context(
-                            branch.runtime.executor(),
-                            &key_program.program,
-                            &vm_batch,
-                            &VmExecutionContext {
-                                now: execution_now,
-                                injector: None,
-                            },
-                        ))
+                    let key_result = self
+                        .remote_ack_timing
+                        .keep_alive_while_pending(
+                            &batch,
+                            execute_program_with_selection_in_context(
+                                branch.runtime.executor(),
+                                &key_program.program,
+                                &vm_batch,
+                                &VmExecutionContext {
+                                    now: execution_now,
+                                    injector: None,
+                                },
+                            ),
+                        )
                         .await;
                     let key_result = match key_result {
                         Ok(result) => result,
@@ -770,15 +775,18 @@ impl RelayProcessorNode {
                         return;
                     };
                     // Every route's aggregate arguments are evaluated over the whole batch once.
-                    let evaluated = messages
-                        .as_slice()
-                        .keep_alive_while_pending(evaluate_window_arguments(
-                            branch.runtime.executor(),
-                            plan,
-                            compiled_aggregates,
-                            first_message.record.batch(),
-                            execution_now,
-                        ))
+                    let evaluated = self
+                        .remote_ack_timing
+                        .keep_alive_while_pending(
+                            messages.as_slice(),
+                            evaluate_window_arguments(
+                                branch.runtime.executor(),
+                                plan,
+                                compiled_aggregates,
+                                first_message.record.batch(),
+                                execution_now,
+                            ),
+                        )
                         .await;
                     let mut evaluated = match evaluated {
                         Ok(evaluated) => evaluated,
@@ -984,9 +992,12 @@ impl RelayProcessorNode {
                             return;
                         }
                     };
-                    let key_result = batch
+                    let key_result = self
+                        .remote_ack_timing
                         .keep_alive_while_pending(
-                            output_buffers.as_slice().keep_alive_while_pending(
+                            &batch,
+                            self.remote_ack_timing.keep_alive_while_pending(
+                                output_buffers.as_slice(),
                                 execute_program_with_selection_in_context(
                                     branch.runtime.executor(),
                                     &program.program,
@@ -1193,13 +1204,17 @@ impl RelayProcessorNode {
                             message,
                             materialized_state: materialized_state.clone(),
                         };
-                        match batch
+                        match self
+                            .remote_ack_timing
                             .keep_alive_while_pending(
-                                correlations.as_slice().keep_alive_while_pending(
+                                &batch,
+                                self.remote_ack_timing.keep_alive_while_pending(
+                                    correlations.as_slice(),
                                     correlate_incoming_message(
                                         ProgramRun {
                                             executor: branch.runtime.executor(),
                                             now: execution_now,
+                                            ack_timing: &self.remote_ack_timing,
                                         },
                                         where_program,
                                         side,
@@ -1300,15 +1315,22 @@ impl RelayProcessorNode {
                         } else {
                             pair_acks.iter().map(AckSet::attached).collect()
                         };
-                        let outcomes = match state
-                            .keep_alive_while_pending(evaluate_correlator_output_batch(
-                                branch.runtime.executor(),
-                                &self.processor,
-                                output_program,
-                                &matched,
-                                route_acks,
-                                execution_now,
-                            ))
+                        let outcomes = match self
+                            .remote_ack_timing
+                            .keep_alive_while_pending(
+                                &*state,
+                                evaluate_correlator_output_batch(
+                                    ProgramRun {
+                                        executor: branch.runtime.executor(),
+                                        now: execution_now,
+                                        ack_timing: &self.remote_ack_timing,
+                                    },
+                                    &self.processor,
+                                    output_program,
+                                    &matched,
+                                    route_acks,
+                                ),
+                            )
                             .await
                         {
                             Ok(outcomes) => outcomes,
@@ -1355,19 +1377,22 @@ impl RelayProcessorNode {
                                 }
                             }
                         }
-                        state
-                            .keep_alive_while_pending(enqueue_correlator_output(
-                                CorrelatorOutputContext {
-                                    branch,
-                                    node_kind: self.kind,
-                                    processor: &self.processor,
-                                    error_policies: &self.error_policies,
-                                    output_routes,
-                                },
-                                output_index,
-                                messages,
-                                execution_now,
-                            ))
+                        self.remote_ack_timing
+                            .keep_alive_while_pending(
+                                &*state,
+                                enqueue_correlator_output(
+                                    CorrelatorOutputContext {
+                                        branch,
+                                        node_kind: self.kind,
+                                        processor: &self.processor,
+                                        error_policies: &self.error_policies,
+                                        output_routes,
+                                    },
+                                    output_index,
+                                    messages,
+                                    execution_now,
+                                ),
+                            )
                             .await;
                     }
                 }
@@ -1759,7 +1784,14 @@ impl RelayProcessorNode {
                             error_policies: &self.error_policies,
                         };
                         reporting
-                            .complete_callback(replicated_state, instance, ack_map, holds, now)
+                            .complete_callback(
+                                &self.remote_ack_timing,
+                                replicated_state,
+                                instance,
+                                ack_map,
+                                holds,
+                                now,
+                            )
                             .await;
                     }
                 }
@@ -1920,7 +1952,14 @@ impl RelayProcessorNode {
                 error_policies: &self.error_policies,
             };
             reporting
-                .complete_callback(replicated_state, instance, ack_map, holds, execution_now)
+                .complete_callback(
+                    &self.remote_ack_timing,
+                    replicated_state,
+                    instance,
+                    ack_map,
+                    holds,
+                    execution_now,
+                )
                 .await;
         })
     }

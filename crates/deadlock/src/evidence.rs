@@ -12,6 +12,14 @@ use crate::{EvidenceError, FindingSelection, RecordedFinding, TriageProof, Triag
 
 /// The most findings one process's evidence holds. Potential cycles accumulate within this bound;
 /// an active deadlock ends the diagnostic process.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter bounds an evidence artifact at 16 records, \
+                  one of them reserved for retention loss"
+    )
+)]
 pub const MAX_FINDINGS: usize = 16;
 
 /// What a diagnostic process recorded: the process, and every finding of its detector up to the

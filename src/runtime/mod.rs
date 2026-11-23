@@ -475,16 +475,14 @@ use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, Ordering
 use emitter_publishing::{
     EmitterConnector, EmitterConnectorState, EmitterPublishBatchOwner, EmitterPublishControl,
     EmitterPublishFailure, EmitterPublishResult, RejectedEmitterRecord, RejectedRecordInput,
-    await_emitter_confirmation, emitter_publish_failure, emitter_unavailable_reason,
-    finish_rejected_records,
+    emitter_publish_failure, emitter_unavailable_reason, finish_rejected_records,
 };
 use emitter_record_writes::{
     CheckedPreparation, EncodedPayload, PreparedHttpRequest, PreparedPayload, PreparedPayloads,
     PreparedWrite, RowAnswers, RowPreparationViolation, RowRequestBody,
 };
 use emitter_retry::{
-    EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
-    emitter_retry_delay,
+    EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, emitter_retry_delay,
 };
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterStartError, EmitterTaskCommand,
@@ -669,7 +667,7 @@ use relay_transit::{
     RelayTransit,
 };
 use remote_ack_owner::RemoteDispatchRegistry;
-use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteAckStorage, RemoteDispatcher};
+use remote_dispatch::{RemoteAckStorage, RemoteDispatcher, SharedRemoteAckTiming};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{
@@ -1082,8 +1080,7 @@ pub(crate) use state_inspection_read::{
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{
-    DEFAULT_RESTORE_STAGING_MAX_BYTES, PersistedRuntimeStateEntry, RuntimePersistenceError,
-    RuntimeStatePlacement,
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
 };
 pub(crate) use subscription_interests::{
     AdvertisedSubscriptionInterest, SubscriptionInterestIndex,

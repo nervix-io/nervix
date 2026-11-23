@@ -24,10 +24,14 @@ use std::{
     ops::Deref,
 };
 
+/// The derive whose generated discriminant constants the hidden-tunable rule leaves to it.
+pub use bytecheck;
 pub use error_stack;
 pub use futures_core;
 use indexmap::IndexMap;
 pub use meticulous;
+/// The policy APIs whose numeric arguments the hidden-tunable rule recognizes.
+pub use nervix_primitives::sync::{Semaphore, mpsc, watch};
 pub use nervix_primitives::{
     expect_lint,
     sync::{
@@ -213,5 +217,30 @@ pub mod branch_ownership {
 
     pub struct BranchTableView {
         pub branches: BTreeMap<BranchKey, BranchTask>,
+    }
+}
+
+/// The shape of the vocabulary's setting declarations: a definition owns its one default, and a
+/// group of settings takes its defaults from them.
+pub mod settings {
+    pub trait SettingDefinition {
+        type Value;
+        fn default_value() -> Self::Value;
+    }
+
+    pub struct Setting<D: SettingDefinition> {
+        pub value: D::Value,
+    }
+
+    impl<D: SettingDefinition> Setting<D> {
+        pub fn new(value: D::Value) -> Self {
+            Self { value }
+        }
+
+        pub fn resolve() -> Self {
+            Self {
+                value: D::default_value(),
+            }
+        }
     }
 }

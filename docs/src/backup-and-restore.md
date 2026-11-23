@@ -892,6 +892,12 @@ it.
 
 A resource or state entity named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 
+A section path is at most 4096 bytes, Linux's `PATH_MAX`, and a manifest that names a longer one,
+like one that names an absolute or otherwise unsafe path, is refused as naming an invalid section
+path. The limit is far above any path a writer produces: the longest, a window group's argument
+columns with every name at its 128-byte limit and the widest unit, fingerprint and group, is 417
+bytes. Tar itself does not limit the length, since a GNU long-name entry carries any path.
+
 A record section begins with a twelve-byte header: the magic `NVXBKREC`, then the record's kind and
 its format version, each a little-endian 16-bit integer. The rest is an
 [rkyv](https://rkyv.org) payload that a reader validates with bytecheck before it reads any value.
@@ -942,7 +948,7 @@ that compare restored and re-exported state.
 | Download chunk | 256 KiB |
 | Frames a download queues ahead of its client | 4 |
 | Retention | Until a download has queued all of it, or the retry validity of the execution reference ends, counted from when the reference was issued |
-| Restore chunk | 256 KiB from the Rust client and the console; the leader accepts any nonempty chunk within one frame |
+| Restore chunk | The smaller of 256 KiB and half the session frame limit the leader announced, from the Rust client and the console alike: 256 KiB at the default 4 MiB frame. The leader accepts any nonempty chunk within one frame |
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore's outcome is recorded, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched, or for at most 600 seconds; a Kafka offset or branch lifecycle section reserves the 64 MiB record limit while it is written |

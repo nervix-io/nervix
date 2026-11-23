@@ -56,7 +56,7 @@ use nervix_connector::{
 use nervix_execution::Executor;
 use nervix_models::{
     ClientConfigEntry, ConnectorKind, ExternalPartitionAssignment, IngestStartPosition,
-    IngestorMetadataType, KafkaTopicName, Timestamp,
+    IngestorMetadataType, KAFKA_COMMIT_ANSWER_DEADLINE, KafkaTopicName, Timestamp,
 };
 use nervix_primitives::{
     sync::Arc,
@@ -76,13 +76,6 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 const KAFKA: &str = "kafka";
-
-/// How long a consumer-group commit waits for its coordinator's answer.
-///
-/// librdkafka keeps retrying a commit it could not send for as long as the group has no reachable
-/// coordinator, so the ingestor stops waiting at this deadline and the commit fails. The commit stays
-/// the instance's one commit in flight, which the next commit waits for first.
-const COMMIT_ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 
 /// The next unread offset for one Kafka topic partition.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -844,7 +837,11 @@ impl IngestorConnector for KafkaTopicIngestor {
             settings: plan.settings,
             topic: plan.topic.clone(),
             offset_mode,
-            commits: GroupCommits::new(COMMIT_ANSWER_DEADLINE),
+            // librdkafka keeps retrying a commit it could not send for as long as the group has no
+            // reachable coordinator, so the ingestor stops waiting at the entity's declared commit
+            // wait and the commit fails. The commit stays the instance's one commit in flight,
+            // which the next commit waits for first.
+            commits: GroupCommits::new(KAFKA_COMMIT_ANSWER_DEADLINE),
             rejections_outstanding: false,
             instance_index,
             assignment: KafkaConsumerAssignment::default(),
