@@ -906,7 +906,8 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   overhead. Windows use `WIDTH` and `STEP`; WASM output cadence is controlled by the guest. Choose
   `FLUSH` values as latency and boundary-cost controls, not as a throughput lever: `MAX BATCH SIZE`
   only clamps a batch, and the flush tuning guidance in the docs records which emitters benefit from
-  larger batches.
+  larger batches. A flush deadline bounds the hold from above and is never a minimum delay: a
+  failover, forced recovery, move, alteration, drain, stop or backup sends held rows early.
 - Use delivery-mode `MAX <n>` with `ACK PARALLEL` or an endpoint's `ACK`; an ingestor's `NO ACK`
   and an emitter's `NO ACK` have no in-flight ACK window and never accept `MAX`.
 - `STOP` is graceful and has no time limit: it stops intake and waits for the work in motion,
