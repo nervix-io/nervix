@@ -144,7 +144,7 @@ passing the turn; cancellation while waiting retains neither a turn nor a memory
 
 Vote and committed-marker reads and writes, the check for stored Raft state and the store's idle
 barrier are management work. Each reserves four management events from the Management class,
-256 KiB with the fixed 64 KiB event, and takes no turn. A durable write charges at most half of that
+272 KiB with the fixed 68 KiB event, and takes no turn. A durable write charges at most half of that
 reservation, two events, to the records and keys it writes, which holds a record as large as a whole
 management event while its encoding buffer doubles; the votes and log positions it writes are far
 smaller. The other half is retained for Fjall's journal encoding and moving batch descriptors, as in

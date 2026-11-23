@@ -416,7 +416,7 @@ async fn an_empty_bulk_window_budget_fails_to_start() {
     );
 }
 
-/// Every consensus vote and metadata read or write reserves four management events, 256 KiB with
+/// Every consensus vote and metadata read or write reserves four management events, 272 KiB with
 /// the default limits. A management budget that holds one event but not that working set would let
 /// the node open its stores and then fail every one of those operations, so the executor refuses
 /// it first.

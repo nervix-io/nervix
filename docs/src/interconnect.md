@@ -1588,16 +1588,16 @@ state can change while its incarnation stays live. Application readiness travels
 Cluster membership gossip uses management discovery capacity. It discovers topology and incarnations
 but does not replace application health checks. Chitchat decides what each gossip message carries,
 and the interconnect carries each message as one exchange in the Management class. Chitchat budgets
-every message it builds to the largest IPv4 UDP payload, 65,507 bytes, whatever transport carries
-it: the message type, the sender's digest and the state delta fit that budget together, and the
-3-byte header Chitchat writes before them, its magic number and protocol version, comes on top. It
-gossips state larger than one message over several rounds, one message per exchange. The gossip
-bound is the largest message Chitchat builds, 65,510 bytes, and both peers hold an exchange's
-payload to it. The management event is 68 KiB so that the largest exchange, that payload with its
-typed request fields and envelope, travels as one management request; a node refuses to start when
-its management-event bound cannot carry the largest exchange, encoded as a send encodes it. Every
-SynAck and Ack, the messages that carry state, therefore fits one exchange. Chitchat does not budget
-a Syn, which carries only the sender's digest, with an entry for every known node, and the cluster
+each message that carries state, a SynAck or an Ack, to the largest IPv4 UDP payload, 65,507 bytes,
+whatever transport carries it: the message type, the sender's digest and the state delta fit that
+budget together, and the 3-byte header Chitchat writes before them, its magic number and protocol
+version, comes on top. It gossips state larger than one message over several rounds, one message per
+exchange. The gossip bound is the largest message Chitchat builds, 65,510 bytes, and both peers hold
+an exchange's payload to it. The management event is 68 KiB so that the largest exchange, that
+payload with its typed request fields and envelope, travels as one management request; a node
+refuses to start when its management-event bound cannot carry the largest exchange, encoded as a
+send encodes it. Every SynAck and Ack therefore fits one exchange. Chitchat does not budget a Syn,
+which carries only the sender's digest, with an entry for every known node, and the cluster
 identifier; a Syn outgrows the bound only once that digest and identifier no longer fit one message.
 The sender refuses any message above the bound and logs it at `warn`, because Chitchat discards the
 error of a reply it cannot send and builds the same reply again on the next round. A node that
