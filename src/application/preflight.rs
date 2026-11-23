@@ -72,7 +72,7 @@ pub enum PreflightError {
     ClientEndpointCapacity,
     #[error("the native runtime capacities do not fit the node")]
     RuntimeCapacity,
-    #[error("the committed runtime deadlines exceed this node’s drain/shutdown budget")]
+    #[error("the committed runtime deadlines exceed this node’s shutdown timeout")]
     RuntimeDeadlines,
     #[error("the committed node-unavailability timeout does not fit this node’s health probes")]
     HealthProbeInterval,

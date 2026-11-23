@@ -144,13 +144,16 @@ impl SessionServiceImpl {
             nervix_primitives::task::consume_budget().await;
             let error = match preparation {
                 Ok(Ok(())) => continue,
-                Ok(Err(reason)) => scope.failure(format!(
-                    "failed to prepare {} '{}' from node '{}' on node '{}': {reason}",
-                    moved.entity.kind.as_str(),
-                    moved.entity.identifier.as_str(),
-                    moved.former_owner,
-                    moved.destination
-                )),
+                Ok(Err(cause)) => scope.failure_caused_by(
+                    cause,
+                    format!(
+                        "failed to prepare {} '{}' from node '{}' on node '{}'",
+                        moved.entity.kind.as_str(),
+                        moved.entity.identifier.as_str(),
+                        moved.former_owner,
+                        moved.destination
+                    ),
+                ),
                 Err(_) => scope.failure(format!(
                     "timed out preparing {} '{}' from node '{}' on node '{}'",
                     moved.entity.kind.as_str(),
@@ -415,6 +418,6 @@ impl SessionServiceImpl {
             )
             .await
             .map_err(|error| OwnershipHandoffError::transport(error.to_string()))?;
-        response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
+        response.map_err(OwnershipHandoffError::of_remote_rejection)
     }
 }

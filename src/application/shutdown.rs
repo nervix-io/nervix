@@ -3,11 +3,16 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** The ordered transition from a stop request through admission shutdown and the cut
-//!   of the client connections it leaves open, drain support, terminal teardown, and the outcome
-//!   reported to the process boundary, together with the one deadline that bounds all of them.
+//!   of the client connections it leaves open, the save of what the node holds, the moves of its
+//!   saved work to other nodes under the shutdown timeout, terminal teardown, and the outcome
+//!   reported to the process boundary.
 //! - **Depends on.** Tokio signaling primitives and monotonic time.
 //! - **Must not know.** Which listeners, control-plane services, or runtime tasks observe each
 //!   lifecycle signal.
+//!
+//! Only the moves have a deadline. The save waits only for work already in motion, which ends on
+//! its own, and every task terminal teardown stops is given its own grace. A save or a teardown
+//! that hangs is ended by the platform's supervisor, not by the node.
 
 #![cfg_attr(
     nervix_lint,
@@ -27,80 +32,60 @@ use nervix_primitives::{
 use tracing::info;
 
 mod settings;
-pub use settings::{
-    DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout, TaskGracePeriod,
-};
+pub use settings::{ShutdownSettings, ShutdownTimeout, TaskGracePeriod};
 
-/// The drain timeout's default, which the application's argument tests compare with.
-#[cfg(test)]
-pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = DrainTimeout::DEFAULT;
-/// The shutdown timeout's default, which the application's argument tests compare with.
+/// The shutdown timeout's default, which the application's argument tests compare with: how long a
+/// stopping node's work may take to move to other nodes once the node has saved it.
 #[cfg(test)]
 pub(super) const DEFAULT_SHUTDOWN_TIMEOUT: Duration = ShutdownTimeout::DEFAULT;
-// The default shutdown timeout, how long a shutdown may take from its first stop request until the
-// process exits, covers the default drain timeout and leaves the rest to the services that stop
-// after the drain.
-const _: () = assert!(
-    DrainTimeout::DEFAULT.as_nanos() < ShutdownTimeout::DEFAULT.as_nanos(),
-    "the default shutdown timeout must leave terminal teardown time after the default drain"
-);
 
-/// The one monotonic deadline that bounds every phase of a shutdown, fixed when its first stop
-/// request is accepted.
+/// The deadline of a stopping node's moves: the shutdown timeout, counted from the moment the node
+/// finished saving what it holds.
 ///
-/// It keeps the instant of that request and the timeout measured from it rather than a single
+/// It keeps the instant the moves began and the timeout measured from it rather than a single
 /// instant, so a configured timeout of any length cannot overflow the monotonic clock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShutdownDeadline {
-    task_grace_period: Duration,
-    requested_at: Instant,
+    started_at: Instant,
     timeout: Duration,
 }
 
 impl ShutdownDeadline {
-    pub(in crate::application) fn task_grace_period(self) -> Duration {
-        self.task_grace_period.min(self.remaining())
+    /// The deadline of moves that begin now and may take `timeout`.
+    pub(in crate::application) fn starting_now(timeout: Duration) -> Self {
+        Self {
+            started_at: Instant::now(),
+            timeout,
+        }
     }
+
     /// The time left before the deadline, which is zero once it has passed.
     pub fn remaining(self) -> Duration {
         self.timeout
-            .checked_sub(self.requested_at.elapsed())
+            .checked_sub(self.started_at.elapsed())
             .unwrap_or(Duration::ZERO)
     }
 
     pub fn has_passed(self) -> bool {
-        self.requested_at.elapsed() >= self.timeout
+        self.started_at.elapsed() >= self.timeout
     }
 
-    /// Runs `work` until it finishes or the deadline passes, whichever comes first.
-    pub(in crate::application) async fn bound<F>(self, work: F) -> BeforeDeadline<F::Output>
-    where
-        F: Future,
-    {
-        let bounded = nervix_primitives::time::timeout(self.remaining(), work).await;
-        match bounded {
-            Ok(output) => BeforeDeadline::Finished(output),
-            Err(_) => BeforeDeadline::Expired,
-        }
+    /// The shutdown timeout this deadline was counted with.
+    pub fn timeout(self) -> Duration {
+        self.timeout
     }
-}
-
-/// Whether shutdown work finished before the deadline passed.
-#[derive(Debug, Eq, PartialEq)]
-pub(in crate::application) enum BeforeDeadline<T> {
-    Finished(T),
-    Expired,
 }
 
 /// The immutable request that starts one application shutdown lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShutdownRequest {
-    deadline: ShutdownDeadline,
+    requested_at: Instant,
 }
 
 impl ShutdownRequest {
-    pub fn deadline(self) -> ShutdownDeadline {
-        self.deadline
+    /// When the first stop request was accepted.
+    pub fn requested_at(self) -> Instant {
+        self.requested_at
     }
 }
 
@@ -119,56 +104,61 @@ pub enum ShutdownRequestOutcome {
 pub enum ShutdownPhase {
     Serving,
     StopRequested,
-    DrainSupport,
+    /// The node takes no new work, lets the work in motion come to rest and saves what it holds.
+    Saving,
+    /// The node's saved work moves to other nodes, within the shutdown timeout.
+    Moving,
     TerminalTeardown,
     Finished,
 }
 
-/// How a shutdown phase ended.
+/// How a shutdown phase without a deadline ended.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
 pub enum ShutdownPhaseOutcome {
-    /// The phase finished its contract before the shutdown deadline.
+    /// The phase finished its contract.
     Completed,
-    /// The phase finished before the shutdown deadline but had to leave work behind.
+    /// The phase finished but had to leave work behind, such as a task that outlived its grace or
+    /// a leader that did not answer.
     Abandoned,
-    /// The shutdown deadline passed before the phase finished, and the work it still owned was
-    /// cancelled.
-    Forced,
 }
 
 impl ShutdownPhaseOutcome {
     pub(in crate::application) fn combine(self, other: Self) -> Self {
         match (self, other) {
-            (Self::Forced, _) | (_, Self::Forced) => Self::Forced,
             (Self::Abandoned, _) | (_, Self::Abandoned) => Self::Abandoned,
             (Self::Completed, Self::Completed) => Self::Completed,
         }
     }
+}
 
-    /// This outcome for a phase that finishes now, or `Forced` when the shutdown deadline has
-    /// already passed.
-    pub(in crate::application) fn unless_deadline_passed(self, deadline: ShutdownDeadline) -> Self {
-        if deadline.has_passed() {
-            return Self::Forced;
-        }
-        self
-    }
+/// How the moves of a stopping node's saved work ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
+pub enum ShutdownMoveOutcome {
+    /// Every unit of the node moved to another node.
+    Moved,
+    /// No other node can take the node's work, so every unit stays saved on this node, and a
+    /// restart restores it. The stop is a success.
+    NowhereToMove,
+    /// The shutdown timeout passed, or a move failed, while another node could have taken the
+    /// work: the units that did not move stay saved on this node, and the cluster is disrupted
+    /// until it restarts.
+    Disrupted,
 }
 
 /// The terminal report shared with signal handlers and other process boundaries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShutdownOutcome {
     pub stop_admission: ShutdownPhaseOutcome,
-    pub drain_support: ShutdownPhaseOutcome,
+    pub save: ShutdownPhaseOutcome,
+    pub moves: ShutdownMoveOutcome,
     pub terminal_teardown: ShutdownPhaseOutcome,
 }
 
 impl ShutdownOutcome {
-    /// Whether the shutdown deadline cut any phase short.
-    pub fn deadline_expired(self) -> bool {
-        self.stop_admission == ShutdownPhaseOutcome::Forced
-            || self.drain_support == ShutdownPhaseOutcome::Forced
-            || self.terminal_teardown == ShutdownPhaseOutcome::Forced
+    /// Whether the node left work it could have moved, which a process reports as a failed
+    /// shutdown.
+    pub fn disrupted(self) -> bool {
+        self.moves == ShutdownMoveOutcome::Disrupted
     }
 }
 
@@ -178,18 +168,27 @@ enum CoordinatorState {
     StopRequested {
         request: ShutdownRequest,
     },
-    DrainSupport {
+    Saving {
         request: ShutdownRequest,
         stop_admission: ShutdownPhaseOutcome,
+    },
+    Moving {
+        request: ShutdownRequest,
+        stop_admission: ShutdownPhaseOutcome,
+        save: ShutdownPhaseOutcome,
+        deadline: ShutdownDeadline,
     },
     TerminalTeardown {
         request: ShutdownRequest,
         stop_admission: ShutdownPhaseOutcome,
-        drain_support: ShutdownPhaseOutcome,
+        save: ShutdownPhaseOutcome,
+        moves: ShutdownMoveOutcome,
+        deadline: ShutdownDeadline,
     },
     Finished {
         request: ShutdownRequest,
         outcome: ShutdownOutcome,
+        deadline: ShutdownDeadline,
     },
 }
 
@@ -198,7 +197,8 @@ impl CoordinatorState {
         match self {
             Self::Serving => ShutdownPhase::Serving,
             Self::StopRequested { .. } => ShutdownPhase::StopRequested,
-            Self::DrainSupport { .. } => ShutdownPhase::DrainSupport,
+            Self::Saving { .. } => ShutdownPhase::Saving,
+            Self::Moving { .. } => ShutdownPhase::Moving,
             Self::TerminalTeardown { .. } => ShutdownPhase::TerminalTeardown,
             Self::Finished { .. } => ShutdownPhase::Finished,
         }
@@ -208,7 +208,8 @@ impl CoordinatorState {
         match self {
             Self::Serving => None,
             Self::StopRequested { request }
-            | Self::DrainSupport { request, .. }
+            | Self::Saving { request, .. }
+            | Self::Moving { request, .. }
             | Self::TerminalTeardown { request, .. }
             | Self::Finished { request, .. } => Some(request),
         }
@@ -219,15 +220,25 @@ impl CoordinatorState {
             Self::Finished { outcome, .. } => Some(outcome),
             Self::Serving
             | Self::StopRequested { .. }
-            | Self::DrainSupport { .. }
+            | Self::Saving { .. }
+            | Self::Moving { .. }
             | Self::TerminalTeardown { .. } => None,
+        }
+    }
+
+    fn moves_deadline(self) -> Option<ShutdownDeadline> {
+        match self {
+            Self::Serving | Self::StopRequested { .. } | Self::Saving { .. } => None,
+            Self::Moving { deadline, .. }
+            | Self::TerminalTeardown { deadline, .. }
+            | Self::Finished { deadline, .. } => Some(deadline),
         }
     }
 }
 
 struct ShutdownCoordinatorInner {
     task_grace_period: Duration,
-    /// How long shutdown may take from its first stop request.
+    /// How long the moves may take once the node has saved what it holds.
     timeout: Duration,
     state: watch::Sender<CoordinatorState>,
     stop_requested: CancellationToken,
@@ -235,6 +246,8 @@ struct ShutdownCoordinatorInner {
     /// Cancelled once the client connections the public listeners still hold after admission
     /// closed are cut.
     connections_cut: CancellationToken,
+    /// Cancelled when terminal teardown begins. The services the save and the moves rely on stay
+    /// alive until then.
     drain_support_shutdown: CancellationToken,
 }
 
@@ -250,7 +263,7 @@ impl std::fmt::Debug for ShutdownCoordinator {
             .debug_struct("ShutdownCoordinator")
             .field("timeout", &self.inner.timeout)
             .field("phase", &self.phase())
-            .field("deadline", &self.request().map(ShutdownRequest::deadline))
+            .field("request", &self.request())
             .finish_non_exhaustive()
     }
 }
@@ -263,7 +276,8 @@ impl Default for ShutdownCoordinator {
 }
 
 impl ShutdownCoordinator {
-    /// A coordinator whose shutdown, once requested, must finish within `timeout`.
+    /// A coordinator whose moves, once a stop is requested and the node has saved what it holds,
+    /// must finish within `timeout`, and whose tasks each have `task_grace_period` to stop.
     pub fn new(timeout: Duration, task_grace_period: Duration) -> Self {
         let (state, _) = watch::channel(CoordinatorState::Serving);
         Self {
@@ -279,9 +293,8 @@ impl ShutdownCoordinator {
         }
     }
 
-    /// Starts shutdown exactly once and fixes its deadline at the configured timeout after this
-    /// first request. Every later request observes that same deadline, so none can restart or
-    /// extend it.
+    /// Starts shutdown exactly once. Every later request observes that same request, so none can
+    /// restart it.
     pub fn request_stop(&self) -> ShutdownRequestOutcome {
         let mut outcome = None;
         self.inner.state.send_if_modified(|state| {
@@ -293,11 +306,7 @@ impl ShutdownCoordinator {
                 }
                 None => {
                     let requested = ShutdownRequest {
-                        deadline: ShutdownDeadline {
-                            task_grace_period: self.inner.task_grace_period,
-                            requested_at: Instant::now(),
-                            timeout: self.inner.timeout,
-                        },
+                        requested_at: Instant::now(),
                     };
                     *state = CoordinatorState::StopRequested { request: requested };
                     outcome = Some(ShutdownRequestOutcome::Accepted(requested));
@@ -326,7 +335,17 @@ impl ShutdownCoordinator {
         self.inner.state.borrow().outcome()
     }
 
-    /// Waits for the first stop request and returns its immutable deadline.
+    /// The deadline of the node's moves, once they have begun.
+    pub fn moves_deadline(&self) -> Option<ShutdownDeadline> {
+        self.inner.state.borrow().moves_deadline()
+    }
+
+    /// The time each listener or background task has to stop cooperatively.
+    pub(in crate::application) fn task_grace_period(&self) -> Duration {
+        self.inner.task_grace_period
+    }
+
+    /// Waits for the first stop request.
     pub async fn requested(&self) -> ShutdownRequest {
         self.inner.stop_requested.cancelled().await;
         self.request()
@@ -357,6 +376,8 @@ impl ShutdownCoordinator {
         self.inner.connections_cut.clone()
     }
 
+    /// The signal that ends the services the save and the moves rely on, cancelled when terminal
+    /// teardown begins.
     pub(in crate::application) fn drain_support_token(&self) -> CancellationToken {
         self.inner.drain_support_shutdown.clone()
     }
@@ -379,12 +400,12 @@ impl ShutdownCoordinator {
         self.inner.connections_cut.cancel();
     }
 
-    pub(in crate::application) fn begin_drain_support(&self, stop_admission: ShutdownPhaseOutcome) {
+    pub(in crate::application) fn begin_save(&self, stop_admission: ShutdownPhaseOutcome) {
         let transitioned = self.inner.state.send_if_modified(|state| {
             let CoordinatorState::StopRequested { request } = *state else {
                 return false;
             };
-            *state = CoordinatorState::DrainSupport {
+            *state = CoordinatorState::Saving {
                 request,
                 stop_admission,
             };
@@ -392,8 +413,7 @@ impl ShutdownCoordinator {
         });
         if !transitioned {
             None::<()>.assured(
-                "the composition root begins drain support once after it completes admission \
-                 shutdown",
+                "the composition root begins the save once after it completes admission shutdown",
             );
         }
         info!(
@@ -402,14 +422,43 @@ impl ShutdownCoordinator {
         );
     }
 
-    pub(in crate::application) fn begin_terminal_teardown(
+    /// Begins the moves once the node has saved what it holds, and returns their deadline: the
+    /// shutdown timeout, counted from now.
+    pub(in crate::application) fn begin_moves(
         &self,
-        drain_support: ShutdownPhaseOutcome,
-    ) {
+        save: ShutdownPhaseOutcome,
+    ) -> ShutdownDeadline {
+        let deadline = ShutdownDeadline::starting_now(self.inner.timeout);
         let transitioned = self.inner.state.send_if_modified(|state| {
-            let CoordinatorState::DrainSupport {
+            let CoordinatorState::Saving {
                 request,
                 stop_admission,
+            } = *state
+            else {
+                return false;
+            };
+            *state = CoordinatorState::Moving {
+                request,
+                stop_admission,
+                save,
+                deadline,
+            };
+            true
+        });
+        if !transitioned {
+            None::<()>.assured("the composition root begins the moves once after the save");
+        }
+        info!(outcome = ?save, "shutdown save phase finished");
+        deadline
+    }
+
+    pub(in crate::application) fn begin_terminal_teardown(&self, moves: ShutdownMoveOutcome) {
+        let transitioned = self.inner.state.send_if_modified(|state| {
+            let CoordinatorState::Moving {
+                request,
+                stop_admission,
+                save,
+                deadline,
             } = *state
             else {
                 return false;
@@ -417,20 +466,18 @@ impl ShutdownCoordinator {
             *state = CoordinatorState::TerminalTeardown {
                 request,
                 stop_admission,
-                drain_support,
+                save,
+                moves,
+                deadline,
             };
             true
         });
         if !transitioned {
-            None::<()>.assured(
-                "the composition root begins terminal teardown once after drain support finishes",
-            );
+            None::<()>
+                .assured("the composition root begins terminal teardown once after the moves end");
         }
         self.inner.drain_support_shutdown.cancel();
-        info!(
-            outcome = ?drain_support,
-            "shutdown drain-support phase finished"
-        );
+        info!(outcome = ?moves, "shutdown move phase finished");
     }
 
     pub(in crate::application) fn finish(&self, terminal_teardown: ShutdownPhaseOutcome) {
@@ -438,7 +485,9 @@ impl ShutdownCoordinator {
             let CoordinatorState::TerminalTeardown {
                 request,
                 stop_admission,
-                drain_support,
+                save,
+                moves,
+                deadline,
             } = *state
             else {
                 return false;
@@ -447,9 +496,11 @@ impl ShutdownCoordinator {
                 request,
                 outcome: ShutdownOutcome {
                     stop_admission,
-                    drain_support,
+                    save,
+                    moves,
                     terminal_teardown,
                 },
+                deadline,
             };
             true
         });
@@ -469,19 +520,13 @@ impl ShutdownCoordinator {
 mod tests {
     use super::*;
 
-    fn requested_deadline(coordinator: &ShutdownCoordinator) -> ShutdownDeadline {
-        coordinator
-            .request()
-            .expect("the scenario requested shutdown first")
-            .deadline()
+    fn coordinator_with_timeout(timeout: Duration) -> ShutdownCoordinator {
+        ShutdownCoordinator::new(timeout, ShutdownSettings::default().task_grace_period())
     }
 
     #[nervix_primitives::test(start_paused = true)]
-    async fn repeated_stop_requests_keep_the_first_deadline() {
-        let coordinator = ShutdownCoordinator::new(
-            Duration::from_secs(30),
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
-        );
+    async fn repeated_stop_requests_keep_the_first_request() {
+        let coordinator = coordinator_with_timeout(Duration::from_secs(30));
         let ShutdownRequestOutcome::Accepted(first) = coordinator.request_stop() else {
             panic!("the first stop request must start shutdown");
         };
@@ -490,58 +535,33 @@ mod tests {
         let repeated = coordinator.request_stop();
 
         assert_eq!(repeated, ShutdownRequestOutcome::AlreadyRequested(first));
-        assert_eq!(first.deadline().remaining(), Duration::from_secs(20));
-        assert!(!first.deadline().has_passed());
-
-        nervix_primitives::time::advance(Duration::from_secs(20)).await;
-        let after_the_deadline = coordinator.request_stop();
-
-        assert_eq!(
-            after_the_deadline,
-            ShutdownRequestOutcome::AlreadyRequested(first)
-        );
-        assert_eq!(first.deadline().remaining(), Duration::ZERO);
-        assert!(first.deadline().has_passed());
+        assert_eq!(coordinator.request(), Some(first));
     }
 
     #[nervix_primitives::test(start_paused = true)]
-    async fn work_still_running_at_the_deadline_is_cut_off_there() {
-        let coordinator = ShutdownCoordinator::new(
-            Duration::from_secs(5),
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
-        );
+    async fn the_shutdown_timeout_starts_when_the_save_finishes() {
+        let coordinator = coordinator_with_timeout(Duration::from_secs(30));
         coordinator.request_stop();
-        let deadline = requested_deadline(&coordinator);
-        let started = Instant::now();
+        coordinator.stop_admission();
+        coordinator.begin_save(ShutdownPhaseOutcome::Completed);
+        assert_eq!(coordinator.moves_deadline(), None);
 
-        let stalled = deadline.bound(std::future::pending::<()>()).await;
+        nervix_primitives::time::advance(Duration::from_secs(100)).await;
+        let deadline = coordinator.begin_moves(ShutdownPhaseOutcome::Completed);
 
-        assert_eq!(stalled, BeforeDeadline::Expired);
-        assert_eq!(started.elapsed(), Duration::from_secs(5));
-    }
+        assert_eq!(coordinator.phase(), ShutdownPhase::Moving);
+        assert_eq!(coordinator.moves_deadline(), Some(deadline));
+        assert_eq!(deadline.remaining(), Duration::from_secs(30));
+        assert_eq!(deadline.timeout(), Duration::from_secs(30));
+        assert!(!deadline.has_passed());
 
-    #[nervix_primitives::test(start_paused = true)]
-    async fn work_that_finishes_before_the_deadline_reports_its_output() {
-        let coordinator = ShutdownCoordinator::new(
-            Duration::from_secs(5),
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
-        );
-        coordinator.request_stop();
-        let deadline = requested_deadline(&coordinator);
-
-        let finished = deadline
-            .bound(async {
-                nervix_primitives::time::sleep(Duration::from_secs(1)).await;
-                7
-            })
-            .await;
-
-        assert_eq!(finished, BeforeDeadline::Finished(7));
-        assert_eq!(deadline.remaining(), Duration::from_secs(4));
+        nervix_primitives::time::advance(Duration::from_secs(30)).await;
+        assert_eq!(deadline.remaining(), Duration::ZERO);
+        assert!(deadline.has_passed());
     }
 
     #[test]
-    fn a_forced_phase_outweighs_every_other_outcome() {
+    fn an_abandoned_phase_outweighs_a_completed_one() {
         assert_eq!(
             ShutdownPhaseOutcome::Completed.combine(ShutdownPhaseOutcome::Completed),
             ShutdownPhaseOutcome::Completed
@@ -551,43 +571,26 @@ mod tests {
             ShutdownPhaseOutcome::Abandoned
         );
         assert_eq!(
-            ShutdownPhaseOutcome::Abandoned.combine(ShutdownPhaseOutcome::Forced),
-            ShutdownPhaseOutcome::Forced
-        );
-        assert_eq!(
-            ShutdownPhaseOutcome::Forced.combine(ShutdownPhaseOutcome::Completed),
-            ShutdownPhaseOutcome::Forced
+            ShutdownPhaseOutcome::Abandoned.combine(ShutdownPhaseOutcome::Completed),
+            ShutdownPhaseOutcome::Abandoned
         );
     }
 
-    #[nervix_primitives::test(start_paused = true)]
-    async fn a_phase_that_finishes_after_the_deadline_is_forced() {
-        let coordinator = ShutdownCoordinator::new(
-            Duration::from_secs(5),
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
-        );
-        coordinator.request_stop();
-        let deadline = requested_deadline(&coordinator);
-
-        assert_eq!(
-            ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline),
-            ShutdownPhaseOutcome::Completed
-        );
-        nervix_primitives::time::advance(Duration::from_secs(5)).await;
-        assert_eq!(
-            ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline),
-            ShutdownPhaseOutcome::Forced
-        );
-        let outcome = ShutdownOutcome {
+    #[test]
+    fn only_moves_left_unfinished_make_a_disrupted_shutdown() {
+        let finished = |moves| ShutdownOutcome {
             stop_admission: ShutdownPhaseOutcome::Completed,
-            drain_support: ShutdownPhaseOutcome::Forced,
-            terminal_teardown: ShutdownPhaseOutcome::Completed,
+            save: ShutdownPhaseOutcome::Completed,
+            moves,
+            terminal_teardown: ShutdownPhaseOutcome::Abandoned,
         };
-        assert!(outcome.deadline_expired());
+        assert!(!finished(ShutdownMoveOutcome::Moved).disrupted());
+        assert!(!finished(ShutdownMoveOutcome::NowhereToMove).disrupted());
+        assert!(finished(ShutdownMoveOutcome::Disrupted).disrupted());
     }
 
     #[nervix_primitives::test]
-    async fn drain_support_stays_live_until_terminal_teardown() {
+    async fn the_services_the_save_and_the_moves_rely_on_stay_live_until_terminal_teardown() {
         let coordinator = ShutdownCoordinator::default();
         let admission = coordinator.admission_token();
         let drain_support = coordinator.drain_support_token();
@@ -597,11 +600,15 @@ mod tests {
         assert!(admission.is_cancelled());
         assert!(!drain_support.is_cancelled());
 
-        coordinator.begin_drain_support(ShutdownPhaseOutcome::Completed);
-        assert_eq!(coordinator.phase(), ShutdownPhase::DrainSupport);
+        coordinator.begin_save(ShutdownPhaseOutcome::Completed);
+        assert_eq!(coordinator.phase(), ShutdownPhase::Saving);
         assert!(!drain_support.is_cancelled());
 
-        coordinator.begin_terminal_teardown(ShutdownPhaseOutcome::Completed);
+        coordinator.begin_moves(ShutdownPhaseOutcome::Completed);
+        assert_eq!(coordinator.phase(), ShutdownPhase::Moving);
+        assert!(!drain_support.is_cancelled());
+
+        coordinator.begin_terminal_teardown(ShutdownMoveOutcome::NowhereToMove);
         assert!(drain_support.is_cancelled());
         coordinator.finish(ShutdownPhaseOutcome::Completed);
 
@@ -610,11 +617,12 @@ mod tests {
             outcome,
             ShutdownOutcome {
                 stop_admission: ShutdownPhaseOutcome::Completed,
-                drain_support: ShutdownPhaseOutcome::Completed,
+                save: ShutdownPhaseOutcome::Completed,
+                moves: ShutdownMoveOutcome::NowhereToMove,
                 terminal_teardown: ShutdownPhaseOutcome::Completed,
             }
         );
-        assert!(!outcome.deadline_expired());
+        assert!(!outcome.disrupted());
     }
 }
 
@@ -656,7 +664,7 @@ mod shuttle_tests {
     fn racing_stop_requests() {
         let shutdown = ShutdownCoordinator::new(
             FAR_FUTURE_SHUTDOWN_TIMEOUT,
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+            ShutdownSettings::default().task_grace_period(),
         );
         let waiting = shutdown.clone();
         let waiter = thread::spawn(move || block_on(waiting.requested()));
@@ -678,8 +686,7 @@ mod shuttle_tests {
             ) => {
                 assert_eq!(
                     observed, accepted,
-                    "the stop request that lost the race must observe the accepted request and \
-                     its deadline"
+                    "the stop request that lost the race must observe the accepted request"
                 );
                 accepted
             }
@@ -690,14 +697,13 @@ mod shuttle_tests {
         let awaited = waiter.join().assured(MODEL_THREAD_JOINS);
         assert_eq!(
             awaited, accepted,
-            "a task waiting for the stop request must observe the accepted request and its \
-             deadline"
+            "a task waiting for the stop request must observe the accepted request"
         );
         assert_eq!(shutdown.request(), Some(accepted));
         assert_eq!(
             shutdown.request_stop(),
             ShutdownRequestOutcome::AlreadyRequested(accepted),
-            "a stop request after the race must observe the accepted deadline rather than replace \
+            "a stop request after the race must observe the accepted request rather than replace \
              it"
         );
     }
@@ -707,7 +713,7 @@ mod shuttle_tests {
     fn phases_racing_their_observers() {
         let shutdown = ShutdownCoordinator::new(
             FAR_FUTURE_SHUTDOWN_TIMEOUT,
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
+            ShutdownSettings::default().task_grace_period(),
         );
         let early_waiting = shutdown.clone();
         let early_completion = thread::spawn(move || block_on(early_waiting.completion()));
@@ -728,7 +734,8 @@ mod shuttle_tests {
             outcome,
             ShutdownOutcome {
                 stop_admission: ShutdownPhaseOutcome::Completed,
-                drain_support: ShutdownPhaseOutcome::Abandoned,
+                save: ShutdownPhaseOutcome::Completed,
+                moves: ShutdownMoveOutcome::NowhereToMove,
                 terminal_teardown: ShutdownPhaseOutcome::Completed,
             }
         );
@@ -747,7 +754,7 @@ mod shuttle_tests {
     }
 
     #[test]
-    fn shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline() {
+    fn shuttle_racing_stop_requests_accept_exactly_one() {
         check_random(racing_stop_requests, RANDOM_ITERATIONS);
         check_pct(racing_stop_requests, PCT_ITERATIONS, PCT_DEPTH);
     }

@@ -6,7 +6,7 @@
 //!   shutdown gives it, and the join of the public listeners once admission closes, including when
 //!   the client connections they still hold are cut.
 //! - **Depends on.** The cancellation token or shutdown coordinator the root advances, and the
-//!   shutdown deadline that bounds every wait.
+//!   task grace period that bounds every wait.
 //! - **Must not know.** What any supervised task does.
 
 #![cfg_attr(
@@ -14,7 +14,6 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-#[cfg(test)]
 use std::time::Duration;
 
 use error_stack::Report;
@@ -24,7 +23,7 @@ use tracing::{info, warn};
 use super::{
     error,
     error::AppError,
-    shutdown::{BeforeDeadline, ShutdownCoordinator, ShutdownDeadline, ShutdownPhaseOutcome},
+    shutdown::{ShutdownCoordinator, ShutdownPhaseOutcome},
 };
 use crate::task_shutdown::JoinShutdown as _;
 
@@ -84,17 +83,16 @@ pub(in crate::application) struct JoinedListeners {
 }
 
 /// Waits for the public listeners to stop accepting and to close the connections they had
-/// accepted. The connections they still hold when their grace period ends are cut, and the
-/// listeners are aborted if the shutdown deadline passes before they close.
+/// accepted. The connections they still hold when their grace period ends are cut, and listeners
+/// that have not closed one more grace period after that are aborted.
 pub(in crate::application) async fn join_public_listeners(
     mut listeners: JoinHandle<Result<(), Report<AppError>>>,
     shutdown: &ShutdownCoordinator,
-    deadline: ShutdownDeadline,
 ) -> JoinedListeners {
-    let grace_period = deadline.task_grace_period();
+    let grace_period = shutdown.task_grace_period();
     let closed_within_grace = nervix_primitives::time::timeout(grace_period, &mut listeners).await;
     let joined = match closed_within_grace {
-        Ok(joined) => BeforeDeadline::Finished(joined),
+        Ok(joined) => joined,
         Err(_) => {
             info!(
                 grace_period = %humantime::format_duration(grace_period),
@@ -102,42 +100,49 @@ pub(in crate::application) async fn join_public_listeners(
                  them"
             );
             shutdown.cut_connections();
-            deadline.bound(&mut listeners).await
+            let closed_after_cut =
+                nervix_primitives::time::timeout(grace_period, &mut listeners).await;
+            match closed_after_cut {
+                Ok(joined) => joined,
+                Err(_) => {
+                    warn!(
+                        grace_period = %humantime::format_duration(grace_period),
+                        "public listeners did not close within their grace period after their \
+                         connections were cut; aborting them"
+                    );
+                    listeners.abort();
+                    listeners.join_after_shutdown("public listeners").await;
+                    return JoinedListeners {
+                        result: Ok(()),
+                        outcome: ShutdownPhaseOutcome::Abandoned,
+                    };
+                }
+            }
         }
     };
     match joined {
-        BeforeDeadline::Finished(Ok(Ok(()))) => JoinedListeners {
+        Ok(Ok(())) => JoinedListeners {
             result: Ok(()),
             outcome: ShutdownPhaseOutcome::Completed,
         },
-        BeforeDeadline::Finished(Ok(Err(error))) => JoinedListeners {
+        Ok(Err(error)) => JoinedListeners {
             result: Err(error),
             outcome: ShutdownPhaseOutcome::Abandoned,
         },
-        BeforeDeadline::Finished(Err(error)) => JoinedListeners {
+        Err(error) => JoinedListeners {
             result: Err(Report::new(error).change_context(AppError::JoinPublicListeners)),
             outcome: ShutdownPhaseOutcome::Abandoned,
         },
-        BeforeDeadline::Expired => {
-            warn!("shutdown deadline expired before the public listeners closed; aborting them");
-            listeners.abort();
-            listeners.join_after_shutdown("public listeners").await;
-            JoinedListeners {
-                result: Ok(()),
-                outcome: ShutdownPhaseOutcome::Forced,
-            }
-        }
     }
 }
 
-/// Waits for a task that has been asked to stop, for at most its grace period and never past the
-/// shutdown deadline, and aborts it if it is still running then.
+/// Waits for a task that has been asked to stop, for at most its grace period, and aborts it if it
+/// is still running then.
 pub(in crate::application) async fn await_background_task_shutdown(
     mut task: JoinHandle<()>,
     task_kind: &'static str,
-    deadline: ShutdownDeadline,
+    grace_period: Duration,
 ) -> ShutdownPhaseOutcome {
-    let grace_period = deadline.task_grace_period();
     let joined = nervix_primitives::time::timeout(grace_period, &mut task).await;
     match joined {
         Ok(Ok(())) => ShutdownPhaseOutcome::Completed,
@@ -161,7 +166,7 @@ pub(in crate::application) async fn await_background_task_shutdown(
             {
                 error!(task_kind, error = %error, "aborted shutdown task join failed");
             }
-            ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline)
+            ShutdownPhaseOutcome::Abandoned
         }
     }
 }
@@ -171,78 +176,47 @@ mod tests {
     use nervix_primitives::time::Instant;
 
     use super::*;
+    use crate::application::shutdown::ShutdownSettings;
 
-    fn deadline_after(timeout: Duration) -> ShutdownDeadline {
-        let coordinator = ShutdownCoordinator::new(
-            timeout,
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
-        );
-        coordinator.request_stop();
-        coordinator
-            .request()
-            .expect("the stop request above was accepted")
-            .deadline()
+    fn grace_period() -> Duration {
+        ShutdownSettings::default().task_grace_period()
     }
 
-    /// A coordinator whose shutdown, with `timeout`, has closed admission, and its deadline.
-    fn closed_admission(timeout: Duration) -> (ShutdownCoordinator, ShutdownDeadline) {
-        let coordinator = ShutdownCoordinator::new(
-            timeout,
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period(),
-        );
+    /// A coordinator whose shutdown has closed admission.
+    fn closed_admission() -> ShutdownCoordinator {
+        let coordinator = ShutdownCoordinator::default();
         coordinator.request_stop();
         coordinator.stop_admission();
-        let deadline = coordinator
-            .request()
-            .expect("the stop request above was accepted")
-            .deadline();
-        (coordinator, deadline)
+        coordinator
     }
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_background_task_that_stops_within_its_grace_period_completes() {
-        let deadline = deadline_after(Duration::from_secs(30));
         let task = nervix_primitives::task::spawn(async {});
 
-        let outcome = await_background_task_shutdown(task, "test task", deadline).await;
+        let outcome = await_background_task_shutdown(task, "test task", grace_period()).await;
 
         assert_eq!(outcome, ShutdownPhaseOutcome::Completed);
     }
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_background_task_that_ignores_its_stop_is_aborted_after_its_grace_period() {
-        let deadline = deadline_after(Duration::from_secs(30));
         let task = nervix_primitives::task::spawn(std::future::pending::<()>());
         let started = Instant::now();
 
-        let outcome = await_background_task_shutdown(task, "test task", deadline).await;
+        let outcome = await_background_task_shutdown(task, "test task", grace_period()).await;
 
         assert_eq!(outcome, ShutdownPhaseOutcome::Abandoned);
-        assert_eq!(
-            started.elapsed(),
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period()
-        );
-    }
-
-    #[nervix_primitives::test(start_paused = true)]
-    async fn the_shutdown_deadline_cuts_a_background_task_grace_period_short() {
-        let deadline = deadline_after(Duration::from_millis(500));
-        let task = nervix_primitives::task::spawn(std::future::pending::<()>());
-        let started = Instant::now();
-
-        let outcome = await_background_task_shutdown(task, "test task", deadline).await;
-
-        assert_eq!(outcome, ShutdownPhaseOutcome::Forced);
-        assert_eq!(started.elapsed(), Duration::from_millis(500));
+        assert_eq!(started.elapsed(), grace_period());
     }
 
     #[nervix_primitives::test(start_paused = true)]
     async fn public_listeners_that_close_within_their_grace_period_keep_their_connections() {
-        let (coordinator, deadline) = closed_admission(Duration::from_secs(30));
+        let coordinator = closed_admission();
         let listeners = nervix_primitives::task::spawn(async { Ok::<(), Report<AppError>>(()) });
         let cut = coordinator.connections_cut_token();
 
-        let joined = join_public_listeners(listeners, &coordinator, deadline).await;
+        let joined = join_public_listeners(listeners, &coordinator).await;
 
         assert_eq!(joined.outcome, ShutdownPhaseOutcome::Completed);
         assert!(joined.result.is_ok());
@@ -254,7 +228,7 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn public_listeners_still_open_after_their_grace_period_have_their_connections_cut() {
-        let (coordinator, deadline) = closed_admission(Duration::from_secs(30));
+        let coordinator = closed_admission();
         let cut = coordinator.connections_cut_token();
         // A listener whose client holds its connection open closes only once the connection is cut.
         let listeners = nervix_primitives::task::spawn(async move {
@@ -263,48 +237,35 @@ mod tests {
         });
         let started = Instant::now();
 
-        let joined = join_public_listeners(listeners, &coordinator, deadline).await;
+        let joined = join_public_listeners(listeners, &coordinator).await;
 
         assert_eq!(joined.outcome, ShutdownPhaseOutcome::Completed);
         assert!(joined.result.is_ok());
-        assert_eq!(
-            started.elapsed(),
-            crate::application::shutdown::ShutdownSettings::default().task_grace_period()
-        );
+        assert_eq!(started.elapsed(), grace_period());
     }
 
     #[nervix_primitives::test(start_paused = true)]
-    async fn public_listeners_that_outlive_the_deadline_are_aborted_and_joined() {
-        let (coordinator, deadline) = closed_admission(Duration::from_secs(5));
+    async fn public_listeners_that_outlive_the_cut_by_a_grace_period_are_aborted_and_joined() {
+        let coordinator = closed_admission();
         let listeners =
             nervix_primitives::task::spawn(std::future::pending::<Result<(), Report<AppError>>>());
         let cut = coordinator.connections_cut_token();
         let started = Instant::now();
 
-        let joined = join_public_listeners(listeners, &coordinator, deadline).await;
+        let joined = join_public_listeners(listeners, &coordinator).await;
 
-        assert_eq!(joined.outcome, ShutdownPhaseOutcome::Forced);
+        assert_eq!(joined.outcome, ShutdownPhaseOutcome::Abandoned);
         assert!(joined.result.is_ok());
         assert!(
             cut.is_cancelled(),
-            "the connections are cut when the grace period ends, before the deadline aborts the \
-             listeners"
+            "the connections are cut when the first grace period ends, before the listeners are \
+             aborted"
         );
-        assert_eq!(started.elapsed(), Duration::from_secs(5));
-    }
-
-    #[nervix_primitives::test(start_paused = true)]
-    async fn a_deadline_inside_the_grace_period_cuts_the_connections_at_the_deadline() {
-        let (coordinator, deadline) = closed_admission(Duration::from_millis(500));
-        let listeners =
-            nervix_primitives::task::spawn(std::future::pending::<Result<(), Report<AppError>>>());
-        let cut = coordinator.connections_cut_token();
-        let started = Instant::now();
-
-        let joined = join_public_listeners(listeners, &coordinator, deadline).await;
-
-        assert_eq!(joined.outcome, ShutdownPhaseOutcome::Forced);
-        assert!(cut.is_cancelled());
-        assert_eq!(started.elapsed(), Duration::from_millis(500));
+        assert_eq!(
+            started.elapsed(),
+            grace_period()
+                .checked_mul(2)
+                .expect("twice the default grace period is a valid duration")
+        );
     }
 }

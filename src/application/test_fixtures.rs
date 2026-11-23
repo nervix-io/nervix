@@ -45,7 +45,9 @@ use rcgen::{
 };
 
 #[cfg(feature = "shuttle")]
-use super::shutdown::{ShutdownCoordinator, ShutdownPhaseOutcome, ShutdownRequest};
+use super::shutdown::{
+    ShutdownCoordinator, ShutdownMoveOutcome, ShutdownPhaseOutcome, ShutdownRequest,
+};
 use super::{
     Args,
     command_result::{CommandResponse, CommandResult},
@@ -531,6 +533,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             limits: WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
                 max_memory_bytes: nonzero!(67_108_864u64),
+                max_table_elements: 4_096,
             },
             global_error_policy: nervix_models::GeneralErrorPolicy::Log,
             rejected_state_policy: Default::default(),
@@ -987,11 +990,10 @@ pub(in crate::application) async fn shut_down_in_phase_order(
     shutdown: ShutdownCoordinator,
 ) -> ShutdownRequest {
     let request = shutdown.requested().await;
-    let deadline = request.deadline();
     shutdown.stop_admission();
-    shutdown.begin_drain_support(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
-    shutdown
-        .begin_terminal_teardown(ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline));
-    shutdown.finish(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
+    shutdown.begin_save(ShutdownPhaseOutcome::Completed);
+    shutdown.begin_moves(ShutdownPhaseOutcome::Completed);
+    shutdown.begin_terminal_teardown(ShutdownMoveOutcome::NowhereToMove);
+    shutdown.finish(ShutdownPhaseOutcome::Completed);
     request
 }

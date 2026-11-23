@@ -2742,6 +2742,7 @@ fn wasm_processor_node() -> ScheduledNode {
             limits: nervix_models::WasmProcessorLimits {
                 max_fuel: nonzero!(1_000_000u64),
                 max_memory_bytes: nonzero!(67_108_864u64),
+                max_table_elements: 4_096,
             },
             global_error_policy: nervix_models::GeneralErrorPolicy::Log,
             rejected_state_policy: Default::default(),

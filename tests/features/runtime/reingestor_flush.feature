@@ -53,11 +53,14 @@ Feature: Reingestor output flushing
       CREATE SUBSCRIPTION repartitioned_subscription TO repartitioned;
       START;
       """
-    When http payload is posted to host "reingestor-flush-{{test_id}}.example.com" path "/events"
+    # The route's flush bounds its hold from above only: a node that applies a newer runtime
+    # revision during the hold, as every node does after a failover, flushes the route early.
+    When the runtime revision each node applied is recorded
+    And http payload is posted to host "reingestor-flush-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"acme","seq":1}
       """
-    Then within "5s" the relay subscription receives payloads no sooner than "100ms" after they were published
+    Then within "5s" the relay subscription receives payloads no sooner than "100ms" after they were published, unless a node applied a newer runtime revision
       """
       "seq":1,"tenant":"acme"
       """
