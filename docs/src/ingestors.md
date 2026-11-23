@@ -1958,8 +1958,9 @@ keep the subscription. Replacing the ingestor with `ALTER PULSAR TOPIC INGESTOR`
 owned subscription after its consumers stop and before the replacement starts, unless the
 replacement reads the same subscription of the same qualified topic at the same resolved broker
 address. The node removes it only once the change can no longer be undone there: an alteration that
-fails on a node keeps the preceding ingestor reading the subscription, with its backlog. Client names, route, codec, delivery-mode, subscription type and instance-count changes
-do not change that identity. Short topics use their client's namespace, so a short name and its
+fails on a node keeps the preceding ingestor reading the subscription, with its backlog. Client
+names, route, codec, delivery-mode, subscription type and instance-count changes do not change that
+identity. Short topics use their client's namespace, so a short name and its
 fully qualified spelling identify the same topic. Broker addresses compare their URL scheme,
 host and effective port; an omitted port means 6650 for `pulsar` and 6651 for `pulsar+ssl`.
 Different configured host names are distinct addresses even if DNS resolves them alike.

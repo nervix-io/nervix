@@ -527,9 +527,10 @@ Transport headers remain connector-owned and enter a relay only when copied into
 fields.
 
 An input that owns external session state is retired from its previous typed plan after its ingestor
-tasks stop, and in an entity swap only once nothing else of the swap can fail. `IngestorStartPlan` decides whether the ingestor changed, independently of codec or route
-changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
-installed revision, and the composition root dispatches retirement. Passive revisions retain the
+tasks stop, and in an entity swap only once nothing else of the swap can fail. `IngestorStartPlan`
+decides whether the ingestor changed, independently of codec or route changes. Runtime installation
+snapshots locally owned retiring inputs before withdrawing the installed revision, and the
+composition root dispatches retirement. Passive revisions retain the
 same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
 host prepares its rendered client configurations, connector plan and resource mounts once
 per logical declaration on a node. Unit starts clone that immutable plan with their own read-ahead

@@ -2290,9 +2290,10 @@ session holds, and a move waits for that node as it waits for any node that has 
 revision. A retirement is forgotten once no instance on that node can owe it any more: the new
 revision runs the instance elsewhere under another subscription of the same session, whose next node
 records a retirement of its own, or under another session, which holds nothing of the preceding one,
-or it no longer runs the instance or declares the ingestor. A domain rebuild, which never puts a previous
-execution back, runs both steps at once, and a failure to prepare the replacement there remains a
-runtime installation failure. The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
+or it no longer runs the instance or declares the ingestor. A domain rebuild, which never puts a
+previous execution back, runs both steps at once, and a failure to prepare the replacement there
+remains a runtime installation failure. The [ingestor manual](./ingestors.md#mqtt) owns the public
+behavior.
 
 ### Pulsar received metadata
 
