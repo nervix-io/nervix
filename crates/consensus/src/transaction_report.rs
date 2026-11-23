@@ -1070,10 +1070,14 @@ fn test_report_with_completeness(
             },
             ..ImpactEffects::default()
         };
+        // The test commit plan creates one resource per operation, named by its index.
+        let resource = nervix_models::ResourceName::parse(&format!("resource_{index}"))
+            .assured("the bounded test index produces an identifier-shaped resource");
         operations.push(OperationImpactReport {
             number,
-            operation: TransactionOperation::StartDomain {
+            operation: TransactionOperation::CreateResource {
                 domain: domain.clone(),
+                resource,
             },
             execution_step: range,
             completeness: ImpactReportCompleteness::Complete,

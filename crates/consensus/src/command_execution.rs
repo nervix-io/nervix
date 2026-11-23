@@ -228,6 +228,11 @@ pub enum CommandExecutionTransactionOperation {
     RefuseUnqueueable {
         statement_label: String,
     },
+    /// A `START` or `STOP` refused before retaining its source or Model, after preceding
+    /// operations run: it runs on its own, after `COMMIT`.
+    RefuseDomainLifecycle {
+        command: nervix_models::DomainLifecycleCommand,
+    },
     Commit {
         /// The whole-transaction preview the requesting client expected this commit to apply.
         /// Absent when the request itself opened the transaction or appended to it, because
@@ -277,6 +282,13 @@ pub enum CommandExecutionEffect {
         source: String,
         stop: nervix_models::StopDomain,
         start_version: u64,
+    },
+    /// A domain `START`. The consensus write that starts the domain records its revision in
+    /// `started_at`, so an execution resumed after a leader change only waits for the domain to
+    /// run at that revision and never starts it again.
+    StartDomain {
+        start: nervix_models::StartDomain,
+        started_at: Option<u64>,
     },
     RotateLicenseClusterKey {
         identity: Box<crate::ClusterIdentity>,
@@ -613,6 +625,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::StopDomain { .. }
+                | CommandExecutionEffect::StartDomain { .. }
                 | CommandExecutionEffect::CreateUser { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -636,6 +649,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::StopDomain { .. }
+                | CommandExecutionEffect::StartDomain { .. }
                 | CommandExecutionEffect::CreateUser { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -662,6 +676,45 @@ impl CommandExecution {
         restore.record(step, users);
     }
 
+    /// The revision at which the `START` this execution applies started its domain, once the
+    /// start committed.
+    pub fn domain_start_revision(&self) -> Option<u64> {
+        match self.effect() {
+            Some(CommandExecutionEffect::StartDomain { started_at, .. }) => *started_at,
+            Some(
+                CommandExecutionEffect::CreateDomain { .. }
+                | CommandExecutionEffect::AlterCluster { .. }
+                | CommandExecutionEffect::EditAdministrativeLabels { .. }
+                | CommandExecutionEffect::Transaction { .. }
+                | CommandExecutionEffect::TransactionRequest(_)
+                | CommandExecutionEffect::Statement { .. }
+                | CommandExecutionEffect::StopDomain { .. }
+                | CommandExecutionEffect::CreateUser { .. }
+                | CommandExecutionEffect::RotateLicenseClusterKey { .. }
+                | CommandExecutionEffect::ReleaseLicense { .. }
+                | CommandExecutionEffect::ActivateLicense { .. }
+                | CommandExecutionEffect::DropNode { .. }
+                | CommandExecutionEffect::Restore(_),
+            )
+            | None => None,
+        }
+    }
+
+    /// Records `revision` as the one at which the `START` this execution applies started its
+    /// domain. An execution that applies no `START`, or that already recorded its start, is left
+    /// as it is.
+    pub(crate) fn record_domain_start(&mut self, revision: u64) {
+        let CommandExecutionState::Applying { effect, .. } = &mut self.state else {
+            return;
+        };
+        let CommandExecutionEffect::StartDomain { started_at, .. } = effect.as_mut() else {
+            return;
+        };
+        if started_at.is_none() {
+            *started_at = Some(revision);
+        }
+    }
+
     pub fn transaction_target(&self) -> Option<&CommandExecutionTransactionTarget> {
         match &self.state {
             CommandExecutionState::Applying { effect, .. } => match effect.as_ref() {
@@ -672,6 +725,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::Transaction { .. }
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::StopDomain { .. }
+                | CommandExecutionEffect::StartDomain { .. }
                 | CommandExecutionEffect::CreateUser { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -702,6 +756,7 @@ impl CommandExecution {
                 | CommandExecutionEffect::TransactionRequest(_)
                 | CommandExecutionEffect::Statement { .. }
                 | CommandExecutionEffect::StopDomain { .. }
+                | CommandExecutionEffect::StartDomain { .. }
                 | CommandExecutionEffect::DropNode { .. }
                 | CommandExecutionEffect::RotateLicenseClusterKey { .. }
                 | CommandExecutionEffect::ReleaseLicense { .. }
@@ -804,6 +859,7 @@ impl CommandExecution {
             | CommandExecutionEffect::Transaction { .. }
             | CommandExecutionEffect::Statement { .. }
             | CommandExecutionEffect::StopDomain { .. }
+            | CommandExecutionEffect::StartDomain { .. }
             | CommandExecutionEffect::DropNode { .. }
             | CommandExecutionEffect::RotateLicenseClusterKey { .. }
             | CommandExecutionEffect::ReleaseLicense { .. }

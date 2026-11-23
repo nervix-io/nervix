@@ -3438,9 +3438,9 @@ counts include unreachable active chunks as well as unpublished staging.
 Staging or publication failure leaves the durable start gate in place, including a failure after the
 complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory.
-Transaction planning reports a blocked `START` as `TransactionPlanningError::RestoreInstallation`,
-naming the domain and restore execution before lifecycle admission. The client receives a definitive
-failure.
+`START` reports a blocked start as `DomainStartError::RestoreInstallation`, naming the domain and
+restore execution before it places the domain's units, and consensus refuses the start itself with
+`ConsensusConflict::RestoreInstallation`. The client receives a definitive failure.
 
 No restore diagnostic includes password hashes or resource bytes. When a state section's entity is
 absent from the restored schedule or its schema fingerprint differs, installation skips that section
@@ -4152,12 +4152,11 @@ committed member, and a returning member does not consume another quota slot.
 
 While the [stop gate](node-settings.md#cluster-licensing) is closed, every refusal carries the typed
 `LicensingStopReason`, which renders `ephemeral activation expired at <instant>`. Admission refuses
-all usage with refusal state `stopped`. Planning refuses a direct `START` before lifecycle
-admission, a transactional `START` as `TransactionPlanningError::LicensingStop` naming the domain,
-and `RESTORE ... RESUME` as `RestoreRefusal::LicensingStop`, each with
-`licensing stopped processing` and its reason. The client receives a definitive failure. Consensus
-refuses a change that would run a domain with `ConsensusConflict::LicensingStop`, and a
-transaction's `START` step with `TransactionMutationError::LicensingStop`; neither changes state.
+all usage with refusal state `stopped`. `START` refuses as `DomainStartError::LicensingStop` naming
+the domain before it places the domain's units, and `RESTORE ... RESUME` as
+`RestoreRefusal::LicensingStop`, each with `licensing stopped processing` and its reason. The client
+receives a definitive failure. Consensus refuses a change that would run a domain, the start of a
+domain included, with `ConsensusConflict::LicensingStop`, and changes no state.
 Model-pause recovery that the gate refuses keeps the command's paused-domain refusal. An `ALTER` or
 a backup whose resume the gate refuses is not failed by it: the operation ends its pause with the
 licensing stop under its own mutation lease, and only a failure of that stop is reported, as

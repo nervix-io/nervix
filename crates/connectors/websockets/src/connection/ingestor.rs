@@ -2,10 +2,11 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Outbound transport requirements and configuration, DNS-backed resume within the
-//!   client's `connect_timeout_ms`, the typed refusal of an upgrade answer that contradicts the
-//!   request's subprotocol offer, signaling before readiness and the ending of a connection whose
-//!   handshake fails, accepted-frame storage, payload delivery, and suspend and close operations.
+//! - **Owns.** Outbound transport requirements and configuration, the outgoing buffer's write
+//!   buffer and cap, DNS-backed resume within the client's `connect_timeout_ms`, the typed refusal
+//!   of an upgrade answer that contradicts the request's subprotocol offer, signaling before
+//!   readiness and the ending of a connection whose handshake fails, accepted-frame storage,
+//!   payload delivery, and suspend and close operations.
 //! - **Depends on.** The ingestor contract, typed plans and host services, compiled signaling engine,
 //!   vocabulary values, execution primitives, TLS configuration, and WebSocket transport.
 //! - **Must not know.** Configuration Models, Plexus, runtime collectors, relays, branches,
@@ -30,7 +31,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use futures_util::{SinkExt as _, StreamExt as _};
+use futures_util::StreamExt as _;
 use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
@@ -67,6 +68,60 @@ use crate::{
 };
 
 const WEBSOCKETS: ConnectorKind = ConnectorKind::Websockets;
+
+/// The largest payload of a control frame, which a pong and the reply to a peer's Close echo.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 6455 section 5.5 limits every control frame's payload to 125 bytes"
+    )
+)]
+const CONTROL_FRAME_PAYLOAD_BYTES: usize = 125;
+
+/// The largest header of a frame this client writes: two bytes, an eight-byte payload length and
+/// the four-byte masking key.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "RFC 6455 section 5.2 gives a payload above 65535 bytes a 64-bit length after \
+                  the two header bytes, and section 5.3 masks every frame a client sends with a \
+                  4-byte key"
+    )
+)]
+const LARGEST_FRAME_HEADER_BYTES: usize = 14;
+
+/// What the transport may hold of the frames this client writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WebsocketOutgoingBuffer {
+    /// The bytes the transport collects before it writes them out, the client's
+    /// `write_buffer_size`.
+    write_buffer: usize,
+    /// The largest message the client writes: its `max_message_size`, or a control frame's
+    /// payload when that is larger.
+    largest_message: usize,
+}
+
+impl WebsocketOutgoingBuffer {
+    fn new(config: &WebsocketsClientConfig) -> Self {
+        Self {
+            write_buffer: config.write_buffer_size(),
+            largest_message: config.max_message_size().max(CONTROL_FRAME_PAYLOAD_BYTES),
+        }
+    }
+
+    /// The most the transport holds: its write buffer, which it writes out as soon as it holds
+    /// more, and one frame of the largest message with the largest header. While the peer reads,
+    /// a frame finds at most the write buffer already held, so every frame within that size fits.
+    /// None when that sum exceeds the address space.
+    fn capacity(self) -> Option<usize> {
+        let largest_frame = self
+            .largest_message
+            .checked_add(LARGEST_FRAME_HEADER_BYTES)?;
+        self.write_buffer.checked_add(largest_frame)
+    }
+}
 
 #[derive(Debug, Error)]
 enum WebsocketsConnectionIngestorFailure {
@@ -109,6 +164,11 @@ impl From<SubProtocolError> for WebsocketsConnectionIngestorFailure {
 pub enum WebsocketsConnectionIngestorPlanError {
     #[error("invalid WebSockets client configuration")]
     Configuration,
+    #[error(
+        "write_buffer_size plus one frame of max_message_size exceeds this platform's address \
+         space"
+    )]
+    OutgoingBuffer,
 }
 
 #[derive(Clone)]
@@ -123,6 +183,8 @@ pub struct WebsocketsConnectionIngestorPlan {
     idle_deadline: connection::WebsocketIdleDeadline,
     handshake_capacity: usize,
     transport_config: WebSocketConfig,
+    /// The largest signaling message the client sends, its `max_message_size`.
+    largest_signaling_message: usize,
     /// How long opening one connection may take: name resolution, the address attempts, TLS and
     /// the upgrade handshake.
     connect_timeout: ConfiguredDeadline,
@@ -160,6 +222,7 @@ impl WebsocketsConnectionIngestorPlan {
             .verified("ws and wss have known default ports, and explicit ports were parsed");
         let idle_deadline = connection::WebsocketIdleDeadline::new(&entries, config.idle_timeout())
             .change_context(WebsocketsConnectionIngestorPlanError::Configuration)?;
+        let transport_config = Self::transport_config(&config)?;
         Ok(Self {
             tls_policy,
             endpoint: WebsocketEndpoint {
@@ -176,11 +239,28 @@ impl WebsocketsConnectionIngestorPlan {
             ping_interval: config.ping_interval(),
             idle_deadline,
             handshake_capacity: config.handshake_buffer_capacity(),
-            transport_config: WebSocketConfig {
-                max_message_size: Some(config.max_message_size()),
-                max_frame_size: Some(config.max_frame_size()),
-                ..WebSocketConfig::default()
-            },
+            transport_config,
+            largest_signaling_message: config.max_message_size(),
+        })
+    }
+
+    /// The transport's limits: the incoming message and frame limits as declared, and an outgoing
+    /// buffer of the client's write buffer and one frame of the largest message it sends.
+    fn transport_config(
+        config: &WebsocketsClientConfig,
+    ) -> Result<WebSocketConfig, Report<WebsocketsConnectionIngestorPlanError>> {
+        let outgoing = WebsocketOutgoingBuffer::new(config);
+        let Some(max_write_buffer_size) = outgoing.capacity() else {
+            return Err(Report::new(
+                WebsocketsConnectionIngestorPlanError::OutgoingBuffer,
+            ));
+        };
+        Ok(WebSocketConfig {
+            write_buffer_size: outgoing.write_buffer,
+            max_write_buffer_size,
+            max_message_size: Some(config.max_message_size()),
+            max_frame_size: Some(config.max_frame_size()),
+            ..WebSocketConfig::default()
         })
     }
 
@@ -257,12 +337,13 @@ pub struct WebsocketsConnectionIngestor {
     ping_interval: Option<Duration>,
     idle_deadline: connection::WebsocketIdleDeadline,
     transport_config: WebSocketConfig,
+    largest_signaling_message: usize,
 }
 
 mod connection;
 mod handshake;
 mod pings;
-use connection::{ConnectionEnding, WebsocketConnection, WebsocketRead};
+use connection::{ConnectionEnding, OwnFrames as _, WebsocketConnection, WebsocketRead};
 
 enum WebsocketPingOutcome {
     Sent,
@@ -280,7 +361,7 @@ impl WebsocketsConnectionIngestor {
             .verified("the installed connection requested its ping above");
         let write = timeout(
             WEBSOCKETS_CONTROL_FRAME_BUDGET,
-            connection.relay.send(Message::Ping(Vec::new())),
+            connection.relay.send_own(Message::Ping(Vec::new())),
         );
         let Some(outcome) = cancellation.unless_cancelled(write).await else {
             return Ok(WebsocketPingOutcome::Interrupted);
@@ -345,7 +426,7 @@ impl WebsocketsConnectionIngestor {
         let relay = &mut connection.relay;
         let closing = async {
             relay
-                .close(None)
+                .send_own(Message::Close(None))
                 .await
                 .change_context(WebsocketsConnectionIngestorFailure::CloseTransport)?;
             loop {
@@ -388,7 +469,11 @@ impl WebsocketsConnectionIngestor {
             .connection
             .take()
             .verified("the installed transport yielded the Close");
-        let answered = timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, connection.relay.flush()).await;
+        let answered = timeout(
+            WEBSOCKETS_CONTROL_FRAME_BUDGET,
+            connection.relay.flush_reply(),
+        )
+        .await;
         let report = Report::new(failure);
         let report = match answered {
             Ok(Ok(())) => report,
@@ -507,6 +592,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
             ping_interval: plan.ping_interval,
             idle_deadline: plan.idle_deadline,
             transport_config: plan.transport_config,
+            largest_signaling_message: plan.largest_signaling_message,
         })
     }
 
@@ -593,7 +679,10 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
         if let Some(protocol) = self.signaling_protocol.as_ref() {
             let mut pending = self.pending.for_handshake();
             let sink = pending.sink(headers.clone());
-            let session = WebsocketSignalingSession::new(protocol.clone());
+            let session = WebsocketSignalingSession::sending_at_most(
+                protocol.clone(),
+                self.largest_signaling_message,
+            );
             let handshake = pending.complete(session.run(&mut relay, &sink)).await;
             match handshake {
                 Ok(completed) => self.pending = completed,
@@ -606,7 +695,7 @@ impl IngestorConnector for WebsocketsConnectionIngestor {
                         failure.current_context()
                     {
                         let answered =
-                            timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, relay.flush()).await;
+                            timeout(WEBSOCKETS_CONTROL_FRAME_BUDGET, relay.flush_reply()).await;
                         failure = match answered {
                             Ok(Ok(())) => failure,
                             Ok(Err(error)) => failure.attach_printable(error),
@@ -1672,3 +1761,6 @@ mod connection_tests;
 
 #[cfg(test)]
 mod failed_handshake_tests;
+
+#[cfg(test)]
+mod outgoing_tests;

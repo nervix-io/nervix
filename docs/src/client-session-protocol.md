@@ -2323,8 +2323,8 @@ failure remains definitive. A failure with origin `Recovered`, or one carrying a
 settles the restore, including the steps a failed restore already applied.
 
 A domain whose restore has not published its complete runtime-state generation refuses `START`
-with a definitive command failure naming the incomplete installation. Planning rejects it before
-admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
+with a definitive command failure naming the incomplete installation. `START` refuses it before it
+places the domain's units, and consensus checks the same gate in the write that starts the domain. Failure of the
 restore, release of its mutation lease, and node restart do not release this gate. Only completion
 of the whole installation does.
 With `RESUME`, complete publication, gate release and the transition to `Running` at the archived
@@ -2841,6 +2841,12 @@ internal dependency/generator full-snapshot protocol.
 The serving node declares its [Listener Bounds](node-settings.md#listener-bounds) in its committed
 capability record. Public connection admission, TLS and idle deadlines precede or contain a session;
 gRPC also bounds handler response time and concurrent streams and uses HTTP/2 and kernel TCP keepalive.
+Its declared HTTP/2 receive windows bound what a client sends ahead of the node's reading, on one
+stream and across a connection, and its send buffer bounds the responses one stream queues for a
+client that stops reading. A client that resets streams faster than the declared rapid-reset limits
+allow loses its connection with `ENHANCE_YOUR_CALM`. A console session's WebSocket collects at most
+the declared write buffer before writing, and holds at most one more frame for a client that stops
+reading.
 A streaming response already established is not given a whole-session request deadline. A peer
 that stops acknowledging server pings is closed, releasing session-owned resources. These transport
 bounds introduce no session wire message and do not change command admission or recovery identity.
