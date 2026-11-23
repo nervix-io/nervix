@@ -187,8 +187,14 @@ cannot hold it:
   and both node client-credit capacities once each, plus the configured node and consensus database
   caches (32 MiB each by default). A 1 GiB node can start with the default
   derivations; explicit oversized totals refuse startup. Leave headroom for graph state, engine
-  allocations and stacks. Omitted high and low memory-pressure watermarks derive as 7/8 and 3/4
-  of known memory, while an explicitly supplied pair keeps its exact thresholds.
+  allocations and stacks. The databases' memtables are such engine memory, which the check does
+  not count and Nervix does not limit: each of the 15 keyspaces, 11 in the node database and 4 in
+  the consensus database, collects new writes in a memtable that grows to 64 MiB before it is
+  written to disk, and a keyspace whose writes outpace those disk writes keeps up to four full
+  memtables waiting before its writers pause. Most keyspaces hold far less; the Raft log and the
+  runtime state are the ones a write-heavy node fills. Omitted high and low memory-pressure
+  watermarks derive as 7/8 and 3/4 of known memory, while an explicitly supplied pair keeps its
+  exact thresholds.
 - **Volume.** The volume that holds the node's database directory must be at least as large as
   each of its quotas. The restore-staging quota, `--restore-staging-max-bytes`, follows the volume
   when it is not given: the node takes the smaller of 128 GiB and the volume's total size, and a
@@ -205,6 +211,13 @@ cannot hold it:
   node before raising a quota above it. Each quota is compared with the volume's total size on its own, and what the volume
   already holds is not subtracted, so size the volume for the log, snapshots and state the node
   keeps beside them.
+- **Health probes.** Before it reports ready, a node also checks that the committed
+  `NODE_UNAVAILABILITY_TIMEOUT`, 10 seconds by default, exceeds its
+  `--control-plane-health-probe-interval`, 1 second by default, plus the probe timeout, a tenth of
+  the timeout. Otherwise its observations of its peers go stale before it probes them again, so the
+  node refuses to start, naming itself, and `ALTER CLUSTER SET` likewise refuses a timeout that any
+  admitted node's interval does not fit, naming that node. Raise the timeout before lengthening a
+  node's interval; [Node Settings](node-settings.md#committed-parameter-changes) gives the rule.
 
 A refusal names the setting, the value and the capacity it was compared with, such as
 `resource-max-extracted-bytes (16GiB) exceeds the 5GiB capacity of the volume holding the database
@@ -315,5 +328,7 @@ An inferencer with `STATE` retains one immutable native F32 generation per concr
 
 Transport, DNS and consensus local capacities are described in
 [Node Settings](node-settings.md#transport-resolver-and-database-capacities). The startup memory
-check includes both configured database caches alongside the execution budgets. Database workers
-derive from the resolved CPU count, capped at four per database unless explicitly overridden.
+check includes both configured database caches alongside the execution budgets; the databases'
+memtables stay outside it. Database workers derive from the resolved CPU count, capped at four per
+database unless explicitly overridden. Each database keeps at most its configured number of table
+files open, 900 by default on Linux.

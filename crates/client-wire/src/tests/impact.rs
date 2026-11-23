@@ -163,7 +163,6 @@ impl RawReport {
             },
         );
         let ownership_moves = builder.create_vector::<WIPOffset<wire::OwnershipMoveImpact>>(&[]);
-        let lifecycle = builder.create_vector::<WIPOffset<wire::DomainLifecycleImpact>>(&[]);
         let activations = builder.create_vector::<WIPOffset<wire::ActivationImpact>>(&[]);
         let rebuilds = builder.create_vector::<WIPOffset<wire::RebuildImpact>>(&[]);
         let state_resets = builder.create_vector::<WIPOffset<wire::StateResetImpact>>(&[]);
@@ -199,7 +198,6 @@ impl RawReport {
                 changed_configuration: Some(changed_configuration),
                 topology: Some(topology),
                 ownership_moves: Some(ownership_moves),
-                lifecycle: Some(lifecycle),
                 activations: Some(activations),
                 rebuilds: Some(rebuilds),
                 state_resets: Some(state_resets),

@@ -144,6 +144,17 @@ const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
                 overflow: BufferOverflow::FailRead,
             },
         },
+        DeclaredBuffer {
+            holds: "outgoing frames the transport has not written yet: signaling messages, pings, \
+                    pong replies and the Close",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "write_buffer_size bytes (default 131072), plus max_message_size bytes \
+                     (default 67108864) or 125, whichever is larger, plus 14 bytes of frame header",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
     ],
     waits: &[
         DeclaredWait {
@@ -197,6 +208,13 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
             },
         },
         DeclaredBuffer {
+            holds: "the header lines of the upgrade request head",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("listener-max-headers"),
+                overflow: BufferOverflow::RefuseOversized,
+            },
+        },
+        DeclaredBuffer {
             holds: "an incoming frame payload, per session",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("websocket-frame-bytes"),
@@ -208,6 +226,13 @@ const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::NodeSetting("websocket-message-bytes"),
                 overflow: BufferOverflow::CloseSession,
+            },
+        },
+        DeclaredBuffer {
+            holds: "outgoing frames collected before a write, per session",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::NodeSetting("websocket-write-buffer-bytes"),
+                overflow: BufferOverflow::Backpressure,
             },
         },
         DeclaredBuffer {

@@ -2,8 +2,9 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** A bounded handshake flood, a signaling handshake refused or left unanswered, a
-//!   silent connection and a message above the client's limit, observed through real sockets,
-//!   with how the client ended each connection it gave up.
+//!   silent connection, a message above the client's limit and a peer that never reads its
+//!   connections, observed through real sockets, with how the client ended each connection it gave
+//!   up and the messages it wrote there first.
 //! - **Depends on.** The scenario-local peer and public Plexus statements.
 //! - **Must not know.** Connector queues, connection owners or the host's retry implementation.
 
@@ -72,6 +73,20 @@ async fn failed_handshake_peer(world: &mut ScenarioWorld, behavior: String) {
     world.websocket_peer = Some(WebsocketPeer::failed_handshake(listener, first));
 }
 
+#[given("a WebSocket bounds peer never reads its connections")]
+async fn unread_connections_peer(world: &mut ScenarioWorld) {
+    initialize_scenario_identity(world);
+    let port = draw_scenario_port(world, "WebSocket unread-connections peer");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .await
+        .assured("the scenario's reserved WebSocket port is available");
+    world.placeholders.insert(
+        "websocket_peer".to_string(),
+        format!("ws://127.0.0.1:{port}"),
+    );
+    world.websocket_peer = Some(WebsocketPeer::unread_connections(listener));
+}
+
 #[then("the WebSocket bounds peer observes a reconnect after the idle bound")]
 async fn idle_reconnect(world: &mut ScenarioWorld) {
     let peer = world
@@ -138,6 +153,28 @@ async fn oversized_connection_closed(world: &mut ScenarioWorld) {
     let PeerEvent::Connected(_) = peer.next().await else {
         panic!("the client reconnects after the oversized message ends its connection");
     };
+}
+
+#[then(
+    expr = "the WebSocket bounds peer's unread connection ends with Close status {int} before any \
+            message"
+)]
+async fn unread_connection_closed_before_any_message(world: &mut ScenarioWorld, status: u16) {
+    let peer = world
+        .websocket_peer
+        .as_mut()
+        .assured("the scenario started its bounds peer");
+    let PeerEvent::Connected(_) = peer.next().await else {
+        panic!("the first connection was upgraded");
+    };
+    let PeerEvent::UnreadConnectionReplayed(connection) = peer.next().await else {
+        panic!("the bounds peer reports what the client wrote on the connection it never read");
+    };
+    assert_eq!(
+        connection.messages, 0,
+        "the client writes no message before the Close that ends the unread connection"
+    );
+    assert_closed_with(connection.ending, CloseCode::from(status), "unread");
 }
 
 #[then(

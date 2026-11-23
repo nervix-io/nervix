@@ -39536,7 +39536,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_tls_cost) and (not \
-             @client_conformance_toolchain) and (not @deadlock_diagnostics)"
+             @client_conformance_toolchain) and (not @deadlock_diagnostics) and (not \
+             @production_licensing)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );

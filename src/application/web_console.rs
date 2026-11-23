@@ -63,6 +63,7 @@ use super::{
     },
     client_traffic::ClientCall,
     http_endpoint::{is_websocket_upgrade_request, response_with_bytes, text_response},
+    listener_settings::ListenerSettings,
     public_listener::PublicListener,
     session::{SessionTransport, websocket::console_websocket_config},
     session_service::SessionServiceImpl,
@@ -163,6 +164,7 @@ async fn authenticate_console_request(
 async fn handle_web_console_request(
     service: SessionServiceImpl,
     peer: SocketAddr,
+    settings: ListenerSettings,
     request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_AUTH_CHECK_PATH {
@@ -179,7 +181,7 @@ async fn handle_web_console_request(
     if request.method() == Method::GET
         && let Some(call) = ConsoleCall::of_path(request.uri().path())
     {
-        return Ok(upgrade_console_websocket(service, peer, request, call).await);
+        return Ok(upgrade_console_websocket(service, peer, settings, request, call).await);
     }
 
     if request.method() == Method::OPTIONS
@@ -242,6 +244,7 @@ async fn handle_web_console_request(
 async fn upgrade_console_websocket(
     service: SessionServiceImpl,
     peer: SocketAddr,
+    settings: ListenerSettings,
     mut request: HyperRequest<HyperIncoming>,
     call: ConsoleCall,
 ) -> HyperResponse<Full<Bytes>> {
@@ -296,7 +299,7 @@ async fn upgrade_console_websocket(
             }
         };
         let limits = service.session_limits();
-        let config = console_websocket_config(&limits);
+        let config = console_websocket_config(&limits, &settings);
         let websocket =
             WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config))
                 .await;
@@ -381,7 +384,7 @@ pub(in crate::application) async fn serve_web_console_http(
                 .serve_connection(
                     io,
                     service_fn(move |request| {
-                        handle_web_console_request(service.clone(), peer, request)
+                        handle_web_console_request(service.clone(), peer, settings, request)
                     }),
                 )
                 .with_upgrades()
@@ -439,7 +442,7 @@ pub(in crate::application) async fn serve_web_console_https(
                 .serve_connection(
                     io,
                     service_fn(move |request| {
-                        handle_web_console_request(service.clone(), peer, request)
+                        handle_web_console_request(service.clone(), peer, settings, request)
                     }),
                 )
                 .with_upgrades()

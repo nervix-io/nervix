@@ -184,6 +184,37 @@ Feature: Outbound WebSocket connection bounds
       | closes   | peer_closed | 1008   | 1            |
       | closes   | peer_closed | 1008   | 3            |
 
+  Scenario Outline: A WebSocket signaling message above max_message_size is refused before it is written and ends its connection with Close status 1011 on <cluster_size> nodes
+    Given a WebSocket bounds peer never reads its connections
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( user_id I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( user_id integer );
+      CREATE WIRE JSON CODEC event_codec FROM WIRE SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY received SCHEMA event UNBRANCHED;
+      CREATE SIGNALING PROTOCOL oversized_handshake FORMAT JSON ON CONNECT
+        SEND JAQ '{op: "subscribe"}'
+        WAIT JAQ '.ready' TIMEOUT 1s;
+      CREATE WEBSOCKETS CLIENT socket WITH SIGNALING PROTOCOL oversized_handshake
+        CONFIG { 'endpoint' = '{{websocket_peer}}', 'max_message_size' = '16' };
+      CREATE WEBSOCKETS CONNECTION INGESTOR socket_events
+        FROM socket MODE NO ACK ON QUIESCE DROP DECODE USING event_codec
+        TO received INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the WebSocket bounds peer's unread connection ends with Close status 1011 before any message
+    And within "60s" DESCRIBE INGESTOR "socket_events" on the leader node contains
+      """
+      SEND JAQ program #1 encodes 19 bytes, above max_message_size 16
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A WebSocket ping interval paces client pings once signaling completes on <cluster_size> nodes
     Given a WebSocket ping peer holds signaling open for 1500ms
     And a <cluster_size> node nervix cluster is started

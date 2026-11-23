@@ -12,7 +12,7 @@
     nervix::layer(harness, reason = "owns the test boundary declared above")
 )]
 
-use futures_util::FutureExt as _;
+use futures_util::{FutureExt as _, SinkExt as _};
 use nervix_primitives::task::unconstrained;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_tungstenite::{

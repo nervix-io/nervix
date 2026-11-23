@@ -146,12 +146,14 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    mixed `CREATE`, supported model `ALTER`, and `DROP`. Each statement is preflighted against the
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
-   maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, other read-only statements,
-   subscriptions, domain clock attachment, uploads, backups, restores, and node administration
-   remain outside the transaction.
+   maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, `START`, `STOP`, other
+   read-only statements, subscriptions, domain clock attachment, uploads, backups, restores, and
+   node administration remain outside the transaction.
    `DESCRIBE TRANSACTION;` and `SHOW TRANSACTIONS;` run on their own beside an open transaction;
    they read impact or status without becoming content or shifting operation numbers.
-5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
+5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended,
+   each on its own after `COMMIT`: queuing either inside a transaction is refused, and the open
+   transaction keeps its other statements. A
    paced `START` establishes one replicated clock generation that joining nodes install before
    execution. One committed authority revision identifies the producing node incarnation; owner
    changes preserve the mapping, `STOP` revokes the authority, and automatic ALTER quiescing keeps

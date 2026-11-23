@@ -116,9 +116,10 @@ pub use runtime_state::{
 };
 pub use settings::{
     BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, ConcurrentHandshakes,
-    ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline, IncomingQueueCapacity,
-    InterconnectLiveness, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
-    PeerReceiveSettingsError, PingInterval, PingTimeout, ProbeTimeout, ProgressTimeout,
+    ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline,
+    HTTP2_INITIAL_CONNECTION_WINDOW_BYTES, IncomingQueueCapacity, InterconnectLiveness,
+    MAX_HTTP2_WINDOW_BYTES, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides,
+    PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout, ProgressTimeout,
     ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
     RelayDecodedBytes, RequestDeadline, RequestQuota, RequestTimeout, StreamReceiveWindow,
     TransportSettingValues, TransportSettings, TransportSettingsError,
