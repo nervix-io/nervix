@@ -805,13 +805,6 @@ impl Runtime {
         domain: &DomainName,
         name: &IngestorName,
         desired: &ExecutionRevision,
-        #[cfg_attr(
-            nervix_lint,
-            nervix::identity(
-                node,
-                reason = "identifies the node applying this execution revision"
-            )
-        )]
         local_node_id: Option<&ClusterNodeName>,
     ) -> error_stack::Result<(), RuntimeError> {
         let units = Self::local_mqtt_units(desired, name, local_node_id);
@@ -860,13 +853,6 @@ impl Runtime {
         &self,
         domain: &DomainName,
         desired: Option<&ExecutionRevision>,
-        #[cfg_attr(
-            nervix_lint,
-            nervix::identity(
-                node,
-                reason = "identifies the node applying this execution revision"
-            )
-        )]
         local_node_id: Option<&ClusterNodeName>,
     ) -> error_stack::Result<(), RuntimeError> {
         let Some(desired) = desired else {

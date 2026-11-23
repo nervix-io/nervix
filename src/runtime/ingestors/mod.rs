@@ -266,13 +266,6 @@ impl Runtime {
         previous: Option<&ExecutionRevision>,
         desired: &ExecutionRevision,
         entities: &[NodeRef],
-        #[cfg_attr(
-            nervix_lint,
-            nervix::identity(
-                node,
-                reason = "identifies the node applying this execution revision"
-            )
-        )]
         local_node_id: Option<&ClusterNodeName>,
         retiring: &mut BTreeMap<IngestorName, RetiringIngestorInput>,
     ) {
