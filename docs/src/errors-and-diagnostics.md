@@ -2187,7 +2187,7 @@ What each failure gets:
 | --- | --- |
 | An expression of any clause (`SET`, `INHERIT`, route `WHERE`, `FILTER WHERE`, `FROM ... WHERE`, `INVOKE`, `VALUES`, an envelope or ordering-group expression, an HTTP request field, a window aggregate argument, a `RATE LIMIT` measure) | `evaluation` |
 | A payload its codec refuses (a [decode rejection](#decode-rejections)), a row its codec cannot encode, a batch container the codec cannot write | `codec` |
-| A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL` or `MAX MEMORY` | `limit` |
+| A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL`, `MAX MEMORY` or `MAX TABLE ELEMENTS` | `limit` |
 | A required field left unset, a value a connector or an admission check refuses, an invalid HTTP request field | `validation` |
 | A destination that refuses a record, a model that refuses a row, a guest's declared message error, an emitter publish that fails for good | `refused` |
 | Emitter work cut at a stop or shutdown deadline, and an ingested payload whose domain is not running or whose branch Nervix closed before it was routed | `interrupted` |

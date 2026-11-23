@@ -289,6 +289,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000000
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO restored_events SET value = value
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;

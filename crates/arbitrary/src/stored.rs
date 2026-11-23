@@ -72,6 +72,8 @@ impl Arbitrary<'_> {
     pub fn node_engine_capabilities(&mut self) -> nervix_models::EngineCapabilities {
         let inline = self.entropy.boundary_biased(0..=u64::MAX);
         let reservation = self.entropy.boundary_biased(0..=u64::MAX);
+        let guard = self.entropy.boundary_biased(0..=u64::MAX);
+        let growth_reservation = self.entropy.boundary_biased(0..=u64::MAX);
         let mut positive = || {
             std::num::NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
                 .assured("generated capacities are positive")
@@ -83,6 +85,8 @@ impl Arbitrary<'_> {
             vm_pattern_sets_per_batch: positive(),
             wasm_stack_bytes: positive(),
             wasm_memory_reservation_bytes: reservation,
+            wasm_memory_guard_bytes: guard,
+            wasm_memory_growth_reservation_bytes: growth_reservation,
             wasm_parallel_compilation: false,
         }
     }

@@ -45,7 +45,7 @@ const SETTINGS_HEADINGS: [&str; 19] = [
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 181] = [
+const SETTING_NAMES: [&str; 183] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -79,6 +79,8 @@ const SETTING_NAMES: [&str; 181] = [
     "syslog-read-chunk-bytes",
     "wasm-stack-bytes",
     "wasm-memory-reservation-bytes",
+    "wasm-memory-guard-bytes",
+    "wasm-memory-growth-reservation-bytes",
     "vm-inline-row-limit",
     "vm-regex-search-cache-bytes",
     "vm-dynamic-pattern-cache-capacity",

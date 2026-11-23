@@ -146,7 +146,7 @@ Feature: Input acknowledgement mode is a Plexus body clause
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE WASM PROCESSOR filtering FROM raw_metrics COLLECT FOR 10ms MAX BATCH SIZE 1MiB
         DETACHED USING RESOURCE guest VERSION 1 FILE 'processors/filter_even.wasm'
-        MAX FUEL 1000000000 MAX MEMORY 64MiB
+        MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096
         UNBRANCHED TO filtered_metrics SET value = value
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       SHOW CREATE WASM PROCESSOR filtering;

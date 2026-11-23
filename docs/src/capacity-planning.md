@@ -25,7 +25,8 @@ One live branch instance can hold the following at each graph node that belongs 
 - deduplication entries retained within `MAX TIME`;
 - open window state retained by `WIDTH` and advanced by `STEP`;
 - reorderer and correlator buffers retained within `MAX TIME`;
-- for WASM processors, an isolated store and the guest linear-memory pages dirtied by that branch;
+- for WASM processors, an isolated store, the guest linear-memory pages dirtied by that branch and
+  one pointer per slot of its table, bounded by `MAX MEMORY` and `MAX TABLE ELEMENTS`;
 - for inferencers, the branch's own ONNX session: the model's weights and the graph ONNX Runtime
   optimized from them, loaded on the branch's first admitted batch and held until the branch ends.
   An inferencer declared `WORKING MEMORY RETAINED` also keeps, per branch, up to the largest

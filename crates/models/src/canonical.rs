@@ -2682,6 +2682,10 @@ impl<Version: Display> CreateWasmProcessor<Version> {
             "MAX MEMORY {}",
             byte_size_literal(self.limits.max_memory_bytes)
         )));
+        clauses.push(Clause::line(format!(
+            "MAX TABLE ELEMENTS {}",
+            self.limits.max_table_elements
+        )));
         clauses.extend(processor_tail_clauses(
             &self.branched_by,
             &self.materialized_state,

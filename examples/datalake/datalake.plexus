@@ -633,6 +633,7 @@ CREATE WASM PROCESSOR geoip_device_location_resolver
   FILE 'nervix_datalake_geo_wasm_guest.wasm'
   MAX FUEL 1000000000
   MAX MEMORY 64MiB
+  MAX TABLE ELEMENTS 4096
   BRANCHED BY by_device
   TO device_location_geo_events
     SET source = source,

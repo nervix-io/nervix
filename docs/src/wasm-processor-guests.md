@@ -1,6 +1,6 @@
 # WASM Processor Guests
 
-WASM processors are native WebAssembly modules loaded by Wasmtime. They do not use WASI. A guest module exports a small C ABI, owns one reusable linear-memory buffer, and exchanges Arrow IPC record batches with Nervix through that buffer.
+WASM processors are native WebAssembly modules loaded by Wasmtime. They do not use WASI. A guest module exports a small C ABI, owns one reusable linear-memory buffer, and exchanges Arrow IPC record batches with Nervix through that buffer. A module defines at most one linear memory, the one it exports as `memory`, and at most one table.
 
 Rust guests use the [Rust WASM Guest SDK](./wasm-guest-sdk.md) rather than implementing this ABI by hand. This chapter is the authoritative wire contract that the SDK implements and that guests in other languages implement directly.
 
@@ -30,12 +30,13 @@ WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does no
 
 ## Execution Limits
 
-Every declaration requires both limits immediately after `FILE`, in this order:
+Every declaration requires all three limits immediately after `FILE`, in this order:
 
 ```plexus,ignore
 FILE "processor.wasm"
 MAX FUEL 1000000000
 MAX MEMORY 64MiB
+MAX TABLE ELEMENTS 4096
 ```
 
 `MAX FUEL` is the Wasmtime instruction-fuel budget for one logical guest operation. Nervix resets
@@ -46,15 +47,32 @@ error inspection, and every subsequent `nervix_read_emit` call are one batch-pro
 Module instantiation also receives one budget. Fuel measures guest WebAssembly execution, not
 wall-clock time or host-side work.
 
-`MAX MEMORY` is the Wasmtime linear-memory ceiling for each branch store. It applies to the total
-initial size of all module memories and every later `memory.grow`; choose a value large enough for
+`MAX MEMORY` is the Wasmtime linear-memory ceiling for each branch store. It applies to the
+initial size of the module's memory and every later `memory.grow`; choose a value large enough for
 the module's initial pages and reusable ABI buffer. It does not include shared compiled code,
 host-side Arrow or FlatBuffer data, or Wasmtime store bookkeeping.
 
-Fuel or memory exhaustion is handled by the processor's node-wide `ON GLOBAL ERROR` policy. Nervix
-discards that concrete branch's trapped guest instance; later work instantiates a replacement from
-the branch's committed [checkpoint](#checkpoints-and-acknowledgements). Other branch instances are
-independent and continue running. There is no separate WASM wall-clock timeout clause.
+`MAX TABLE ELEMENTS` is the ceiling on the slots of the module's table in each branch store. It
+applies to the table's initial size and every later `table.grow`; each slot costs the node one
+pointer of host memory. Compiled guests keep their indirect-call targets in this table, and its
+size is fixed when the module is linked: a Rust guest built with the
+[Rust WASM Guest SDK](./wasm-guest-sdk.md) usually needs one to a few thousand slots, and a guest
+without a table may declare `MAX TABLE ELEMENTS 0`. A module whose initial table is larger than the
+ceiling cannot instantiate. A growth that the table's own declared maximum refuses returns `-1` to
+the guest, as WebAssembly specifies, and takes none of the ceiling.
+
+A module that defines more than one linear memory or more than one table is refused when the node
+compiles it, before any branch instantiates.
+
+Fuel, memory or table exhaustion is handled by the processor's node-wide `ON GLOBAL ERROR` policy.
+Nervix discards that concrete branch's trapped guest instance; later work instantiates a replacement
+from the branch's committed [checkpoint](#checkpoints-and-acknowledgements). Other branch instances
+are independent and continue running. There is no separate WASM wall-clock timeout clause.
+
+Every guest call runs on a stack of its own: the node's `--wasm-stack-bytes` for the guest's frames,
+plus a fixed 1.5 MiB for the host functions the guest calls. A guest that recurses past
+`--wasm-stack-bytes` traps with a stack overflow. See
+[Node Settings](node-settings.md#engine-and-connector-host-capabilities).
 
 Before every guest operation, Nervix supplies one explicit domain execution snapshot to the WASM
 host. Initialization, input processing, a timeout callback, quiesce flush, and state save or load
@@ -106,8 +124,9 @@ must still export it.
 | `-7` | The saved bytes are not a snapshot envelope the guest can decode. |
 | `-8` | The guest decoded the snapshot envelope and refuses the application state it carries. |
 
-Only these two codes are a rejection of the saved state. A trap, an exhausted `MAX FUEL` or
-`MAX MEMORY`, or any other negative code while restoring is a failure of the restore itself and says
+Only these two codes are a rejection of the saved state. A trap, an exhausted `MAX FUEL`,
+`MAX MEMORY` or `MAX TABLE ELEMENTS`, or any other negative code while restoring is a failure of the
+restore itself and says
 nothing about the saved bytes. When an instance the branch's owner creates fails to restore, Nervix
 keeps the saved state, including after a rejection, and reports each outcome as a distinct
 [failure stage](#failure-diagnostics).
@@ -561,8 +580,9 @@ values:
   and the branch resumes on the fresh lifetime it publishes.
 
 Only the guest's own verdict — `-7` or `-8` from `nervix_load_state` — reaches this policy. A
-module that does not compile, an initialization the guest refuses, an exhausted `MAX FUEL` or
-`MAX MEMORY`, a trap while restoring, and every storage, replication and state-authority failure
+module that does not compile, an initialization the guest refuses, an exhausted `MAX FUEL`,
+`MAX MEMORY` or `MAX TABLE ELEMENTS`, a trap while restoring, and every storage, replication and
+state-authority failure
 leave the saved bytes as usable as they were, so the policy never discards state for any of them.
 Losing the branch's owner is the one path that can recreate state without a verdict; see
 [Forced Recovery](./wasm-state.md#forced-recovery).
@@ -746,8 +766,9 @@ Nervix calls the export only to answer `SHOW WASM PROCESSOR <processor> STATE`, 
 instance that processes input. For each branch entry the read returns, the owner of the branch
 creates a scratch instance from the pinned module, initializes it with the branch's `BranchInit`,
 restores the branch's committed checkpoint with `nervix_load_state`, calls `nervix_describe_state`,
-and discards the instance. The scratch instance runs under the processor's `MAX FUEL` and
-`MAX MEMORY`, the host's guest buffer limit and the read's deadline, on the node's extension workers.
+and discards the instance. The scratch instance runs under the processor's `MAX FUEL`,
+`MAX MEMORY` and `MAX TABLE ELEMENTS`, the host's guest buffer limit and the read's deadline, on the
+node's extension workers.
 It requests no timeouts that are ever delivered, and `nervix_request_state_reset` is refused there.
 The description reflects the committed checkpoint, which lags the live instance by at most the
 callback in progress.
@@ -1031,6 +1052,21 @@ wasm processor 'sessionizer' application state restoration failed (branch 402383
 
 : The branch guest tried to instantiate or grow linear memory beyond `MAX MEMORY`.
   Reduce guest allocation or raise the declared ceiling.
+
+`wasm guest exceeded MAX TABLE ELEMENTS ...`
+
+: The branch guest's table needs more slots than `MAX TABLE ELEMENTS`, either at instantiation,
+  where the module's initial table is larger than the ceiling, or through `table.grow`. Raise the
+  declared ceiling to cover the table the module links, or stop the guest growing its table.
+
+`wasm module defines ... linear memories, but a guest defines at most 1`
+
+: The module defines a second linear memory, which the guest contract does not allow. Keep every
+  buffer in the one exported `memory`.
+
+`wasm module defines ... tables, but a guest defines at most 1`
+
+: The module defines a second table, which the guest contract does not allow.
 
 `generated column ... has ... rows, but the routed output has ... rows`
 

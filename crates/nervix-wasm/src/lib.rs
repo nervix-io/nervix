@@ -2,10 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Engine configuration, instance lifetime, linear-memory limits, epoch deadlines, the
-//!   host half of the C ABI, the guest snapshot and state description calls, and the
-//!   classification of every failed guest operation, including a guest's verdict on the saved
-//!   state it was asked to restore.
+//! - **Owns.** Engine configuration, instance lifetime, linear-memory and table limits, the guest
+//!   contract's one memory and one table, epoch deadlines, the host half of the C ABI, the guest
+//!   snapshot and state description calls, and the classification of every failed guest
+//!   operation, including a guest's verdict on the saved state it was asked to restore.
 //! - **Depends on.** The vocabulary for processor limits and timestamps, `nervix-wasm-protocol`
 //!   for the envelopes it exchanges with a guest, and the node's bounded executor, whose bulk
 //!   workers compile a module.
@@ -47,7 +47,9 @@ use nervix_recovery::NoReceiver as _;
 use nervix_wasm_protocol as protocol;
 pub use nervix_wasm_protocol::SavedStateRejection;
 pub use settings::{
-    WasmEngineSettings, WasmEngineSettingsError, WasmMemoryReservationBytes, WasmStackBytes,
+    WASM_HOST_STACK_BYTES, WasmEngineSettingOverrides, WasmEngineSettings, WasmEngineSettingsError,
+    WasmMemoryGrowthReservationBytes, WasmMemoryGuardBytes, WasmMemoryReservationBytes,
+    WasmStackBytes,
 };
 use thiserror::Error;
 use wasmtime::{
@@ -74,6 +76,39 @@ nervix_primitives::unmodeled::task_local! {
 /// the charge only admits the compilation onto the bulk workers.
 const COMPILE_RESERVATION_BYTES: u64 = 1;
 
+/// The linear memories a guest module may define: the one it exports as `memory`, which holds
+/// every buffer the host and the guest exchange.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Processor Guests contract gives a guest one linear memory, the \
+                  exported memory every ABI buffer lives in"
+    )
+)]
+pub const GUEST_MEMORIES: u32 = 1;
+
+/// The tables a guest module may define: the one function table its toolchain links.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the WASM Processor Guests contract gives a guest one table, the function table \
+                  its toolchain links"
+    )
+)]
+pub const GUEST_TABLES: u32 = 1;
+
+/// The instances one branch store holds: the guest module, instantiated once for the branch.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the host instantiates exactly one guest module in each branch store"
+    )
+)]
+const BRANCH_STORE_INSTANCES: usize = 1;
+
 /// Why the Wasmtime engine could not start, or why a module could not be compiled and linked.
 ///
 /// Like every error this crate reports, a variant names only its own failure and leaves the cause
@@ -90,6 +125,10 @@ pub enum WasmProcessorError {
     CompileExecution,
     #[error("failed to link wasm module")]
     Link(#[source] wasmtime::Error),
+    #[error("wasm module defines {defined} linear memories, but a guest defines at most {limit}")]
+    TooManyMemories { defined: u32, limit: u32 },
+    #[error("wasm module defines {defined} tables, but a guest defines at most {limit}")]
+    TooManyTables { defined: u32, limit: u32 },
 }
 
 /// One operation the host runs on a guest branch instance, in the order an instance meets them.
@@ -175,6 +214,16 @@ pub enum WasmGuestCallError {
         growth: u64,
         export: Option<&'static str>,
     },
+    #[error(
+        "wasm guest exceeded MAX TABLE ELEMENTS {limit} (growing its table by {growth} elements \
+         past the {allocated} elements already allocated)"
+    )]
+    TableLimitExceeded {
+        limit: u64,
+        allocated: u64,
+        growth: u64,
+        export: Option<&'static str>,
+    },
     #[error("wasm export '{export}' trapped: {trap}")]
     Trap { export: &'static str, trap: Trap },
     #[error("failed to call wasm export '{export}'")]
@@ -227,6 +276,14 @@ impl WasmGuestCallError {
                 export,
             });
         }
+        if let Some(exceeded) = source.downcast_ref::<GuestTableLimitExceeded>() {
+            return Some(Self::TableLimitExceeded {
+                limit: exceeded.limit,
+                allocated: exceeded.allocated,
+                growth: exceeded.growth,
+                export,
+            });
+        }
         let exceeded = source.downcast_ref::<GuestMemoryLimitExceeded>()?;
         Some(Self::MemoryLimitExceeded {
             limit: exceeded.limit.arch_into(),
@@ -269,9 +326,9 @@ impl WasmGuestCallError {
             | Self::Trap { export, .. }
             | Self::Call { export, .. }
             | Self::ErrorCode { export, .. } => Some(*export),
-            Self::FuelExhausted { export, .. } | Self::MemoryLimitExceeded { export, .. } => {
-                *export
-            }
+            Self::FuelExhausted { export, .. }
+            | Self::MemoryLimitExceeded { export, .. }
+            | Self::TableLimitExceeded { export, .. } => *export,
             Self::InvalidEmission => Some("nervix_read_emit"),
             Self::Instantiate(_)
             | Self::ResetFuel { .. }
@@ -364,6 +421,7 @@ impl WasmGuestReportExt for Report<WasmGuestError> {
             Some(
                 WasmGuestCallError::FuelExhausted { .. }
                     | WasmGuestCallError::MemoryLimitExceeded { .. }
+                    | WasmGuestCallError::TableLimitExceeded { .. }
             )
         )
     }
@@ -405,24 +463,41 @@ struct GuestMemoryLimitExceeded {
     limit: usize,
 }
 
+#[derive(Debug, Error)]
+#[error("growing the guest's table by {growth} elements past {allocated} exceeds {limit} elements")]
+struct GuestTableLimitExceeded {
+    allocated: u64,
+    growth: u64,
+    limit: u64,
+}
+
+/// What one branch store's guest may allocate: `MAX MEMORY` bytes of linear memory and
+/// `MAX TABLE ELEMENTS` table slots, counted from the initial sizes Wasmtime asks for at
+/// instantiation through every later growth, in exactly one instance with at most one memory and
+/// one table.
 #[derive(Debug)]
-struct GuestMemoryLimiter {
+struct GuestResourceLimiter {
     max_memory_bytes: usize,
     allocated_memory_bytes: usize,
     pending_growth_bytes: usize,
+    max_table_elements: u64,
 }
 
-impl GuestMemoryLimiter {
-    fn new(max_memory_bytes: usize) -> Self {
+// `table_growing` reads the size of the table being grown as every slot the guest holds.
+const _: () = assert!(GUEST_TABLES == 1);
+
+impl GuestResourceLimiter {
+    fn new(limits: WasmProcessorLimits) -> Self {
         Self {
-            max_memory_bytes,
+            max_memory_bytes: limits.max_memory_bytes.get().arch_into(),
             allocated_memory_bytes: 0,
             pending_growth_bytes: 0,
+            max_table_elements: limits.max_table_elements,
         }
     }
 }
 
-impl ResourceLimiter for GuestMemoryLimiter {
+impl ResourceLimiter for GuestResourceLimiter {
     fn memory_growing(
         &mut self,
         current: usize,
@@ -467,11 +542,40 @@ impl ResourceLimiter for GuestMemoryLimiter {
 
     fn table_growing(
         &mut self,
-        _current: usize,
-        _desired: usize,
+        current: usize,
+        desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
+        // A guest holds at most one table, so the size Wasmtime reports for the table being grown
+        // is every slot the guest holds. Admission reads that size instead of keeping a running
+        // total: Wasmtime fails some growths without asking first, such as one whose new size
+        // overflows, and a total rolled back on failure could then subtract a growth that stood.
+        // A permitted growth that Wasmtime fails afterwards leaves the size unchanged, so nothing
+        // needs undoing.
+        let growth = desired
+            .checked_sub(current)
+            .assured("wasmtime only asks to grow a table to a size at or above its current one");
+        let desired_elements: u64 = desired.arch_into();
+        if desired_elements > self.max_table_elements {
+            return Err(wasmtime::Error::new(GuestTableLimitExceeded {
+                allocated: current.arch_into(),
+                growth: growth.arch_into(),
+                limit: self.max_table_elements,
+            }));
+        }
         Ok(true)
+    }
+
+    fn instances(&self) -> usize {
+        BRANCH_STORE_INSTANCES
+    }
+
+    fn tables(&self) -> usize {
+        GUEST_TABLES.arch_into()
+    }
+
+    fn memories(&self) -> usize {
+        GUEST_MEMORIES.arch_into()
     }
 }
 
@@ -570,8 +674,15 @@ impl WasmRuntime {
         // Cranelift invocation fan out across the global CPU pool can starve Raft and Tokio
         // executor threads when several nodes or branch instances initialize together.
         wasmtime_config.parallel_compilation(config.engine.parallel_compilation());
+        // Every guest call runs on a stack of its own, which must hold the guest's stack and the
+        // host functions the guest calls beside it.
         wasmtime_config.max_wasm_stack(config.engine.stack_bytes());
+        wasmtime_config.async_stack_size(config.engine.call_stack_bytes());
         wasmtime_config.memory_reservation(config.engine.memory_reservation_bytes());
+        wasmtime_config.memory_guard_size(config.engine.memory_guard_bytes());
+        wasmtime_config.guard_before_linear_memory(config.engine.guard_before_memory());
+        wasmtime_config
+            .memory_reservation_for_growth(config.engine.memory_growth_reservation_bytes());
         wasmtime_config.cranelift_opt_level(if config.optimize {
             OptLevel::Speed
         } else {
@@ -613,6 +724,7 @@ impl WasmRuntime {
                         .change_context(WasmProcessorError::CompileExecution)?;
                     let module = Module::new(&engine, wasm)
                         .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
+                    refuse_module_beyond_guest_contract(&module)?;
                     let mut linker = Linker::<BranchStore>::new(&engine);
                     define_host_functions(&mut linker)?;
                     linker
@@ -630,6 +742,25 @@ impl WasmRuntime {
             max_guest_buffer_bytes: self.max_guest_buffer_bytes,
         })
     }
+}
+
+/// Refuses a module that defines more linear memories or tables than the guest contract allows,
+/// before any branch instantiates it.
+fn refuse_module_beyond_guest_contract(module: &Module) -> StackResult<(), WasmProcessorError> {
+    let required = module.resources_required();
+    if required.num_memories > GUEST_MEMORIES {
+        return Err(Report::new(WasmProcessorError::TooManyMemories {
+            defined: required.num_memories,
+            limit: GUEST_MEMORIES,
+        }));
+    }
+    if required.num_tables > GUEST_TABLES {
+        return Err(Report::new(WasmProcessorError::TooManyTables {
+            defined: required.num_tables,
+            limit: GUEST_TABLES,
+        }));
+    }
+    Ok(())
 }
 
 /// One retained wake handle per runtime lifetime. The epoch thread keeps only a weak reference
@@ -1633,7 +1764,7 @@ impl GuestStateResetRequests {
 }
 
 struct BranchStore {
-    memory_limiter: GuestMemoryLimiter,
+    resource_limiter: GuestResourceLimiter,
     timeout_requests: Vec<WasmTimeoutRequest>,
     next_timeout_handle: i64,
     emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
@@ -1642,11 +1773,11 @@ struct BranchStore {
 
 impl BranchStore {
     fn new(
-        max_memory_bytes: usize,
+        limits: WasmProcessorLimits,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> Self {
         Self {
-            memory_limiter: GuestMemoryLimiter::new(max_memory_bytes),
+            resource_limiter: GuestResourceLimiter::new(limits),
             timeout_requests: Vec::new(),
             next_timeout_handle: 1,
             emitted_batch_sender,
@@ -1766,12 +1897,8 @@ impl CompiledWasmProcessor {
         limits: WasmProcessorLimits,
         emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
     ) -> StackResult<WasmBranchInstance, WasmGuestCallError> {
-        let max_memory_bytes = limits.max_memory_bytes.get().arch_into();
-        let mut store = Store::new(
-            &self.engine,
-            BranchStore::new(max_memory_bytes, emitted_batch_sender),
-        );
-        store.limiter(|state| &mut state.memory_limiter);
+        let mut store = Store::new(&self.engine, BranchStore::new(limits, emitted_batch_sender));
+        store.limiter(|state| &mut state.resource_limiter);
         store.set_fuel(limits.max_fuel.get()).map_err(|source| {
             Report::new(WasmGuestCallError::ResetFuel {
                 limit: limits.max_fuel,
@@ -2851,10 +2978,10 @@ mod tests {
         )
     "#;
 
+    /// A guest whose one memory starts at two pages and grows by one page per batch.
     const MEMORY_GROWING_WASM: &str = r#"
         (module
-            (memory (export "memory") 1)
-            (memory 1)
+            (memory (export "memory") 2)
             (global $read_ptr (mut i32) (i32.const 1024))
             (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
             (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
@@ -2862,7 +2989,7 @@ mod tests {
             (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
             (func (export "nervix_process_batch") (param i32 i32) (result i32)
                 i32.const 1
-                memory.grow 1
+                memory.grow
                 drop
                 i32.const 0)
             (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
@@ -3275,10 +3402,15 @@ mod tests {
         WasmRuntime::new(WasmRuntimeConfig::default()).expect("runtime must initialize")
     }
 
+    /// The table bound every test guest's limits declare: a test guest has no table or a table of
+    /// one slot.
+    const GUEST_TABLE_ELEMENTS: u64 = 4_096;
+
     fn limits() -> WasmProcessorLimits {
         WasmProcessorLimits {
             max_fuel: nonzero!(1_000_000_000u64),
             max_memory_bytes: nonzero!(67_108_864u64),
+            max_table_elements: GUEST_TABLE_ELEMENTS,
         }
     }
 
@@ -3648,6 +3780,7 @@ mod tests {
         let limited = WasmProcessorLimits {
             max_fuel: nonzero!(100_000u64),
             max_memory_bytes: nonzero!(67_108_864u64),
+            max_table_elements: GUEST_TABLE_ELEMENTS,
         };
 
         let error = failed_instantiation(wasm, limited, Some(b"saved state")).await;
@@ -5416,6 +5549,7 @@ mod tests {
         let configured_limits = WasmProcessorLimits {
             max_fuel: nonzero!(1_000u64),
             max_memory_bytes: nonzero!(67_108_864u64),
+            max_table_elements: GUEST_TABLE_ELEMENTS,
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -5451,6 +5585,7 @@ mod tests {
         let configured_limits = WasmProcessorLimits {
             max_fuel: nonzero!(10_000u64),
             max_memory_bytes: nonzero!(67_108_864u64),
+            max_table_elements: GUEST_TABLE_ELEMENTS,
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -5487,6 +5622,7 @@ mod tests {
         let configured_limits = WasmProcessorLimits {
             max_fuel: nonzero!(100_000u64),
             max_memory_bytes: nonzero!(131_072u64),
+            max_table_elements: GUEST_TABLE_ELEMENTS,
         };
         let mut branch = compiled
             .instantiate_branch(
@@ -5496,7 +5632,7 @@ mod tests {
                 None,
             )
             .await
-            .expect("two-page branch must instantiate at its total memory limit");
+            .expect("a two-page memory instantiates at its memory limit");
 
         let error = branch
             .process_batch_in_context(b"grow", test_execution_context())
@@ -5527,6 +5663,7 @@ mod tests {
         let configured_limits = WasmProcessorLimits {
             max_fuel: nonzero!(100_000u64),
             max_memory_bytes: nonzero!(65_536u64),
+            max_table_elements: GUEST_TABLE_ELEMENTS,
         };
 
         let error = compiled
@@ -5544,8 +5681,8 @@ mod tests {
                 call_failure(&error, WasmGuestOperation::Instantiation),
                 WasmGuestCallError::MemoryLimitExceeded {
                     limit: 65_536,
-                    allocated: 65_536,
-                    growth: 65_536,
+                    allocated: 0,
+                    growth: 131_072,
                     export: None,
                 }
             ),
@@ -5600,6 +5737,502 @@ mod tests {
             ticks.load(Ordering::Relaxed) > 0,
             "epoch async yielding should allow another task to run during guest execution"
         );
+    }
+
+    /// A guest whose batch processing recurses `depth` times. Every frame keeps eight 64-bit
+    /// values live across its call and sums them after it returns, so each level needs stack of
+    /// its own and a deep enough call needs more than Wasmtime's 512 KiB default.
+    fn recursing_wasm(depth: u32) -> String {
+        format!(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func $deep (param $n i32)
+                    (param $a i64) (param $b i64) (param $c i64) (param $d i64)
+                    (param $e i64) (param $f i64) (param $g i64) (param $h i64)
+                    (result i64)
+                    local.get $n
+                    i32.eqz
+                    if (result i64)
+                        local.get $a
+                    else
+                        local.get $n
+                        i32.const 1
+                        i32.sub
+                        local.get $b
+                        local.get $c
+                        local.get $d
+                        local.get $e
+                        local.get $f
+                        local.get $g
+                        local.get $h
+                        local.get $a
+                        call $deep
+                        local.get $a
+                        i64.add
+                        local.get $b
+                        i64.add
+                        local.get $c
+                        i64.add
+                        local.get $d
+                        i64.add
+                        local.get $e
+                        i64.add
+                        local.get $f
+                        i64.add
+                        local.get $g
+                        i64.add
+                        local.get $h
+                        i64.add
+                    end)
+                (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+                (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32)
+                    i32.const {depth}
+                    i64.const 1
+                    i64.const 2
+                    i64.const 3
+                    i64.const 4
+                    i64.const 5
+                    i64.const 6
+                    i64.const 7
+                    i64.const 8
+                    call $deep
+                    drop
+                    i32.const 0)
+                (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32) i32.const 0)
+                (func (export "nervix_read_emit") (result i32) i32.const 0)
+                (func (export "nervix_dump_state") (result i32) i32.const 0)
+                (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
+            )
+            "#
+        )
+    }
+
+    /// How deep [`recursing_wasm`] recurses below: past Wasmtime's 512 KiB default stack, and well
+    /// inside a 4 MiB one.
+    const DEEP_RECURSION: u32 = 12_000;
+
+    async fn process_recursing_batch(
+        runtime: &WasmRuntime,
+    ) -> StackResult<Vec<WasmEnvelope>, WasmGuestError> {
+        let compiled = runtime
+            .compile_processor(&Executor::default(), recursing_wasm(DEEP_RECURSION))
+            .await
+            .expect("module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
+                None,
+            )
+            .await
+            .expect("branch must instantiate");
+        branch
+            .process_batch_in_context(b"deep", test_execution_context())
+            .await
+    }
+
+    #[nervix_primitives::test]
+    async fn the_default_stack_traps_a_guest_that_recurses_past_it() {
+        let error = process_recursing_batch(&runtime())
+            .await
+            .expect_err("the recursion needs more than the default 512 KiB stack");
+
+        assert!(
+            matches!(
+                call_failure(&error, WasmGuestOperation::BatchProcessing),
+                WasmGuestCallError::Trap {
+                    export: "nervix_process_batch",
+                    trap: Trap::StackOverflow,
+                }
+            ),
+            "unexpected deep recursion failure: {error:?}"
+        );
+    }
+
+    /// Wasmtime runs every guest call on a separate stack and refuses a guest stack larger than
+    /// it. A stack setting above Wasmtime's 2 MiB default for that separate stack still builds the
+    /// engine and gives a guest call the whole stack the setting names.
+    #[nervix_primitives::test]
+    async fn a_stack_above_wasmtimes_default_call_stack_runs_a_guest_that_needs_it() {
+        let engine = WasmEngineSettings::resolve(WasmEngineSettingOverrides {
+            stack_bytes: Some(4 * 1024 * 1024),
+            ..WasmEngineSettingOverrides::default()
+        })
+        .expect("a 4 MiB stack is a valid setting");
+        let runtime = WasmRuntime::new(WasmRuntimeConfig {
+            engine,
+            ..WasmRuntimeConfig::default()
+        })
+        .expect("the engine builds with a 4 MiB stack");
+
+        process_recursing_batch(&runtime)
+            .await
+            .expect("the guest recursion fits a 4 MiB stack");
+    }
+
+    /// A guest with one table of one slot whose batch processing grows that table by a million
+    /// slots.
+    const TABLE_GROWING_WASM: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (table $slots 1 funcref)
+            (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+            (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+            (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+            (func (export "nervix_process_batch") (param i32 i32) (result i32)
+                ref.null func
+                i32.const 1000000
+                table.grow $slots
+                drop
+                i32.const 0)
+            (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+            (func (export "nervix_flush") (result i32) i32.const 0)
+            (func (export "nervix_read_emit") (result i32) i32.const 0)
+            (func (export "nervix_dump_state") (result i32) i32.const 0)
+            (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+            (func (export "nervix_reset_state") (result i32) i32.const 0)
+            (func (export "nervix_describe_state") (result i32) i32.const 0)
+        )
+    "#;
+
+    #[nervix_primitives::test]
+    async fn growing_a_table_past_its_limit_fails_the_guest_call() {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(&Executor::default(), TABLE_GROWING_WASM)
+            .await
+            .expect("module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
+                None,
+            )
+            .await
+            .expect("a one-slot table fits the limit");
+
+        let error = branch
+            .process_batch_in_context(b"grow", test_execution_context())
+            .await
+            .expect_err("a million more table slots exceed MAX TABLE ELEMENTS");
+
+        assert!(
+            matches!(
+                call_failure(&error, WasmGuestOperation::BatchProcessing),
+                WasmGuestCallError::TableLimitExceeded {
+                    limit: GUEST_TABLE_ELEMENTS,
+                    allocated: 1,
+                    growth: 1_000_000,
+                    export: Some("nervix_process_batch"),
+                }
+            ),
+            "unexpected table growth error: {error:?}"
+        );
+        assert!(error.is_resource_limit_exceeded());
+    }
+
+    /// A refused growth leaves what the guest already holds counted exactly once: a growth that
+    /// still fits succeeds after it.
+    #[nervix_primitives::test]
+    async fn a_table_growth_that_fits_the_limit_succeeds_up_to_the_limit() {
+        let wasm = TABLE_GROWING_WASM.replace("i32.const 1000000", "i32.const 3");
+        let compiled = runtime()
+            .compile_processor(&Executor::default(), wasm)
+            .await
+            .expect("module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                WasmProcessorLimits {
+                    max_table_elements: 7,
+                    ..limits()
+                },
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
+                None,
+            )
+            .await
+            .expect("a one-slot table fits seven elements");
+
+        for _ in 0..2 {
+            branch
+                .process_batch_in_context(b"grow", test_execution_context())
+                .await
+                .expect("three more slots fit while the total stays at or below seven");
+        }
+        let error = branch
+            .process_batch_in_context(b"grow", test_execution_context())
+            .await
+            .expect_err("ten slots exceed seven");
+
+        assert!(
+            matches!(
+                call_failure(&error, WasmGuestOperation::BatchProcessing),
+                WasmGuestCallError::TableLimitExceeded {
+                    limit: 7,
+                    allocated: 7,
+                    growth: 3,
+                    export: Some("nervix_process_batch"),
+                }
+            ),
+            "unexpected table growth error: {error:?}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn max_table_elements_rejects_a_guest_initial_table() {
+        let compiled = runtime()
+            .compile_processor(&Executor::default(), TABLE_GROWING_WASM)
+            .await
+            .expect("module must compile");
+
+        let error = compiled
+            .instantiate_branch(
+                WasmProcessorLimits {
+                    max_table_elements: 0,
+                    ..limits()
+                },
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
+                None,
+            )
+            .await
+            .expect_err("a one-slot initial table exceeds zero elements");
+
+        assert!(
+            matches!(
+                call_failure(&error, WasmGuestOperation::Instantiation),
+                WasmGuestCallError::TableLimitExceeded {
+                    limit: 0,
+                    allocated: 0,
+                    growth: 1,
+                    export: None,
+                }
+            ),
+            "unexpected instantiation table error: {error:?}"
+        );
+    }
+
+    /// A guest with one 64-bit table of one slot whose batch processing grows that table by three
+    /// slots and then asks for a growth whose new size overflows. Wasmtime fails the overflowing
+    /// growth without asking the store's limiter first.
+    const TABLE64_OVERFLOWING_WASM: &str = r#"
+        (module
+            (memory (export "memory") 1)
+            (table $slots i64 1 funcref)
+            (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+            (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+            (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+            (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+            (func (export "nervix_process_batch") (param i32 i32) (result i32)
+                ref.null func
+                i64.const 3
+                table.grow $slots
+                drop
+                ref.null func
+                i64.const -1
+                table.grow $slots
+                drop
+                i32.const 0)
+            (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+            (func (export "nervix_flush") (result i32) i32.const 0)
+            (func (export "nervix_read_emit") (result i32) i32.const 0)
+            (func (export "nervix_dump_state") (result i32) i32.const 0)
+            (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+            (func (export "nervix_reset_state") (result i32) i32.const 0)
+            (func (export "nervix_describe_state") (result i32) i32.const 0)
+        )
+    "#;
+
+    /// A growth whose size overflows fails in the guest, and the slots the guest already holds
+    /// stay counted: repeating it between admitted growths never lets the table pass its limit.
+    #[nervix_primitives::test]
+    async fn an_overflowing_table_growth_leaves_the_held_slots_counted() {
+        let compiled = runtime()
+            .compile_processor(&Executor::default(), TABLE64_OVERFLOWING_WASM)
+            .await
+            .expect("module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                WasmProcessorLimits {
+                    max_table_elements: 7,
+                    ..limits()
+                },
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
+                None,
+            )
+            .await
+            .expect("a one-slot table fits seven elements");
+
+        for _ in 0..2 {
+            branch
+                .process_batch_in_context(b"grow", test_execution_context())
+                .await
+                .expect("three more slots fit while the table stays at or below seven");
+        }
+        let error = branch
+            .process_batch_in_context(b"grow", test_execution_context())
+            .await
+            .expect_err("ten slots exceed seven, whatever growths failed in between");
+
+        assert!(
+            matches!(
+                call_failure(&error, WasmGuestOperation::BatchProcessing),
+                WasmGuestCallError::TableLimitExceeded {
+                    limit: 7,
+                    allocated: 7,
+                    growth: 3,
+                    export: Some("nervix_process_batch"),
+                }
+            ),
+            "unexpected table growth error: {error:?}"
+        );
+    }
+
+    /// A growth past the table's own declared maximum of five slots fails in the guest and takes
+    /// none of `MAX TABLE ELEMENTS`: the growth after it still has the whole remaining budget.
+    #[nervix_primitives::test]
+    async fn a_growth_past_the_declared_table_maximum_takes_none_of_the_limit() {
+        let wasm = TABLE_GROWING_WASM
+            .replace("(table $slots 1 funcref)", "(table $slots 1 5 funcref)")
+            .replace(
+                "i32.const 1000000",
+                "i32.const 8 table.grow $slots drop ref.null func i32.const 4",
+            );
+        let compiled = runtime()
+            .compile_processor(&Executor::default(), wasm)
+            .await
+            .expect("module must compile");
+        let mut branch = compiled
+            .instantiate_branch(
+                WasmProcessorLimits {
+                    max_table_elements: 9,
+                    ..limits()
+                },
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(1)),
+                None,
+            )
+            .await
+            .expect("a one-slot table fits nine elements");
+
+        branch
+            .process_batch_in_context(b"grow", test_execution_context())
+            .await
+            .expect("the declared maximum refuses eight slots, and four more fit both bounds");
+        let error = branch
+            .process_batch_in_context(b"grow", test_execution_context())
+            .await
+            .expect_err("eight more slots past the five held exceed nine");
+
+        assert!(
+            matches!(
+                call_failure(&error, WasmGuestOperation::BatchProcessing),
+                WasmGuestCallError::TableLimitExceeded {
+                    limit: 9,
+                    allocated: 5,
+                    growth: 8,
+                    export: Some("nervix_process_batch"),
+                }
+            ),
+            "unexpected table growth error: {error:?}"
+        );
+    }
+
+    /// A guest that implements every export the host requires and defines `declarations` beside
+    /// its exported memory.
+    fn guest_defining(declarations: &str) -> String {
+        format!(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                {declarations}
+                (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+                (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32) i32.const 0)
+                (func (export "nervix_read_emit") (result i32) i32.const 0)
+                (func (export "nervix_dump_state") (result i32) i32.const 0)
+                (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_reset_state") (result i32) i32.const 0)
+                (func (export "nervix_describe_state") (result i32) i32.const 0)
+            )
+            "#
+        )
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_with_two_memories_is_refused_when_it_compiles() {
+        let Err(refusal) = runtime()
+            .compile_processor(&Executor::default(), guest_defining("(memory 1)"))
+            .await
+        else {
+            panic!("a guest defines at most one linear memory");
+        };
+
+        assert!(
+            matches!(
+                refusal.current_context(),
+                WasmProcessorError::TooManyMemories {
+                    defined: 2,
+                    limit: GUEST_MEMORIES,
+                }
+            ),
+            "unexpected refusal: {refusal:?}"
+        );
+        assert_eq!(
+            refusal.current_context().to_string(),
+            "wasm module defines 2 linear memories, but a guest defines at most 1"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_with_two_tables_is_refused_when_it_compiles() {
+        let Err(refusal) = runtime()
+            .compile_processor(
+                &Executor::default(),
+                guest_defining("(table 1 funcref) (table 1 funcref)"),
+            )
+            .await
+        else {
+            panic!("a guest defines at most one table");
+        };
+
+        assert!(
+            matches!(
+                refusal.current_context(),
+                WasmProcessorError::TooManyTables {
+                    defined: 2,
+                    limit: GUEST_TABLES,
+                }
+            ),
+            "unexpected refusal: {refusal:?}"
+        );
+        assert_eq!(
+            refusal.current_context().to_string(),
+            "wasm module defines 2 tables, but a guest defines at most 1"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_with_one_memory_and_one_table_compiles() {
+        runtime()
+            .compile_processor(&Executor::default(), guest_defining("(table 1 funcref)"))
+            .await
+            .expect("one memory and one table are what a guest may define");
     }
 
     #[nervix_primitives::test]

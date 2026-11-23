@@ -710,11 +710,16 @@ impl<'bytes> GeneratedSettings<'bytes> {
             ),
         })
         .assured("generated positive cache sizes validate");
-        runtime.wasm_engine = nervix_wasm::WasmEngineSettings::resolve(
-            Some(self.entropy.boundary_biased(1..=8_388_608)),
-            Some(self.entropy.boundary_biased(0..=8_589_934_592)),
-        )
-        .assured("bounded engine sizes fit this native host");
+        runtime.wasm_engine =
+            nervix_wasm::WasmEngineSettings::resolve(nervix_wasm::WasmEngineSettingOverrides {
+                stack_bytes: Some(self.entropy.boundary_biased(1..=8_388_608)),
+                memory_reservation_bytes: Some(self.entropy.boundary_biased(0..=8_589_934_592)),
+                memory_guard_bytes: Some(self.entropy.boundary_biased(0..=67_108_864)),
+                memory_growth_reservation_bytes: Some(
+                    self.entropy.boundary_biased(0..=8_589_934_592),
+                ),
+            })
+            .assured("bounded engine sizes fit this native host");
         runtime.connector_host = crate::runtime::ConnectorHostSettings::resolve(
             crate::runtime::ConnectorHostSettingOverrides {
                 retry_multiplier: std::num::NonZeroU32::new(
