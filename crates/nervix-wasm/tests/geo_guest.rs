@@ -31,6 +31,7 @@ fn limits() -> WasmProcessorLimits {
     WasmProcessorLimits {
         max_fuel: nonzero!(1_000_000_000u64),
         max_memory_bytes: nonzero!(134_217_728u64),
+        max_table_elements: 4_096,
     }
 }
 

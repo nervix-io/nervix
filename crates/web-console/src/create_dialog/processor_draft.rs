@@ -1428,6 +1428,8 @@ pub(super) enum ProcessorDraftError {
     MaxMemory,
     #[error("MAX MEMORY must be greater than zero")]
     MaxMemoryZero,
+    #[error("Enter MAX TABLE ELEMENTS as a whole number of table slots")]
+    MaxTableElements,
     #[error("Choose ON GLOBAL ERROR LOG or IGNORE")]
     GlobalError,
     #[error("Materialized dependency {index}: choose a relay")]

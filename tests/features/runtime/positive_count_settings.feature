@@ -102,6 +102,7 @@ Feature: Positive count settings
         FILE 'processors/filter_even.wasm'
         MAX FUEL 0
         MAX MEMORY 64MiB
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO processed SET tenant = tenant
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
@@ -113,6 +114,7 @@ Feature: Positive count settings
         FILE 'processors/filter_even.wasm'
         MAX FUEL 1000000
         MAX MEMORY 0B
+        MAX TABLE ELEMENTS 4096
         UNBRANCHED
         TO processed SET tenant = tenant
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;

@@ -484,6 +484,9 @@ pub struct CreateWasmProcessor<Version = u64> {
 pub struct WasmProcessorLimits {
     pub max_fuel: NonZeroU64,
     pub max_memory_bytes: NonZeroU64,
+    /// The most slots the guest's table may hold in one branch store, its initial size and every
+    /// later growth together. Zero is a guest without a table.
+    pub max_table_elements: u64,
 }
 
 /// What a WASM processor does with a saved snapshot its guest refused to restore.

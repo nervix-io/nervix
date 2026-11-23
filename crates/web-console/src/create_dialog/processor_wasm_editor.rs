@@ -2,7 +2,8 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Browser editing of a WASM processor's `MAX FUEL` and `MAX MEMORY` limits, its
+//! - **Owns.** Browser editing of a WASM processor's `MAX FUEL`, `MAX MEMORY` and
+//!   `MAX TABLE ELEMENTS` limits, its
 //!   `ON REJECTED STATE` choice with the consequence the choice has, and its `ON GLOBAL ERROR`
 //!   policy.
 //! - **Depends on.** The WASM processor draft and Leptos signals.
@@ -48,7 +49,7 @@ pub(super) fn ProcessorWasmLimitsEditor(signals: CreateSignals) -> impl IntoView
     let section = view! {
         <section class="create-wasm-limits">
             <h3>"Guest limits"</h3>
-            <p>"MAX FUEL bounds one logical guest operation and MAX MEMORY each branch instance's linear memory; both are required. The guest owns when its routes emit: guest output and the timeouts it requests set the cadence, so a WASM route declares no flush."</p>
+            <p>"MAX FUEL bounds one logical guest operation, MAX MEMORY each branch instance's linear memory and MAX TABLE ELEMENTS the slots of its table; all three are required. The guest owns when its routes emit: guest output and the timeouts it requests set the cadence, so a WASM route declares no flush."</p>
             <label class="create-field"><span>"MAX FUEL, a whole number of fuel units"</span>
                 <input class="create-wasm-max-fuel" type="text" inputmode="numeric" autocomplete="off"
                     prop:value=move || read_wasm(signals, |wasm| wasm.max_fuel.clone())
@@ -65,6 +66,15 @@ pub(super) fn ProcessorWasmLimitsEditor(signals: CreateSignals) -> impl IntoView
                     on:input=move |event| {
                         let value = event_target_value(&event);
                         edit_wasm(signals, |wasm| wasm.max_memory = value);
+                    } />
+            </label>
+            <label class="create-field"><span>"MAX TABLE ELEMENTS, a whole number of table slots; zero for a guest without a table"</span>
+                <input class="create-wasm-max-table-elements" type="text" inputmode="numeric" autocomplete="off"
+                    prop:value=move || read_wasm(signals, |wasm| wasm.max_table_elements.clone())
+                    disabled=pending
+                    on:input=move |event| {
+                        let value = event_target_value(&event);
+                        edit_wasm(signals, |wasm| wasm.max_table_elements = value);
                     } />
             </label>
         </section>

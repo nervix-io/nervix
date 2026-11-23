@@ -346,7 +346,7 @@ fn apply_batch_accepts_wasm_output_routes_on_generated_output() {
           FILTER WHERE input.value >= 0
           USING RESOURCE wasm_filter VERSION 1
           FILE 'processors/filter_even.wasm'
-          MAX FUEL 1000000000 MAX MEMORY 64MiB
+          MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096
           UNBRANCHED
           TO even_metrics
             SET value = value, source = source
@@ -498,7 +498,7 @@ fn apply_batch_rejects_duplicate_wasm_output_route() {
           FROM raw_metrics
           USING RESOURCE wasm_filter VERSION 1
           FILE 'processors/filter_even.wasm'
-          MAX FUEL 1000000000 MAX MEMORY 64MiB
+          MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS 4096
           UNBRANCHED
           TO projected_metrics SET value = value ON MESSAGE ERROR LOG
           TO projected_metrics SET value = value WHERE value >= 0 ON MESSAGE ERROR LOG
