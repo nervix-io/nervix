@@ -629,7 +629,7 @@ While a payload waits, its ingestor keeps its transport within the transport's o
 | `KAFKA TOPIC` | A consumer group's member stays in its group: Nervix pauses fetching and services the group for as long as the payload waits, and fetching resumes at the next unread offset. A domain-offset reader keeps its assignment. Kafka's retention keeps what the ingestor has not read. |
 | `PULSAR TOPIC` | The consumer keeps its connection, and the broker stops sending once the receiver queue's flow permits are spent. |
 | `RABBITMQ QUEUE` | The connection keeps its heartbeats. In an acknowledged mode the prefetch bounds what the broker sends; in `MODE NO ACK` the client keeps receiving deliveries into a buffer without a bound, as it does whenever the ingestor falls behind. |
-| `MQTT TOPIC` | The connection keeps polling, and with it its keep-alive, while it reads up to 64 publishes ahead in `MODE NO ACK`. Once those fill it stops reading, and a broker closes a connection that sends nothing for one and a half keep-alive intervals, so a wait longer than that ends the connection until the ingestor reconnects. |
+| `MQTT TOPIC` | The connection keeps polling, and with it its keep-alive, while it reads up to `--mqtt-read-ahead-headroom` publishes, 64 by default, ahead in `MODE NO ACK`. Once those fill it stops reading, and a broker closes a connection that sends nothing for one and a half keep-alive intervals, so a wait longer than that ends the connection until the ingestor reconnects. |
 | `REDIS PUBSUB` | The dedicated reader keeps reading and probing until `subscription_buffer_messages` messages wait, then stops reading. Redis closes a subscriber whose output buffer passes its `client-output-buffer-limit`. |
 | `WEBSOCKETS CONNECTION` | The connection keeps reading, so the client answers the server's pings and writes its own on their cadence, and it parks the first data frame it reads. Once a frame is parked it reads nothing further, so a server that pings with a deadline shorter than the rest of the wait closes the connection until the ingestor reconnects. |
 
@@ -2393,7 +2393,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Every live node | no; scheduled owner |
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
-| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: at most 64 outcome; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: at most 64 outcome; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus node setting mqtt-read-ahead-headroom up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: set by node setting `--mqtt-read-ahead-headroom`; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: set by node setting `--mqtt-read-ahead-headroom`; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>retire a refused or downgraded subscription before retrying: driver default, 5 s<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
@@ -2473,12 +2473,14 @@ Delivery constraints:
 - `ACK PARALLEL MAX <n>` is the in-flight ACK window and `BATCH TIMEOUT` is the maximum partial-batch wait;
   a quiesce change or a stop that meets a partial batch takes in the publishes it gathered at once
   rather than after its batch timeout
-- every `CONNECT` in an `ACK` mode advertises the in-flight window and 64 more as its Receive
-  Maximum: 65 under `ACK SEQUENTIAL`, and `MAX` plus 64 under `ACK PARALLEL`, at most MQTT's
-  65,535, so the broker sends no further QoS 1 or QoS 2 publish while that many wait on their
-  acknowledgements, and a batch above 65,535 gathers at most 65,535 of them before its
-  `BATCH TIMEOUT` ends it. The extra capacity lets the connection keep reading while the ingestor
-  holds a batch
+- every `CONNECT` in an `ACK` mode advertises the in-flight window plus the node's
+  `--mqtt-read-ahead-headroom`, 64 by default, as its Receive Maximum, at most MQTT's 65,535: at
+  the default, 65 under `ACK SEQUENTIAL` and `MAX` plus 64 under `ACK PARALLEL`. The broker then
+  sends no further QoS 1 or QoS 2 publish while that many wait on their acknowledgements, and a
+  batch above 65,535 gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra
+  capacity lets the connection keep reading while the ingestor holds a batch. The headroom is a node
+  capability, the same for every MQTT ingestor a node runs, which [Node
+  Settings](node-settings.md#engine-and-connector-host-capabilities) owns
 - `INSTANCES <count>` controls Nervix consumer parallelism within the shared subscription group
 
 A new subscription becomes ready only when the broker grants the declared QoS. A lower grant
@@ -2539,8 +2541,8 @@ next, on the mode's `RETRY POLICY`, and writes its one acknowledgement once the 
 accepted. Its connection keeps writing those acknowledgements and sending its keep-alive while the
 ingestor waits on a batch's acknowledgement trees, however long a downstream emitter holds them, so
 the broker keeps the session connected and delivers nothing again. In an `ACK` mode the read-ahead
-reserves its full Receive Maximum for QoS 1/2 outcomes and holds up to 64 QoS 0 outcomes alongside
-them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 or QoS 2 subscription.
+reserves its full Receive Maximum for QoS 1/2 outcomes and holds up to `--mqtt-read-ahead-headroom`
+QoS 0 outcomes, 64 by default, alongside them. A QoS 0 publisher is not held back by the broker, even through a QoS 1 or QoS 2 subscription.
 Nervix drops and counts QoS 0 publishes that do not fit, keeping the connection polling and
 retaining the reserved capacity and acknowledgements of QoS 1 and QoS 2 publishes. Admitted
 outcomes retain packet order.
@@ -2556,8 +2558,8 @@ overflow immediately, including during an acknowledgement wait. [Ingestor intake
 handling](metrics-and-observability.md#ingestor-intake-and-payload-handling) lists its labels and
 the transport-redelivery counter that `DESCRIBE INGESTOR` reports.
 An oversized QoS 0 publish dropped at this boundary counts as overflow only. Under `NO ACK` the
-64-outcome read-ahead applies backpressure when full, which also stops its keep-alive until the
-ingestor reads again. See
+read-ahead holds `--mqtt-read-ahead-headroom` outcomes, 64 by default, and applies backpressure
+when full, which also stops its keep-alive until the ingestor reads again. See
 [MQTT ingestor connections](connector-contract.md#mqtt-ingestor-connections).
 
 Every MQTT connection advertises the full protocol framing limit of 268,435,460 bytes in its
@@ -3901,7 +3903,10 @@ commonly frame text that way; a binary format reads binary frames only.
 Failure matchers run first, so a rejection is never swallowed by a lenient
 acknowledgement matcher: a `FAIL JAQ` guard on the step is checked before the
 protocol-wide one, and the first to produce a value that is neither `null` nor
-`false` aborts the handshake carrying that value as the reason. Otherwise the
+`false` aborts the handshake carrying that value as the reason. The reason is the
+value itself when it is a string and its JSON text otherwise, cut on a character
+boundary after its first 512 bytes and marked with `…`, so a peer cannot grow the
+ingestor's diagnostic without bound. Otherwise the
 step's outstanding matchers are tried and the first satisfied one is consumed.
 Because matchers assert only the fields they name, acknowledgements carrying
 connection ids, timestamps, or echoed parameters still match.

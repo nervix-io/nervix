@@ -16,6 +16,15 @@ use crate::{CapacityWaits, MemoryClass, executor::SemaphoreRef};
 /// The smallest charge an incremental writer takes. Charging every byte would put a semaphore
 /// acquisition in the middle of a serializer's inner loop; charging at least this much keeps the
 /// overhead bounded while a small output still wastes little.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "an accounting granule, which Node Settings keeps fixed: charging a growing \
+                  buffer at least 4 KiB at a time bounds a writer to one budget acquisition per 4 \
+                  KiB of output, while a small output is over-charged by less than 4 KiB"
+    )
+)]
 const MINIMUM_GROWTH: u64 = 4 * 1024;
 
 /// Why an operation was not charged. An operation that is refused here has allocated nothing.

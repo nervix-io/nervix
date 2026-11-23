@@ -18,6 +18,7 @@
 use std::{collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, time::Duration};
 
 use ahash::HashMap;
+use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -36,6 +37,7 @@ use rkyv::{
     api::high::{HighDeserializer, HighSerializer},
     rancor::Error as RkyvError,
     ser::{allocator::ArenaHandle, writer::IoWriter},
+    util::AlignedVec,
 };
 use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
 use thiserror::Error;
@@ -345,6 +347,37 @@ impl RequestSubquota {
             Self::Cancellation => 8,
             Self::Terminal => 9,
         }
+    }
+}
+
+/// Why one typed request of a kind could not carry a message on this node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RequestFitError {
+    #[error(
+        "request '{request}' archives to {bytes} bytes, above its class's {limit}-byte payload \
+         limit"
+    )]
+    Payload {
+        request: &'static str,
+        bytes: u64,
+        limit: u64,
+    },
+    #[error(
+        "request '{request}' needs a {bytes}-byte control body with its envelope, above its \
+         class's {limit}-byte limit"
+    )]
+    Body {
+        request: &'static str,
+        bytes: u64,
+        limit: u64,
+    },
+    #[error("request '{request}' cannot be archived")]
+    Archive { request: &'static str },
+}
+
+impl RequestFitError {
+    fn archive(error: RkyvError, request: &'static str) -> Report<Self> {
+        Report::new(error).change_context(Self::Archive { request })
     }
 }
 
@@ -1877,6 +1910,49 @@ impl Transport {
     {
         self.request_with_timeout(node, message, self.request_deadline::<M>())
             .await
+    }
+
+    /// Refuses `message` when one typed request of its kind could not carry it on this node: its
+    /// archive above the class's payload limit, or that archive inside the request envelope a send
+    /// writes above the class's control body limit. It measures both encodings without sending
+    /// anything or charging a budget, so an owner that holds its largest request to a bound checks
+    /// that bound with it before it sends anything.
+    pub fn check_request_fits<M>(&self, message: &M) -> Result<(), Report<RequestFitError>>
+    where
+        M: InterconnectRequest
+            + for<'a> Serialize<HighSerializer<AlignedVec, ArenaHandle<'a>, RkyvError>>,
+    {
+        let executor = self.inner.executor();
+        let payload = rkyv::to_bytes::<RkyvError>(message)
+            .map_err(|error| RequestFitError::archive(error, M::NAME))?
+            .into_vec();
+        let payload_bytes: u64 = payload.len().arch_into();
+        let payload_limit = M::CLASS.payload_limit(executor);
+        if payload_bytes > payload_limit {
+            return Err(Report::new(RequestFitError::Payload {
+                request: M::NAME,
+                bytes: payload_bytes,
+                limit: payload_limit,
+            }));
+        }
+        let control = ControlEnvelope::Request(RequestEnvelope {
+            class: M::CLASS,
+            request: M::NAME.to_string(),
+            payload,
+        });
+        let body_bytes: u64 = rkyv::to_bytes::<RkyvError>(&control)
+            .map_err(|error| RequestFitError::archive(error, M::NAME))?
+            .len()
+            .arch_into();
+        let body_limit = M::CLASS.control_body_limit(executor);
+        if body_bytes > body_limit {
+            return Err(Report::new(RequestFitError::Body {
+                request: M::NAME,
+                bytes: body_bytes,
+                limit: body_limit,
+            }));
+        }
+        Ok(())
     }
 
     pub async fn request_stream<M>(

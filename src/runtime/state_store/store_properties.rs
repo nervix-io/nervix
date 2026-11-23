@@ -23,7 +23,7 @@ use std::{
 use ahash::HashSet;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_interconnect::backup::RestoreStateInventory;
-use nervix_models::RestoreStateAuthority;
+use nervix_models::{RestoreStateAuthority, SettingDefinition as _};
 
 use super::{
     checkpoint_reader::ListedCheckpoint,
@@ -31,6 +31,7 @@ use super::{
     key_properties::generated_placement,
     *,
 };
+use crate::runtime::RestoreStagingMaxBytes;
 
 /// A payload length at, beside, or between the chunk boundaries a stream is cut at, or empty.
 fn payload_length(arbitrary: &mut Arbitrary<'_>) -> usize {
@@ -74,7 +75,7 @@ fn open_store(path: &std::path::Path) -> RuntimeStateStore {
     RuntimeStateStore::from_database(
         database,
         nervix_execution::Executor::default(),
-        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        RestoreStagingMaxBytes::default_value(&()).as_u64(),
     )
     .assured("a new test database opens as a runtime-state store")
 }

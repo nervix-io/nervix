@@ -346,6 +346,17 @@ struct BoundedTDigest {
     centroids: SortedVec<Centroid>,
 }
 
+/// The centroids a digest holds beyond its capacity between an insertion and its compression.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "admit and merge insert one centroid at a time and compress after each, so a \
+                  digest holds at most one centroid beyond its capacity"
+    )
+)]
+const CENTROIDS_BEFORE_COMPRESSION: usize = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Centroid {
     mean: OrderedFloat<f64>,
@@ -358,7 +369,7 @@ impl BoundedTDigest {
             capacity,
             centroids: SortedVec::with_capacity(
                 capacity
-                    .checked_add(1)
+                    .checked_add(CENTROIDS_BEFORE_COMPRESSION)
                     .assured("validated centroid capacity is at most 4096"),
             ),
         }

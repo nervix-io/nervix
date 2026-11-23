@@ -21,12 +21,50 @@ use std::{fmt, num::NonZeroU32, time::Duration};
 
 /// The probability scale of a configuration: a preemption probability of one is this many
 /// millionths.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a stress configuration states its preemption probability in millionths, and one \
+                  is a million millionths"
+    )
+)]
 pub const PREEMPTION_SCALE: u32 = 1_000_000;
 
 /// The longest delay a configuration may inject before one acquisition. Product physical deadlines
 /// are measured in hundreds of milliseconds and longer; a delay below this bound holds one runtime
 /// worker for a fraction of the shortest of them.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter bounds a stress configuration's delays at \
+                  two milliseconds"
+    )
+)]
 pub const MAX_STRESS_DELAY: Duration = Duration::from_millis(2);
+
+/// The shortest delay of [`StressConfiguration::LANE`].
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter's stress lane delays a preempted acquisition \
+                  by at least 20µs"
+    )
+)]
+const LANE_SHORTEST_DELAY: Duration = Duration::from_micros(20);
+
+/// The longest delay of [`StressConfiguration::LANE`].
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter's stress lane delays a preempted acquisition \
+                  by at most 200µs"
+    )
+)]
+const LANE_LONGEST_DELAY: Duration = Duration::from_micros(200);
 
 /// Deloxide's random preemption, as one diagnostic process applies it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -91,8 +129,8 @@ impl StressConfiguration {
             Some(per_million) => per_million,
             None => panic!("a twentieth of the scale is nonzero"),
         },
-        Duration::from_micros(20),
-        Duration::from_micros(200),
+        LANE_SHORTEST_DELAY,
+        LANE_LONGEST_DELAY,
         false,
     ) {
         Ok(configuration) => configuration,

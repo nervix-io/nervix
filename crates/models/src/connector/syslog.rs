@@ -113,6 +113,14 @@ const IPV4_HEADER_BYTES: u64 = 20;
 const UDP_HEADER_BYTES: u64 = 8;
 
 /// The most decimal digits in an RFC 6587 octet count that either side reads or writes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the syslog chapter limits an octet count to ten decimal digits, which a \
+                  collector writes and a listener reads"
+    )
+)]
 const OCTET_COUNT_DIGITS: usize = 10;
 
 /// The frames both sides of a syslog transport carry: a collector writes only a payload that fits

@@ -161,9 +161,11 @@ impl Default for ShutdownSettings {
 }
 
 impl ShutdownTimeout {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(50);
 }
 impl DrainTimeout {
+    /// The compile-time source of this setting definition's default.
     pub const DEFAULT: Duration = Duration::from_secs(30);
 }
 impl ShutdownSettings {

@@ -12,7 +12,7 @@
 //! download as a whole is not bounded, because an archive may be far larger than any reply. A
 //! frame that arrives as its timeout ends still counts.
 
-use std::{num::NonZeroU64, pin::pin, time::Duration};
+use std::{num::NonZeroU64, pin::pin};
 
 use error_stack::Report;
 use futures_util::future::{Either, select};
@@ -25,17 +25,23 @@ use nervix_client_wire::{
 use nervix_models::{ArchiveDigest, BackupArchiveSummary, CommandExecutionReference};
 use thiserror::Error;
 
-use super::browser::{Browser, CallSocket as _, DownloadedArchive, Received};
+use super::{
+    FRAME_TIMEOUT, RETRY_DELAY,
+    browser::{Browser, CallSocket as _, DownloadedArchive, Received},
+};
 use crate::web_console_websocket_url_from_base;
 
-/// How long a download waits for its next frame before it counts as stalled.
-pub(crate) const FRAME_TIMEOUT: Duration = Duration::from_secs(120);
-
 /// How many times one download starts again or follows a redirect before it gives up.
+#[cfg_attr(
+    nervix_lint,
+    expect(
+        nervix::hidden_tunable,
+        reason = "how many attempts a download needs depends on the network and the cluster, and \
+                  the console has no settings carrier yet; it stays fixed until its repair task \
+                  bounds the download by a served time budget https://app.clickup.com/t/86bd5vvdq"
+    )
+)]
 pub(crate) const MAX_DOWNLOAD_ATTEMPTS: usize = 8;
-
-/// How long a download waits before it starts again from the first byte.
-pub(crate) const RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Why a backup's archive was not downloaded. The backup itself completed either way.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

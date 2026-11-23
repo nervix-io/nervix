@@ -82,8 +82,12 @@ impl FaultInjection {
         if armed.is_none() {
             return outcome;
         }
-        let mut answer = nervix_connector::PerRecordOutcome::with_capacity(1);
-        answer.deliver(nervix_connector::EmitterRecordId::new(records));
+        // The substituted answer names one record: the first identity past this write's records.
+        let unknown_records = [nervix_connector::EmitterRecordId::new(records)];
+        let mut answer = nervix_connector::PerRecordOutcome::with_capacity(unknown_records.len());
+        for record in unknown_records {
+            answer.deliver(record);
+        }
         answer
     }
 

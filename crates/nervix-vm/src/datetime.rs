@@ -68,6 +68,14 @@ pub use zone::{OffsetStyle, Zone};
 
 /// How far the first Monday after the Unix epoch lies past it. Weeks start on Monday, and the
 /// epoch itself was a Thursday.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Unix epoch, 1970-01-01, was a Thursday, so the first Monday, where \
+                  date_trunc starts a week, falls four days after it"
+    )
+)]
 const FIRST_MONDAY_AFTER_UNIX_EPOCH: i64 = 4 * FixedTimeUnit::Day.nanoseconds();
 
 const _: () = assert!(

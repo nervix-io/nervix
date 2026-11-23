@@ -18,8 +18,16 @@
 )]
 
 use super::*;
+use crate::runtime::entity_gate::SHORTEST_WAIT;
 
 impl Runtime {
+    /// How long a wait for replica confirmations sleeps when no replica report wakes it before it
+    /// reads what the replicas hold again: one tenth of the replication poll, never less than
+    /// [`SHORTEST_WAIT`].
+    fn replica_confirmation_recheck(&self) -> Duration {
+        (self.inner.state_replication_poll_interval / 10).max(SHORTEST_WAIT)
+    }
+
     /// Wait until every assigned replica has installed the branch lifecycle that authorizes a
     /// branch checkpoint. A reset uses this before offering its first guest checkpoint, so a
     /// replica can never reject that checkpoint merely because the lifecycle announcement raced
@@ -96,9 +104,7 @@ impl Runtime {
                 }));
             }
             let recheck = now
-                .checked_add(
-                    (self.inner.state_replication_poll_interval / 10).max(Duration::from_nanos(1)),
-                )
+                .checked_add(self.replica_confirmation_recheck())
                 .assured("a fraction-of-a-second recheck stays within Instant")
                 .min(deadline);
             nervix_primitives::select! {
@@ -374,9 +380,7 @@ impl Runtime {
                 }));
             }
             let recheck = now
-                .checked_add(
-                    (self.inner.state_replication_poll_interval / 10).max(Duration::from_nanos(1)),
-                )
+                .checked_add(self.replica_confirmation_recheck())
                 .assured("a recheck interval of a fraction of a second stays within Instant")
                 .min(deadline);
             nervix_primitives::select! {

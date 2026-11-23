@@ -361,12 +361,21 @@ impl<'bytes> GeneratedSettings<'bytes> {
     }
 
     fn membership(&mut self) -> MembershipSettings {
+        let gossip_receive_queue_capacity = std::num::NonZeroUsize::new(
+            usize::try_from(self.entropy.boundary_biased(1..=65_536))
+                .assured("a bounded gossip queue fits usize"),
+        );
         MembershipSettings::resolve(MembershipValues {
             node_unavailability_timeout: Some(self.cluster_duration()),
             gossip_interval: Some(self.timing_from(1)),
             clock_skew_tolerance: Some(self.timing_from(1)),
+            gossip_receive_queue_capacity,
+            gossip_tombstone_grace_period: Some(self.cluster_duration()),
         })
-        .assured("each membership timing is at least a millisecond and bounded")
+        .assured(
+            "each membership timing is at least a millisecond and bounded, the gossip queue is \
+             positive within the channel bound and the tombstone grace is a positive u32 seconds",
+        )
     }
 
     fn raft_retention(&mut self) -> RaftRetentionSettings {
@@ -736,6 +745,8 @@ impl<'bytes> GeneratedSettings<'bytes> {
             Some(self.entropy.boundary_biased(0..=8_589_934_592)),
         )
         .assured("bounded engine sizes fit this native host");
+        runtime.udf = nervix_roto::UdfSettings::resolve(Some(self.cluster_duration()))
+            .assured("a generated positive watchdog validates");
         runtime.connector_host = crate::runtime::ConnectorHostSettings::resolve(
             crate::runtime::ConnectorHostSettingOverrides {
                 retry_multiplier: std::num::NonZeroU32::new(
@@ -753,6 +764,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
                         .assured("bounded queue fits usize"),
                 ),
                 syslog_read_chunk_bytes: Some(self.entropy.boundary_biased(1..=65_536)),
+                mqtt_read_ahead_headroom: std::num::NonZeroUsize::new(
+                    usize::try_from(self.entropy.boundary_biased(1..=65_536))
+                        .assured("a bounded headroom fits usize"),
+                ),
             },
         )
         .assured("generated connector host bounds validate");
@@ -818,6 +833,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
                 remote_relay_instantiation_wait: Some(ack_unit * 5),
                 tls_cipher_suites: Some(tls_cipher_suites),
                 tls_key_exchange_groups: Some(tls_key_exchange_groups),
+                udf_compile_budget: Some(self.cluster_duration()),
                 ..Default::default()
             },
             raft,

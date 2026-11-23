@@ -38,7 +38,14 @@ use crate::{
 /// delivered as an overload finding, preventing qualification. A thread keeps at most this many
 /// live guards, a process at most `MAX_ORDER_HISTORY_EDGES` edges, and an edge at most
 /// `MAX_ORDER_WITNESSES` witnesses.
-const HELD_GUARD_CAPACITY: usize = MAX_ORDER_EDGES;
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter bounds a thread's live guard leases at 64"
+    )
+)]
+const HELD_GUARD_CAPACITY: usize = 64;
 
 /// Whether the caller's live guards are kept. Deloxide records a thread's held locks itself when
 /// order instrumentation is compiled, and when stress disables its fast paths, and then filters a

@@ -68,10 +68,22 @@ const UUID_RANDOM_A: u64 = 0x0fff;
 const UUID_RANDOM_B: u64 = 0x3fff_ffff_ffff_ffff;
 
 impl Arbitrary<'_> {
-    /// Current engine capabilities, with addressable positive counts and explicit local derivations.
+    /// Current engine capabilities, with addressable positive counts, explicit local derivations
+    /// and a positive UDF watchdog across the whole duration range.
     pub fn node_engine_capabilities(&mut self) -> nervix_models::EngineCapabilities {
         let inline = self.entropy.boundary_biased(0..=u64::MAX);
         let reservation = self.entropy.boundary_biased(0..=u64::MAX);
+        let watchdog_seconds = self.entropy.boundary_biased(0..=u64::MAX);
+        let watchdog_nanos = self.entropy.boundary_biased(0..=999_999_999);
+        let watchdog_nanos = if watchdog_seconds == 0 {
+            watchdog_nanos.max(1)
+        } else {
+            watchdog_nanos
+        };
+        let udf_watchdog = std::time::Duration::new(
+            watchdog_seconds,
+            u32::try_from(watchdog_nanos).assured("subsecond nanoseconds fit u32"),
+        );
         let mut positive = || {
             std::num::NonZeroU64::new(self.entropy.boundary_biased(1..=u64::MAX))
                 .assured("generated capacities are positive")
@@ -84,6 +96,7 @@ impl Arbitrary<'_> {
             wasm_stack_bytes: positive(),
             wasm_memory_reservation_bytes: reservation,
             wasm_parallel_compilation: false,
+            udf_watchdog,
         }
     }
 
@@ -118,6 +131,25 @@ impl Arbitrary<'_> {
             partition_topology_poll_interval: topology_poll,
             syslog_intake_queue_capacity: positive(),
             syslog_read_chunk_bytes: positive(),
+            mqtt_read_ahead_headroom: positive(),
+        }
+    }
+
+    /// Current local gossip capabilities: a positive receive queue within native channel limits
+    /// and a positive tombstone grace of at most `u32::MAX` whole seconds.
+    pub fn node_membership_capabilities(&mut self) -> nervix_models::MembershipCapabilities {
+        let queue = std::num::NonZeroU64::new(self.entropy.boundary_biased(1..=65_536))
+            .assured("the generated gossip queue is positive");
+        let seconds = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
+        let nanos = self.entropy.boundary_biased(0..=999_999_999);
+        let nanos = if seconds == 0 { nanos.max(1) } else { nanos };
+        let grace = std::time::Duration::new(
+            seconds,
+            u32::try_from(nanos).assured("subsecond nanoseconds fit u32"),
+        );
+        nervix_models::MembershipCapabilities {
+            gossip_receive_queue_capacity: queue,
+            gossip_tombstone_grace_period: grace,
         }
     }
 
@@ -393,6 +425,7 @@ impl Arbitrary<'_> {
                 consensus,
                 engines: self.node_engine_capabilities(),
                 connector_host: self.node_connector_host_capabilities(),
+                membership: self.node_membership_capabilities(),
                 cpu_count: cpu,
                 memory_bytes: memory,
                 receive,

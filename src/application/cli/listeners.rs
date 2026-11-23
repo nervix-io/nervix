@@ -22,65 +22,65 @@ use crate::application::{
 #[derive(clap::Args, Debug, Clone, Default, PartialEq)]
 #[command(next_help_heading = "Listeners")]
 pub struct ListenerArgs {
-    #[arg(id = MaxConnections::NAME, long = MaxConnections::NAME, env = "NERVIX_LISTENER_MAX_CONNECTIONS", help = "Local listener max connections; omitted values use the declared default")]
+    #[arg(id = MaxConnections::NAME, long = MaxConnections::NAME, env = "NERVIX_LISTENER_MAX_CONNECTIONS", help = super::settings::capability_help::<MaxConnections>("Connections each public TCP listener admits, including upgraded WebSockets and TLS handshakes", <MaxConnections as SettingDefinition>::default_value(&())))]
     pub max_connections: Option<u32>,
-    #[arg(id = HeaderBytes::NAME, long = HeaderBytes::NAME, env = "NERVIX_LISTENER_HEADER_BYTES", help = "Local listener header bytes; omitted values use the declared default")]
+    #[arg(id = HeaderBytes::NAME, long = HeaderBytes::NAME, env = "NERVIX_LISTENER_HEADER_BYTES", help = super::settings::capability_help::<HeaderBytes>("Largest HTTP/1 request head and chunked trailers", HumanBytes(<HeaderBytes as SettingDefinition>::default_value(&()))))]
     pub header_bytes: Option<HumanBytes>,
-    #[arg(id = MaxHeaders::NAME, long = MaxHeaders::NAME, env = "NERVIX_LISTENER_MAX_HEADERS", help = "Headers in one HTTP/1 request head; defaults to 100, or the three-byte header lines listener-header-bytes holds when fewer")]
+    #[arg(id = MaxHeaders::NAME, long = MaxHeaders::NAME, env = "NERVIX_LISTENER_MAX_HEADERS", help = super::settings::derived_capability_help::<MaxHeaders>("Headers in one HTTP/1 request head, WebSocket upgrades included; at most the three-byte header lines listener-header-bytes holds"))]
     pub max_headers: Option<u32>,
-    #[arg(id = BufferBytes::NAME, long = BufferBytes::NAME, env = "NERVIX_LISTENER_BUFFER_BYTES", help = "Local listener buffer bytes; omitted values use the declared default")]
+    #[arg(id = BufferBytes::NAME, long = BufferBytes::NAME, env = "NERVIX_LISTENER_BUFFER_BYTES", help = super::settings::capability_help::<BufferBytes>("HTTP/1 read buffer, and the largest body copy made on the connection; at least 8KiB", HumanBytes(<BufferBytes as SettingDefinition>::default_value(&()))))]
     pub buffer_bytes: Option<HumanBytes>,
-    #[arg(id = HeaderTimeout::NAME, long = HeaderTimeout::NAME, env = "NERVIX_LISTENER_HEADER_TIMEOUT", help = "Local listener header timeout; omitted values use the declared default")]
+    #[arg(id = HeaderTimeout::NAME, long = HeaderTimeout::NAME, env = "NERVIX_LISTENER_HEADER_TIMEOUT", help = super::settings::capability_help::<HeaderTimeout>("Deadline of a complete HTTP/1 request head", HumanDuration(<HeaderTimeout as SettingDefinition>::default_value(&()))))]
     pub header_timeout: Option<HumanDuration>,
-    #[arg(id = TlsTimeout::NAME, long = TlsTimeout::NAME, env = "NERVIX_LISTENER_TLS_TIMEOUT", help = "Local listener tls timeout; omitted values use the declared default")]
+    #[arg(id = TlsTimeout::NAME, long = TlsTimeout::NAME, env = "NERVIX_LISTENER_TLS_TIMEOUT", help = super::settings::capability_help::<TlsTimeout>("Deadline of an HTTPS, console TLS or gRPC TLS handshake", HumanDuration(<TlsTimeout as SettingDefinition>::default_value(&()))))]
     pub tls_timeout: Option<HumanDuration>,
-    #[arg(id = IdleTimeout::NAME, long = IdleTimeout::NAME, env = "NERVIX_LISTENER_IDLE_TIMEOUT", help = "Local listener idle timeout; omitted values use the declared default")]
+    #[arg(id = IdleTimeout::NAME, long = IdleTimeout::NAME, env = "NERVIX_LISTENER_IDLE_TIMEOUT", help = super::settings::capability_help::<IdleTimeout>("How long accepted public I/O may make no read or write progress", HumanDuration(<IdleTimeout as SettingDefinition>::default_value(&()))))]
     pub idle_timeout: Option<HumanDuration>,
-    #[arg(id = AcceptRetryDelay::NAME, long = AcceptRetryDelay::NAME, env = "NERVIX_LISTENER_ACCEPT_RETRY_DELAY", help = "Local listener accept retry delay; omitted values use the declared default")]
+    #[arg(id = AcceptRetryDelay::NAME, long = AcceptRetryDelay::NAME, env = "NERVIX_LISTENER_ACCEPT_RETRY_DELAY", help = super::settings::capability_help::<AcceptRetryDelay>("Pause after a node-local accept failure, on public and interconnect listeners", HumanDuration(<AcceptRetryDelay as SettingDefinition>::default_value(&()))))]
     pub accept_retry_delay: Option<HumanDuration>,
-    #[arg(id = HttpKeepalive::NAME, long = HttpKeepalive::NAME, env = "NERVIX_LISTENER_HTTP_KEEPALIVE", help = "Local listener http keepalive; omitted values use the declared default")]
+    #[arg(id = HttpKeepalive::NAME, long = HttpKeepalive::NAME, env = "NERVIX_LISTENER_HTTP_KEEPALIVE", help = super::settings::capability_help::<HttpKeepalive>("Whether HTTP/1 connections are reused", <HttpKeepalive as SettingDefinition>::default_value(&())))]
     pub http_keepalive: Option<bool>,
-    #[arg(id = HttpBodyBytes::NAME, long = HttpBodyBytes::NAME, env = "NERVIX_HTTP_BODY_BYTES", help = "Local http body bytes; omitted values use the declared default")]
+    #[arg(id = HttpBodyBytes::NAME, long = HttpBodyBytes::NAME, env = "NERVIX_HTTP_BODY_BYTES", help = super::settings::capability_help::<HttpBodyBytes>("Largest complete HTTP endpoint payload, including chunked input", HumanBytes(<HttpBodyBytes as SettingDefinition>::default_value(&()))))]
     pub http_body_bytes: Option<HumanBytes>,
-    #[arg(id = HttpBodyTimeout::NAME, long = HttpBodyTimeout::NAME, env = "NERVIX_HTTP_BODY_TIMEOUT", help = "Local http body timeout; omitted values use the declared default")]
+    #[arg(id = HttpBodyTimeout::NAME, long = HttpBodyTimeout::NAME, env = "NERVIX_HTTP_BODY_TIMEOUT", help = super::settings::capability_help::<HttpBodyTimeout>("Deadline of a complete HTTP input, including moving its body to a larger buffer", HumanDuration(<HttpBodyTimeout as SettingDefinition>::default_value(&()))))]
     pub http_body_timeout: Option<HumanDuration>,
-    #[arg(id = HttpRefusalDrainTimeout::NAME, long = HttpRefusalDrainTimeout::NAME, env = "NERVIX_HTTP_REFUSAL_DRAIN_TIMEOUT", help = "Transport drain after an HTTP refusal; omitted values use the declared default")]
+    #[arg(id = HttpRefusalDrainTimeout::NAME, long = HttpRefusalDrainTimeout::NAME, env = "NERVIX_HTTP_REFUSAL_DRAIN_TIMEOUT", help = super::settings::capability_help::<HttpRefusalDrainTimeout>("Transport drain after a completed HTTP input refusal", HumanDuration(<HttpRefusalDrainTimeout as SettingDefinition>::default_value(&()))))]
     pub http_refusal_drain_timeout: Option<HumanDuration>,
-    #[arg(id = HttpBodyCopyBytes::NAME, long = HttpBodyCopyBytes::NAME, env = "NERVIX_HTTP_BODY_COPY_BYTES", help = "Maximum body bytes copied between cancellation checks; defaults to 64KiB")]
+    #[arg(id = HttpBodyCopyBytes::NAME, long = HttpBodyCopyBytes::NAME, env = "NERVIX_HTTP_BODY_COPY_BYTES", help = super::settings::capability_help::<HttpBodyCopyBytes>("Body bytes a data worker moves between cancellation checks", HumanBytes(<HttpBodyCopyBytes as SettingDefinition>::default_value(&()))))]
     pub http_body_copy_bytes: Option<HumanBytes>,
-    #[arg(id = WebsocketMessageBytes::NAME, long = WebsocketMessageBytes::NAME, env = "NERVIX_WEBSOCKET_MESSAGE_BYTES", help = "Local websocket message bytes; omitted values use the declared default")]
+    #[arg(id = WebsocketMessageBytes::NAME, long = WebsocketMessageBytes::NAME, env = "NERVIX_WEBSOCKET_MESSAGE_BYTES", help = super::settings::capability_help::<WebsocketMessageBytes>("Largest ingest endpoint WebSocket message", HumanBytes(<WebsocketMessageBytes as SettingDefinition>::default_value(&()))))]
     pub websocket_message_bytes: Option<HumanBytes>,
-    #[arg(id = WebsocketFrameBytes::NAME, long = WebsocketFrameBytes::NAME, env = "NERVIX_WEBSOCKET_FRAME_BYTES", help = "Local websocket frame bytes; omitted values use the declared default")]
+    #[arg(id = WebsocketFrameBytes::NAME, long = WebsocketFrameBytes::NAME, env = "NERVIX_WEBSOCKET_FRAME_BYTES", help = super::settings::capability_help::<WebsocketFrameBytes>("Largest ingest endpoint WebSocket frame", HumanBytes(<WebsocketFrameBytes as SettingDefinition>::default_value(&()))))]
     pub websocket_frame_bytes: Option<HumanBytes>,
-    #[arg(id = WebsocketWriteBufferBytes::NAME, long = WebsocketWriteBufferBytes::NAME, env = "NERVIX_WEBSOCKET_WRITE_BUFFER_BYTES", help = "Outgoing bytes an endpoint or console WebSocket collects before writing; defaults to 128KiB")]
+    #[arg(id = WebsocketWriteBufferBytes::NAME, long = WebsocketWriteBufferBytes::NAME, env = "NERVIX_WEBSOCKET_WRITE_BUFFER_BYTES", help = super::settings::capability_help::<WebsocketWriteBufferBytes>("Outgoing bytes an endpoint or console WebSocket collects before writing", HumanBytes(<WebsocketWriteBufferBytes as SettingDefinition>::default_value(&()))))]
     pub websocket_write_buffer_bytes: Option<HumanBytes>,
-    #[arg(id = GrpcConcurrency::NAME, long = GrpcConcurrency::NAME, env = "NERVIX_GRPC_CONCURRENCY", help = "Local grpc concurrency; omitted values use the declared default")]
+    #[arg(id = GrpcConcurrency::NAME, long = GrpcConcurrency::NAME, env = "NERVIX_GRPC_CONCURRENCY", help = super::settings::capability_help::<GrpcConcurrency>("Concurrent request handlers per gRPC connection", <GrpcConcurrency as SettingDefinition>::default_value(&())))]
     pub grpc_concurrency: Option<u32>,
-    #[arg(id = GrpcHeaderBytes::NAME, long = GrpcHeaderBytes::NAME, env = "NERVIX_GRPC_HEADER_BYTES", help = "HTTP/2 header list byte capacity; defaults to 16KiB")]
+    #[arg(id = GrpcHeaderBytes::NAME, long = GrpcHeaderBytes::NAME, env = "NERVIX_GRPC_HEADER_BYTES", help = super::settings::capability_help::<GrpcHeaderBytes>("Largest HTTP/2 header list", HumanBytes(<GrpcHeaderBytes as SettingDefinition>::default_value(&()))))]
     pub grpc_header_bytes: Option<HumanBytes>,
-    #[arg(id = GrpcRequestTimeout::NAME, long = GrpcRequestTimeout::NAME, env = "NERVIX_GRPC_REQUEST_TIMEOUT", help = "Local grpc request timeout; omitted values use the declared default")]
+    #[arg(id = GrpcRequestTimeout::NAME, long = GrpcRequestTimeout::NAME, env = "NERVIX_GRPC_REQUEST_TIMEOUT", help = super::settings::capability_help::<GrpcRequestTimeout>("gRPC handler response deadline; an established streaming response keeps its lifetime", HumanDuration(<GrpcRequestTimeout as SettingDefinition>::default_value(&()))))]
     pub grpc_request_timeout: Option<HumanDuration>,
-    #[arg(id = GrpcMaxStreams::NAME, long = GrpcMaxStreams::NAME, env = "NERVIX_GRPC_MAX_STREAMS", help = "Local grpc max streams; omitted values use the declared default")]
+    #[arg(id = GrpcMaxStreams::NAME, long = GrpcMaxStreams::NAME, env = "NERVIX_GRPC_MAX_STREAMS", help = super::settings::capability_help::<GrpcMaxStreams>("HTTP/2 streams per gRPC connection", <GrpcMaxStreams as SettingDefinition>::default_value(&())))]
     pub grpc_max_streams: Option<u32>,
-    #[arg(id = GrpcStreamWindowBytes::NAME, long = GrpcStreamWindowBytes::NAME, env = "NERVIX_GRPC_STREAM_WINDOW_BYTES", help = "HTTP/2 receive window of one gRPC stream; defaults to 1MiB")]
+    #[arg(id = GrpcStreamWindowBytes::NAME, long = GrpcStreamWindowBytes::NAME, env = "NERVIX_GRPC_STREAM_WINDOW_BYTES", help = super::settings::capability_help::<GrpcStreamWindowBytes>("HTTP/2 receive window of one gRPC stream", HumanBytes(<GrpcStreamWindowBytes as SettingDefinition>::default_value(&()))))]
     pub grpc_stream_window_bytes: Option<HumanBytes>,
-    #[arg(id = GrpcConnectionWindowBytes::NAME, long = GrpcConnectionWindowBytes::NAME, env = "NERVIX_GRPC_CONNECTION_WINDOW_BYTES", help = "HTTP/2 receive window of one gRPC connection, at least 65535 bytes; defaults to 1MiB")]
+    #[arg(id = GrpcConnectionWindowBytes::NAME, long = GrpcConnectionWindowBytes::NAME, env = "NERVIX_GRPC_CONNECTION_WINDOW_BYTES", help = super::settings::capability_help::<GrpcConnectionWindowBytes>("HTTP/2 receive window of one gRPC connection; at least 65535 bytes", HumanBytes(<GrpcConnectionWindowBytes as SettingDefinition>::default_value(&()))))]
     pub grpc_connection_window_bytes: Option<HumanBytes>,
-    #[arg(id = GrpcSendBufferBytes::NAME, long = GrpcSendBufferBytes::NAME, env = "NERVIX_GRPC_SEND_BUFFER_BYTES", help = "Response bytes one gRPC stream queues before it waits; defaults to 400KiB")]
+    #[arg(id = GrpcSendBufferBytes::NAME, long = GrpcSendBufferBytes::NAME, env = "NERVIX_GRPC_SEND_BUFFER_BYTES", help = super::settings::capability_help::<GrpcSendBufferBytes>("Response bytes one gRPC stream queues before it waits", HumanBytes(<GrpcSendBufferBytes as SettingDefinition>::default_value(&()))))]
     pub grpc_send_buffer_bytes: Option<HumanBytes>,
-    #[arg(id = GrpcMaxPendingResetStreams::NAME, long = GrpcMaxPendingResetStreams::NAME, env = "NERVIX_GRPC_MAX_PENDING_RESET_STREAMS", help = "Client-reset gRPC streams that may wait unaccepted before the connection ends; defaults to 20")]
+    #[arg(id = GrpcMaxPendingResetStreams::NAME, long = GrpcMaxPendingResetStreams::NAME, env = "NERVIX_GRPC_MAX_PENDING_RESET_STREAMS", help = super::settings::capability_help::<GrpcMaxPendingResetStreams>("Client-reset gRPC streams that may wait unaccepted before the connection ends", <GrpcMaxPendingResetStreams as SettingDefinition>::default_value(&())))]
     pub grpc_max_pending_reset_streams: Option<u32>,
-    #[arg(id = GrpcMaxErrorResetStreams::NAME, long = GrpcMaxErrorResetStreams::NAME, env = "NERVIX_GRPC_MAX_ERROR_RESET_STREAMS", help = "gRPC streams reset for a client's protocol errors before the connection ends; defaults to 1024")]
+    #[arg(id = GrpcMaxErrorResetStreams::NAME, long = GrpcMaxErrorResetStreams::NAME, env = "NERVIX_GRPC_MAX_ERROR_RESET_STREAMS", help = super::settings::capability_help::<GrpcMaxErrorResetStreams>("gRPC streams reset for a client's protocol errors before the connection ends", <GrpcMaxErrorResetStreams as SettingDefinition>::default_value(&())))]
     pub grpc_max_error_reset_streams: Option<u32>,
-    #[arg(id = GrpcKeepaliveInterval::NAME, long = GrpcKeepaliveInterval::NAME, env = "NERVIX_GRPC_KEEPALIVE_INTERVAL", help = "Local grpc keepalive interval; omitted values use the declared default")]
+    #[arg(id = GrpcKeepaliveInterval::NAME, long = GrpcKeepaliveInterval::NAME, env = "NERVIX_GRPC_KEEPALIVE_INTERVAL", help = super::settings::capability_help::<GrpcKeepaliveInterval>("HTTP/2 server ping interval", HumanDuration(<GrpcKeepaliveInterval as SettingDefinition>::default_value(&()))))]
     pub grpc_keepalive_interval: Option<HumanDuration>,
-    #[arg(id = GrpcKeepaliveTimeout::NAME, long = GrpcKeepaliveTimeout::NAME, env = "NERVIX_GRPC_KEEPALIVE_TIMEOUT", help = "Local grpc keepalive timeout; omitted values use the declared default")]
+    #[arg(id = GrpcKeepaliveTimeout::NAME, long = GrpcKeepaliveTimeout::NAME, env = "NERVIX_GRPC_KEEPALIVE_TIMEOUT", help = super::settings::capability_help::<GrpcKeepaliveTimeout>("HTTP/2 ping acknowledgement budget", HumanDuration(<GrpcKeepaliveTimeout as SettingDefinition>::default_value(&()))))]
     pub grpc_keepalive_timeout: Option<HumanDuration>,
-    #[arg(id = TcpKeepaliveTime::NAME, long = TcpKeepaliveTime::NAME, env = "NERVIX_LISTENER_TCP_KEEPALIVE_TIME", help = "Local listener tcp keepalive time; omitted values use the declared default")]
+    #[arg(id = TcpKeepaliveTime::NAME, long = TcpKeepaliveTime::NAME, env = "NERVIX_LISTENER_TCP_KEEPALIVE_TIME", help = super::settings::capability_help::<TcpKeepaliveTime>("Kernel TCP keepalive idle time", HumanDuration(<TcpKeepaliveTime as SettingDefinition>::default_value(&()))))]
     pub tcp_keepalive_time: Option<HumanDuration>,
-    #[arg(id = TcpKeepaliveInterval::NAME, long = TcpKeepaliveInterval::NAME, env = "NERVIX_LISTENER_TCP_KEEPALIVE_INTERVAL", help = "Local listener tcp keepalive interval; omitted values use the declared default")]
+    #[arg(id = TcpKeepaliveInterval::NAME, long = TcpKeepaliveInterval::NAME, env = "NERVIX_LISTENER_TCP_KEEPALIVE_INTERVAL", help = super::settings::capability_help::<TcpKeepaliveInterval>("Kernel TCP keepalive probe interval", HumanDuration(<TcpKeepaliveInterval as SettingDefinition>::default_value(&()))))]
     pub tcp_keepalive_interval: Option<HumanDuration>,
-    #[arg(id = TcpKeepaliveRetries::NAME, long = TcpKeepaliveRetries::NAME, env = "NERVIX_LISTENER_TCP_KEEPALIVE_RETRIES", help = "Local listener tcp keepalive retries; omitted values use the declared default")]
+    #[arg(id = TcpKeepaliveRetries::NAME, long = TcpKeepaliveRetries::NAME, env = "NERVIX_LISTENER_TCP_KEEPALIVE_RETRIES", help = super::settings::capability_help::<TcpKeepaliveRetries>("Kernel TCP keepalive unanswered probe count", <TcpKeepaliveRetries as SettingDefinition>::default_value(&())))]
     pub tcp_keepalive_retries: Option<u32>,
 }
 impl ListenerArgs {

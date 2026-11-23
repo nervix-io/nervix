@@ -32,7 +32,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::OnceLock,
     thread::{self, Thread},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use error_stack::{Report, ResultExt as _};
@@ -49,7 +49,27 @@ use crate::{
 
 /// How many reports wait for the sink at most. The first active cycle normally ends a diagnostic
 /// process, so the queue needs room only for the cycles detected while the sink handles it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter hands reports from Deloxide's callback to \
+                  the findings thread through a lock-free handoff of 64 reports"
+    )
+)]
 const HANDOFF_CAPACITY: usize = 64;
+
+/// How long the findings thread sleeps when nothing unparks it. A lost history record wakes no
+/// thread, so this period bounds how late its count reaches the sink when no cycle follows it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the data-plane concurrency chapter wakes the findings thread every 100 ms, so \
+                  history overload that produced no cycle reaches the sink within that period"
+    )
+)]
+const FINDINGS_WAKE_PERIOD: Duration = Duration::from_millis(100);
 
 const FINDINGS_THREAD: &str = "nervix-deadlock-findings";
 
@@ -405,7 +425,7 @@ impl Handoff {
                 return;
             }
             // Context overflow can occur without a Deloxide cycle and must still reach the sink.
-            thread::park_timeout(std::time::Duration::from_millis(100));
+            thread::park_timeout(FINDINGS_WAKE_PERIOD);
         }
     }
 }
