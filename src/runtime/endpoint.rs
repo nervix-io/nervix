@@ -739,7 +739,7 @@ impl Runtime {
                 debug!(
                     domain = binding.domain.as_str(), ingestor = binding.ingestor.as_str(),
                     error = %format_args!("{report:#}"), protocol,
-                    "the node could not take an acknowledged endpoint message now"
+                    "the node could not unfold an acknowledged endpoint message at all"
                 );
                 root.ack_success();
                 return EndpointRequestOutcome::NotAdmitted(
@@ -895,7 +895,7 @@ impl Runtime {
                     ingestor = binding.ingestor.as_str(),
                     error = %format_args!("{error:#}"),
                     protocol,
-                    "the node could not take an endpoint message now"
+                    "the node could not unfold an endpoint message at all"
                 );
                 EndpointNoAckIntake::NotAdmitted
             }

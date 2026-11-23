@@ -548,9 +548,11 @@ them:
   native header, identity and column pieces and concatenates them into one quota-owned file through
   a 64 KiB buffer, which the streamed publisher installs like a guest save, including a container
   larger than the 32 MiB bulk budget; the pieces and the container briefly occupy twice its disk
-  space. Typed branch uniqueness has an independent 8 MiB commands reservation and native row views an
-  independent 8 MiB state-read reservation. Decoded columns are charged cumulatively to `state_read`
-  through installation, and loading refuses further groups when that class is full. Row projection
+  space. Typed branch uniqueness has an independent 8 MiB commands reservation. Loading draws the
+  native row views and the decoded columns it keeps through installation from one `state_read`
+  share, which it waits for while it holds nothing of that class; a load that outgrows its share
+  gives everything back and loads again within the share it needed, rather than refusing further
+  groups. Row projection
   and Arrow encoding share one admission and one bounded bulk CPU job, so projected columns never
   wait for a second grant while retaining the first, and typed native identities convert only after
   their allocation is charged.

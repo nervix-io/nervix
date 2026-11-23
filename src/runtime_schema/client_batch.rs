@@ -52,7 +52,7 @@ pub struct ClientBatchLimits {
 /// Why a submitted body did not become one batch of its ingestor's schema.
 #[derive(Debug, Clone, Error)]
 pub enum ClientBatchError {
-    #[error("the node has no capacity to validate the batch now")]
+    #[error("the node is stopping and did not validate the batch")]
     Busy,
     #[error("a batch of {size} bytes exceeds the {limit} byte limit")]
     TooLarge { size: u64, limit: u64 },

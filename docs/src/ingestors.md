@@ -3525,7 +3525,7 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
 | --- | --- | --- | --- |
 | 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
 | 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
-| 503 | `not_admitted` | `busy` | The response window, pause buffer or execution capacity is full. |
+| 503 | `not_admitted` | `busy` | The response window or pause buffer is full, or the node could not unfold the payload at all: it is stopping, or the unfolding needs a charge larger than its whole memory class. A full extension class holds the payload back instead. |
 | 503 | `not_admitted` | `suspended` | Intake is quiesced, or the deadline or intake ended while the payload was still waiting to enter the graph. |
 | 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
 | 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired after admission. |
