@@ -778,10 +778,12 @@ nothing moves, and `START` plans the move again against the cluster as it is the
 When the leader running a waiting `START` loses its leadership, `START` is not
 refused: its outcome stays unknown, the answer names the new leader, and the statement repeated
 there under the same execution reference, which a client that follows the session protocol does on
-its own, waits on. When that node shuts down instead, `START` stops waiting and fails, saying that
-the node is shutting down; the domain stays stopped, and repeating the statement under the same
-execution reference returns that refusal. Nothing starts until every unit can be placed. `START`
-never runs inside a transaction, so it always places against the node rules already committed.
+its own, waits on. When that node shuts down instead, `START` is not refused either: like any
+command in progress, it continues on the leader that follows. The stopping node sends no answer
+and takes no further part in it, the leader that follows resumes it from its record, still holding
+the domain's mutation lease, and the statement repeated under the same execution reference joins it
+and answers once it ends. Nothing starts until every unit can be placed. `START` never runs inside a
+transaction, so it always places against the node rules already committed.
 
 The cluster can still change under an accepted rule:
 

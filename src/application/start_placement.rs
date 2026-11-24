@@ -47,11 +47,6 @@ pub(in crate::application) enum StartPlacementError {
         )]
         leader: Option<ClusterNodeName>,
     },
-    #[error(
-        "START of domain '{domain}' stopped waiting for its node rules because the node is \
-         shutting down"
-    )]
-    ShuttingDown { domain: DomainName },
     #[error("START of domain '{domain}' could not judge its units against its node rules")]
     Judge { domain: DomainName },
     #[error("START of domain '{domain}' could not move a unit to a node its node rules admit")]
@@ -136,7 +131,7 @@ impl SessionServiceImpl {
                             crate::fault_injection::StartPlacementBoundary::Waiting,
                         )
                         .await;
-                    self.wait_for_start_placement(domain).await?;
+                    self.wait_for_start_placement().await;
                 }
                 Ok(StartPlacement::Misplaced { units }) => {
                     let moved = self
@@ -147,7 +142,7 @@ impl SessionServiceImpl {
                         // The scheduler found no admitted node the judgement saw: look again once
                         // the cluster may have changed, rather than planning the same schedule.
                         StartPlacementMove::Unchanged => {
-                            self.wait_for_start_placement(domain).await?;
+                            self.wait_for_start_placement().await;
                         }
                         StartPlacementMove::Deferred(error) => {
                             if announced_deferral {
@@ -174,7 +169,7 @@ impl SessionServiceImpl {
                                     crate::fault_injection::StartPlacementBoundary::Deferred,
                                 )
                                 .await;
-                            self.wait_for_start_placement(domain).await?;
+                            self.wait_for_start_placement().await;
                         }
                     }
                 }
@@ -187,20 +182,14 @@ impl SessionServiceImpl {
         }
     }
 
-    /// Waits one scheduling interval before START looks at its units again, unless the node
-    /// begins shutting down.
-    async fn wait_for_start_placement(
-        &self,
-        domain: &DomainName,
-    ) -> error_stack::Result<(), StartPlacementError> {
-        nervix_primitives::select! {
-            _ = self.inner.drain_support_shutdown.cancelled() => {
-                Err(Report::new(StartPlacementError::ShuttingDown {
-                    domain: domain.clone(),
-                }))
-            }
-            _ = sleep(self.inner.operational.control_plane.scheduling_interval()) => Ok(()),
-        }
+    /// Waits one scheduling interval before START looks at its units again.
+    ///
+    /// Only the end of START's own task ends this wait. A node that turns off ends that task with
+    /// the rest of its service work, before any later step of its stop, and the leader that follows
+    /// resumes the START from its record, as it resumes every command in progress, so a START
+    /// never answers that its node is stopping.
+    async fn wait_for_start_placement(&self) {
+        sleep(self.inner.operational.control_plane.scheduling_interval()).await;
     }
 
     /// The answer a START gives when placing its units failed: a redirect to the current leader,
