@@ -24,7 +24,7 @@ use nervix_backup::{
     MATERIALIZED_COLUMNS_BYTES, MATERIALIZED_IDENTITIES_BYTES, MaterializedIdentitiesRecord,
     MaterializedRelayDescriptor, SectionPath,
 };
-use nervix_execution::{ChargedBytes, CpuClass, MemoryClass};
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::{
     BranchKeyFingerprint, ModelKind, NodeRef, RemoteRuntimeRecordMetadata, ScheduledNode, Unit,
 };
@@ -84,13 +84,13 @@ pub(super) enum MaterializedRestoreError {
 }
 
 async fn read_section(
-    runtime: &Runtime,
+    executor: &Executor,
     archive: &VerifiedArchive,
     section: &DescribedSection,
     limit: u64,
 ) -> Result<ChargedBytes, Report<MaterializedRestoreError>> {
     {
-        let mapping_input = archive.read_bounded_section(runtime, section, limit).await;
+        let mapping_input = archive.read_bounded_section(executor, section, limit).await;
         match mapping_input {
             Ok(mapped_value) => Ok(mapped_value),
             Err(error) => Err({
@@ -127,7 +127,7 @@ async fn stage_piece(
 
 /// The native sealed checkpoint of one archived materialized relay. Every record identity's branch
 /// key is admitted under `declarations`, the branching of the restored relay, before it is staged.
-pub(super) async fn prepare_materialized_checkpoint(
+pub(super) async fn convert_materialized_checkpoint(
     runtime: &Runtime,
     archive: &VerifiedArchive,
     descriptor: &MaterializedRelayDescriptor,
@@ -159,6 +159,48 @@ pub(super) async fn prepare_materialized_checkpoint(
         .reserve(MemoryClass::Commands, identity_bytes.max(1))
         .await
         .change_context(MaterializedRestoreError::Admission)?;
+    // The groups convert within one share of bulk memory, which the conversion waits for while it
+    // holds nothing of the class, and each group releases its charges back into the share before
+    // the next. A conversion that needs more gives everything back and runs again from its first
+    // group within a larger share, so a full class holds the conversion back and never refuses it.
+    let share = materialized_bulk_share(
+        executor,
+        groups
+            .iter()
+            .map(|group| (&group.identities, &group.columns)),
+        0,
+    );
+    let schema = &schema;
+    let declarations = &declarations;
+    executor
+        .within_allowance(MemoryClass::Bulk, share, |bulk| async move {
+            prepare_materialized_checkpoint(
+                runtime,
+                &bulk,
+                archive,
+                descriptor,
+                groups,
+                schema,
+                declarations,
+            )
+            .await
+        })
+        .await
+        .change_context(MaterializedRestoreError::Admission)?
+}
+
+/// One attempt to convert an archived materialized relay's groups into its native sealed
+/// checkpoint, charging bulk memory through `executor`, which draws from the conversion's share.
+/// Everything it holds ends with it.
+async fn prepare_materialized_checkpoint(
+    runtime: &Runtime,
+    executor: &Executor,
+    archive: &VerifiedArchive,
+    descriptor: &MaterializedRelayDescriptor,
+    groups: &[DescribedMaterializedGroup],
+    schema: &StdArc<arrow_schema::Schema>,
+    declarations: &Arc<RestoredBranchDeclarations>,
+) -> Result<StagedArtifact, Report<MaterializedRestoreError>> {
     #[cfg_attr(
         nervix_lint,
         expect(
@@ -185,7 +227,7 @@ pub(super) async fn prepare_materialized_checkpoint(
     for group in groups {
         nervix_primitives::task::consume_budget().await;
         let identities = read_section(
-            runtime,
+            executor,
             archive,
             &group.identities,
             MATERIALIZED_IDENTITIES_BYTES,
@@ -242,12 +284,16 @@ pub(super) async fn prepare_materialized_checkpoint(
             .change_context(MaterializedRestoreError::Admission)??;
         branches = decoded.1;
         pieces.push(stage_piece(runtime, decoded.0).await?);
-        let columns =
-            read_section(runtime, archive, &group.columns, MATERIALIZED_COLUMNS_BYTES).await?;
+        let columns = read_section(
+            executor,
+            archive,
+            &group.columns,
+            MATERIALIZED_COLUMNS_BYTES,
+        )
+        .await?;
         let batch = {
             let mapping_input = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
-                nervix_execution::QueueAdmission::RefuseWhenFull,
                 schema.clone(),
                 columns.clone(),
             )
@@ -279,12 +325,56 @@ pub(super) async fn prepare_materialized_checkpoint(
         pieces.push(stage_piece(runtime, frame).await?);
         pieces.push(stage_piece(runtime, columns).await?);
     }
-    assemble_checkpoint(runtime, pieces).await
+    assemble_checkpoint(runtime, executor, pieces).await
 }
 
-/// Writes `pieces`, a checkpoint's header and sections in order, into one staged checkpoint file.
+/// The bulk share a materialized relay conversion starts from: its largest group's identities
+/// with their decoded record, or its columns with their decoded and regrouped copies, with the
+/// chunk the checkpoint is assembled through, and `held` more for what the conversion keeps
+/// across its groups, up to the whole class. A conversion that needs more runs again within a
+/// larger share.
+fn materialized_bulk_share<'a>(
+    executor: &Executor,
+    groups: impl IntoIterator<Item = (&'a DescribedSection, &'a DescribedSection)>,
+    held: u64,
+) -> u64 {
+    let identity_working = MATERIALIZED_IDENTITIES_BYTES
+        .checked_mul(4)
+        .verified("the fixed identity working size fits 64 bits");
+    let mut largest = 0_u64;
+    for (identities, columns) in groups {
+        let identities = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a first share beyond u64 bytes is capped at the class below",
+            identities.length.saturating_add(identity_working)
+        );
+        let columns = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a first share beyond u64 bytes is capped at the class below",
+            columns.length.saturating_mul(3)
+        );
+        largest = largest.max(identities).max(columns);
+    }
+    let chunk = u64::try_from(crate::runtime::RESTORE_STATE_CHUNK_BYTES)
+        .verified("one bounded chunk fits 64 bits");
+    let share = nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "a first share beyond u64 bytes is capped at the class below",
+        largest.saturating_add(chunk)
+    );
+    nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "a first share beyond u64 bytes is capped at the class below",
+        share.saturating_add(held)
+    )
+    .min(executor.memory(MemoryClass::Bulk).capacity_bytes)
+}
+
+/// Writes `pieces`, a checkpoint's header and sections in order, into one staged checkpoint file,
+/// reading them back through `executor`.
 async fn assemble_checkpoint(
     runtime: &Runtime,
+    executor: &Executor,
     pieces: Vec<StagedArtifact>,
 ) -> Result<StagedArtifact, Report<MaterializedRestoreError>> {
     let total = pieces
@@ -298,7 +388,7 @@ async fn assemble_checkpoint(
     for piece in pieces {
         nervix_primitives::task::consume_budget().await;
         let mut reader = piece
-            .open_reader()
+            .open_reader_with(executor)
             .await
             .change_context(MaterializedRestoreError::Storage)?;
         while let Some(chunk) = reader
@@ -412,7 +502,7 @@ struct RestoredRowOwners {
 /// An inherited coordinate cannot be reconstructed from fields. Census the bounded identity
 /// sections before selecting rows so a released copy cannot hide a later admitted origin.
 async fn inherited_row_owners(
-    runtime: &Runtime,
+    executor: &Executor,
     archive: &VerifiedArchive,
     archived: &[ArchivedMaterializedUnit<'_>],
     node: &ScheduledNode,
@@ -433,28 +523,29 @@ async fn inherited_row_owners(
     for source in archived {
         for group in source.groups {
             let bytes = read_section(
-                runtime,
+                executor,
                 archive,
                 &group.identities,
                 MATERIALIZED_IDENTITIES_BYTES,
             )
             .await?;
-            let reservation = runtime
-                .executor()
-                .try_reserve(
+            // The census keeps every group's owners while it reads the next, so each charge is
+            // drawn from the regrouping's share rather than waited for while earlier ones are held.
+            let reservation = executor
+                .reserve(
                     MemoryClass::Bulk,
                     u64::try_from(bytes.len())
                         .verified("bounded identity bytes fit")
                         .checked_mul(4)
                         .ok_or_else(|| Report::new(MaterializedRestoreError::Admission))?,
                 )
+                .await
                 .change_context(MaterializedRestoreError::Admission)?;
             let node = node.clone();
             let declarations = declarations.clone();
             let path = group.identities.path.clone();
             let unit = source.descriptor.unit;
-            owners = runtime
-                .executor()
+            owners = executor
                 .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
                     let record = MaterializedIdentitiesRecord::decode(path.as_str(), &bytes)
                         .change_context(MaterializedRestoreError::Identities)?;
@@ -512,7 +603,7 @@ async fn inherited_row_owners(
 /// in `unit`. `archived` lists the archived unit that is `unit` first, so a key archived in two
 /// units keeps the row of its own unit, where its claim installed it. None when no archived row
 /// lands in `unit`. Every kept row's key is admitted under `declarations` before it is staged.
-pub(super) async fn prepare_regrouped_materialized_checkpoint(
+pub(super) async fn regroup_materialized_checkpoint(
     runtime: &Runtime,
     archive: &VerifiedArchive,
     archived: &[ArchivedMaterializedUnit<'_>],
@@ -522,7 +613,76 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
     declarations: Arc<RestoredBranchDeclarations>,
 ) -> Result<Option<StagedArtifact>, Report<MaterializedRestoreError>> {
     let executor = runtime.executor();
-    let owners = inherited_row_owners(runtime, archive, archived, node, &declarations).await?;
+    // The census of inherited owners keeps every identity group it read, about four times its
+    // bytes, while the regrouping reads each group again: both are one attempt within one share of
+    // bulk memory, which the conversion waits for while it holds nothing of the class. A
+    // conversion that needs more gives everything back and runs again within a larger share.
+    let mut census = 0_u64;
+    for source in archived {
+        for group in source.groups {
+            let group_census = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a census beyond u64 bytes asks for the largest share, which no budget grants",
+                group.identities.length.saturating_mul(4)
+            );
+            census = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "a census beyond u64 bytes asks for the largest share, which no budget grants",
+                census.saturating_add(group_census)
+            );
+        }
+    }
+    let share = materialized_bulk_share(
+        executor,
+        archived.iter().flat_map(|source| {
+            source
+                .groups
+                .iter()
+                .map(|group| (&group.identities, &group.columns))
+        }),
+        census,
+    );
+    let target = RegroupTarget { unit, node };
+    let schema = &schema;
+    let declarations = &declarations;
+    executor
+        .within_allowance(MemoryClass::Bulk, share, |bulk| async move {
+            prepare_regrouped_materialized_checkpoint(
+                runtime,
+                &bulk,
+                archive,
+                archived,
+                target,
+                schema,
+                declarations,
+            )
+            .await
+        })
+        .await
+        .change_context(MaterializedRestoreError::Admission)?
+}
+
+/// The restored unit a regrouping selects rows for, and the node it belongs to.
+#[derive(Clone, Copy)]
+struct RegroupTarget<'a> {
+    unit: Unit,
+    node: &'a ScheduledNode,
+}
+
+/// One attempt to regroup archived materialized units into the native sealed checkpoint of one
+/// restored unit, charging bulk memory through `executor`, which draws from the conversion's
+/// share. Everything it holds ends with it.
+async fn prepare_regrouped_materialized_checkpoint(
+    runtime: &Runtime,
+    executor: &Executor,
+    archive: &VerifiedArchive,
+    archived: &[ArchivedMaterializedUnit<'_>],
+    target: RegroupTarget<'_>,
+    schema: &StdArc<arrow_schema::Schema>,
+    declarations: &Arc<RestoredBranchDeclarations>,
+) -> Result<Option<StagedArtifact>, Report<MaterializedRestoreError>> {
+    let RegroupTarget { unit, node } = target;
+    let owners = inherited_row_owners(executor, archive, archived, node, declarations).await?;
     #[cfg_attr(
         nervix_lint,
         expect(
@@ -552,7 +712,7 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
         for group in source.groups {
             nervix_primitives::task::consume_budget().await;
             let identities = read_section(
-                runtime,
+                executor,
                 archive,
                 &group.identities,
                 MATERIALIZED_IDENTITIES_BYTES,
@@ -563,7 +723,7 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
                 .reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
                 .await
                 .change_context(MaterializedRestoreError::Admission)?;
-            let declarations = declarations.clone();
+            let declarations = Arc::clone(declarations);
             let node = node.clone();
             let owners = owners.clone();
             let archived_unit = source.descriptor.unit;
@@ -598,11 +758,15 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
             if selected.rows.is_empty() {
                 continue;
             }
-            let columns =
-                read_section(runtime, archive, &group.columns, MATERIALIZED_COLUMNS_BYTES).await?;
+            let columns = read_section(
+                executor,
+                archive,
+                &group.columns,
+                MATERIALIZED_COLUMNS_BYTES,
+            )
+            .await?;
             let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
-                nervix_execution::QueueAdmission::RefuseWhenFull,
                 schema.clone(),
                 columns,
             )
@@ -616,10 +780,7 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
                 .change_context(MaterializedRestoreError::Columns)?;
             drop(decoded);
             let encoded = regrouped
-                .encode_arrow_snapshot_section(
-                    executor,
-                    nervix_execution::QueueAdmission::RefuseWhenFull,
-                )
+                .encode_arrow_snapshot_section(executor)
                 .await
                 .map_err(MaterializedRestoreError::columns)?;
             let identity_section = materialized_identity_section(selected.identities)
@@ -659,7 +820,9 @@ pub(super) async fn prepare_regrouped_materialized_checkpoint(
         .await
         .change_context(MaterializedRestoreError::Admission)?;
     pieces.insert(0, stage_piece(runtime, header).await?);
-    assemble_checkpoint(runtime, pieces).await.map(Some)
+    assemble_checkpoint(runtime, executor, pieces)
+        .await
+        .map(Some)
 }
 
 impl ScannedIdentities {

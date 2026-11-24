@@ -1544,7 +1544,6 @@ mod tests {
             group
                 .decode_payload(
                     &Executor::default(),
-                    QueueAdmission::RefuseWhenFull,
                     &codec,
                     payload.as_bytes(),
                     usize::try_from(nervix_models::PayloadUnfoldLimit::DEFAULT)

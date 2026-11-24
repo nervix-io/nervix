@@ -234,7 +234,7 @@ impl fmt::Display for RefusedWasmProposals {
 
 #[cfg(test)]
 mod tests {
-    use nervix_execution::{CpuClass, Executor, MemoryClass, QueueAdmission};
+    use nervix_execution::{CpuClass, Executor, MemoryClass};
 
     use super::*;
 
@@ -247,12 +247,9 @@ mod tests {
             .await
             .expect("an idle executor admits one byte of bulk memory");
         executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| RefusedWasmProposals::needed_by(wasm, cancellation),
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                RefusedWasmProposals::needed_by(wasm, cancellation)
+            })
             .await
             .expect("an idle executor runs the job")
             .expect("nothing cancels the job")

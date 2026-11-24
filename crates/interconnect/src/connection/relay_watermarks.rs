@@ -40,9 +40,9 @@ use crate::RelayChannelRetention;
 ///
 /// A watermark is part of what its channel's deliveries need, so nothing forgets one to make room.
 /// Each is charged to the relay memory class for as long as it is retained: the grant that opens a
-/// channel reserves the charge with the delivery's own memory, and a class without room holds the
-/// peer's new channel back, as a capacity refusal its sender retries, instead of costing another
-/// channel its position. A watermark keeps the longest retention among the deliveries whose
+/// channel waits for the charge together with the delivery's own memory, and a class without room
+/// holds the peer's new channel back, through that wait and then a capacity refusal its sender
+/// retries, instead of costing another channel its position. A watermark keeps the longest retention among the deliveries whose
 /// outcomes it recorded, and is forgotten once that retention has passed since it was last
 /// recorded or consulted, unless its channel has a batch outstanding.
 ///

@@ -1053,8 +1053,8 @@ pub(super) async fn dispatch_wasm_output_route(
         .remote_ack_timing
         .keep_alive_while_pending(
             &decoded.batch,
-            execute_accepted_program_with_selection_in_context(
-                context.branch.runtime.executor().accepted_work(),
+            execute_program_with_selection_in_context(
+                context.branch.runtime.executor(),
                 &program.compiled,
                 &vm_input,
                 &VmExecutionContext {
@@ -1534,7 +1534,7 @@ mod tests {
                 &domain,
                 None,
                 1,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .assured("the branch instantiates")
@@ -1588,7 +1588,6 @@ mod tests {
         );
         assert_eq!(completed.wait().await, AckOutcome::Ack);
         assert_no_runtime_events(&mut events).await;
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[nervix_primitives::test]
@@ -1622,7 +1621,6 @@ mod tests {
             input.acks.ack_success();
         }
         assert_eq!(completed.wait().await, AckOutcome::Ack);
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     #[test]

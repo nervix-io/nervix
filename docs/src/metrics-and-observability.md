@@ -451,23 +451,23 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
 - `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes`: the
   transient memory reserved for one class, and what it is currently holding
 - `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
-  charges granted and charges refused outright
+  charges granted, and charges refused because they were larger than their whole class or their
+  class was closed. A charge that waits for room is not refused, and an optional charge that finds
+  no room, such as a retained read view, is not counted.
 - `nervix_execution_operation_limit_bytes` and `nervix_execution_resident_replication_batches`: resolved relay/bulk byte ceilings and replication window.
 - `nervix_execution_queue_capacity`: configured waiting places for each worker class. Workers,
   queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
 - `nervix_execution_jobs_waiting`: jobs that found their class's wait queue full and wait for a
-  place in it instead of being refused. They carry work no caller is waiting to be answered about,
-  such as a payload an ingestor handed over, a relay or subscription delivery, a checkpoint or the
-  compilation for a committed change. A nonzero value is backpressure, never loss: the jobs take
-  the places the class frees, in the order they asked
-- `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
-  `nervix_execution_job_rejections_total`: jobs admitted, jobs that left a worker, and jobs refused
-  because the class already held its whole wait queue
+  place in it. Every job waits this way, requests included, so a nonzero value is backpressure,
+  never loss: the jobs take the places the class frees, in the order they asked, and a caller that
+  stops waiting gives its place up
+- `nervix_execution_jobs_total` and `nervix_execution_jobs_completed_total`: jobs admitted and jobs
+  that left a worker. No job is refused for a full queue
 
-For `state_read_cache`, a rejected charge means the optional retained view had no room. The
-generator can still return a complete uncached read using `state_read` admission. Active decoded
+For `state_read_cache`, an optional retained view that finds no room is not retained, and the
+generator still returns a complete uncached read using `state_read` admission. Active decoded
 snapshots hold that class through installation or source evaluation and dispatch. Both read
 classes default to the relay budget, accept independent overrides and count separately in the startup total.
 - `nervix_execution_job_queue_seconds_total` and `nervix_execution_job_work_seconds_total`: time
@@ -767,7 +767,7 @@ route, under the outcome that ingestor reached:
 | `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
 | `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
 | `refused` | refused new intake under quiesce, overflowed or ended a waiting `MODE NO ACK` request (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | had no extension-worker capacity to unfold an HTTP body or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). Extension-worker refusals also count in `nervix_ingestor_unfolding_refused_total`. A WebSocket frame in `MODE NO ACK` waits for a place instead. |
+| `not_admitted` | could not unfold an HTTP body at all, because the node is stopping or the unfolding needs a charge larger than its whole memory class, or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). The first also counts in `nervix_ingestor_unfolding_refused_total`. Otherwise a body waits for an extension-worker place while its request lasts, as a WebSocket frame in `MODE NO ACK` does. |
 | `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
 | `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
 
@@ -812,7 +812,7 @@ These three additional counters are available in `/metrics`:
 
 | Family | Meaning |
 | --- | --- |
-| `nervix_ingestor_unfolding_refused_total` | Endpoint request bodies answered as refused because the extension workers had no room to unfold them, which their senders send again. Every other payload, acknowledged or not, waits for a place, and waiting leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
+| `nervix_ingestor_unfolding_refused_total` | Endpoint request bodies answered as refused because the node could not unfold them at all: it is stopping, or the unfolding needs a charge larger than its whole memory class. Their senders send them again. Every payload, endpoint bodies included, otherwise waits for a place, and waiting leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
 | `nervix_ingestor_header_values_dropped_total` | Invalid UTF-8 header values skipped while retaining their valid siblings and the payload. Applies to `HTTP REQUEST` responses, `HTTP ENDPOINT` requests and `WEBSOCKETS ENDPOINT` upgrades. Requests and upgrades count once per invalid value for each bound ingestor. |
 | `nervix_ingestor_read_ahead_dropped_payloads_total` | QoS 0 publishes that exceed the separate read-ahead quota of an ACK-mode MQTT ingestor, counted immediately, including during a downstream acknowledgement wait. [MQTT ingestor connections](connector-contract.md#mqtt-ingestor-connections) owns the bound. |
 

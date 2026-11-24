@@ -9,21 +9,31 @@ use thiserror::Error;
 use crate::{
     AdmissionError, Cancellation, CapacityWaits, ChargedBytes, CpuClass, ExecutionConfig,
     ExecutionConfigError, ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits,
-    QueueAdmission, Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget,
+    PreparedCpu, Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget,
     workers::WorkerPool,
 };
 
 /// The node's execution and memory admission, shared by every owner that runs variable-size work.
 ///
-/// Cloning the node's own handle is one refcount: every class, budget and counter lives behind the
-/// single inner allocation. A handle from [`Self::reporting_waits_to`] also holds its owner's
+/// Cloning it is one refcount: every class, budget and counter lives behind the single inner
+/// allocation. An executor within an allowance ([`Executor::reserve_allowance`]) also carries the
+/// allowances it draws from, and a handle from [`Self::reporting_waits_to`] holds its owner's
 /// [`CapacityWaits`], a second refcount, because that owner keeps the count to watch it.
 #[derive(Clone, Debug)]
 pub struct Executor {
     inner: Arc<ExecutorInner>,
+    scope: Option<StdArc<AllowanceScope>>,
     /// The owner told while work submitted through this handle waits for capacity. Only a handle
-    /// from [`Self::reporting_waits_to`] has one.
+    /// from [`Self::reporting_waits_to`], and the handles drawn from it, have one.
     waits: Option<CapacityWaits>,
+}
+
+/// The allowances an executor draws from, innermost first: each is the budget of its class for
+/// every charge taken through that executor.
+#[derive(Debug)]
+struct AllowanceScope {
+    budget: MemoryBudget,
+    outer: Option<StdArc<AllowanceScope>>,
 }
 
 #[derive(Debug)]
@@ -168,18 +178,13 @@ impl Default for Executor {
 }
 
 impl Executor {
-    /// Bind execution to work the caller has already accepted and continues to own.
-    /// Its CPU jobs wait for a worker place until the owner ends the future.
-    pub fn accepted_work(&self) -> crate::AcceptedWork<'_> {
-        crate::AcceptedWork { executor: self }
-    }
-
-    /// A handle on the same classes and budgets that tells `waits` while work submitted through it
-    /// waits for a place in a full wait queue or for room in a memory class. It admits, queues and
-    /// refuses exactly as this handle does; only the telling is added.
+    /// A handle on the same classes, budgets and allowances that tells `waits` while work submitted
+    /// through it waits for a place in a full wait queue or for room in a memory class. It admits
+    /// and queues exactly as this handle does; only the telling is added.
     pub fn reporting_waits_to(&self, waits: &CapacityWaits) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            scope: self.scope.clone(),
             waits: Some(waits.clone()),
         }
     }
@@ -190,6 +195,7 @@ impl Executor {
     pub fn new(config: ExecutionConfig) -> Result<Self, Report<ExecutionConfigError>> {
         let validated = config.validate()?;
         Ok(Self {
+            scope: None,
             inner: Arc::new(ExecutorInner {
                 control_cpu: WorkerPool::new(
                     CpuClass::Control.into(),
@@ -285,14 +291,24 @@ impl Executor {
             .min(pair_capacity)
     }
 
-    /// Charge `bytes` to `class` without waiting. An operation that cannot be charged is refused
-    /// here, before it allocates anything.
+    /// Charge `bytes` to `class` only if the class has room for them now, without waiting.
+    ///
+    /// This is for an optional extra that proceeds without its charge, such as a read cache that
+    /// retains a snapshot only when room is free. Work that needs its charge waits for it with
+    /// [`Self::reserve`]: a full class is backpressure, never a reason to refuse work.
     pub fn try_reserve(
         &self,
         class: MemoryClass,
         bytes: u64,
     ) -> Result<Reservation, Report<AdmissionError>> {
         self.budget(class).try_reserve(bytes)
+    }
+
+    /// A charge of no bytes in `class`, for a job that allocates nothing beyond input that carries
+    /// its own charge. It is granted at once whatever the class holds, so an owner that holds part
+    /// of the class never waits for it.
+    pub fn charge_nothing(&self, class: MemoryClass) -> Reservation {
+        self.budget(class).nothing()
     }
 
     /// Charge `bytes` to `class`, waiting behind the operations already holding it. The caller's
@@ -334,8 +350,9 @@ impl Executor {
     /// bounded units: when the caller stops awaiting, the flag is raised, but the charge stays held
     /// until the job returns, because its allocation is still live.
     ///
-    /// A class whose wait queue is full refuses the job, which is what work answering a request
-    /// needs; [`Self::run_cpu_with`] states another [`QueueAdmission`].
+    /// A class whose wait queue is full holds the job until a place frees: places go to waiting
+    /// jobs in the order they asked. The caller bounds that wait by dropping the future, which
+    /// gives up its place in line and returns its charge.
     pub async fn run_cpu<T>(
         &self,
         class: CpuClass,
@@ -345,32 +362,29 @@ impl Executor {
     where
         T: Send + 'static,
     {
-        self.run_cpu_with(class, QueueAdmission::RefuseWhenFull, reservation, job)
+        self.cpu_pool(class)
+            .run(self.waits.as_ref(), reservation, job)
             .await
     }
 
-    /// Run one CPU job like [`Self::run_cpu`], with `admission` saying what a full wait queue does
-    /// with it.
-    pub async fn run_cpu_with<T>(
+    /// Wait for a charged place in `class`'s queue before the caller transfers mutable state into
+    /// a job. While this future waits, the caller still owns that state. Dropping the future, or
+    /// the returned place, returns the charge and the place. After this returns,
+    /// [`PreparedCpu::run`] runs like any other admitted job.
+    pub async fn prepare_cpu(
         &self,
         class: CpuClass,
-        admission: QueueAdmission,
         reservation: Reservation,
-        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
-    ) -> Result<T, Report<ExecutionError>>
-    where
-        T: Send + 'static,
-    {
-        self.cpu_pool(class)
-            .run(admission, self.waits.as_ref(), reservation, job)
-            .await
+    ) -> Result<PreparedCpu<'_>, Report<ExecutionError>> {
+        let place = self.cpu_pool(class).prepare(self.waits.as_ref()).await?;
+        Ok(PreparedCpu { place, reservation })
     }
 
     /// Run one storage job on `class`'s workers. The consensus class has a single worker, so its
     /// jobs execute in the order they were admitted.
     ///
-    /// A class whose wait queue is full refuses the job, which is what work answering a request
-    /// needs; [`Self::run_storage_with`] states another [`QueueAdmission`].
+    /// A class whose wait queue is full holds the job until a place frees, as [`Self::run_cpu`]
+    /// does.
     pub async fn run_storage<T>(
         &self,
         class: StorageClass,
@@ -380,31 +394,14 @@ impl Executor {
     where
         T: Send + 'static,
     {
-        self.run_storage_with(class, QueueAdmission::RefuseWhenFull, reservation, job)
-            .await
-    }
-
-    /// Run one storage job like [`Self::run_storage`], with `admission` saying what a full wait
-    /// queue does with it.
-    pub async fn run_storage_with<T>(
-        &self,
-        class: StorageClass,
-        admission: QueueAdmission,
-        reservation: Reservation,
-        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
-    ) -> Result<T, Report<ExecutionError>>
-    where
-        T: Send + 'static,
-    {
         self.storage_pool(class)
-            .run(admission, self.waits.as_ref(), reservation, job)
+            .run(self.waits.as_ref(), reservation, job)
             .await
     }
 
     /// Submit one storage job and return once it is running off the async workers.
     ///
-    /// The job waits for a place in the class's queue rather than being refused: it carries work
-    /// no caller is waiting to be answered about, such as a consensus log append. Unlike
+    /// The job waits for a place in the class's queue like every job. Unlike
     /// [`Self::run_storage`], dropping the async caller after this returns does not cancel the job.
     /// The job owns its reservation until it exits.
     pub async fn submit_storage(
@@ -448,12 +445,67 @@ impl Executor {
     /// charge fits before it asks for one. A place in the queue takes every byte the class releases
     /// until that place is satisfied, so an owner whose room is released by other work of the same
     /// class would hold that work up behind itself. While another charge waits in the queue, the
-    /// class reports no room, so reading it never overtakes that charge.
+    /// class reports no room, so reading it never overtakes that charge. It reports the class
+    /// itself, not an allowance this executor draws from.
     pub fn memory(&self, class: MemoryClass) -> MemoryBudgetSnapshot {
-        self.budget(class).snapshot()
+        self.class_budget(class).snapshot()
     }
 
+    /// Wait for a share of `bytes` of `class` for one operation's whole working set, and return
+    /// an executor through which every charge of that class the operation takes is drawn from the
+    /// share.
+    ///
+    /// Nothing waits within the share: a charge it has no room for fails with the
+    /// [`Shortfall`](crate::Shortfall)
+    /// the operation needs, everything it holds included, and the operation's owner gives
+    /// everything back and waits for a share that large. So the operation waits for room once,
+    /// while it holds nothing of the class, and never behind its own charges. Other classes, the
+    /// workers and the limits are this executor's. The share is held until the returned executor
+    /// and everything drawn through it are gone.
+    pub async fn reserve_allowance(
+        &self,
+        class: MemoryClass,
+        bytes: u64,
+    ) -> Result<Executor, Report<AdmissionError>> {
+        let share = self.reserve(class, bytes).await?;
+        Ok(Self {
+            inner: Arc::clone(&self.inner),
+            scope: Some(StdArc::new(AllowanceScope {
+                budget: MemoryBudget::allowance(share),
+                outer: self.scope.clone(),
+            })),
+            // Work drawn from the allowance still tells this handle's owner while it waits.
+            waits: self.waits.clone(),
+        })
+    }
+
+    /// The budget a charge of `class` taken through this executor comes from: the innermost
+    /// allowance of that class it draws from, or the class itself.
     fn budget(&self, class: MemoryClass) -> &MemoryBudget {
+        let mut scope = self.scope.as_deref();
+        while let Some(allowance) = scope {
+            if allowance.budget.class() == class {
+                return &allowance.budget;
+            }
+            scope = allowance.outer.as_deref();
+        }
+        self.class_budget(class)
+    }
+
+    /// The most a charge of `class` taken through this executor can ever be: the share of the
+    /// innermost allowance of that class it draws from, or the whole class.
+    pub(crate) fn budget_capacity(&self, class: MemoryClass) -> u64 {
+        self.budget(class).capacity_bytes()
+    }
+
+    /// The largest share a required charge of `class` taken through this executor found missing,
+    /// when this executor is within an allowance of that class and one did.
+    pub(crate) fn allowance_shortfall(&self, class: MemoryClass) -> Option<u64> {
+        let budget = self.budget(class);
+        budget.allowance_hold()?.shortfall()
+    }
+
+    fn class_budget(&self, class: MemoryClass) -> &MemoryBudget {
         match class {
             MemoryClass::Management => &self.inner.management_memory,
             MemoryClass::Intake => &self.inner.intake_memory,
@@ -466,11 +518,6 @@ impl Executor {
             MemoryClass::RestoreMetadata => &self.inner.restore_metadata_memory,
             MemoryClass::Credentials => &self.inner.credentials_memory,
         }
-    }
-
-    /// The owner this handle tells while its work waits for capacity, if it has one.
-    pub(crate) fn waits(&self) -> Option<&CapacityWaits> {
-        self.waits.as_ref()
     }
 
     pub(crate) fn cpu_pool(&self, class: CpuClass) -> &WorkerPool {
@@ -492,13 +539,17 @@ impl Executor {
     }
 }
 
-/// Why a job could not be admitted or did not produce a value.
+/// Why a job run through [`Executor::run_cpu_growing`] produced no outcome. The cause beneath says
+/// which charge or which execution failed.
 #[derive(Debug, Error)]
 pub enum ExecutionFailure {
-    #[error(transparent)]
-    Admission(#[from] AdmissionError),
-    #[error(transparent)]
-    Execution(#[from] ExecutionError),
+    /// A charge the job needed was not granted: it is larger than the whole class, or the class
+    /// was closed. The [`AdmissionError`] is beneath.
+    #[error("a charge the job needed was not granted")]
+    Admission,
+    /// The job was not run to its end. The [`ExecutionError`] is beneath.
+    #[error("the job was not run to its end")]
+    Execution,
 }
 
 /// The standard-library shared pointer the Tokio semaphores require. Every other shared value in

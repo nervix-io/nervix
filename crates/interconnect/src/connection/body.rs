@@ -12,13 +12,14 @@ use http::{Response, StatusCode, Version};
 use meticulous::OptionExt as _;
 use nervix_execution::{
     AdmissionError, BudgetedBuffer, ChargedBytes, ExecutionError, Executor, MemoryClass,
+    Reservation,
 };
 use nervix_primitives::time::timeout;
 
 use super::BODY_CHUNK_BYTES;
 use crate::{
     PoolClass, RemoteOperationFailureKind, TransportError, operation::OPERATION_FAILURE_HEADER,
-    request::RemoteRequestFailure, wire::FreeRoom,
+    request::RemoteRequestFailure, wire,
 };
 
 /// Read a refused opening under its body and progress bounds, retaining a reported operation
@@ -48,10 +49,14 @@ pub(super) async fn read_error_response(
         }
         None => None,
     };
+    let declared = match declared_length(response.headers(), limit) {
+        Ok(declared) => declared,
+        Err(error) => return error,
+    };
     let message = match read_body(
         executor,
         class.memory_class(),
-        limit,
+        declared,
         progress_timeout,
         response.into_body(),
     )
@@ -88,7 +93,7 @@ pub(super) async fn send_decode_refusal(
     let admission = error.contains::<AdmissionError>()
         || matches!(
             error.downcast_ref::<ExecutionError>(),
-            Some(ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. })
+            Some(ExecutionError::PoolClosed { .. })
         );
     if !admission {
         return Err(error);
@@ -180,9 +185,14 @@ pub(super) async fn send_response(
     body: Option<ChargedBytes>,
     progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
+    let length = match &body {
+        Some(body) => body.len(),
+        None => 0,
+    };
     let response = Response::builder()
         .status(status)
         .version(Version::HTTP_2)
+        .header(http::header::CONTENT_LENGTH, length)
         .body(())
         .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Http))?;
     let end_stream = body.as_ref().is_none_or(ChargedBytes::is_empty);
@@ -257,9 +267,14 @@ async fn send_error_response<F>(
 where
     F: FnOnce(http::response::Builder) -> http::response::Builder,
 {
-    let response = headers(Response::builder().status(status).version(Version::HTTP_2))
-        .body(())
-        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Http))?;
+    let response = headers(
+        Response::builder()
+            .status(status)
+            .version(Version::HTTP_2)
+            .header(http::header::CONTENT_LENGTH, message.len()),
+    )
+    .body(())
+    .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Http))?;
     let mut stream = respond
         .send_response(response, false)
         .map_err(TransportError::from)?;
@@ -308,6 +323,59 @@ where
     })?
 }
 
+/// The length the sender declared for a body, which its receiver charges before reading any of it.
+/// Every interconnect body declares its length, so a body without one, or declared longer than
+/// `limit`, is malformed.
+pub(super) fn declared_length(
+    headers: &http::HeaderMap,
+    limit: u64,
+) -> Result<u64, Report<TransportError>> {
+    let declared = headers
+        .get(http::header::CONTENT_LENGTH)
+        .ok_or_else(|| {
+            Report::new(TransportError::Decode(
+                "the body does not declare its length".to_string(),
+            ))
+        })?
+        .to_str()
+        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Decode))?
+        .parse::<u64>()
+        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Decode))?;
+    if declared > limit {
+        return Err(Report::new(TransportError::Decode(format!(
+            "the body declares {declared} bytes, more than its limit of {limit}"
+        ))));
+    }
+    Ok(declared)
+}
+
+/// Run `operation` until it completes or the peer resets the exchange it serves, as
+/// [`wire::until_ended`] does. A receiver that waits for room to charge a request to, or for a
+/// place to decode it, ends that wait with the request: `None` once the peer reset it.
+pub(super) async fn until_reset<T>(
+    respond: &mut server::SendResponse<Bytes>,
+    operation: impl Future<Output = Result<T, Report<TransportError>>>,
+) -> Result<Option<T>, Report<TransportError>> {
+    let reset = async {
+        poll_fn(|context| respond.poll_reset(context))
+            .await
+            .map_err(TransportError::from)?;
+        Ok::<(), Report<TransportError>>(())
+    };
+    wire::until_ended(reset, operation).await
+}
+
+/// A body read whole, and the room its decoding takes, charged together with it.
+pub(super) struct ReceivedBody {
+    pub(super) bytes: ChargedBytes,
+    /// Room for the decoded value, as large as the body.
+    pub(super) decoding: Reservation,
+}
+
+/// Read a body of the `declared` length, charged exactly that much. The reader waits for the
+/// charge while it holds nothing of `class`, so a full class holds the body back until room frees;
+/// only a body the whole class could never hold fails. The caller's reset or deadline ends the
+/// wait.
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -318,16 +386,67 @@ where
 pub(super) async fn read_body(
     executor: &Executor,
     class: MemoryClass,
-    limit: u64,
+    declared: u64,
     progress_timeout: Duration,
     body: RecvStream,
 ) -> Result<ChargedBytes, Report<TransportError>> {
-    let reservation = executor
-        .reserve(class, initial_body_charge(limit))
+    let charge = executor
+        .reserve(class, declared)
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
-    let mut buffer = BudgetedBuffer::with_limit(reservation, limit);
+    read_declared(charge, declared, progress_timeout, body).await
+}
+
+/// Read a body of the `declared` length together with the room its decoding needs, as one charge
+/// the reader waits for while it holds nothing of `class`: no read or decoding then waits for room
+/// behind the body it holds.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the transport performs this operation for each admitted frame or stream request"
+    )
+)]
+pub(super) async fn read_body_to_decode(
+    executor: &Executor,
+    class: MemoryClass,
+    declared: u64,
+    progress_timeout: Duration,
+    body: RecvStream,
+) -> Result<ReceivedBody, Report<TransportError>> {
+    let whole = declared.checked_mul(2).ok_or_else(|| {
+        Report::new(TransportError::Decode(format!(
+            "a body of {declared} bytes and its decoding overflow a charge"
+        )))
+    })?;
+    let charge = executor
+        .reserve(class, whole)
+        .await
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    let (input, decoding) = charge
+        .split(declared)
+        .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    let bytes = read_declared(input, declared, progress_timeout, body).await?;
+    Ok(ReceivedBody { bytes, decoding })
+}
+
+/// Read `body` into `charge`, which holds exactly its `declared` length, and fail when the body
+/// carries more or fewer bytes than it declared.
+async fn read_declared(
+    charge: Reservation,
+    declared: u64,
+    progress_timeout: Duration,
+    body: RecvStream,
+) -> Result<ChargedBytes, Report<TransportError>> {
+    let mut buffer = BudgetedBuffer::with_limit(charge, declared);
     read_body_into(&mut buffer, progress_timeout, body).await?;
+    let received = u64::try_from(buffer.len())
+        .map_err(|error| TransportError::with_cause(Report::new(error), TransportError::Decode))?;
+    if received != declared {
+        return Err(Report::new(TransportError::Decode(format!(
+            "the body carried {received} of the {declared} bytes it declared"
+        ))));
+    }
     Ok(ChargedBytes::from_buffer(buffer))
 }
 
@@ -356,101 +475,6 @@ pub(super) async fn read_body_into(
             .map_err(TransportError::from)?;
     }
     Ok(())
-}
-
-/// Read `body`, of at most `limit` bytes, charging it only to room `class` has free now.
-///
-/// [`read_body`] waits in its class's line while the class is full. A request whose answer is that
-/// the class has no room must not wait on that class to be read, so this reader takes only free
-/// room. A body it finds no room for is drained without being kept, which completes its sender's
-/// request so that the request can still be answered.
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "the transport performs this operation for each admitted frame or stream request"
-    )
-)]
-pub(super) async fn read_body_in_free_room(
-    executor: &Executor,
-    class: MemoryClass,
-    limit: u64,
-    progress_timeout: Duration,
-    mut body: RecvStream,
-) -> Result<FreeRoom<ChargedBytes>, Report<TransportError>> {
-    let reservation = match executor.try_reserve(class, initial_body_charge(limit)) {
-        Ok(reservation) => reservation,
-        Err(refusal) => {
-            if let AdmissionError::BudgetExhausted { .. } = refusal.current_context() {
-                drain_body(progress_timeout, body).await?;
-                return Ok(FreeRoom::NoRoom);
-            }
-            return Err(TransportError::with_cause(refusal, TransportError::Decode));
-        }
-    };
-    let mut buffer = BudgetedBuffer::with_limit(reservation, limit);
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let Some(chunk) = next_body_chunk(&mut body, progress_timeout).await? else {
-            break;
-        };
-        let grown = buffer.try_extend_from_slice(&chunk);
-        body.flow_control()
-            .release_capacity(chunk.len())
-            .map_err(TransportError::from)?;
-        let Err(refusal) = grown else {
-            continue;
-        };
-        if let Some(AdmissionError::BudgetExhausted { .. }) =
-            refusal.downcast_ref::<AdmissionError>()
-        {
-            drop(buffer);
-            drain_body(progress_timeout, body).await?;
-            return Ok(FreeRoom::NoRoom);
-        }
-        return Err(TransportError::with_cause(refusal, TransportError::Decode));
-    }
-    Ok(FreeRoom::Taken(ChargedBytes::from_buffer(buffer)))
-}
-
-/// Read the rest of `body` and keep none of it, releasing each chunk's flow-control capacity so
-/// that its sender can complete the request.
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "the transport performs this operation for each admitted frame or stream request"
-    )
-)]
-async fn drain_body(
-    progress_timeout: Duration,
-    mut body: RecvStream,
-) -> Result<(), Report<TransportError>> {
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let Some(chunk) = next_body_chunk(&mut body, progress_timeout).await? else {
-            return Ok(());
-        };
-        body.flow_control()
-            .release_capacity(chunk.len())
-            .map_err(TransportError::from)?;
-    }
-}
-
-/// The charge a body reader starts with: room for a small body, never more than the body's limit.
-/// A larger body grows the charge as it arrives.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "body accounting starts with one 4 KiB granule and then charges bytes as they \
-                  arrive"
-    )
-)]
-const INITIAL_BODY_CHARGE: u64 = 4 * 1024;
-
-fn initial_body_charge(limit: u64) -> u64 {
-    limit.min(INITIAL_BODY_CHARGE)
 }
 
 /// The next chunk of `body`, or `None` at its end, failing when no chunk arrives for

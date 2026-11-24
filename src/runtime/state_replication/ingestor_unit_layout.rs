@@ -118,24 +118,47 @@ impl Runtime {
             .primary_node
             .as_ref()
             .ok_or_else(|| refuse(IngestorUnitLayoutError::SourceInventory))?;
-        let (snapshots, _charges) = self
-            .read_handoff_unit(domain, entity, unit, source, checkpoints, None)
-            .await?;
-        let mut projected = Vec::with_capacity(snapshots.len());
-        for (placement, snapshot) in snapshots {
-            let snapshot = self
-                .project_ingestor_unit_checkpoint(&placement, snapshot, selection)
-                .await?;
-            let snapshot = self
-                .describe_state_checkpoint(&placement, snapshot)
-                .await
-                .change_context(OwnershipHandoffError::IngestorUnitLayout)?;
-            projected.push(OwnershipHandoffCheckpoint {
-                placement: placement.to_remote(),
-                snapshot,
-            });
-        }
-        Ok(projected)
+        // The read keeps every checkpoint it fetched while it projects and describes them, so it
+        // draws all of their restore metadata from one share it waits for while holding nothing,
+        // starting from the checkpoints' described lengths; a read that needs more is made again
+        // within the share it needed.
+        let share = checkpoint_lengths(&checkpoints)?;
+        let checkpoints = &checkpoints;
+        self.inner
+            .executor
+            .within_allowance(MemoryClass::RestoreMetadata, share, |metadata| async move {
+                let (snapshots, _charges) = self
+                    .read_handoff_unit(
+                        &metadata,
+                        HandoffUnitSource {
+                            domain,
+                            entity,
+                            unit,
+                            source,
+                        },
+                        checkpoints.clone(),
+                        None,
+                    )
+                    .await?;
+                let mut projected = Vec::with_capacity(snapshots.len());
+                for (placement, snapshot) in snapshots {
+                    nervix_primitives::task::consume_budget().await;
+                    let snapshot = self
+                        .project_ingestor_unit_checkpoint(&placement, snapshot, selection)
+                        .await?;
+                    let snapshot = self
+                        .describe_state_checkpoint_with(&metadata, &placement, snapshot)
+                        .await
+                        .change_context(OwnershipHandoffError::IngestorUnitLayout)?;
+                    projected.push(OwnershipHandoffCheckpoint {
+                        placement: placement.to_remote(),
+                        snapshot,
+                    });
+                }
+                Ok(projected)
+            })
+            .await
+            .change_context(OwnershipHandoffError::IngestorUnitLayout)?
     }
 
     pub(in crate::runtime) async fn project_ingestor_unit_checkpoint(
@@ -161,30 +184,31 @@ impl Runtime {
         let placement = placement.clone();
         self.inner
             .executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| {
-                    project_checkpoint(&placement, snapshot, selection, cancellation)
-                },
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                project_checkpoint(&placement, snapshot, selection, cancellation)
+            })
             .await
             .change_context(OwnershipHandoffError::IngestorUnitLayout)?
     }
 
+    /// Fetch one unit's checkpoints from its source, charging their restore metadata through
+    /// `executor`, which draws from its caller's allowance.
     async fn read_handoff_unit(
         &self,
-        domain: &DomainName,
-        entity: &NodeRef,
-        unit: Unit,
-        source: &ClusterNodeName,
+        executor: &nervix_execution::Executor,
+        target: HandoffUnitSource<'_>,
         checkpoints: Vec<OwnershipHandoffCheckpoint>,
         selection: Option<IngestorUnitSelection>,
     ) -> OwnershipHandoffResult<(
         Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
         Vec<Reservation>,
     )> {
+        let HandoffUnitSource {
+            domain,
+            entity,
+            unit,
+            source,
+        } = target;
         let mut decoded = Vec::with_capacity(checkpoints.len());
         let mut charges = Vec::new();
         #[cfg_attr(
@@ -219,7 +243,13 @@ impl Runtime {
                 .delay_ownership_handoff_checkpoint_read_if_armed(domain)
                 .await;
             let (snapshot, charge) = self
-                .fetch_state_checkpoint_charged(source, &placement, &checkpoint.snapshot, read)
+                .fetch_state_checkpoint_charged(
+                    executor,
+                    source,
+                    &placement,
+                    &checkpoint.snapshot,
+                    read,
+                )
                 .await
                 .change_context(OwnershipHandoffError::IngestorUnitLayout)?;
             if selection.is_none() {
@@ -247,8 +277,29 @@ impl Runtime {
     ) -> OwnershipHandoffResult<Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>> {
         match input {
             OwnershipHandoffInput::Unit(checkpoints) => {
+                // Every checkpoint's restore metadata comes from one share, which holds exactly what
+                // the fetches charge and which the read waits for while holding nothing.
+                let metadata = self
+                    .inner
+                    .executor
+                    .reserve_allowance(
+                        MemoryClass::RestoreMetadata,
+                        checkpoint_lengths(&checkpoints)?,
+                    )
+                    .await
+                    .change_context(OwnershipHandoffError::IngestorUnitLayout)?;
                 let (decoded, _charges) = self
-                    .read_handoff_unit(domain, entity, unit, source, checkpoints, None)
+                    .read_handoff_unit(
+                        &metadata,
+                        HandoffUnitSource {
+                            domain,
+                            entity,
+                            unit,
+                            source,
+                        },
+                        checkpoints,
+                        None,
+                    )
                     .await?;
                 Ok(decoded)
             }
@@ -279,13 +330,31 @@ impl Runtime {
                 .ok_or_else(|| refuse(IngestorUnitLayoutError::SourceInventory))?;
                 // Every source is read at the same time: each read waits on its own node, and the
                 // merge needs all of them. The reads keep the sources' order, so the merge sees the
-                // same sequence as before.
+                // same sequence as before. Their restore metadata comes from one share, which holds
+                // exactly what every fetch charges and which the reads wait for while holding
+                // nothing, so no read waits for room while the others hold part of the class.
+                let mut share = 0_u64;
+                for source in &sources {
+                    share = share
+                        .checked_add(checkpoint_lengths(&source.checkpoints)?)
+                        .ok_or_else(|| refuse(IngestorUnitLayoutError::Bounds))?;
+                }
+                let metadata = self
+                    .inner
+                    .executor
+                    .reserve_allowance(MemoryClass::RestoreMetadata, share)
+                    .await
+                    .change_context(OwnershipHandoffError::IngestorUnitLayout)?;
+                let metadata = &metadata;
                 let reads = sources.into_iter().map(|source| async move {
                     self.read_handoff_unit(
-                        domain,
-                        entity,
-                        source.unit,
-                        &source.node,
+                        metadata,
+                        HandoffUnitSource {
+                            domain,
+                            entity,
+                            unit: source.unit,
+                            source: &source.node,
+                        },
                         source.checkpoints,
                         Some(selection),
                     )
@@ -320,23 +389,18 @@ impl Runtime {
                 let target = NodeUnitRef::new(entity.clone(), unit);
                 self.inner
                     .executor
-                    .run_cpu_with(
-                        CpuClass::Bulk,
-                        nervix_execution::QueueAdmission::WaitForPlace,
-                        reservation,
-                        move |_charge, cancellation| {
-                            let _inputs = charges;
-                            merge_checkpoints(
-                                domain,
-                                target,
-                                schema_fingerprint,
-                                kafka_offsets,
-                                source_count,
-                                decoded,
-                                cancellation,
-                            )
-                        },
-                    )
+                    .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                        let _inputs = charges;
+                        merge_checkpoints(
+                            domain,
+                            target,
+                            schema_fingerprint,
+                            kafka_offsets,
+                            source_count,
+                            decoded,
+                            cancellation,
+                        )
+                    })
                     .await
                     .change_context(OwnershipHandoffError::IngestorUnitLayout)?
             }
@@ -454,4 +518,25 @@ fn merge_checkpoints(
             )
         })
         .collect())
+}
+
+/// The unit one handoff read fetches checkpoints for, and the node it fetches them from.
+#[derive(Clone, Copy)]
+struct HandoffUnitSource<'a> {
+    domain: &'a DomainName,
+    entity: &'a NodeRef,
+    unit: Unit,
+    source: &'a ClusterNodeName,
+}
+
+/// What a handoff read's checkpoints take of restore metadata: the sum of their described
+/// lengths, each at least one byte, as each fetch charges it.
+fn checkpoint_lengths(checkpoints: &[OwnershipHandoffCheckpoint]) -> OwnershipHandoffResult<u64> {
+    let mut total = 0_u64;
+    for checkpoint in checkpoints {
+        total = total
+            .checked_add(checkpoint.snapshot.length.max(1))
+            .ok_or_else(|| refuse(IngestorUnitLayoutError::Bounds))?;
+    }
+    Ok(total)
 }

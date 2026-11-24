@@ -1,5 +1,5 @@
 //! An owner is told exactly while its work waits for a place in a full worker class or for room in
-//! a full memory class, and never for work that is admitted at once or refused.
+//! a full memory class, and never for work that is admitted at once.
 
 use std::{future::Future, num::NonZeroUsize, pin::pin, task::Poll, time::Duration};
 
@@ -9,7 +9,7 @@ use nervix_primitives::{task::JoinHandle, time::timeout};
 use super::*;
 use crate::{
     ConnectorStorageWorkers, CpuClass, ExecutionConfig, Executor, MemoryClass, PendingJobCounts,
-    QueueAdmission, StorageClass, WorkerCounts,
+    StorageClass, WorkerCounts,
     workers::{HeldWorker, WorkerPool},
 };
 
@@ -47,23 +47,12 @@ impl Class {
     async fn run(
         self,
         executor: &Executor,
-        admission: QueueAdmission,
         job: impl FnOnce() + Send + 'static,
     ) -> Result<(), Report<crate::ExecutionError>> {
-        let charge = executor
-            .try_reserve(MemoryClass::Bulk, 0)
-            .expect("the bulk class admits an empty charge");
+        let charge = executor.charge_nothing(MemoryClass::Bulk);
         match self {
-            Self::Cpu(class) => {
-                executor
-                    .run_cpu_with(class, admission, charge, move |_, _| job())
-                    .await
-            }
-            Self::Storage(class) => {
-                executor
-                    .run_storage_with(class, admission, charge, move |_, _| job())
-                    .await
-            }
+            Self::Cpu(class) => executor.run_cpu(class, charge, move |_, _| job()).await,
+            Self::Storage(class) => executor.run_storage(class, charge, move |_, _| job()).await,
         }
     }
 
@@ -97,7 +86,7 @@ impl FullClass {
         let queueing = executor.clone();
         let queued = nervix_primitives::task::spawn(async move {
             class
-                .run(&queueing, QueueAdmission::RefuseWhenFull, || ())
+                .run(&queueing, || ())
                 .await
                 .expect("the queued job runs once the held worker is released");
         });
@@ -132,11 +121,7 @@ async fn waits_for_a_place_in(class: Class) {
     let full = FullClass::fill(&executor, class).await;
     let waits = CapacityWaits::new();
     let reporting = executor.reporting_waits_to(&waits);
-    let waiting = nervix_primitives::task::spawn(async move {
-        class
-            .run(&reporting, QueueAdmission::WaitForPlace, || ())
-            .await
-    });
+    let waiting = nervix_primitives::task::spawn(async move { class.run(&reporting, || ()).await });
 
     timeout(WAIT, waits.began())
         .await
@@ -150,7 +135,7 @@ async fn waits_for_a_place_in(class: Class) {
         .await
         .expect("the job runs once it has its place")
         .expect("the waiting job is joined")
-        .expect("a job that waits for a place is never refused");
+        .expect("a job that waits for a place runs once it takes one");
     assert!(!waits.is_waiting());
 }
 
@@ -164,9 +149,9 @@ async fn a_storage_job_waiting_for_a_place_tells_its_owner_until_it_takes_one() 
     waits_for_a_place_in(Class::Storage(StorageClass::Filesystem)).await;
 }
 
-/// Accepted work that prepares its place before it hands its state over reports the same wait.
+/// Work that prepares its place before it hands its state over reports the same wait.
 #[nervix_primitives::test]
-async fn accepted_work_preparing_its_place_tells_its_owner_while_it_waits() {
+async fn a_cpu_job_preparing_its_place_tells_its_owner_while_it_waits() {
     let executor = single_place_executor();
     let full = FullClass::fill(&executor, Class::Cpu(CpuClass::Data)).await;
     let waits = CapacityWaits::new();
@@ -176,10 +161,9 @@ async fn accepted_work_preparing_its_place_tells_its_owner_while_it_waits() {
         .expect("the relay class has room");
     let preparing = nervix_primitives::task::spawn(async move {
         let place = reporting
-            .accepted_work()
             .prepare_cpu(CpuClass::Data, charge)
             .await
-            .expect("accepted work waits for its place");
+            .expect("a preparing job waits for its place");
         place.run(|_, _| ()).await
     });
 
@@ -195,8 +179,8 @@ async fn accepted_work_preparing_its_place_tells_its_owner_while_it_waits() {
     assert!(!waits.is_waiting());
 }
 
-/// A job admitted at once and a job refused for the full queue never waited, so neither tells the
-/// owner anything, and a waiting job dropped before it takes its place ends its wait.
+/// A job admitted at once never waited, so it tells the owner nothing, and a waiting job dropped
+/// before it takes its place ends its wait.
 #[nervix_primitives::test]
 async fn only_a_job_that_actually_waits_tells_its_owner_and_dropping_it_ends_the_wait() {
     let executor = single_place_executor();
@@ -205,30 +189,20 @@ async fn only_a_job_that_actually_waits_tells_its_owner_and_dropping_it_ends_the
     let reporting = executor.reporting_waits_to(&waits);
 
     Class::Cpu(CpuClass::Bulk)
-        .run(&reporting, QueueAdmission::WaitForPlace, || ())
+        .run(&reporting, || ())
         .await
         .expect("an idle class admits the job at once");
-    let full = FullClass::fill(&executor, Class::Cpu(CpuClass::Bulk)).await;
-    let refused = Class::Cpu(CpuClass::Bulk)
-        .run(&reporting, QueueAdmission::RefuseWhenFull, || ())
-        .await
-        .expect_err("a full class refuses a job that answers a request");
-    assert!(matches!(
-        refused.current_context(),
-        crate::ExecutionError::QueueFull { .. }
-    ));
     assert!(
         !changes
             .has_changed()
             .expect("the count's sender lives in the waits"),
-        "neither an admitted nor a refused job told the owner it waited"
+        "a job admitted at once did not tell the owner it waited"
     );
+    let full = FullClass::fill(&executor, Class::Cpu(CpuClass::Bulk)).await;
 
-    let waiting = Box::pin(Class::Cpu(CpuClass::Bulk).run(
-        &reporting,
-        QueueAdmission::WaitForPlace,
-        || panic!("a job dropped while it waits never runs"),
-    ));
+    let waiting = Box::pin(Class::Cpu(CpuClass::Bulk).run(&reporting, || {
+        panic!("a job dropped while it waits never runs")
+    }));
     let (waiting, pending) = first_poll(waiting).await;
     assert!(pending, "the job waits for a place in the full class");
     assert!(waits.is_waiting(), "the owner is told while the job waits");

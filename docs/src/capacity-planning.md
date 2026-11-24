@@ -100,15 +100,15 @@ share of admission; it is not guaranteed an idle thread. Apart from the classes,
 waits rather than computes uses the pool: a Kafka producer's final drain and partition
 inspection, which wait on the broker, and the one read of the resolver configuration at startup.
 Each class defaults to 64 pending jobs per worker, capped at 1,024; an explicit per-class queue
-can override this bound. A full queue never costs data: only a request whose caller still holds
-its input and waits on the answer, such as an HTTP endpoint body, a statement or an inspection, is
-refused, and its caller answers that the node is busy. Every other job waits for a place: the
-unfolding of every payload an ingestor handed over, acknowledged or not, of a poll a paced ingestor
-handed over and of a payload a quiesce buffer retained, an Iceberg commit's read of the staged rows
-its emitter already accepted, relay and subscription deliveries, the answer of an interconnect
-request whose handler already ran, checkpoints, consensus storage and lifecycle steps. Holding an
-ingestor loop pushes back into its transport, so a node whose extension workers stay full delays
-polls and reads, and lets each transport keep what it holds within its own bounds; see
+can override this bound. A full queue or memory class is backpressure on the machine's resources,
+never a reason to refuse work: every job waits for a place and every charge waits for room,
+requests included. An HTTP endpoint body, a statement or an inspection waits within its own limit
+(the request's lifetime or the statement's deadline) exactly as the unfolding of a payload an
+ingestor handed over, relay and subscription deliveries, the answer of an interconnect request
+whose handler already ran, checkpoints, consensus storage and lifecycle steps do. Only an operation
+larger than its whole class fails, since no wait could hold it. Holding an ingestor loop pushes
+back into its transport, so a node whose extension workers stay full delays polls and reads, and
+lets each transport keep what it holds within its own bounds; see
 [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
 Transient memory ceilings derive from the node's known memory. Management gets 1/128, commands
@@ -124,10 +124,11 @@ and one twelfth for scratch, capped at 32, 32 and 16 MiB respectively. The valid
 complete operations so a blocked channel leaves room for another. Bulk streams retain their own
 1 MiB default receive window, drawn from the dedicated bulk-window pool; the stream waits within
 its request deadline when that pool is full.
-An Iceberg commit charges the bulk budget for the staged batches it reads back, only when the
-budget has room for them now, so a commit whose staged batches exceed the budget reads them in
-groups, a single staged batch larger than the budget waits until the whole budget is free and is
-charged all of it, and a commit refused for room is retried by its emitter.
+An Iceberg commit charges the bulk budget for the staged batches it reads back, one group at a
+time, so a commit whose staged batches exceed the budget reads them in groups, a single staged batch
+larger than the budget waits until the whole budget is free and is charged all of it, and a commit
+whose group finds the budget full waits for room, holding nothing of it, while its emitter shows
+the wait.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
@@ -137,9 +138,10 @@ them, their watches fill the budget and the owner holds further deliveries back 
 rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
 fast acknowledgements return to the sending node, not by the budget's size, and an ingestor that sends
 there waits instead of failing. A grant reserves the largest decoded batch and the scratch room
-whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
-is refused for that room, and a sender whose own budget has no room to store the acknowledgements
-of the rows it sends, hold their delivery back and wait as well; see
+whatever the body's size, so the budget grants about three deliveries at once. A grant waits for
+that room for half its delivery's dispatch timeout and is then answered with a capacity refusal; a
+sender so refused, and a sender whose own budget has no room to store the acknowledgements of the
+rows it sends, hold their delivery back and wait as well; see
 [Held Deliveries](./interconnect.md#held-deliveries). The derived ceilings follow node memory; explicit settings retain the operator's exact bounds.
 Decoded materialized snapshots use the independent `state_read` pool; optional source retention
 uses `state_read_cache`. Each defaults to the relay pool's capacity and has its own override. Retaining a complete generation
@@ -149,6 +151,9 @@ views leave live relay capacity available for evaluation, encoding and dispatch,
 count in the startup memory total.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
+The node refuses to start unless the budget holds a follower's whole resident replication window
+beside that working set, 8 MiB and 16 MiB at the defaults, so a follower's durable append never
+waits for room its own window holds.
 Consensus storage operations that need that working set queue at the store rather than in the
 budget, so the rest of it stays with command and replication traffic and with ingestor control calls
 while they wait; see

@@ -199,7 +199,7 @@ impl PasswordHashError {
 
     fn from_execution(error: Report<ExecutionError>) -> Report<Self> {
         let failure = match error.current_context() {
-            ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => Self::Busy,
+            ExecutionError::PoolClosed { .. } => Self::Busy,
             ExecutionError::JobPanicked { .. } => Self::Task,
         };
         error.change_context(failure)
@@ -780,8 +780,11 @@ mod tests {
         assert_eq!(snapshot.bulk_cpu.admitted, 0);
     }
 
+    /// A node whose credentials worker is busy holds a verification back and judges nothing while
+    /// it waits: no attempt is paced, an abandoned verification is no attempt at all, and the
+    /// credentials are accepted once a worker frees.
     #[nervix_primitives::test]
-    async fn a_node_without_room_to_verify_credentials_does_not_judge_them() {
+    async fn a_node_without_room_to_verify_credentials_waits_without_judging_them() {
         let executor = single_worker_executor();
         let TestService {
             service,
@@ -809,8 +812,16 @@ mod tests {
         };
 
         let filled = FilledCpuClass::fill(&executor, CpuClass::Credentials).await;
-        let refused = service.authenticate_basic_credentials(&credentials).await;
-        assert_eq!(refused, Err(AuthenticationRefusal::Unavailable));
+        let mut waiting = std::pin::pin!(service.authenticate_basic_credentials(&credentials));
+        assert!(
+            nervix_primitives::time::timeout(
+                std::time::Duration::from_millis(200),
+                waiting.as_mut()
+            )
+            .await
+            .is_err(),
+            "a full credentials class holds the verification back instead of refusing it"
+        );
         // Nothing judged the credentials, so the user is not paced as after a failed attempt.
         assert!(service.inner.authentication_pacing.is_empty().await);
 
@@ -818,27 +829,23 @@ mod tests {
             username: "unknown_user".to_string(),
             password: "busy-secret".to_string(),
         };
-        let refused = service.authenticate_basic_credentials(&unknown).await;
-        assert_eq!(
-            refused,
-            Err(AuthenticationRefusal::Unavailable),
-            "a name that names no user is not judged either while the node has no room"
+        {
+            let abandoned = service.authenticate_basic_credentials(&unknown);
+            assert!(
+                nervix_primitives::time::timeout(std::time::Duration::from_millis(200), abandoned)
+                    .await
+                    .is_err(),
+                "a name that names no user waits for the worker too"
+            );
+        }
+        assert!(
+            service.inner.authentication_pacing.is_empty().await,
+            "an abandoned verification judged nothing"
         );
-        assert!(service.inner.authentication_pacing.is_empty().await);
-        let invalid = BasicAuthCredentials {
-            username: "not a user".to_string(),
-            password: "busy-secret".to_string(),
-        };
-        assert_eq!(
-            service.authenticate_basic_credentials(&invalid).await,
-            Err(AuthenticationRefusal::Unavailable)
-        );
-        assert!(service.inner.authentication_pacing.is_empty().await);
 
         filled.release().await;
-        let accepted = service.authenticate_basic_credentials(&credentials).await;
         assert_eq!(
-            accepted,
+            waiting.await,
             Ok(UserName::parse("busy_user").assured("the name parsed above"))
         );
         let _ = std::fs::remove_dir_all(&path);

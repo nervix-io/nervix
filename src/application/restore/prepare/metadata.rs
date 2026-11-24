@@ -120,7 +120,8 @@ pub(super) async fn reserve_metadata(
         .checked_add(FIXED_WORKING_BYTES)
         .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
     let charge = executor
-        .try_reserve(MemoryClass::RestoreMetadata, manifest_working)
+        .reserve(MemoryClass::RestoreMetadata, manifest_working)
+        .await
         .change_context(RestoreRefusal::MetadataAdmission)?;
     let bytes = executor
         .run_storage(
@@ -131,8 +132,11 @@ pub(super) async fn reserve_metadata(
         .await
         .change_context(RestoreRefusal::Unreadable)?
         .change_context(RestoreRefusal::InvalidArchive)?;
+    // The measuring job gave back its charge, so the restore holds nothing of the class while
+    // it waits for the description's.
     executor
-        .try_reserve(MemoryClass::RestoreMetadata, bytes)
+        .reserve(MemoryClass::RestoreMetadata, bytes)
+        .await
         .change_context(RestoreRefusal::MetadataAdmission)
 }
 

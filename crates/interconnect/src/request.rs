@@ -22,7 +22,7 @@ use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, QueueAdmission, Reservation};
+use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity, DomainClockAuthorityRevision,
     DomainName,
@@ -36,7 +36,7 @@ use rkyv::{
     Archive, Deserialize, Serialize,
     api::high::{HighDeserializer, HighSerializer},
     rancor::Error as RkyvError,
-    ser::{allocator::ArenaHandle, writer::IoWriter},
+    ser::allocator::ArenaHandle,
     util::AlignedVec,
 };
 use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
@@ -120,8 +120,6 @@ pub enum RemoteRequestFailure {
     },
     #[error("the {class:?} memory budget is closed")]
     MemoryBudgetClosed { class: PoolClass },
-    #[error("the {class:?} execution queue already holds {pending} waiting jobs")]
-    ExecutionQueueFull { class: PoolClass, pending: u64 },
     #[error("the {class:?} execution pool is closed")]
     ExecutionPoolClosed { class: PoolClass },
     #[error("the coordination identity does not belong to the authenticated request sender")]
@@ -160,13 +158,6 @@ impl RemoteRequestFailure {
             Some(AdmissionError::DifferentBudget { .. }) | None => {}
         }
         match error.downcast_ref::<ExecutionError>() {
-            Some(ExecutionError::QueueFull { pending, .. }) => {
-                return Self::ExecutionQueueFull {
-                    class,
-                    pending: u64::try_from(*pending)
-                        .assured("a bounded worker queue fits in the wire count"),
-                };
-            }
             Some(ExecutionError::PoolClosed { .. }) => return Self::ExecutionPoolClosed { class },
             Some(ExecutionError::JobPanicked { .. }) | None => {}
         }
@@ -178,7 +169,6 @@ impl RemoteRequestFailure {
             Self::AdmissionFull { .. }
             | Self::MemoryBudgetFull { .. }
             | Self::MemoryBudgetClosed { .. }
-            | Self::ExecutionQueueFull { .. }
             | Self::ExecutionPoolClosed { .. } => http::StatusCode::SERVICE_UNAVAILABLE,
             Self::MemoryBudgetExceeded { .. } => http::StatusCode::PAYLOAD_TOO_LARGE,
             Self::PreconditionChanged => http::StatusCode::PRECONDITION_FAILED,
@@ -216,12 +206,8 @@ impl RequestContext {
     }
 }
 
-/// A value that the transport can validate and encode as bounded rkyv.
-///
-/// [`encode_rkyv`](Self::encode_rkyv) and [`decode_rkyv`](Self::decode_rkyv) refuse at once when
-/// the class's CPU queue has no place, which suits a request its caller still holds. The `_with`
-/// forms take the admission from the caller, so a response, which carries work its handler already
-/// did, waits for a place instead.
+/// A value that the transport can validate and encode as bounded rkyv. Each job waits for a place
+/// on its class's CPU queue like every job.
 #[doc(hidden)]
 pub trait RkyvMessage: Archive + Sized + Send + 'static {
     fn encode_rkyv(
@@ -229,78 +215,72 @@ pub trait RkyvMessage: Archive + Sized + Send + 'static {
         executor: Executor,
         class: PoolClass,
         limit: u64,
-    ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send {
-        self.encode_rkyv_with(executor, class, limit, QueueAdmission::RefuseWhenFull)
-    }
-
-    fn encode_rkyv_with(
-        self,
-        executor: Executor,
-        class: PoolClass,
-        limit: u64,
-        admission: QueueAdmission,
     ) -> impl Future<Output = Result<(Vec<u8>, Reservation), Report<TransportError>>> + Send;
 
     fn decode_rkyv(
         executor: Executor,
         class: PoolClass,
         payload: Vec<u8>,
-    ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send {
-        Self::decode_rkyv_with(executor, class, QueueAdmission::RefuseWhenFull, payload)
-    }
+    ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
 
-    fn decode_rkyv_with(
+    /// Decode `payload` within `room`, which the caller took together with the input that carried
+    /// it, for the payload's copy and its decoded value, so the decoding never waits for room behind
+    /// that input. Room beyond what the payload needs is given back.
+    fn decode_rkyv_within(
         executor: Executor,
         class: PoolClass,
-        admission: QueueAdmission,
         payload: Vec<u8>,
+        room: Reservation,
     ) -> impl Future<Output = Result<(Self, Reservation), Report<TransportError>>> + Send;
 }
 
 impl<T> RkyvMessage for T
 where
-    T: Archive
-        + Sized
-        + Send
-        + 'static
-        + for<'a> Serialize<HighSerializer<IoWriter<BudgetedBuffer>, ArenaHandle<'a>, RkyvError>>,
+    T: Archive + Sized + Send + 'static + for<'a, 'b> Serialize<wire::MessageSerializer<'a, 'b>>,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + Deserialize<T, HighDeserializer<RkyvError>>,
 {
-    async fn encode_rkyv_with(
+    async fn encode_rkyv(
         self,
         executor: Executor,
         class: PoolClass,
         limit: u64,
-        admission: QueueAdmission,
     ) -> Result<(Vec<u8>, Reservation), Report<TransportError>> {
         wire::encode_rkyv_payload(
             &executor,
             class.memory_class(),
             class.cpu_class(),
             limit,
-            admission,
             self,
         )
         .await
         .map(wire::EncodedPayload::into_parts)
     }
 
-    async fn decode_rkyv_with(
+    async fn decode_rkyv(
         executor: Executor,
         class: PoolClass,
-        admission: QueueAdmission,
         payload: Vec<u8>,
     ) -> Result<(Self, Reservation), Report<TransportError>> {
-        wire::decode_rkyv_payload_with::<Self>(
+        wire::decode_rkyv_payload::<Self>(
             &executor,
             class.memory_class(),
             class.cpu_class(),
-            admission,
             payload,
         )
         .await
         .map(wire::Decoded::into_parts)
+    }
+
+    async fn decode_rkyv_within(
+        executor: Executor,
+        class: PoolClass,
+        payload: Vec<u8>,
+        room: Reservation,
+    ) -> Result<(Self, Reservation), Report<TransportError>> {
+        wire::decode_rkyv_payload_within::<Self>(&executor, class.cpu_class(), payload, room)
+            .await
+            .map(wire::Decoded::into_parts)
     }
 }
 
@@ -943,8 +923,7 @@ impl RequestError {
             | Self::RemoteRejected {
                 failure:
                     RemoteRequestFailure::AdmissionFull { .. }
-                    | RemoteRequestFailure::MemoryBudgetFull { .. }
-                    | RemoteRequestFailure::ExecutionQueueFull { .. },
+                    | RemoteRequestFailure::MemoryBudgetFull { .. },
                 ..
             } => true,
             Self::Encode { .. }
@@ -1332,11 +1311,15 @@ where
             let codec = DuplexCodec::of::<M>(&executor);
             let ChargedItem {
                 item: request,
-                charge: _request_charge,
+                charge: request_charge,
             } = codec
-                .decode_opening::<M>(payload)
+                .decode::<M>(payload)
                 .await
                 .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
+            // The handler owns the request from here, and its own work takes charges of this
+            // class, so the request's charge is given back before it runs: no handler waits for
+            // room behind the request it serves. The connection's stream places bound it meanwhile.
+            drop(request_charge);
             let items = DuplexItems::new(frames, codec.clone(), M::NAME);
             let responses = (handler)(context, request, items)
                 .await
@@ -1344,7 +1327,7 @@ where
             let frames = responses.into_stream().then(move |response| {
                 // The encoding starts here, so the answer keeps no borrow of the codec. It waits for
                 // a place on a full class, and the stream's reset ends that wait.
-                let encoding = response.map(|response| codec.encode_answer(response));
+                let encoding = response.map(|response| codec.encode(response));
                 async move {
                     let encoded = encoding?.await.map_err(StreamHandlerError::with_cause)?;
                     Ok(ChargedBytes::from_owned(encoded.bytes, encoded.charge))
@@ -1378,9 +1361,13 @@ where
     ) -> StreamHandlerFuture {
         let handler = self.handler.clone();
         Box::pin(async move {
-            let (request, _request_reservation) = M::decode_rkyv(executor, M::CLASS, payload)
+            let (request, request_reservation) = M::decode_rkyv(executor, M::CLASS, payload)
                 .await
                 .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
+            // The handler owns the request from here, and its own work takes charges of this
+            // class, so the request's charge is given back before it runs: no handler waits for
+            // room behind the request it serves. The connection's stream places bound it meanwhile.
+            drop(request_reservation);
             if let Some(identity) = request.coordination_identity()
                 && !context.authenticates(identity)
             {
@@ -1438,10 +1425,14 @@ where
     ) -> HandlerFuture {
         let handler = self.handler.clone();
         Box::pin(async move {
-            let (request, _request_reservation) =
+            let (request, request_reservation) =
                 M::decode_rkyv(executor.clone(), M::CLASS, payload)
                     .await
                     .map_err(|error| RemoteRequestFailure::decode(error, M::CLASS))?;
+            // The handler owns the request from here, and its own work takes charges of this
+            // class, so the request's charge is given back before it runs: no handler waits for
+            // room behind the request it serves. The connection's stream places bound it meanwhile.
+            drop(request_reservation);
             if let Some(identity) = request.coordination_identity()
                 && !context.authenticates(identity)
             {
@@ -1451,12 +1442,7 @@ where
             // The handler already did its work, so a full queue holds the answer back rather than
             // throwing that work away. The caller's reset still ends the wait.
             response
-                .encode_rkyv_with(
-                    executor,
-                    M::CLASS,
-                    payload_limit,
-                    QueueAdmission::WaitForPlace,
-                )
+                .encode_rkyv(executor, M::CLASS, payload_limit)
                 .await
                 .map_err(|error| RemoteRequestFailure::ResponseEncode(error.to_string()))
         })
@@ -1863,7 +1849,7 @@ impl Transport {
             bytes: payload,
             charge: _payload_charge,
         } = DuplexCodec::of::<M>(self.inner.executor())
-            .encode_opening(message)
+            .encode(message)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         let opening = RequestEnvelope {
@@ -2015,7 +2001,11 @@ impl Transport {
                 payload,
             },
         };
-        let body = wire::encode_stream_request(self.inner.executor(), request, payload_reservation)
+        // The envelope's encoding copies the payload, whose charge is given back first so the
+        // encoding never waits for room while holding it; the outbound admission bounds the payload
+        // meanwhile.
+        drop(payload_reservation);
+        let body = wire::encode_stream_request(self.inner.executor(), request)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
         self.inner
@@ -2100,7 +2090,7 @@ impl Transport {
                         subquota: M::SUBQUOTA,
                     })
                 })?;
-            let (payload, _payload_reservation) = message
+            let (payload, payload_reservation) = message
                 .encode_rkyv(
                     self.inner.executor().clone(),
                     M::CLASS,
@@ -2108,6 +2098,10 @@ impl Transport {
                 )
                 .await
                 .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
+            // The envelope's encoding copies the payload, whose charge is given back first so the
+            // encoding and the answer never wait for room while holding it; the outbound admission
+            // bounds the payload meanwhile.
+            drop(payload_reservation);
             let request = ControlEnvelope::Request(RequestEnvelope {
                 class: M::CLASS,
                 request: M::NAME.to_string(),
@@ -2158,7 +2152,11 @@ impl Transport {
                     }),
                 }
             }?;
-            let (response, _response_reservation) = response.into_parts();
+            // The typed answer's decoding copies the payload this envelope carries, so the envelope's
+            // charge is given back before that decoding waits for its own; the outbound admission
+            // bounds the envelope meanwhile.
+            let (response, response_reservation) = response.into_parts();
+            drop(response_reservation);
             let ControlEnvelope::Response(response) = response else {
                 return Err(Report::new(RequestError::ResponseMismatch {
                     node: node.clone(),
@@ -2175,14 +2173,10 @@ impl Transport {
                 Ok(payload) => {
                     // The peer already did the work, so a full queue holds the answer back until
                     // the request's own deadline rather than discarding it.
-                    let mapping_input = M::Response::decode_rkyv_with(
-                        self.inner.executor().clone(),
-                        M::CLASS,
-                        QueueAdmission::WaitForPlace,
-                        payload,
-                    )
-                    .await
-                    .map(|(response, _response_payload_reservation)| response);
+                    let mapping_input =
+                        M::Response::decode_rkyv(self.inner.executor().clone(), M::CLASS, payload)
+                            .await
+                            .map(|(response, _response_payload_reservation)| response);
                     match mapping_input {
                         Ok(mapped_value) => Ok(mapped_value),
                         Err(error) => {
@@ -2393,8 +2387,13 @@ mod tests {
         const DEADLINE: crate::RequestDeadline = crate::RequestDeadline::Setup;
     }
 
+    /// A stream request whose class has no room to decode it now waits for room instead of being
+    /// refused, reaches its handler once room frees, and has given its own charge back by then.
     #[nervix_primitives::test]
-    async fn receive_decode_reports_memory_pressure_as_capacity_exhaustion() {
+    async fn a_stream_request_a_full_class_cannot_decode_now_waits_and_reaches_its_handler() {
+        use futures_util::FutureExt as _;
+        use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
         let executor = Executor::default();
         let payload = rkyv::to_bytes::<RkyvError>(&BulkDecodeRequest {
             payload: vec![7; 1024],
@@ -2409,43 +2408,62 @@ mod tests {
                     .capacity_bytes,
             )
             .assured("the fixture occupies the untouched bulk class");
-        let node = ClusterNodeName::parse("node-b").assured("the fixture node name is valid");
+        let reached = Arc::new(AtomicBool::new(false));
+        let reserved_in_handler = Arc::new(AtomicU64::new(u64::MAX));
         let handler = TypedStreamHandler::<BulkDecodeRequest, _> {
-            handler: Arc::new(|_context, _request| async {
-                Err(Report::new(StreamHandlerError::new(
-                    "a refused request reached its handler",
-                )))
+            handler: Arc::new({
+                let reached = Arc::clone(&reached);
+                let reserved_in_handler = Arc::clone(&reserved_in_handler);
+                let executor = executor.clone();
+                move |_context, _request| {
+                    reached.store(true, Ordering::Release);
+                    reserved_in_handler.store(
+                        executor
+                            .memory(nervix_execution::MemoryClass::Bulk)
+                            .reserved_bytes,
+                        Ordering::Release,
+                    );
+                    async {
+                        Err(Report::new(StreamHandlerError::new(
+                            "the test's handler ran",
+                        )))
+                    }
+                }
             }),
             request: PhantomData,
         };
-        let failure = match handler
-            .handle(
-                executor.clone(),
-                RequestContext {
-                    peer_node_id: node.clone(),
-                    peer_advertised_host: "node-b".to_owned(),
-                    peer_process_epoch: 1,
-                },
-                payload,
-            )
-            .await
-        {
-            Err(failure) => failure,
-            Ok(_) => panic!("the occupied class must refuse decoding"),
-        };
-        let StreamOpeningFailure::Request(failure) = failure else {
-            panic!("decode capacity must refuse the request before its operation runs");
-        };
-        let error = RequestError::RemoteRejected {
-            node,
-            request: BulkDecodeRequest::NAME,
-            failure,
-        };
+        let node = ClusterNodeName::parse("node-b").assured("the fixture node name is valid");
+        let mut handling = Box::pin(handler.handle(
+            executor.clone(),
+            RequestContext {
+                peer_node_id: node,
+                peer_advertised_host: "node-b".to_owned(),
+                peer_process_epoch: 1,
+            },
+            payload,
+        ));
         assert!(
-            error.is_capacity_exhaustion(),
-            "a decode that judged no bytes must report a retryable capacity refusal: {error}"
+            handling.as_mut().now_or_never().is_none(),
+            "a full class holds the request's decoding back instead of refusing it"
         );
+        assert!(!reached.load(Ordering::Acquire));
         drop(held);
+        let outcome = nervix_primitives::time::timeout(Duration::from_secs(30), handling)
+            .await
+            .assured("the request is decoded once its class has room");
+        assert!(
+            outcome.is_err(),
+            "the test's handler answers with its own error"
+        );
+        assert!(
+            reached.load(Ordering::Acquire),
+            "the request reaches its handler once its class has room"
+        );
+        assert_eq!(
+            reserved_in_handler.load(Ordering::Acquire),
+            0,
+            "the request's charge is given back before its handler runs"
+        );
         assert_eq!(
             executor
                 .memory(nervix_execution::MemoryClass::Bulk)

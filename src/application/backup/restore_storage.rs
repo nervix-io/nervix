@@ -112,9 +112,8 @@ impl SessionServiceImpl {
         let executor = self.inner.runtime.executor();
         let service = self.clone();
         let result = executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
                     service

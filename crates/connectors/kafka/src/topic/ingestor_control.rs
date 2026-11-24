@@ -17,7 +17,7 @@ use std::time::Duration;
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, ExecutionError, Executor, MemoryClass, StorageClass};
+use nervix_execution::{Cancellation, Executor, MemoryClass, StorageClass};
 use nervix_primitives::{
     sync::{Semaphore, StdArc},
     task::JoinHandle,
@@ -40,7 +40,7 @@ use super::{
 const CONSUMER_CONTROL_TURNS: usize = 1;
 
 /// One commit's exact job and eventual coordinator answer, retained by its ingestor instance.
-pub(super) type CommitTask = JoinHandle<Result<KafkaResult<()>, Report<ExecutionError>>>;
+pub(super) type CommitTask = JoinHandle<Result<KafkaResult<()>, Report<KafkaTopicIngestorError>>>;
 
 pub(super) struct KafkaControl {
     executor: Executor,
@@ -92,23 +92,25 @@ impl KafkaControl {
             "librdkafka limits the control-call budget to five minutes, which fits the monotonic \
              clock",
         );
-        // Charge the job envelope. librdkafka owns its native request and response buffers;
-        // their limits remain driver bounds, separate from Nervix's transient byte budgets.
-        let charge = self
-            .executor
-            .try_reserve(MemoryClass::Commands, std::mem::size_of::<F>().arch_into())
-            .change_context(KafkaTopicIngestorError::ControlAdmission)?;
         let consumer = consumer.clone();
         let bound = self.timeout;
         let turn = StdArc::clone(&self.turn);
+        let charge_bytes = std::mem::size_of::<F>().arch_into();
         let running = async move {
+            // Charge the job envelope. librdkafka owns its native request and response buffers;
+            // their limits remain driver bounds, separate from Nervix's transient byte budgets. A
+            // full commands class holds the job back, within the same client deadline.
+            let charge = self
+                .executor
+                .reserve(MemoryClass::Commands, charge_bytes)
+                .await
+                .change_context(KafkaTopicIngestorError::ControlAdmission)?;
             let turn = turn.acquire_owned().await.assured(
                 "the control owner never closes its semaphore and this waiter owns a handle",
             );
             self.executor
-                .run_storage_with(
+                .run_storage(
                     StorageClass::Connector,
-                    nervix_execution::QueueAdmission::WaitForPlace,
                     charge,
                     move |_charge, cancellation| {
                         let _turn = turn;
@@ -122,11 +124,11 @@ impl KafkaControl {
                     },
                 )
                 .await
+                .change_context(KafkaTopicIngestorError::ControlExecution)?
         };
         timeout_at(deadline, running)
             .await
             .map_err(|_| Report::new(KafkaTopicIngestorError::ControlTimeout { timeout: bound }))?
-            .change_context(KafkaTopicIngestorError::ControlExecution)?
     }
 
     /// Wait for an admitted control operation that could outlive its caller, without admitting
@@ -142,31 +144,31 @@ impl KafkaControl {
     }
 
     /// The supervisor owns admission and the answer until the synchronous commit actually ends.
-    /// Dropping its JoinHandle does not cancel it or release its worker prematurely.
+    /// Dropping its JoinHandle does not cancel it or release its worker prematurely. A full
+    /// commands class holds the commit back inside the supervisor, whose caller's deadline bounds
+    /// the wait.
     pub(super) fn start_commit(
         &self,
         consumer: &KafkaConsumerHandle,
         request: GroupCommitRequest,
-    ) -> Result<CommitTask, Report<KafkaTopicIngestorError>> {
-        let charge = self
-            .executor
-            .try_reserve(
-                MemoryClass::Commands,
-                std::mem::size_of::<GroupCommitRequest>().arch_into(),
-            )
-            .change_context(KafkaTopicIngestorError::ControlAdmission)?;
+    ) -> CommitTask {
         let consumer = consumer.clone();
         let executor = self.executor.clone();
-        Ok(nervix_primitives::task::spawn(async move {
-            executor
-                .run_storage_with(
-                    StorageClass::Connector,
-                    nervix_execution::QueueAdmission::WaitForPlace,
-                    charge,
-                    move |_charge, _| request.commit(&consumer),
+        nervix_primitives::task::spawn(async move {
+            let charge = executor
+                .reserve(
+                    MemoryClass::Commands,
+                    std::mem::size_of::<GroupCommitRequest>().arch_into(),
                 )
                 .await
-        }))
+                .change_context(KafkaTopicIngestorError::ControlAdmission)?;
+            executor
+                .run_storage(StorageClass::Connector, charge, move |_charge, _| {
+                    request.commit(&consumer)
+                })
+                .await
+                .change_context(KafkaTopicIngestorError::ControlExecution)
+        })
     }
 }
 

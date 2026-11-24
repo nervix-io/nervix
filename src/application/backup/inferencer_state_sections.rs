@@ -13,6 +13,7 @@ use nervix_backup::{
     ArchiveRecord, InferencerStateDescriptor, SectionContent, SectionDigest, SectionPath,
     StateField,
 };
+use nervix_execution::Executor;
 use nervix_interconnect::{RemoteOperationFailure, RuntimeState};
 use nervix_models::ScheduledNode;
 
@@ -29,6 +30,7 @@ use crate::{
 impl SessionServiceImpl {
     pub(super) async fn stage_inferencer_sections(
         &self,
+        executor: &Executor,
         captured: CapturedBranchState,
         node: &ScheduledNode,
         request: &CaptureDomainStateRequest,
@@ -56,11 +58,15 @@ impl SessionServiceImpl {
             CapturedBranchStateKind::Inferencer(capture) => capture,
             CapturedBranchStateKind::StoredInferencer(checkpoint) => {
                 let limit = plan.snapshot_bytes;
-                let capture = CapturedInferencer::stored(checkpoint, &self.inner.runtime, limit)
-                    .await
-                    .change_context_lazy(|| {
-                        failure_context(domain, "the stored inferencer snapshot could not be read")
-                    })?;
+                let capture =
+                    CapturedInferencer::stored(checkpoint, &self.inner.runtime, executor, limit)
+                        .await
+                        .change_context_lazy(|| {
+                            failure_context(
+                                domain,
+                                "the stored inferencer snapshot could not be read",
+                            )
+                        })?;
                 let Some(capture) = capture else {
                     return Ok(Vec::new());
                 };
@@ -75,7 +81,12 @@ impl SessionServiceImpl {
         };
         let snapshot_bytes = plan.snapshot_bytes;
         let (values, metadata) = capture
-            .stage(&self.inner.runtime, plan.bytes_per_branch, snapshot_bytes)
+            .stage(
+                &self.inner.runtime,
+                executor,
+                plan.bytes_per_branch,
+                snapshot_bytes,
+            )
             .await
             .change_context_lazy(|| {
                 failure_context(domain, "the inferencer tensors could not be staged")
@@ -120,7 +131,7 @@ impl SessionServiceImpl {
         let bytes = descriptor.encode().change_context_lazy(|| {
             failure_context(domain, "the inferencer descriptor could not be encoded")
         })?;
-        let record = self.stage_captured_section(bytes, domain).await?;
+        let record = self.stage_captured_section(executor, bytes, domain).await?;
         let key = |path: SectionPath| CaptureSectionKey {
             coordination: request.coordination.clone(),
             domain: domain.clone(),

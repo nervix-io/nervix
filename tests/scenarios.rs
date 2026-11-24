@@ -655,6 +655,10 @@ struct ScenarioWorld {
     last_auth_attempts_elapsed: Option<Duration>,
     /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
     saturated_credentials_node: Option<String>,
+    /// A client connection a scenario began without waiting for it: what the connection's status
+    /// command printed, or the error it ended with.
+    pending_client_connection:
+        Option<nervix_primitives::task::AbortOnDropHandle<Result<String, String>>>,
     broker_observer: Option<BrokerObserver>,
     /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
@@ -876,6 +880,10 @@ impl fmt::Debug for ScenarioWorld {
             .field(
                 "saturated_credentials_node",
                 &self.saturated_credentials_node,
+            )
+            .field(
+                "pending_client_connection",
+                &self.pending_client_connection.is_some(),
             )
             .field(
                 "last_cluster_operation_elapsed",
@@ -14509,49 +14517,6 @@ async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
     });
 }
 
-#[then(
-    expr = "within {string} HTTP admission on node {string} host {string} path {string} refuses \
-            with retry-after"
-)]
-async fn then_http_admission_refuses_without_waiting(
-    world: &mut ScenarioWorld,
-    duration: String,
-    node: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    let uri = world
-        .cluster()
-        .http_uri(
-            &expand_placeholders(world, &node),
-            &expand_placeholders(world, &path),
-        )
-        .assured("the configured endpoint has a listener");
-    let request = reqwest::Client::new()
-        .post(uri)
-        .header("Host", expand_placeholders(world, &host))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(expand_placeholders(world, docstring(step)));
-    let response = nervix_primitives::time::timeout(
-        parse_duration_text(&duration).assured("the step duration is valid"),
-        request.send(),
-    )
-    .await
-    .assured("request admission answers while the worker remains held")
-    .assured("the HTTP listener answers");
-    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    let retry = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .assured("typed admission refusal supplies Retry-After")
-        .to_str()
-        .assured("Retry-After is ASCII")
-        .parse::<u64>()
-        .assured("Retry-After is a delay in seconds");
-    assert!(retry > 0);
-}
-
 /// The junction's first read of a message's dependency is slowed too, so a payload that reached
 /// the junction's input may still be read rather than parked. This waits until the junction, whose
 /// reads the scenario slowed, has parked a message on `REQUIRED WAIT`.
@@ -19314,6 +19279,23 @@ async fn then_background_command_request_redirects(world: &mut ScenarioWorld, no
     );
 }
 
+#[then(expr = "the background command request has not completed within {string}")]
+async fn then_background_command_request_has_not_completed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    let task = world
+        .background_command_result
+        .as_ref()
+        .verified("the preceding step started a background command request");
+    assert!(
+        !task.is_finished(),
+        "the background command request completed within {duration:?} while the node held it"
+    );
+}
+
 #[then("the background command request succeeds")]
 async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
     let task = world
@@ -22588,6 +22570,52 @@ async fn when_held_window_processor_branch_restore_is_released(
         .release_processor_branch_restore(&processor);
 }
 
+/// The window processor's next claim of a moved key stops once the key's holder released it and
+/// before the claiming unit installs its state, wherever that unit runs.
+#[when(expr = "the next partition install of window processor {string} is held")]
+async fn when_window_processor_partition_install_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .pause_processor_partition_install(processor);
+}
+
+#[then(
+    expr = "within {string} the partition install of window processor {string} reaches its hold"
+)]
+async fn then_window_processor_partition_install_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let processor = window_processor_ref(world, &processor);
+    nervix_primitives::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_processor_partition_install(&processor),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the partition install of {processor:?} did not reach its hold within {duration:?}")
+    });
+}
+
+#[when(expr = "the held partition install of window processor {string} is released")]
+async fn when_held_window_processor_partition_install_is_released(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .release_processor_partition_install(&processor);
+}
+
 /// Leave room for transport on the selected node while refusing larger decoding reservations.
 #[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
 async fn when_bulk_memory_on_node_keeps_only_bytes_free(
@@ -22606,7 +22634,7 @@ async fn when_bulk_memory_on_node_keeps_only_bytes_free(
 }
 
 /// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
-/// that is refused until the scenario releases the hold.
+/// that waits until the scenario releases the hold.
 #[when(expr = "bulk memory on every node keeps only {string} bytes free")]
 async fn when_bulk_memory_on_every_node_keeps_only_bytes_free(
     world: &mut ScenarioWorld,
@@ -22790,8 +22818,8 @@ async fn then_within_duration_describe_emitter_reports_metric_total(
 }
 
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
-/// password the leader is asked to verify is refused rather than queued. The leader is the node
-/// the scenario created its user through, so the user is already visible there.
+/// password the leader is asked to verify waits for a place. The leader is the node the scenario
+/// created its user through, so the user is already visible there.
 #[when("credential verification on the leader node is saturated")]
 async fn when_credential_verification_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
@@ -22825,6 +22853,83 @@ async fn when_the_client_connects_to_the_saturated_node_as_user_with_password(
         .clone()
         .expect("an earlier step saturated credential verification on a node");
     connect_to_node_with_credentials(world, &node_id, username, password).await;
+}
+
+/// Begin connecting to the saturated node without waiting for the connection: its credentials
+/// wait for a place on the node's credentials worker.
+#[when(
+    expr = "the client begins connecting to the saturated node as user {string} with password \
+            {string}"
+)]
+async fn when_the_client_begins_connecting_to_the_saturated_node(
+    world: &mut ScenarioWorld,
+    username: String,
+    password: String,
+) {
+    let node_id = world
+        .saturated_credentials_node
+        .clone()
+        .expect("an earlier step saturated credential verification on a node");
+    let username = expand_placeholders(world, &username);
+    let password = expand_placeholders(world, &password);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve node gRPC URI");
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    options.username = Some(username);
+    options.password = Some(password);
+    let domain = client_domain(&world.domain);
+    let connection = nervix_primitives::task::spawn(async move {
+        let client = Client::connect_with_options(&grpc_uri, domain, options)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        match client.execute("SHOW CLUSTER STATUS;".to_string()).await {
+            Ok(outcome) if outcome.succeeded() => Ok(outcome.message),
+            Ok(outcome) => Err(outcome.message),
+            Err(error) => Err(format!("{error:#}")),
+        }
+    });
+    world.pending_client_connection =
+        Some(nervix_primitives::task::AbortOnDropHandle::new(connection));
+}
+
+#[then(expr = "the pending client connection has not completed within {string}")]
+async fn then_the_pending_client_connection_has_not_completed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    let connection = world
+        .pending_client_connection
+        .as_ref()
+        .expect("an earlier step began a client connection");
+    assert!(
+        !connection.is_finished(),
+        "the client connection completed within {duration:?} while the node held its credentials"
+    );
+}
+
+/// Wait for the pending connection, and record its status command's output or its error as a
+/// connection step does.
+#[then("the pending client connection completes")]
+async fn then_the_pending_client_connection_completes(world: &mut ScenarioWorld) {
+    let connection = world
+        .pending_client_connection
+        .take()
+        .expect("an earlier step began a client connection");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), connection)
+        .await
+        .expect("the pending client connection completes once the node can verify it")
+        .expect("the pending client connection's task is joined");
+    world.last_command_error = None;
+    world.last_command_output = None;
+    match result {
+        Ok(output) => world.last_command_output = Some(output),
+        Err(error) => world.last_command_error = Some(error),
+    }
 }
 
 #[when("the saturated credential verification is released")]

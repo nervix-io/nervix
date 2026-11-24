@@ -215,13 +215,13 @@ impl TransportState {
             )
             .await?;
         // The status is the receiver's verdict on the attempt, and a cancellation it answers is
-        // already applied, so a full control queue holds the answer back rather than losing it,
-        // until the query's own deadline.
+        // already applied, so a full class holds the answer back rather than losing it, until the
+        // query's own deadline. It was read with the room its decoding takes.
         let response = wire::decode_answer::<RelayAdmissionResponse>(
             &self.executor,
-            MemoryClass::Management,
             CpuClass::Control,
-            response,
+            response.bytes,
+            response.decoding,
             AnswerDeadline {
                 peer: node_id,
                 at: deadline,
@@ -324,6 +324,14 @@ impl TransportState {
         )? {
             self.relay_retention_changed.notify_one();
         }
+        // The receiver may hold the grant back for room for half the stall bound the delivery gives
+        // each attempt, its dispatch timeout, the same half the delivery waits between asks, and no
+        // longer than half of what this exchange has left. It then answers the capacity refusal the
+        // delivery is held back on, which leaves the rest of the attempt for the answer and the body.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let grant_wait = (payload.ack_timing.remote_ack_dispatch_timeout / 2).min(remaining / 2);
+        let grant_wait = u64::try_from(grant_wait.as_nanos()).unwrap_or(u64::MAX);
+        let grant_wait = grant_wait.to_string();
         let grant_response = management
             .request_raw(
                 self,
@@ -332,8 +340,8 @@ impl TransportState {
                     body: Some(metadata),
                     response_class: PoolClass::Management,
                     response_limit: self.executor.limits().management_event_bytes.as_u64(),
-                    timeout: deadline.saturating_duration_since(Instant::now()),
-                    headers: &[],
+                    timeout: remaining,
+                    headers: &[(GRANT_WAIT_HEADER, grant_wait.as_str())],
                 },
             )
             .await;
@@ -352,13 +360,14 @@ impl TransportState {
             }
         };
         // The receiver has already decided the grant, and a grant it issued holds its relay memory
-        // until this delivery uses or cancels it, so a full control queue holds the answer back
-        // rather than leaving the grant to be reconciled, until the delivery's own deadline.
+        // until this delivery uses or cancels it, so a full class holds the answer back rather than
+        // leaving the grant to be reconciled, until the delivery's own deadline. It was read with
+        // the room its decoding takes.
         let grant = wire::decode_answer::<RelayGrantResponse>(
             &self.executor,
-            MemoryClass::Management,
             CpuClass::Control,
-            grant_response,
+            grant_response.bytes,
+            grant_response.decoding,
             AnswerDeadline {
                 peer: node_id,
                 at: deadline,
@@ -602,25 +611,37 @@ impl TransportState {
         peer_epoch: u64,
         relay_owner: StdArc<RelayPeerOwner>,
         cancel: bool,
-        body: RecvStream,
-        respond: server::SendResponse<Bytes>,
+        request: Request<RecvStream>,
+        mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        let encoded = read_body(
-            &self.executor,
-            MemoryClass::Management,
+        let declared = declared_length(
+            request.headers(),
             self.executor.limits().management_event_bytes.as_u64(),
-            self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let request = wire::decode_rkyv::<RelayAdmissionRequest>(
+        )?;
+        let reading = read_body_to_decode(
             &self.executor,
             MemoryClass::Management,
-            CpuClass::Control,
-            encoded,
+            declared,
+            self.options.progress_timeout,
+            request.into_body(),
+        );
+        let Some(received) = until_reset(&mut respond, reading).await? else {
+            return Ok(());
+        };
+        let Some(request) = until_reset(
+            &mut respond,
+            wire::decode_rkyv_within::<RelayAdmissionRequest>(
+                &self.executor,
+                CpuClass::Control,
+                received.bytes,
+                received.decoding,
+            ),
         )
         .await?
-        .into_value();
+        else {
+            return Ok(());
+        };
+        let request = request.into_value();
         if request.sender_epoch != peer_epoch || request.receiver_epoch != self.process_epoch {
             self.send_relay_admission_response(respond, RelayAdmissionStatus::Indeterminate)
                 .await?;
@@ -634,18 +655,24 @@ impl TransportState {
         let attempt = self.relay_attempt_key(peer_node_id, request.sender_epoch, request.delivery);
         let control = if cancel {
             // A cancellation that fences a position this node never granted records a watermark
-            // there, so it reserves that watermark's charge first. Without room the fence is not
-            // recorded and the sender, answered `Unknown`, asks again.
-            let note = self.executor.try_reserve(
+            // there, so it takes that watermark's charge first. The request holds nothing of the
+            // relay class, so it waits for room for as long as its sender keeps it open. Only a
+            // closed executor leaves the fence unrecorded, and the sender, answered `Unknown`,
+            // asks again.
+            let reserving = self.executor.reserve(
                 MemoryClass::Relay,
                 RelayChannelWatermarks::watermark_charge(),
             );
+            let reserving = async { Ok::<_, Report<TransportError>>(reserving.await) };
+            let Some(note) = until_reset(&mut respond, reserving).await? else {
+                return Ok(());
+            };
             let fence = match note {
                 Ok(note) => Some(note),
                 Err(refusal) => {
                     debug!(
                         error = %format_args!("{refusal:#}"),
-                        "relay memory has no room to fence a cancelled position"
+                        "relay memory cannot take a cancelled position's fence"
                     );
                     None
                 }
@@ -755,38 +782,66 @@ impl TransportState {
         peer_node_id: ClusterNodeName,
         peer_epoch: u64,
         relay_owner: StdArc<RelayPeerOwner>,
-        body: RecvStream,
-        respond: server::SendResponse<Bytes>,
+        request: Request<RecvStream>,
+        mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        // A full relay budget is answered with the capacity refusal the sender holds its delivery
-        // back on. Reading or decoding the request must therefore not wait on that same budget:
-        // both take only the room it has free.
-        let encoded = read_body_in_free_room(
-            &self.executor,
-            MemoryClass::Relay,
+        // A full relay class holds the grant back, as it holds back every charge: the request is
+        // read and decoded under one charge, and once it is known the operation's whole charge is
+        // waited for while the grant holds nothing of the class. The sender gives each ask its
+        // stall bound and declares half of it as the time the grant may be held, the same half it
+        // waits between asks. A grant still without room by then is answered with the capacity
+        // refusal the sender holds its delivery back on and asks again with, so the exchange never
+        // outlasts the bound its sender gives it. The sender's reset also ends every wait.
+        let held_for = Duration::from_nanos(header_u64(&request, GRANT_WAIT_HEADER)?);
+        let held_until = Instant::now().checked_add(held_for).ok_or_else(|| {
+            Report::new(TransportError::RelayGrant(
+                "the grant's declared wait overflows the clock".to_string(),
+            ))
+        })?;
+        let declared = declared_length(
+            request.headers(),
             self.executor.limits().relay_encoded_bytes.as_u64(),
-            self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let wire::FreeRoom::Taken(encoded) = encoded else {
-            debug!("relay grant refused: the relay budget has no room to read its request");
-            return self
-                .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
-                .await;
+        )?;
+        let reading = timeout_at(
+            held_until,
+            read_body_to_decode(
+                &self.executor,
+                MemoryClass::Relay,
+                declared,
+                self.options.progress_timeout,
+                request.into_body(),
+            ),
+        );
+        let reading = async { Ok::<_, Report<TransportError>>(reading.await) };
+        let received = match until_reset(&mut respond, reading).await? {
+            None => return Ok(()),
+            Some(Ok(received)) => received?,
+            Some(Err(_)) => {
+                debug!("relay grant held back: no room to read its request within its wait");
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
+                    .await;
+            }
         };
-        let decoded = wire::decode_rkyv_in_free_room::<RelayGrantRequest>(
-            &self.executor,
-            MemoryClass::Relay,
-            CpuClass::Data,
-            encoded,
-        )
-        .await?;
-        let wire::FreeRoom::Taken(decoded) = decoded else {
-            debug!("relay grant refused: the relay budget has no room to decode its request");
-            return self
-                .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
-                .await;
+        let decoding = timeout_at(
+            held_until,
+            wire::decode_rkyv_within::<RelayGrantRequest>(
+                &self.executor,
+                CpuClass::Data,
+                received.bytes,
+                received.decoding,
+            ),
+        );
+        let decoding = async { Ok::<_, Report<TransportError>>(decoding.await) };
+        let decoded = match until_reset(&mut respond, decoding).await? {
+            None => return Ok(()),
+            Some(Ok(decoded)) => decoded?,
+            Some(Err(_)) => {
+                debug!("relay grant held back: no worker decoded its request within its wait");
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
+                    .await;
+            }
         };
         let (grant, metadata_memory) = decoded.into_parts();
         if grant.sender_epoch != peer_epoch {
@@ -891,30 +946,48 @@ impl TransportState {
             .ok_or_else(|| {
                 TransportError::RelayGrant("relay operation limits overflow".to_string())
             })?;
-        // The watermark the delivery's outcome records is part of what the delivery needs, so its
-        // charge is reserved with the delivery's own room: without room for both, the grant is
-        // refused as a capacity refusal the sender holds its delivery back on.
+        // The grant's metadata stays charged with its record, and the watermark the delivery's
+        // outcome records is part of what the delivery needs. The metadata's charge is given back
+        // while the grant waits for its operation's room, and all three are taken again as one
+        // charge, so the wait holds nothing of the class; the connection's stream places bound the
+        // metadata meanwhile. A grant whose wait ends without room is refused as a capacity refusal
+        // the sender holds its delivery back on.
+        let metadata_bytes = metadata_memory.bytes();
+        drop(metadata_memory);
         let watermark_charge = RelayChannelWatermarks::watermark_charge();
-        let reserved_bytes = operation_bytes
+        let delivery_bytes = operation_bytes
             .checked_add(watermark_charge)
             .ok_or_else(|| {
                 TransportError::RelayGrant("relay operation limits overflow".to_string())
             })?;
-        let reservation = match self
-            .executor
-            .try_reserve(MemoryClass::Relay, reserved_bytes)
-        {
-            Ok(reservation) => reservation,
-            Err(error) => {
+        let whole = delivery_bytes.checked_add(metadata_bytes).ok_or_else(|| {
+            TransportError::RelayGrant("relay operation limits overflow".to_string())
+        })?;
+        let charging = timeout_at(held_until, self.executor.reserve(MemoryClass::Relay, whole));
+        let charging = async { Ok::<_, Report<TransportError>>(charging.await) };
+        let charge = match until_reset(&mut respond, charging).await? {
+            None => return Ok(()),
+            Some(Ok(Ok(charge))) => charge,
+            Some(Ok(Err(error))) => {
+                // An operation the whole class could never hold, or a closed class, is refused.
                 debug!(error = %format_args!("{error:#}"), "relay grant refused by memory admission");
                 return self
                     .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
                     .await;
             }
+            Some(Err(_)) => {
+                debug!("relay grant held back: no relay room for its operation within its wait");
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::Memory)
+                    .await;
+            }
         };
-        let (note, reservation) = reservation
+        let (metadata_memory, charge) = charge
+            .split(metadata_bytes)
+            .map_err(|error| TransportError::with_cause(error, TransportError::RelayGrant))?;
+        let (note, reservation) = charge
             .split(watermark_charge)
-            .verified("the reservation above includes the watermark's charge");
+            .verified("the charge above includes the watermark's charge");
         let Ok(item) = StdArc::clone(&self.relay_items).try_acquire_owned() else {
             return self
                 .refuse_relay_grant(respond, RelayGrantRefusal::QueueItem)

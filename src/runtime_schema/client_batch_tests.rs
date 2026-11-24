@@ -615,21 +615,27 @@ async fn columns_that_break_their_type_are_invalid_data() {
     );
 }
 
+/// A node whose relay memory is full holds a batch back until room frees and then decodes it: a
+/// full class is no reason to answer the producer `Busy`.
 #[nervix_primitives::test]
-async fn a_node_without_relay_memory_is_busy_rather_than_refusing_the_batch() {
+async fn a_node_without_relay_memory_holds_the_batch_until_room_frees() {
     let executor = Executor::default();
     let mut held = Vec::<Reservation>::new();
     while let Ok(reservation) = executor.try_reserve(MemoryClass::Relay, 1024 * 1024) {
         held.push(reservation);
     }
     let body = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1])]);
-    let refused = schema()
-        .decode_client_batch(&executor, Bytes::from(body), limits())
-        .await;
-    let Err(error) = refused else {
-        panic!("a node without relay memory decodes nothing");
-    };
-    assert!(matches!(error.current_context(), ClientBatchError::Busy));
-    assert_eq!(error.current_context().defect(), None);
+    let schema = schema();
+    let mut decoding =
+        std::pin::pin!(schema.decode_client_batch(&executor, Bytes::from(body), limits()));
+    assert!(
+        nervix_primitives::time::timeout(std::time::Duration::from_millis(200), decoding.as_mut())
+            .await
+            .is_err(),
+        "a full relay class holds the batch back instead of answering it busy"
+    );
     drop(held);
+    decoding
+        .await
+        .assured("the batch decodes once its class has room");
 }

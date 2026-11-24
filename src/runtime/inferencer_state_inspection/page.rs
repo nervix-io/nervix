@@ -6,7 +6,7 @@
 use super::*;
 
 struct Page {
-    memory: Reservation,
+    memory: GrowingCharge,
     start: u64,
     skip: u64,
     rows_left: usize,
@@ -29,7 +29,7 @@ pub(super) fn build(
     catalog: nervix_models::StateInspectionKeyCatalog,
     after: Option<(Option<BranchKeyFingerprint>, u64)>,
     bounds: ProcessorStatePageBounds,
-    memory: Reservation,
+    memory: GrowingCharge,
     cancellation: &Cancellation,
 ) -> ReadResult<ProcessorStatePage> {
     let mut page = Page::new(plan, after, bounds, memory, cancellation)?;
@@ -47,7 +47,7 @@ impl Page {
         plan: &InferencerStatePlan,
         after: Option<(Option<BranchKeyFingerprint>, u64)>,
         bounds: ProcessorStatePageBounds,
-        mut memory: Reservation,
+        mut memory: GrowingCharge,
         cancellation: &Cancellation,
     ) -> ReadResult<Self> {
         let sections =
@@ -241,7 +241,7 @@ impl Page {
             runs: self.metadata,
             sections,
             memory: Some(ProcessorStatePageMemory {
-                _reservation: self.memory,
+                _reservation: self.memory.into_reservation(),
                 _windows: Vec::new(),
             }),
         })

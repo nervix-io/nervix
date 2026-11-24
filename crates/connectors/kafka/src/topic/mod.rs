@@ -289,22 +289,22 @@ impl KafkaPartitionMetadata {
         let charge_bytes = std::mem::size_of_val(&operation)
             .checked_add(topic_bytes)
             .assured("the charged job is held in memory");
-        let charge = self
-            .executor
-            .try_reserve(MemoryClass::Commands, charge_bytes.arch_into())
-            .change_context(KafkaPartitionMetadataError::Admission)
-            .change_context_lazy(failure)?;
-        let running = self.executor.run_storage_with(
-            StorageClass::Connector,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            charge,
-            operation,
-        );
+        // A full commands class holds the lookup back like a full queue, within the same deadline.
+        let running = async {
+            let charge = self
+                .executor
+                .reserve(MemoryClass::Commands, charge_bytes.arch_into())
+                .await
+                .change_context(KafkaPartitionMetadataError::Admission)?;
+            self.executor
+                .run_storage(StorageClass::Connector, charge, operation)
+                .await
+                .change_context(KafkaPartitionMetadataError::Execution)
+        };
         timeout_at(deadline, running)
             .await
             .map_err(|_| Report::new(KafkaPartitionMetadataError::Timeout))
             .change_context_lazy(failure)?
-            .change_context(KafkaPartitionMetadataError::Execution)
             .change_context_lazy(failure)?
             .change_context_lazy(failure)
     }
@@ -313,9 +313,9 @@ impl KafkaPartitionMetadata {
 /// Why a Kafka emitter could not create its producer, beneath the emitter's start failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 enum KafkaProducerStartError {
-    /// The node's commands budget has no room for the charge of the job that will destroy the
-    /// producer, so the producer is not created. The refusal judged nothing, so the host starts the
-    /// emitter again after its retry delay.
+    /// The node's commands budget did not grant the charge of the job that will destroy the
+    /// producer, so the producer is not created. A full budget only holds the creation back; this
+    /// is a charge the budget can never grant, and it judged nothing of the emitter.
     #[error(
         "the {connector} producer cannot reserve the job that will destroy it",
         connector = ConnectorKind::Kafka
@@ -611,11 +611,11 @@ impl KafkaTopicEmitter {
 
     /// Creates the producer `config` describes, taking the charge of the job that will destroy it
     /// on `executor` first.
-    fn create_producer(
+    async fn create_producer(
         config: &ClientConfig,
         executor: Executor,
     ) -> EmitterStartResult<Retiring<KafkaProducer>> {
-        let retirement = match RetirementCharge::reserve(executor) {
+        let retirement = match RetirementCharge::reserve(executor).await {
             Ok(retirement) => retirement,
             Err(refused) => {
                 let refused = refused.change_context(KafkaProducerStartError::RetirementAdmission);
@@ -1002,9 +1002,11 @@ impl EmitterLifecycle for KafkaTopicEmitter {
                 } else {
                     None
                 };
-                let producer = Self::create_producer(config, executor.clone()).change_context(
-                    nervix_connector::EmitterLifecycleError::Resume { connector: KAFKA },
-                )?;
+                let producer = Self::create_producer(config, executor.clone())
+                    .await
+                    .change_context(nervix_connector::EmitterLifecycleError::Resume {
+                        connector: KAFKA,
+                    })?;
                 self.producer = KafkaProducerState::Ready {
                     producer,
                     partitioning,
