@@ -870,9 +870,12 @@ pub(in crate::registry) fn emitter(
         connector: Box::new(EmitterEntity::Kafka(KafkaEmitter::Topic(
             KafkaTopicEmitter {
                 mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: ClientName::parse(client).expect("valid identifier"),

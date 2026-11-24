@@ -1064,7 +1064,8 @@ pub use nervix_models::{
 pub use node::{DEFAULT_TEMP_DIR, Runtime};
 use observability::BranchMetricsMark;
 pub(crate) use observability::{
-    IngestorDescribe, IngestorRateLimitTotals, KafkaDomainOffsetDescribe,
+    DataflowNodeTransientState, IngestorDescribe, IngestorRateLimitTotals,
+    KafkaDomainOffsetDescribe,
 };
 pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoffResult};
 pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};

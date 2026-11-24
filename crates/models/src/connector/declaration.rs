@@ -510,6 +510,9 @@ pub enum RuntimeCapability {
     EndpointPause(EndpointPauseResponse),
     /// An emitter publishing in one declared mode.
     Publishing(EmitterPublishingModeKind),
+    /// An emitter giving up the work its destination did not take once its retry policy's
+    /// `GIVE UP AFTER` has passed since the work's first failed attempt.
+    GiveUp,
     /// A statement writing an option that takes a value.
     Option { keywords: &'static str },
     /// A statement making one choice of an option, or leaving the option out where that choice
@@ -579,6 +582,7 @@ impl Display for RuntimeCapability {
             Self::Delivery(kind) => write!(f, "MODE {}", kind.phrase()),
             Self::EndpointPause(response) => write!(f, "ON QUIESCE BUFFER {}", response.phrase()),
             Self::Publishing(kind) => write!(f, "MODE {}", kind.label()),
+            Self::GiveUp => f.write_str("GIVE UP AFTER"),
             Self::Option { keywords } => f.write_str(keywords),
             Self::OptionChoice { keywords, choice } => write!(f, "{keywords} {choice}"),
             Self::Metadata { field } => write!(f, "metadata.{field}"),

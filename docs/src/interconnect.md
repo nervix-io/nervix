@@ -592,8 +592,11 @@ reserve among them), the ordered `RATE LIMIT`
 clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
 rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
 carries for a unit whose ingestor writes `RATE LIMIT`. The fingerprint also includes the
-`node` expression scope and the `SHOW NODES` statement in the archived vocabulary. Peers must
-match it exactly.
+`node` expression scope and the `SHOW NODES` statement in the archived vocabulary, an emitter
+retry policy's optional `GIVE UP AFTER`, the client emitter description a forwarded consumer
+receives with that limit, and the dataflow node status that says whether an emitter's retried
+failure is a misconfiguration and how long remains before it gives up its oldest retried unit.
+Peers must match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
 partition relay grants retain that bounded footprint when other entities declare external
@@ -984,7 +987,11 @@ visibility all answer in these terms. A dataflow node status request names one e
 its node, so an emitter with several [instances](emitters.md#emitter-instances) is asked about each
 instance at that instance's owner; a node scheduled as one unit is asked about its `Single` unit.
 A domain or entity drain status reports each publishing emitter with the unit that publishes, so
-instances of one emitter are reported apart. An ingestor description is the execution owner's
+instances of one emitter are reported apart. An emitter's dataflow node status carries its
+retried failure with whether that failure is a misconfiguration, and the milliseconds that remained
+before the owner gives up its oldest retried unit when the owner answered, so `DESCRIBE EMITTER` on
+any node shows the owner's `misconfigured:` and `give up in:` lines. An ingestor description is the
+execution owner's
 report of the ingestor. Its last decode rejection crosses as a typed record: a reference, an
 instant, a codec name, field paths, an optional Kafka or syslog position and the rendered codec
 diagnostic. The asking node renders that record; it never parses one.

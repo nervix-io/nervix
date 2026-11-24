@@ -30,6 +30,7 @@ const FAILED: &str = "nervix_emitter_records_failed_total";
 const RETRIED: &str = "nervix_emitter_records_retried_total";
 const RETRIES: &str = "nervix_emitter_retries_total";
 const RETRY_WAIT: &str = "nervix_emitter_retry_wait_seconds_total";
+const GIVE_UPS: &str = "nervix_emitter_give_ups_total";
 const OPENS: &str = "nervix_emitter_opens_total";
 const POOL_WAITS: &str = "nervix_emitter_pool_waits_total";
 const POOL_SECONDS: &str = "nervix_emitter_pool_wait_seconds_total";
@@ -102,6 +103,7 @@ pub(super) struct OutcomeFamilies {
     retried: IntCounterVec,
     retries: IntCounterVec,
     retry_wait: CounterVec,
+    give_ups: IntCounterVec,
     opens: IntCounterVec,
     pool_waits: IntCounterVec,
     pool_seconds: CounterVec,
@@ -146,6 +148,13 @@ impl OutcomeFamilies {
                 registry,
                 RETRY_WAIT,
                 "Wall seconds of retry delay actually scheduled.",
+            ),
+            give_ups: Self::counter(
+                registry,
+                GIVE_UPS,
+                "Units of work the host stopped retrying because the emitter's GIVE UP AFTER \
+                 passed since their first failed attempt.",
+                None,
             ),
             opens: Self::counter(
                 registry,
@@ -231,6 +240,7 @@ impl OutcomeFamilies {
             retries: EmitterRetryCause::ALL
                 .map(|cause| Self::child(&self.retries, values, cause.as_ref())),
             retry_wait: self.retry_wait.with_label_values(values),
+            give_ups: self.give_ups.with_label_values(values),
             opens: EmitterOpenOutcome::ALL
                 .map(|outcome| Self::child(&self.opens, values, outcome.as_ref())),
             pool_waits: self.pool_waits.with_label_values(values),
@@ -262,6 +272,7 @@ pub(super) struct OutcomeMetrics {
     retried: IntCounter,
     retries: [IntCounter; 3],
     retry_wait: Counter,
+    give_ups: IntCounter,
     opens: [IntCounter; 2],
     pool_waits: IntCounter,
     pool_seconds: Counter,
@@ -312,6 +323,7 @@ impl OutcomeMetrics {
         for (name, counter) in [
             (FAILED, &self.failed),
             (RETRIED, &self.retried),
+            (GIVE_UPS, &self.give_ups),
             (POOL_WAITS, &self.pool_waits),
             (CONFIRMATION_TIMEOUTS, &self.confirmation_timeouts),
             (UNSENT, &self.unsent),
@@ -336,6 +348,14 @@ impl EmitterInteractionMetrics {
     pub(crate) fn record_retry(&self, cause: EmitterRetryCause, delay: Duration) {
         self.series.outcomes.retries[cause.index()].inc();
         self.series.outcomes.retry_wait.inc_by(delay.as_secs_f64());
+    }
+
+    /// Counts `units` of work the host gave up retrying at once: buffered batches, and a staged
+    /// commit.
+    pub(crate) fn record_give_ups(&self, units: u64) {
+        if units != 0 {
+            self.series.outcomes.give_ups.inc_by(units);
+        }
     }
 
     pub(crate) fn record_retried(&self, records: u64) {

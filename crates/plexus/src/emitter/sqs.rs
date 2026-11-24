@@ -131,8 +131,8 @@ mod tests {
         assert_eq!(destination.fifo_group, None);
         assert_eq!(destination.send, SqsSend::Single);
         let SqsQueuePublishingMode::Ack { retry_policy } = destination.mode;
-        assert_eq!(retry_policy.backoff, "250ms");
-        assert_eq!(retry_policy.max_backoff, "30s");
+        assert_eq!(retry_policy.pacing.backoff, "250ms");
+        assert_eq!(retry_policy.pacing.max_backoff, "30s");
     }
 
     #[test]

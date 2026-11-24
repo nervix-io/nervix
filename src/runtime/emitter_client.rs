@@ -75,6 +75,7 @@ impl ClientConsumerConnector {
         plan: &ClientConsumerEmitterPlan,
         output_schema: Arc<CompiledSchema>,
         retry: nervix_connector::ParsedRetryPolicy,
+        give_up_after: Option<Duration>,
     ) -> Self {
         let key = DomainNodeRef::node_in(
             context.domain.clone(),
@@ -95,6 +96,7 @@ impl ClientConsumerConnector {
                 ack_timeout: plan.ack_timeout,
                 retry_backoff: retry.backoff,
                 retry_max_backoff: retry.max_backoff,
+                give_up_after,
             },
             context.runtime.inner.client_emitter_budget.clone(),
             context
@@ -336,11 +338,24 @@ impl EmitterConnector for ClientConsumerConnector {
         )
         .await;
         let mut outcome = PerRecordOutcome::with_capacity(results.len());
+        let mut given_up = Vec::new();
         for (id, occurred_at, result) in results {
             match result {
                 Ok(ClientEmitterResult::Acknowledged) => outcome.deliver(id),
                 Ok(ClientEmitterResult::Rejected(reason)) => {
                     outcome.reject(RejectedEmitterMember::external(id, occurred_at, reason));
+                }
+                // The delivery owner retries a delivery by itself and measured the emitter's
+                // GIVE UP AFTER from its first failed attempt, so the emitter gives the payload's
+                // batches up rather than retrying it once more.
+                Ok(ClientEmitterResult::GivenUp(latest)) => {
+                    given_up.push(id);
+                    outcome.fail(
+                        Report::new(EmitterWriteError::Publish {
+                            connector: "client",
+                        })
+                        .attach_printable(latest.to_string()),
+                    );
                 }
                 Ok(ClientEmitterResult::Unconsumed) => outcome.fail(
                     Report::new(EmitterWriteError::Publish {
@@ -357,6 +372,9 @@ impl EmitterConnector for ClientConsumerConnector {
                     .attach_printable(format!("client delivery unavailable: {refusal:?}")),
                 ),
             }
+        }
+        for id in given_up {
+            client_payloads.give_up_written(batches, &write.payloads, id)?;
         }
         client_payloads
             .answers(batches, write.payloads, outcome)?

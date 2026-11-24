@@ -20,7 +20,7 @@ use nervix_models::{
 use super::delivery::{NamedDelivery, rate_limits_after, suspend_only_quiesce_clause};
 use crate::{
     lexer::{Identifier, Token},
-    parser_support::{ParseError, ack_timeout, ack_window, kw, retry_policy, schema_ref},
+    parser_support::{ParseError, ack_timeout, ack_window, ingestor_retry_policy, kw, schema_ref},
 };
 
 /// The acknowledging mode of a client source: its window, its ACK timeout and the retry policy a
@@ -30,7 +30,7 @@ fn mode<'src>()
     kw(Identifier::Ack)
         .ignore_then(ack_window())
         .then(ack_timeout())
-        .then(retry_policy())
+        .then(ingestor_retry_policy())
         .map(|((window, ack_timeout), retry_policy)| ClientIngestMode {
             window,
             ack_timeout,

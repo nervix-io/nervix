@@ -148,6 +148,13 @@ Every ingestor body declares its delivery mode with `MODE`, polled and listener 
   `REJECT RETRY AFTER <duration>` or hold them with `BUFFER MAX SIZE <bytes> RESPOND AFTER RESUME`.
   The sender owns retry.
 
+An ingestor's `RETRY POLICY` only paces its next attempt after a transient failure: reading again
+after a failed or timed-out acknowledgement, recovering from a transport failure, or, for a
+`CLIENT PRODUCER`, the producer sending again a batch that was refused only temporarily. Its source
+keeps what the ingestor has not acknowledged, so an ingestor has nothing to give up: `GIVE UP AFTER`
+belongs only to an [emitter's retry policy](emitters.md#giving-up), and writing it on an
+ingestor's is a parse error that completion never offers.
+
 For `ACK SEQUENTIAL` and `ACK PARALLEL`, `ACK TIMEOUT` bounds how long a payload may make no
 acknowledgement progress, not how long its processing takes. Work under way on its records reports
 them alive on the physical clock: a node that received a record from another node does for as long

@@ -195,6 +195,32 @@ pub(crate) enum ClientEmitterResult {
     /// consumer that attaches could move it on. It returns to its emitter, which holds it for a
     /// retry, so a stop or a node's save cuts it as held work instead of waiting for it.
     Unconsumed,
+    /// The emitter's `GIVE UP AFTER` passed since the delivery's first failed attempt, so the
+    /// emitter stops offering it, and its rows fail. It names the latest failed attempt.
+    GivenUp(ClientAttemptFailure),
+}
+
+/// How one attempt of a client emitter delivery ended without the consumer's acknowledgement or
+/// rejection, which the delivery is retried after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a failed attempt of a client emitter delivery is a semantic retry outcome the \
+                  delivery owner records and its emitter reports when it gives the delivery up"
+    )
+)]
+pub(crate) enum ClientAttemptFailure {
+    /// The consumer answered that it wants the delivery again.
+    #[error("the consumer asked to receive the delivery again")]
+    AskedToRetry,
+    /// The consumer did not answer within the emitter's `ACK TIMEOUT`.
+    #[error("the consumer did not answer the delivery within ACK TIMEOUT")]
+    Unanswered,
+    /// The consumer detached while it held the attempt.
+    #[error("the consumer detached before it answered the delivery")]
+    Detached,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -231,6 +257,9 @@ pub(crate) struct ClientEmitterDescription {
     pub(crate) ack_timeout: Duration,
     pub(crate) retry_backoff: Duration,
     pub(crate) retry_max_backoff: Duration,
+    /// The emitter's `GIVE UP AFTER`, after which a delivery that keeps failing is offered no
+    /// more; absent when the emitter retries a delivery until a consumer takes it.
+    pub(crate) give_up_after: Option<Duration>,
 }
 
 pub(crate) struct ClientEmitterConsumer {
@@ -389,6 +418,7 @@ impl ClientEmitterEndpoint {
                 ack_timeout: description.ack_timeout,
                 retry_backoff: description.retry_backoff,
                 retry_max_backoff: description.retry_max_backoff,
+                give_up_after: description.give_up_after,
                 series: series.clone(),
                 references,
                 deadline_wakes,
@@ -614,6 +644,29 @@ struct RetainedDelivery {
     reply: oneshot::Sender<ClientEmitterResult>,
     phase: DeliveryPhase,
     retries: u32,
+    /// The attempts of this delivery that failed, absent until the first one does.
+    failed: Option<FailedAttempts>,
+}
+
+/// What the failed attempts of one delivery decide: when the emitter gives it up, and how the
+/// latest one ended.
+#[derive(Debug, Clone, Copy)]
+struct FailedAttempts {
+    /// When `GIVE UP AFTER` has passed since the first failed attempt, absent when the emitter
+    /// declares no limit or the limit ends beyond every instant the monotonic clock reports.
+    give_up_at: Option<Instant>,
+    /// How the latest failed attempt ended.
+    latest: ClientAttemptFailure,
+}
+
+impl FailedAttempts {
+    /// Whether the delivery's limit has passed at `now`.
+    fn has_run_out(&self, now: Instant) -> bool {
+        match self.give_up_at {
+            Some(give_up_at) => give_up_at <= now,
+            None => false,
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -639,6 +692,8 @@ struct Owner<R> {
     ack_timeout: Duration,
     retry_backoff: Duration,
     retry_max_backoff: Duration,
+    /// The emitter's `GIVE UP AFTER`, absent when it retries a delivery until a consumer takes it.
+    give_up_after: Option<Duration>,
     series: ClientEmitterSeries,
     references: R,
     deadline_wakes: bool,
@@ -736,6 +791,7 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
                             due: Instant::now(),
                         },
                         retries: 0,
+                        failed: None,
                     },
                 );
                 self.pending.push_back(identity);
@@ -816,7 +872,7 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
                 AttemptHistory::Acknowledged { consumer }
             }
             ClientEmitterAnswer::Retry => {
-                self.retry(identity);
+                self.retry(identity, ClientAttemptFailure::AskedToRetry);
                 AttemptHistory::Retried { consumer }
             }
             ClientEmitterAnswer::Reject(reason) => {
@@ -863,7 +919,35 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
         }
     }
 
-    fn retry(&mut self, identity: Uuid) {
+    /// Offers the delivery again after the attempt that ended with `failure`, or gives it up once
+    /// the emitter's `GIVE UP AFTER` has passed since its first failed attempt.
+    fn retry(&mut self, identity: Uuid, failure: ClientAttemptFailure) {
+        let now = Instant::now();
+        let give_up_after = self.give_up_after;
+        let Some(delivery) = self.deliveries.get_mut(&identity) else {
+            return;
+        };
+        let failed = match delivery.failed {
+            Some(earlier) => FailedAttempts {
+                give_up_at: earlier.give_up_at,
+                latest: failure,
+            },
+            None => {
+                let give_up_at = match give_up_after {
+                    Some(limit) => now.checked_add(limit),
+                    None => None,
+                };
+                FailedAttempts {
+                    give_up_at,
+                    latest: failure,
+                }
+            }
+        };
+        delivery.failed = Some(failed);
+        if failed.has_run_out(now) {
+            self.give_up(identity, failure);
+            return;
+        }
         if let Some(delivery) = self.deliveries.get_mut(&identity) {
             self.series.retry();
             if delivery.retries < 9 {
@@ -909,7 +993,7 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
             .collect::<Vec<_>>();
         let revoked = assigned.len();
         for identity in assigned {
-            self.revoke(identity);
+            self.revoke(identity, ClientAttemptFailure::Detached);
         }
         if let Some(consumer) = self.consumers.remove(&id) {
             self.series.detach(consumer.forwarded, consumer.max_bytes);
@@ -931,7 +1015,7 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
         }
     }
 
-    fn revoke(&mut self, identity: Uuid) {
+    fn revoke(&mut self, identity: Uuid, failure: ClientAttemptFailure) {
         if let Some(delivery) = self.deliveries.get(&identity)
             && let DeliveryPhase::Assigned { reference, .. } = delivery.phase
         {
@@ -940,17 +1024,44 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
             self.remember_result(reference);
             self.release_assignment(identity);
         }
-        self.retry(identity);
+        self.retry(identity, failure);
     }
 
+    /// Ends the delivery as given up: the emitter offers it no more, and its rows fail.
+    fn give_up(&mut self, identity: Uuid, latest: ClientAttemptFailure) {
+        tracing::debug!(%identity, %latest, "gave up a client emitter delivery");
+        self.complete(identity, ClientEmitterResult::GivenUp(latest));
+    }
+
+    /// Revokes every attempt its consumer left unanswered past its `ACK TIMEOUT`, and gives up
+    /// every delivery that waits for its next attempt after its limit has passed. An attempt in
+    /// flight is decided by its own answer first, so a delivery its consumer acknowledges is never
+    /// given up.
     fn expire(&mut self) {
         let now = Instant::now();
-        let expired = self.deliveries.iter().filter_map(|(identity, delivery)| {
-            matches!(delivery.phase, DeliveryPhase::Assigned { deadline, .. } if deadline <= now)
-                .then_some(*identity)
-        }).collect::<Vec<_>>();
+        let mut expired = Vec::new();
+        let mut given_up = Vec::new();
+        for (identity, delivery) in &self.deliveries {
+            match delivery.phase {
+                DeliveryPhase::Assigned { deadline, .. } => {
+                    if deadline <= now {
+                        expired.push(*identity);
+                    }
+                }
+                DeliveryPhase::Pending { .. } => {
+                    if let Some(failed) = delivery.failed
+                        && failed.has_run_out(now)
+                    {
+                        given_up.push((*identity, failed.latest));
+                    }
+                }
+            }
+        }
         for identity in expired {
-            self.revoke(identity);
+            self.revoke(identity, ClientAttemptFailure::Unanswered);
+        }
+        for (identity, latest) in given_up {
+            self.give_up(identity, latest);
         }
     }
 
@@ -958,14 +1069,37 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
         if !self.deadline_wakes {
             return None;
         }
-        self.deliveries
-            .values()
-            .filter_map(|delivery| match delivery.phase {
+        let now = Instant::now();
+        let mut wake: Option<Instant> = None;
+        for delivery in self.deliveries.values() {
+            let candidate = match delivery.phase {
                 DeliveryPhase::Assigned { deadline, .. } => Some(deadline),
-                DeliveryPhase::Pending { due } if due > Instant::now() => Some(due),
-                _ => None,
-            })
-            .min()
+                DeliveryPhase::Pending { due } => {
+                    // A delivery waiting for its next attempt is given up once its limit passes,
+                    // which may come before that attempt is due.
+                    let give_up_at = match delivery.failed {
+                        Some(failed) => failed.give_up_at,
+                        None => None,
+                    };
+                    if let Some(give_up_at) = give_up_at
+                        && give_up_at < due
+                    {
+                        Some(give_up_at)
+                    } else if due > now {
+                        Some(due)
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(candidate) = candidate {
+                wake = Some(match wake {
+                    Some(earlier) => earlier.min(candidate),
+                    None => candidate,
+                });
+            }
+        }
+        wake
     }
 
     fn stream_capacity(&self, identity: Uuid) -> bool {
@@ -1131,6 +1265,7 @@ mod tests {
             ack_timeout,
             retry_backoff: Duration::from_millis(1),
             retry_max_backoff: Duration::from_millis(8),
+            give_up_after: None,
         }
     }
 
@@ -1262,6 +1397,131 @@ mod tests {
         assert_eq!(
             publisher.await.expect("publisher runs"),
             Ok(ClientEmitterResult::Acknowledged)
+        );
+    }
+
+    /// `GIVE UP AFTER 0s` never offers a delivery again: the consumer's first request to receive it
+    /// again gives it up, its reservation returns, and the emitter learns how the attempt ended.
+    #[nervix_primitives::test]
+    async fn a_zero_limit_gives_a_delivery_up_at_its_first_failed_attempt() {
+        let budget = ClientEmitterBudget::default();
+        let endpoint = Arc::new(ClientEmitterEndpoint::new(
+            ClientEmitterDescription {
+                give_up_after: Some(Duration::ZERO),
+                ..description(AckWindow::Sequential, Duration::from_secs(2))
+            },
+            budget.clone(),
+            series(),
+        ));
+        let mut consumer = endpoint
+            .open(
+                &fields(),
+                1,
+                NonZeroU64::new(1024).assured("literal credit"),
+                false,
+            )
+            .await
+            .assured("consumer opens");
+        let publisher = nervix_primitives::task::spawn({
+            let endpoint = endpoint.clone();
+            async move { endpoint.publish(test_payload()).await }
+        });
+        let attempt = consumer
+            .deliveries
+            .recv()
+            .await
+            .assured("the delivery reaches the attached consumer");
+        consumer
+            .answer(attempt.reference, ClientEmitterAnswer::Retry)
+            .await
+            .assured("the request to receive it again is accepted");
+
+        assert_eq!(
+            publisher.await.assured("publisher runs"),
+            Ok(ClientEmitterResult::GivenUp(
+                ClientAttemptFailure::AskedToRetry
+            ))
+        );
+        assert_eq!(
+            budget.used(),
+            0,
+            "a given-up delivery returns its reservation"
+        );
+        assert!(
+            consumer.deliveries.try_recv().is_err(),
+            "a given-up delivery is offered no more"
+        );
+    }
+
+    /// A delivery retried before its limit passes is offered again, and the limit counts from its
+    /// first failed attempt: once it has passed, the delivery waiting for its next attempt is given
+    /// up at the limit, naming the latest attempt, without being offered once more.
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_retried_delivery_is_given_up_once_its_limit_passes_since_the_first_failure() {
+        let limit = Duration::from_secs(10);
+        let endpoint = Arc::new(ClientEmitterEndpoint::new(
+            ClientEmitterDescription {
+                retry_backoff: Duration::from_secs(4),
+                retry_max_backoff: Duration::from_secs(8),
+                give_up_after: Some(limit),
+                ..description(AckWindow::Sequential, Duration::from_secs(2))
+            },
+            ClientEmitterBudget::default(),
+            series(),
+        ));
+        let mut consumer = endpoint
+            .open(
+                &fields(),
+                1,
+                NonZeroU64::new(1024).assured("literal credit"),
+                false,
+            )
+            .await
+            .assured("consumer opens");
+        let publisher = nervix_primitives::task::spawn({
+            let endpoint = endpoint.clone();
+            async move { endpoint.publish(test_payload()).await }
+        });
+        let first = consumer
+            .deliveries
+            .recv()
+            .await
+            .assured("the first attempt reaches the consumer");
+        let first_failure = nervix_primitives::time::Instant::now();
+        consumer
+            .answer(first.reference, ClientEmitterAnswer::Retry)
+            .await
+            .assured("the request to receive it again is accepted");
+        // The second attempt comes after the first backoff and is left unanswered, so its ACK
+        // TIMEOUT revokes it: a failed attempt before the limit, which schedules the next one.
+        let second = consumer
+            .deliveries
+            .recv()
+            .await
+            .assured("a delivery retried before its limit is offered again");
+        assert_eq!(second.payload.identity, first.payload.identity);
+
+        let result = publisher.await.assured("publisher runs");
+        let given_up_after = first_failure.elapsed();
+        assert_eq!(
+            result,
+            Ok(ClientEmitterResult::GivenUp(
+                ClientAttemptFailure::Unanswered
+            ))
+        );
+        assert!(
+            given_up_after >= limit,
+            "the delivery was given up {given_up_after:?} after its first failed attempt, before \
+             its limit of {limit:?}"
+        );
+        assert!(
+            given_up_after < limit + Duration::from_secs(8),
+            "the delivery waited for an attempt due after its limit: given up after \
+             {given_up_after:?}"
+        );
+        assert!(
+            consumer.deliveries.try_recv().is_err(),
+            "a delivery whose limit passed while it waited is not offered once more"
         );
     }
 

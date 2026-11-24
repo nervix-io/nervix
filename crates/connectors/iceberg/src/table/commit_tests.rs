@@ -847,3 +847,56 @@ fn a_load_group_reads_one_span_from_each_staging_file_it_takes_batches_from() {
         }]
     );
 }
+
+/// Giving up a staged commit drops every staged batch with its staging file and hands back the
+/// acknowledgements the batches retained, unresolved, for the host to report. The emitter then
+/// stages nothing, and a commit after it publishes nothing it dropped.
+#[nervix_primitives::test]
+async fn giving_up_the_staged_rows_drops_their_staging_file_and_returns_their_acknowledgements() {
+    let catalog: StdArc<dyn Catalog> = StdArc::new(memory_catalog().await);
+    let executor = Executor::default();
+    let mut connector = fixture_emitter(StdArc::clone(&catalog), executor.clone()).await;
+    let acknowledgements = StdArc::new(RecordedAcknowledgements::default());
+    stage_carriers(&mut connector, &[&[1, 2], &[3]], &acknowledgements).await;
+    assert_eq!(staging_files(&connector), 1);
+
+    let abandoned = connector
+        .abandon_staged()
+        .await
+        .assured("staged rows hand their acknowledgements back when they are given up");
+
+    assert!(connector.staged_batches.is_empty());
+    assert_eq!(connector.staged_rows, 0);
+    assert_eq!(connector.staged_bytes, 0);
+    assert_eq!(connector.staged_messages(), 0);
+    assert_eq!(
+        staging_files(&connector),
+        0,
+        "giving the staged rows up removes the staging file that held them"
+    );
+    assert_eq!(acknowledgements.acknowledged(), 0);
+    assert_eq!(
+        acknowledgements.rejected(),
+        0,
+        "the connector leaves resolving the handed-back acknowledgements to the host"
+    );
+    abandoned.reject("gave up after 0s of retries".to_string());
+    assert_eq!(
+        acknowledgements.rejected(),
+        2,
+        "the host resolves every carrier's acknowledgement it was handed back"
+    );
+    assert!(
+        connector.abandon_staged().await.is_none(),
+        "an emitter that stages nothing gives nothing up"
+    );
+    let report = connector
+        .commit()
+        .await
+        .assured("a commit with nothing staged has nothing to fail on");
+    assert!(report.is_none());
+    assert_eq!(
+        committed_user_ids(catalog.as_ref()).await,
+        Vec::<i64>::new()
+    );
+}

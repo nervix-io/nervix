@@ -211,6 +211,7 @@ checks = [
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once",
   "runtime::emitter_lifecycle::shuttle_tests::shuttle_cancelling_resume_retains_one_owner_until_finish_then_close",
+  "runtime::emitter_retry::shuttle_tests::shuttle_an_attempt_in_flight_when_the_limit_runs_out_never_fails_a_confirmed_row",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained",
   # The host's retained-payload owner is driven by the dev-only connector-fake record script.
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter",

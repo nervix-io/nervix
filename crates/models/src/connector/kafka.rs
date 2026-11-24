@@ -786,8 +786,8 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum KafkaTopicPublishingMode {
-        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
-        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
+        NoAck { retry_policy: crate::EmitterRetryPolicy } => NoAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::EmitterRetryPolicy } => BrokerAck,
     }
 }
 

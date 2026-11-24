@@ -320,9 +320,12 @@ mod tests {
             connector: Box::new(EmitterEntity::Http(HttpEmitter::Request(
                 HttpRequestEmitter {
                     mode: HttpRequestPublishingMode::Ack {
-                        retry_policy: RetryPolicy {
-                            backoff: "100ms".to_string(),
-                            max_backoff: "1s".to_string(),
+                        retry_policy: nervix_models::EmitterRetryPolicy {
+                            pacing: RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: ClientName::parse("api").assured("the fixture client name is valid"),

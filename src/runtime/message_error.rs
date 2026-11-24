@@ -710,34 +710,75 @@ impl Runtime {
                 }
             }
             GeneralErrorPolicy::Log => {
-                let reason = format!("{error:#}");
-                let report = format!(
-                    "{} '{}' general error in domain '{}': {}",
-                    node.kind.as_str(),
-                    node.identifier.as_str(),
-                    domain.as_str(),
-                    reason
-                );
-                self.inner.events.report_node_error(
-                    report.clone(),
-                    ReportedError {
-                        class,
-                        node: node.clone(),
-                    },
-                );
-                warn!(
-                    domain = domain.as_str(),
-                    node_kind = node.kind.as_str(),
-                    node = node.identifier.as_str(),
-                    error_class = class.as_str(),
-                    reason = %reason,
-                    "runtime node handled general error"
-                );
+                let report = self.report_general_error(domain, node, class, error);
                 for ack in acks {
                     ack.no_ack(report.clone());
                 }
             }
         }
+    }
+
+    /// Applies a node's general error policy to the acknowledgements an emitter's connector
+    /// retained for rows it staged and then dropped, as it does to an [`AckSet`] a failed batch
+    /// held: the host no longer holds those rows, so no message error can name them.
+    pub(in crate::runtime) fn handle_general_error_for_staged_acks<C: error_stack::Context>(
+        &self,
+        domain: &DomainName,
+        node: &NodeRef,
+        policies: &ErrorPolicies,
+        acks: &[nervix_connector::EmitterRecordAcknowledgements],
+        class: MessageErrorClass,
+        error: &Report<C>,
+    ) {
+        match policies.general {
+            GeneralErrorPolicy::Ignore => {
+                for ack in acks {
+                    ack.acknowledge();
+                }
+            }
+            GeneralErrorPolicy::Log => {
+                let report = self.report_general_error(domain, node, class, error);
+                for ack in acks {
+                    ack.reject(report.clone());
+                }
+            }
+        }
+    }
+
+    /// Reports a general error of `node` under the `LOG` policy, as a runtime event carrying its
+    /// class and node and as a log entry, and returns the report every negative acknowledgement
+    /// of the failed work carries.
+    fn report_general_error<C: error_stack::Context>(
+        &self,
+        domain: &DomainName,
+        node: &NodeRef,
+        class: MessageErrorClass,
+        error: &Report<C>,
+    ) -> String {
+        let reason = format!("{error:#}");
+        let report = format!(
+            "{} '{}' general error in domain '{}': {}",
+            node.kind.as_str(),
+            node.identifier.as_str(),
+            domain.as_str(),
+            reason
+        );
+        self.inner.events.report_node_error(
+            report.clone(),
+            ReportedError {
+                class,
+                node: node.clone(),
+            },
+        );
+        warn!(
+            domain = domain.as_str(),
+            node_kind = node.kind.as_str(),
+            node = node.identifier.as_str(),
+            error_class = class.as_str(),
+            reason = %reason,
+            "runtime node handled general error"
+        );
+        report
     }
 
     /// Reports a failure inside a node's own processing that ended work holding `acks`, and fails
@@ -1343,6 +1384,72 @@ mod tests {
         assert_eq!(
             logged_completion.wait().await,
             AckOutcome::NoAck(logged_report)
+        );
+    }
+
+    /// Staged rows an emitter gave up hold no row a message error could name, so the
+    /// acknowledgements its connector retained follow the node's general error policy: acknowledged
+    /// when it ignores general errors, and rejected with the reported failure, which an event
+    /// announces with its class and node, when it logs them.
+    #[nervix_primitives::test]
+    async fn staged_rows_given_up_follow_the_general_error_policy() {
+        use meticulous::ResultExt as _;
+
+        let runtime = Runtime::default();
+        let mut events = runtime.subscribe_events();
+        let domain = domain("orders");
+        let node = NodeRef::new(ModelKind::Emitter, named::<ModelName>("lake"));
+        let failure = || {
+            Report::new(super::super::emitter_task::EmitterRuntimeError::CommitGivenUp)
+                .attach_printable("gave up after 0s of retries: the catalog refused the connection")
+        };
+
+        let (ignored, ignored_completion) = AckSet::root();
+        runtime.handle_general_error_for_staged_acks(
+            &domain,
+            &node,
+            &ErrorPolicies {
+                message: MessageErrorPolicy::Log,
+                general: GeneralErrorPolicy::Ignore,
+            },
+            &[nervix_connector::EmitterRecordAcknowledgements::new(
+                ignored,
+            )],
+            MessageErrorClass::UNAVAILABLE,
+            &failure(),
+        );
+        assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
+
+        let (logged, logged_completion) = AckSet::root();
+        runtime.handle_general_error_for_staged_acks(
+            &domain,
+            &node,
+            &ErrorPolicies::handled_by_log(),
+            &[nervix_connector::EmitterRecordAcknowledgements::new(logged)],
+            MessageErrorClass::UNAVAILABLE,
+            &failure(),
+        );
+        let RuntimeEvent::Error(event) = events
+            .recv()
+            .await
+            .assured("a logged general error is reported to the node's observers");
+        assert_eq!(
+            event.error,
+            Some(ReportedError {
+                class: MessageErrorClass::UNAVAILABLE,
+                node: node.clone(),
+            })
+        );
+        assert!(
+            event
+                .message
+                .starts_with("emitter 'lake' general error in domain 'orders': "),
+            "{}",
+            event.message
+        );
+        assert_eq!(
+            logged_completion.wait().await,
+            AckOutcome::NoAck(event.message)
         );
     }
 
