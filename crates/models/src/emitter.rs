@@ -21,8 +21,8 @@ use thiserror::Error;
 
 use crate::{
     AckWindow, BatchUnavailability, ClientName, CodecName, EmitterBatchLegality, EmitterEntity,
-    EmitterName, ErrorPolicies, FlushPolicy, InputCollectPolicy, ProcessorInputWhere,
-    ProcessorInputs, RelayName, RetryPolicy,
+    EmitterName, EmitterRetryPolicy, ErrorPolicies, FlushPolicy, InputCollectPolicy,
+    ProcessorInputWhere, ProcessorInputs, RelayName,
 };
 
 #[derive(
@@ -549,23 +549,23 @@ pub enum EmitterPublishing<'a> {
     ClientAck {
         window: &'a AckWindow,
         ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
+        retry_policy: &'a EmitterRetryPolicy,
     },
     NoAck {
-        retry_policy: &'a RetryPolicy,
+        retry_policy: &'a EmitterRetryPolicy,
     },
     BrokerAck {
         window: &'a AckWindow,
         ack_timeout: &'a str,
-        retry_policy: &'a RetryPolicy,
+        retry_policy: &'a EmitterRetryPolicy,
     },
     RequestAck {
-        retry_policy: &'a RetryPolicy,
+        retry_policy: &'a EmitterRetryPolicy,
     },
 }
 
 impl<'a> EmitterPublishing<'a> {
-    pub fn retry_policy(self) -> &'a RetryPolicy {
+    pub fn retry_policy(self) -> &'a EmitterRetryPolicy {
         match self {
             Self::ClientAck { retry_policy, .. }
             | Self::NoAck { retry_policy }

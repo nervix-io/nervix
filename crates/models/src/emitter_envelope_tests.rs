@@ -325,9 +325,12 @@ fn an_emitter_presents_the_envelope_it_writes_among_its_inspection_rows() {
     let entity =
         crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(crate::ZeroMqPushEmitter {
             mode: crate::ZeroMqPushPublishingMode::NoAck {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: crate::ClientName::parse("zeromq_main").expect("valid client name"),
@@ -402,9 +405,12 @@ fn an_emitter_statement_writes_its_envelope_after_its_payload() {
         connector: Box::new(crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(
             crate::ZeroMqPushEmitter {
                 mode: crate::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: crate::RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: crate::EmitterRetryPolicy {
+                        pacing: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: crate::ClientName::parse("zeromq_main").expect("valid client name"),

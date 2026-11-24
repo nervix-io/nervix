@@ -1231,6 +1231,29 @@ impl EmitterLifecycle for IcebergTableEmitter {
         self.staged_rows
     }
 
+    /// Removes every staged batch and the staging files that held them, and hands their
+    /// acknowledgements back to the host. A commit in progress ends with them: the data files it
+    /// already wrote under the table location stay there unreferenced, as after any commit that
+    /// never reached the catalog.
+    async fn abandon_staged(&mut self) -> Option<EmitterRecordAcknowledgements> {
+        if self.staged_batches.is_empty() {
+            return None;
+        }
+        let abandoned = std::mem::take(&mut self.staged_batches);
+        self.staged_rows = 0;
+        self.staged_bytes = 0;
+        self.commit_state.preparation = None;
+        let mut acknowledgements = Vec::with_capacity(abandoned.len());
+        for batch in abandoned {
+            nervix_primitives::task::consume_budget().await;
+            acknowledgements.extend(batch.acknowledgements);
+            self.release_staged_batch(batch.file).await;
+        }
+        Some(EmitterRecordAcknowledgements::new(
+            RetainedAcknowledgements(acknowledgements),
+        ))
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "external Iceberg SDK commit and error formatting own their \
@@ -1582,7 +1605,7 @@ impl IcebergTableEmitter {
             debug!(
                 path = %file.path.display(),
                 error = %error,
-                "failed to remove committed Iceberg staging file"
+                "failed to remove an Iceberg staging file no staged batch holds"
             );
         }
     }

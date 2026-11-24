@@ -142,14 +142,27 @@ fn answer(arbitrary: &mut Arbitrary<'_>) -> ClientEmitterAnswer {
 }
 
 fn description(arbitrary: &mut Arbitrary<'_>) -> ClientEmitterDescription {
+    let fields = arbitrary.schema_fields(0);
+    let maximum_payload_bytes = arbitrary.entropy().any_u64();
+    let maximum_payload_rows = any_u32(arbitrary);
+    let window = arbitrary.ack_window();
+    let ack_timeout = arbitrary.physical_duration();
+    let retry_backoff = arbitrary.physical_duration();
+    let retry_max_backoff = arbitrary.physical_duration();
+    let give_up_after = if arbitrary.entropy().flag() {
+        Some(arbitrary.physical_duration())
+    } else {
+        None
+    };
     ClientEmitterDescription {
-        fields: arbitrary.schema_fields(0),
-        maximum_payload_bytes: arbitrary.entropy().any_u64(),
-        maximum_payload_rows: any_u32(arbitrary),
-        window: arbitrary.ack_window(),
-        ack_timeout: arbitrary.physical_duration(),
-        retry_backoff: arbitrary.physical_duration(),
-        retry_max_backoff: arbitrary.physical_duration(),
+        fields,
+        maximum_payload_bytes,
+        maximum_payload_rows,
+        window,
+        ack_timeout,
+        retry_backoff,
+        retry_max_backoff,
+        give_up_after,
     }
 }
 
@@ -375,6 +388,7 @@ fn description_at(
         ack_timeout: duration,
         retry_backoff: duration,
         retry_max_backoff: duration,
+        give_up_after: Some(duration),
     }
 }
 

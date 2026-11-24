@@ -75,11 +75,13 @@ async fn a_stop_drain_recovers_the_same_instance_and_finishes_before_close() {
     );
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let deadline = Instant::now() + Duration::from_secs(5);
     let drained = connector
@@ -230,11 +232,13 @@ async fn an_empty_flush_is_not_a_destination_attempt() {
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let mut connector = EmitterConnectorState::opened(Box::new(unencodable_emitter()));
     let mut buffer = releasing_buffer();
@@ -260,11 +264,13 @@ async fn a_failed_preparation_counts_once_and_retains_its_unresolved_batch() {
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let mut connector = EmitterConnectorState::opened(Box::new(unencodable_emitter()));
     let mut buffer = releasing_buffer();
@@ -295,11 +301,13 @@ async fn a_staged_write_and_its_commit_are_separate_destination_attempts() {
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let mut connector = EmitterConnectorState::opened(Box::new(staging_emitter(
         Duration::from_secs(60),
@@ -356,11 +364,13 @@ async fn a_failed_commit_retains_staged_rows_and_counts_its_successful_retry_sep
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let mut connector = EmitterConnectorState::opened(Box::new(staging_emitter(
         Duration::from_secs(60),
@@ -405,6 +415,7 @@ async fn a_failed_commit_retains_staged_rows_and_counts_its_successful_retry_sep
             &mut control,
             &acknowledgements,
             &failure,
+            None,
         )
         .await
         .assured("the declared commit delay completes")
@@ -442,11 +453,13 @@ async fn unanswered_records_are_transient_and_their_retry_counts_one_success() {
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let mut connector = encoded_connector([
         PublishAnswer::Members(vec![MemberAnswer::Unanswered]),
@@ -519,11 +532,13 @@ async fn an_unknown_record_is_a_violation_without_accepting_a_foreign_answer() {
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let mut connector = encoded_connector([nervix_connector_fake::PublishAnswer::ConfirmAll]);
     let mut buffer = releasing_buffer();

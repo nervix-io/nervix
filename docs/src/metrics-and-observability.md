@@ -615,7 +615,9 @@ due staged commit, including each retry. It never counts one attempt per record.
   the operation
 - `transient`: an existing retryable publish failure, a stop deadline or shutdown while stalled,
   or cancellation of an attempt before it has a definitive answer
-- `misconfigured`: the connector returned the host's invalid-connector-configuration outcome
+- `misconfigured`: the destination refused the write as the emitter is configured, which the host
+  retries on the emitter's retry policy like a `transient` failure while `DESCRIBE EMITTER` shows
+  the refusal on its `misconfigured:` line
 - `violation`: a terminal preparation or connector-contract failure, including an unknown or
   repeated record answer
 
@@ -645,10 +647,11 @@ The two wait counters preserve fractional seconds.
 | Family | Additional label | Meaning |
 | --- | --- | --- |
 | `nervix_emitter_records_rejected_total` | `code="refused\|limit\|validation\|evaluation\|codec"` | Source rows definitively rejected: refused by the destination, over a size limit, holding a value that does not fit, whose expression could not be computed, or that the codec could not encode. `code` is the [error class](./errors-and-diagnostics.md#the-message-error-record) of the row's own message error, the one its error route reads as `error.class`, so the two never disagree; a rejection is always of the `REJECTED` group. The host counts a row when its message-error handling settles its rejection. |
-| `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure. Delivered, rejected and connector-staged rows are excluded. |
+| `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure or after the emitter gave them up. Delivered, rejected and connector-staged rows are excluded. |
 | `nervix_emitter_records_retried_total` | None | Unresolved source rows selected by each retried host publish attempt, after transport acquisition. Drain retries count too. A staged commit alone presents no source rows again. |
 | `nervix_emitter_retries_total` | `cause="publish\|connect\|commit"` | Successfully scheduled retry deferrals and inline retry waits, classified by the typed operation being retried. |
 | `nervix_emitter_retry_wait_seconds_total` | None | Sum of the delays actually scheduled for those retries, rather than elapsed time or a suggested backoff. |
+| `nervix_emitter_give_ups_total` | None | Units of work the host stopped retrying because the emitter's [`GIVE UP AFTER`](./emitters.md#giving-up) passed since their first failed attempt: each buffered batch whose remaining rows failed as `unavailable`, and each staged commit whose rows the emitter dropped. A unit given up together with another because they share a retained payload counts once of its own. |
 | `nervix_emitter_opens_total` | `outcome="succeeded\|failed"` | Initial transport acquisition and every retained transport reacquisition. Failed local preparation counts once; successful local preparation delegates the outcome to acquisition. A ready instance requires no new acquisition. A cancelled acquisition counts as failed. |
 | `nervix_emitter_pool_waits_total` | None | Pending pooled-connection borrows that ended by success, failure or cancellation, attributed to the borrowing emitter. A borrow ready on its first poll contributes zero. |
 | `nervix_emitter_pool_wait_seconds_total` | None | Elapsed monotonic wall seconds of those pending borrows, including failed and cancelled waits. |
@@ -916,6 +919,14 @@ explaining anything other than ordinary operation. `WAITING` means the emitter i
 no connection because it has asked a shared client's pool for one and has not been given it yet;
 see [Database Client Connection Pools](database-client-pools.md). A full pool is a waiting state,
 not a failure, so an acquisition timeout or a lost connection is reported as `ERROR` instead.
+
+Below it, `transient error:` shows the failure the emitter is retrying, and `reconnect backoff:` and
+`reconnect wait:` show the retry's delay and what remains of it. `misconfigured:` follows them and
+shows, in place of `transient error:`, a destination that refuses the writes as the emitter is
+configured, which it retries on the same policy until an operator repairs the setup; of those two
+lines, the one that does not apply reads `-`. `give up in:` shows how long remains before the
+emitter's [`GIVE UP AFTER`](./emitters.md#giving-up) gives up the oldest unit it retries, in
+milliseconds, or `-` when no unit's clock runs.
 
 `DESCRIBE INGESTOR` also reports the declared `quiesce:` policy, current `quiesce state:`, all
 four quiesce values and the node's `nervix_ingestor_transport_redeliveries_total`,

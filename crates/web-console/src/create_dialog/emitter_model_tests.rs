@@ -478,9 +478,12 @@ fn assert_publication(
     assert_eq!(actual.kind(), mode);
     assert_eq!(
         actual.retry_policy(),
-        &RetryPolicy {
-            backoff: "1ms".to_string(),
-            max_backoff: "1s".to_string()
+        &EmitterRetryPolicy {
+            pacing: RetryPolicy {
+                backoff: "1ms".to_string(),
+                max_backoff: "1s".to_string()
+            },
+            give_up_after: Some("10m".to_string()),
         }
     );
     match actual {
@@ -518,6 +521,7 @@ fn every_declared_publication_body_and_batch_shape_has_complete_form_coverage() 
                             ack_timeout: "5s".to_string(),
                             retry_backoff: "1ms".to_string(),
                             retry_max: "1s".to_string(),
+                            give_up_after: "10m".to_string(),
                         };
                         for requirement in publishing.requires {
                             let choice = requirement
@@ -593,6 +597,39 @@ fn wide_window_limits_and_invalid_policy_fields_keep_exact_values() {
     assert_eq!(
         error.current_context(),
         &EmitterDraftError::Missing("retry backoff")
+    );
+}
+
+#[test]
+fn a_give_up_after_field_reaches_the_retry_policy_and_an_empty_one_retries_without_a_limit() {
+    let mut arbitrary =
+        nervix_arbitrary::Arbitrary::new(&[7; 4096], nervix_arbitrary::Domain::Plexus);
+    let model = arbitrary.create_emitter_to(EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic));
+    let mut draft = filled(&model);
+    draft.destination.publication.kind = Some(EmitterPublishingModeKind::NoAck);
+    draft.destination.publication.retry_backoff = "250ms".to_string();
+    draft.destination.publication.retry_max = "30s".to_string();
+    draft.destination.publication.give_up_after = "10m".to_string();
+    let limited = draft
+        .build()
+        .assured("a NO ACK Kafka emitter with a complete retry policy builds");
+    let retry = limited.connector.publishing().retry_policy().clone();
+    assert_eq!(retry.pacing.backoff, "250ms");
+    assert_eq!(retry.pacing.max_backoff, "30s");
+    assert_eq!(retry.give_up_after.as_deref(), Some("10m"));
+    assert!(round_trip(limited, true));
+
+    draft.destination.publication.give_up_after.clear();
+    let unlimited = draft
+        .build()
+        .assured("an empty GIVE UP AFTER leaves the retry policy complete");
+    assert_eq!(
+        unlimited
+            .connector
+            .publishing()
+            .retry_policy()
+            .give_up_after,
+        None
     );
 }
 

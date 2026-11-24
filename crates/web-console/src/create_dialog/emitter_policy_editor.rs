@@ -46,6 +46,7 @@ pub(super) fn EmitterPublicationEditor(signals: CreateSignals) -> impl IntoView 
         </Show>
         <EmitterText label="Retry backoff" class_name="create-emitter-retry-backoff" signals=signals read=|draft| draft.destination.publication.retry_backoff.clone() write=|draft, value| draft.destination.publication.retry_backoff = value />
         <EmitterText label="Maximum retry backoff" class_name="create-emitter-retry-max" signals=signals read=|draft| draft.destination.publication.retry_max.clone() write=|draft, value| draft.destination.publication.retry_max = value />
+        <EmitterText label="Give up after (empty: retry without a limit)" class_name="create-emitter-give-up-after" signals=signals read=|draft| draft.destination.publication.give_up_after.clone() write=|draft, value| draft.destination.publication.give_up_after = value />
         <EmitterEnvelopeEditor signals=signals />
     }
     .into_any()

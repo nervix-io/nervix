@@ -24,6 +24,7 @@ impl EmitterConnectorStarter {
             connector,
             output_schema.clone(),
             plan.retry_policy,
+            plan.give_up_after,
         ));
         Ok(opened)
     }

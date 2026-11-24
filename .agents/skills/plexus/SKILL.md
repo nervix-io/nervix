@@ -745,6 +745,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
+- An emitter retries an outage without limit unless its `RETRY POLICY` ends with `GIVE UP AFTER
+  <d>`; then rows still unsent that long after their first failed attempt fail as `unavailable` /
+  `publish` through `ON MESSAGE ERROR`, and `GIVE UP AFTER 0s` never retries. Suggest it only when
+  the user would rather handle the rows than wait. Never write it on an ingestor's retry policy,
+  where it is a parse error. A destination refusing writes as configured is retried too, shown as
+  `misconfigured:` in `DESCRIBE EMITTER`. Read [Giving up](../../../docs/src/emitters.md#giving-up).
 - When an application receives constructed graph output, use `CREATE CLIENT CONSUMER EMITTER <name> FROM <relays> TO SCHEMA <output_schema>
   MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
   Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an

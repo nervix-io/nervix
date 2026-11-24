@@ -232,12 +232,19 @@ members the transport actually identifies.
 | The destination definitively refuses a payload | Reject every included member with one shared `refused` / `publish` error reference |
 | A native row write reports row-specific refusal | Preserve identified successes; isolate rows where the native contract requires it and reject only refused members |
 | The answer is missing or an infrastructure attempt fails | Keep unresolved membership and prepared bytes; apply physical retry backoff |
+| The emitter's `GIVE UP AFTER` passes for a unit that still holds unresolved members | Release the retained payloads that carry them, with every carrier any of those payloads also carries, and fail each unresolved member as `unavailable` / `publish`; confirmed members stay delivered |
 
 An ambiguous retry of a retained codec payload, Sentry envelope, OTEL request or client IPC stream
 uses its original bytes and members. It does not rerun transforms, refresh observation timestamps,
 regroup the payload, resend an already confirmed member or add later arrivals. Native row paths
 that reconstruct a request retain their unresolved row set and accepted execution snapshot;
 MongoDB's identified successes are excluded even when the write concern was not met.
+
+Giving up keeps this membership whole. The host decides between attempts, so an attempt in flight
+when a unit's limit passes still applies its answers first, and a member it confirmed is delivered
+rather than failed. A retained payload is never split: when one carrier's limit passes, every
+carrier that shares one of its payloads leaves the buffer with it, and their unresolved members fail
+together. [Giving up](./emitters.md#giving-up) states the public contract.
 
 `ATTACHED` keeps the source acknowledgement waiting until its downstream contract completes.
 `DETACHED` retains its earlier relay-fan-out acknowledgement boundary while the emitter still

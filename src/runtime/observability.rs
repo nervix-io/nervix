@@ -269,8 +269,26 @@ pub(crate) struct LocalLookupDescription {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DataflowNodeTransientState {
     pub(crate) error: Option<String>,
+    /// Whether the published failure is a destination refusing writes as it is configured, which
+    /// the node retries until an operator repairs it, rather than a transient error.
+    pub(crate) misconfigured: bool,
     pub(crate) reconnect_backoff: Option<String>,
     pub(crate) reconnect_wait_millis: Option<u64>,
+    /// How long until the emitter gives up the oldest unit it retries, absent while no unit's
+    /// `GIVE UP AFTER` clock runs.
+    pub(crate) give_up_wait_millis: Option<u64>,
+}
+
+/// What inspection reads of a published retry.
+struct TransientRetry<'a> {
+    reconnect: &'a RuntimeReconnectStatus,
+    misconfigured: bool,
+    give_up_at: Option<nervix_connector::physical_time::PhysicalDeadline>,
+}
+
+/// Milliseconds of `duration` as inspection reports them, at most `u64::MAX`.
+fn reported_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// One placement's dirty mark, retained beside the task's metric children.
@@ -288,7 +306,7 @@ impl BranchMetricsMark {
 impl DataflowNodeTransientState {
     fn from_failures<R>(
         failures: Option<nervix_primitives::sync::StdArc<task_status::TaskFailures<R>>>,
-        retry_of: fn(&R) -> &RuntimeReconnectStatus,
+        retry_of: for<'a> fn(&'a R) -> TransientRetry<'a>,
     ) -> Self {
         let Some(failures) = failures else {
             return Self::default();
@@ -307,16 +325,18 @@ impl DataflowNodeTransientState {
         };
         if let Some(retry) = failure.retry.as_ref() {
             let retry = retry_of(retry);
-            state.reconnect_backoff = Some(humantime::format_duration(retry.backoff).to_string());
-            state.reconnect_wait_millis = Some(
-                u64::try_from(
-                    retry
-                        .retry_at
-                        .saturating_duration_since(Instant::now())
-                        .as_millis(),
-                )
-                .unwrap_or(u64::MAX),
-            );
+            state.misconfigured = retry.misconfigured;
+            state.reconnect_backoff =
+                Some(humantime::format_duration(retry.reconnect.backoff).to_string());
+            state.reconnect_wait_millis = Some(reported_millis(
+                retry
+                    .reconnect
+                    .retry_at
+                    .saturating_duration_since(Instant::now()),
+            ));
+            if let Some(give_up_at) = retry.give_up_at {
+                state.give_up_wait_millis = Some(reported_millis(give_up_at.remaining()));
+            }
         }
         state
     }
@@ -790,7 +810,11 @@ impl Runtime {
                 .iter()
                 .filter(|entry| entry.key().entity == entity)
                 .find_map(|entry| entry.connection.failures());
-            DataflowNodeTransientState::from_failures(failures, |retry| retry)
+            DataflowNodeTransientState::from_failures(failures, |retry| TransientRetry {
+                reconnect: retry,
+                misconfigured: false,
+                give_up_at: None,
+            })
         } else if kind.eq_ignore_ascii_case("EMITTER") {
             let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
             let mut failures = None;
@@ -803,7 +827,11 @@ impl Runtime {
                     break;
                 }
             }
-            DataflowNodeTransientState::from_failures(failures, |retry| &retry.reconnect)
+            DataflowNodeTransientState::from_failures(failures, |retry| TransientRetry {
+                reconnect: &retry.reconnect,
+                misconfigured: retry.kind == EmitterRetryKind::Misconfigured,
+                give_up_at: retry.give_up_at,
+            })
         } else {
             DataflowNodeTransientState::default()
         }
@@ -911,7 +939,11 @@ impl Runtime {
                 .ingestor_statuses
                 .get(&key)
                 .and_then(|status| status.connection.failures()),
-            |retry| retry,
+            |retry| TransientRetry {
+                reconnect: retry,
+                misconfigured: false,
+                give_up_at: None,
+            },
         );
         let memory_backpressure_paused = self.ingestors_paused_for_memory_pressure();
         let quiesce_control = self.ingestor_quiesce_control(domain, ingestor, unit);

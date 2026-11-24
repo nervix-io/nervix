@@ -919,8 +919,10 @@ A connector reports through the contract's own contexts and keeps its integratio
 them. `IngestorError` names the connector and the operation that failed: opening, reading,
 acknowledging, rejecting, suspending, resuming or closing. `EmitterOpenError` separates an invalid
 configuration and a missing external entity from a failed initialization. `EmitterWriteError`
-separates a failed publish or commit, which the host retries on its backoff, from a
-misconfiguration, which it does not retry. `EmitterFinishError` reports a finish that did not send
+separates a failed publish or commit from a destination that refuses the write as the emitter is
+configured; the host retries both on the emitter's retry policy, because neither says anything is
+wrong with the records, and shows the second as the emitter's misconfiguration until an operator
+repairs it or `GIVE UP AFTER` passes. `EmitterFinishError` reports a finish that did not send
 everything the emitter's client still held when the emitter stopped: `Unsent` when the deadline passed,
 with the count of records the client still held, and `Flush` when the client failed while it sent
 them. The host does not retry a finish; a stop that asked for it fails, and teardown records it as
@@ -2201,23 +2203,28 @@ What each failure gets:
 | A record over `MAX SIZE`, a payload over a `RATE LIMIT` clause's `BURST`, a window row its retention bound cannot admit, a WASM guest that exhausts `MAX FUEL`, `MAX MEMORY` or `MAX TABLE ELEMENTS` | `limit` |
 | A required field left unset, a value a connector or an admission check refuses, an invalid HTTP request field | `validation` |
 | A destination that refuses a record, a model that refuses a row, a guest's declared message error, an emitter publish that fails for good | `refused` |
+| The rows an emitter still holds when its `GIVE UP AFTER` passes, and the staged rows it drops then | `unavailable` |
 | Emitter work cut at a stop or shutdown deadline, and an ingested payload whose domain is not running or whose branch Nervix closed before it was routed | `interrupted` |
 | A model output of the wrong shape, a guest trap or invalid output, and every failure of Nervix's own processing | `internal` |
 
 When a publish fails for a whole batch, every row of the batch takes the class of that failure: a
 publish its destination or connector fails for good is `refused`, a batch its codec cannot encode
 is `codec`, a source filter that cannot be evaluated is `evaluation`, work cut at a stop or
-shutdown deadline is `interrupted`, and a broken invariant of the emitter's own bookkeeping is
-`internal`. A failure that a node's `ON GENERAL ERROR` or a WASM processor's `ON GLOBAL ERROR`
+shutdown deadline is `interrupted`, the rows an emitter still holds when its `GIVE UP AFTER`
+passes are `unavailable`, and a broken invariant of the emitter's own bookkeeping is `internal`. A failure that a node's `ON GENERAL ERROR` or a WASM processor's `ON GLOBAL ERROR`
 reports holds no record, but it carries a class too, which the step that failed names: a decode
 rejection is `codec`, a payload over a `RATE LIMIT` burst is `limit`, a guest trap is `internal`,
 and a general error that an emitter's connector reports itself carries the class the connector
 names. When a route cannot deliver an error record to its `DLQ` relay, the event that reports the
 failed delivery carries the class and node of the error it could not deliver.
 
-At this stage `unavailable`, `throttled` and `timeout` are defined but never produced: the
-retry-policy give-up, the rate-limit rework and the lost-work timeout of the [error
-handling](https://app.clickup.com/t/86bd54b3d) epic produce them.
+An emitter's retry policy produces `unavailable` once its [`GIVE UP AFTER`](./emitters.md#giving-up)
+passes: every row the given-up unit still holds fails with operation `publish`, a message that
+names the limit and the latest failure, and the outside system's code of that failure as
+`error.external_code` when the connector reported one. The staged rows of an emitter that stages
+writes for a commit fail without a record, through `ON GENERAL ERROR`, with the same class. At this
+stage `throttled` and `timeout` are defined but never produced: the rate-limit rework and the
+lost-work timeout of the [error handling](https://app.clickup.com/t/86bd54b3d) epic produce them.
 
 The operation that failed raises the error without knowing which graph node it ran for, because
 VM programs, codecs and connectors are engines shared by every node. The node that handles the
@@ -2381,7 +2388,8 @@ warning instead of inventing per-record rejections. An OTLP/gRPC export the rece
 — a timeout, a lost connection, an unreadable answer — is an infrastructure failure the host
 retries, whatever code tonic reports for it. An answered status other than `INVALID_ARGUMENT`,
 `RESOURCE_EXHAUSTED` or a code the OTLP specification lists as retryable is a misconfiguration
-failure, which the host does not retry.
+failure, which the host retries on the emitter's retry policy like an outage while `DESCRIBE
+EMITTER` shows it on its `misconfigured:` line.
 
 The shared HTTP client builder adds `HttpClientConfigError::Tls` above the
 `TlsClientConfigError` the common rustls configuration owner returns. HTTP polling, Prometheus,
@@ -2429,7 +2437,7 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 Emitter interaction metrics read the typed outcome at the host boundary. They count a completed
 attempt as `succeeded` even when the destination definitively refused some rows. Each such row
 has its own typed rejection code. Retryable failures and interrupted attempts count as
-`transient`, invalid connector configuration as `misconfigured`, and terminal preparation or
+`transient`, a destination misconfiguration as `misconfigured`, and terminal preparation or
 contract failures as `violation`. An unknown or repeated record answer belongs to `violation`.
 The original cause remains in the diagnostic report. Only the bounded classes reach the metric
 labels. [Connector Interaction Metrics](metrics-and-observability.md#connector-interaction-metrics)

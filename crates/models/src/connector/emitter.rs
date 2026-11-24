@@ -391,6 +391,8 @@ impl EmitterEntityCapabilities {
         for mode in self.publishing_modes {
             capabilities.push(RuntimeCapability::Publishing(mode.kind));
         }
+        // Every publishing mode's retry policy takes GIVE UP AFTER, and the host applies it.
+        capabilities.push(RuntimeCapability::GiveUp);
         capabilities.extend(RuntimeCapability::of_options(self.options));
         if self.batch.is_available() {
             capabilities.push(RuntimeCapability::Batch);
