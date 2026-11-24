@@ -1124,9 +1124,15 @@ The licensing coordinator owns separate refresh attempts and an activation/key-b
 It aborts and joins both on a leadership-tenure change. The stream owns its reconnect cursor and
 publishes a bounded coalescing wakeup; only the coordinator starts a refresh, through the existing
 serialized request owner. A notification can expedite a foreground or background refresh retry,
-while stream reads and backoff never occupy that request turn. Operator and notification wakeups
-stay independent: a queued attempt consumes its represented notification without taking another
-waiting operator's signal. Failed refreshes retain their pending work and respect retry timing.
+while stream reads and backoff never occupy that request turn. The turn counts the operator
+statements waiting for it, from the moment one asks until it holds the turn or stops waiting, so
+the attempt holding the turn sees every one of them however their requests interleave. While one
+waits, a release holding the turn gives it back, and a refresh between retries retries at once:
+once when it takes the turn with operators already waiting, and once for each operator request made
+while it holds it, so its backoff still spaces every later retry. An operator's own request never
+hurries the attempt it makes. A notification hurries a refresh retry the same way but never makes
+a release give its turn away, and a queued attempt consumes the notification that preceded its
+turn. Failed refreshes retain their pending work and respect retry timing.
 The coalesced hint retains its activation and the revisions reported by a sync. After acquiring
 the request turn, an automatic refresh compares that requirement with the fresh committed
 observation. A foreground response that already covers those decision, conditions and trust
