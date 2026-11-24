@@ -995,15 +995,7 @@ impl SessionServiceImpl {
             .inner
             .runtime
             .dataflow_node_transient_state(domain, kind, identifier);
-        dataflow_node_status_to_envelope(
-            health.status,
-            health.detail,
-            transient.error,
-            transient.reconnect_backoff,
-            health
-                .reconnect_wait_millis
-                .or(transient.reconnect_wait_millis),
-        )
+        dataflow_node_status_to_envelope(health, transient)
     }
 
     pub(in crate::application) async fn handle_dataflow_node_status_request(
@@ -1037,15 +1029,7 @@ impl SessionServiceImpl {
             request.kind.as_str(),
             &request.name,
         );
-        Ok(dataflow_node_status_to_envelope(
-            health.status,
-            health.detail,
-            transient.error,
-            transient.reconnect_backoff,
-            health
-                .reconnect_wait_millis
-                .or(transient.reconnect_wait_millis),
-        ))
+        Ok(dataflow_node_status_to_envelope(health, transient))
     }
 
     async fn describe_metrics_for_scheduled_node(
@@ -2880,7 +2864,6 @@ mod tests {
                     stop: None,
                 },
                 None,
-                nervix_licensing_vocabulary::Quota::Unlimited,
             )
             .await
             .expect("domain should persist");

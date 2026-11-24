@@ -70,7 +70,6 @@ fn put(state: &mut StateMachineData, name: &str, status: DomainStatus) -> Consen
     let command = ConsensusCommand::PutDomain {
         domain: Box::new(domain),
         mutation: None,
-        domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
     };
     apply_consensus_command(state, &command).response
 }
@@ -255,16 +254,6 @@ fn a_closed_gate_refuses_every_change_that_runs_a_domain_and_records_its_stops()
         .get(&domain("paused"))
         .verified("created above");
     assert_eq!(paused.status, DomainStatus::Paused);
-    // A new domain is new usage, which the closed gate admits under no quota.
-    let ConsensusResponse::Conflict(ConsensusConflict::LicensingQuota { refusal }) =
-        put(&mut state, "created", DomainStatus::Stopped)
-    else {
-        panic!("a closed gate refuses a new domain record");
-    };
-    assert_eq!(
-        refusal.state,
-        nervix_licensing_vocabulary::AdmissionState::Stopped
-    );
     // A stopped record may still be written: administration of a stopped domain continues.
     assert_eq!(
         put(&mut state, "idle", DomainStatus::Stopped),

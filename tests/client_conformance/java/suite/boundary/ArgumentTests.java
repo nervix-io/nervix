@@ -19,6 +19,10 @@ public final class ArgumentTests {
                 assertThrows(Nervix.InvalidArgumentException.class, () -> options.requestTimeout(seconds));
                 assertThrows(Nervix.InvalidArgumentException.class, () -> options.retryTimeout(seconds));
                 assertThrows(Nervix.InvalidArgumentException.class, () -> options.backupWaitTimeout(seconds));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.keepaliveInterval(seconds));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.keepaliveTimeout(seconds));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.resetStreamDuration(seconds));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.connectionAttemptDelay(seconds));
             }
         }
         // ANCHOR: lifetimes
@@ -28,6 +32,42 @@ public final class ArgumentTests {
         var failure = assertThrows(Nervix.ClosedException.class, fields::schema);
         assertEquals(Nervix.FailureKind.CLOSED, failure.kind());
         // ANCHOR_END: lifetimes
+    }
+
+    @Test
+    void receiveWindowsOutsideTheirBoundsAreTypedArguments() {
+        try (var options = new Nervix.ConnectOptions()) {
+            for (long bytes : new long[] {0, -1, 1L << 32}) {
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.streamWindowBytes(bytes));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.connectionWindowBytes(bytes));
+            }
+            // A window HTTP/2 does not allow is kept by the setter and refused before connecting.
+            options.streamWindowBytes(1_000).connectionWindowBytes(65_534);
+            assertThrows(Nervix.InvalidArgumentException.class,
+                () -> Nervix.Session.connect("http://127.0.0.1:1", null, options, null));
+        }
+    }
+
+    @Test
+    void connectionLimitsOutsideTheirBoundsAreTypedArguments() {
+        try (var options = new Nervix.ConnectOptions()) {
+            for (long value : new long[] {0, -1}) {
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.callQueueCapacity(value));
+            }
+            for (long value : new long[] {0, -1, 1L << 32}) {
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.headerListBytes(value));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.sendBufferBytes(value));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.maxErrorResetStreams(value));
+                assertThrows(Nervix.InvalidArgumentException.class, () -> options.rememberedResetStreams(value));
+            }
+            // A connection attempt delay outside RFC 8305's bounds is kept by the setter and refused
+            // before connecting.
+            options.callQueueCapacity(3).headerListBytes(8_192).sendBufferBytes(65_536)
+                .maxErrorResetStreams(7).rememberedResetStreams(9).resetStreamDuration(0.5)
+                .connectionAttemptDelay(0.005);
+            assertThrows(Nervix.InvalidArgumentException.class,
+                () -> Nervix.Session.connect("http://127.0.0.1:1", null, options, null));
+        }
     }
 
     @Test

@@ -139,15 +139,15 @@ three listener kinds. Member names are unqualified; a name shared by more than o
 eligible entity kind is ambiguous and must be changed before it can be used in a placement.
 
 Duplicate names on one side collapse. Both sides must contain at least one member after duplicate
-removal. The same runtime node may appear in `FROM` and `TO`, but it contributes coverage only when
-the graph contains a directed cycle back to that runtime node.
+removal. The same runtime node may appear in `FROM` and `TO`, but that pair covers nothing: a
+domain's graph has no loops ([Runtime Nodes](processors.md#shared-input-and-branch-contracts)), so
+no path leads from a runtime node back to itself.
 
 ## Understanding Path-Gated Coverage
 
 For each connected `FROM`/`TO` pair, the rule captures both endpoints and every runtime node that
 can carry traffic from the source to the destination. If the graph contains alternate paths, all
-runtime nodes on those paths are part of the corridor. A cycle within a corridor is captured in
-full.
+runtime nodes on those paths are part of the corridor.
 
 For this graph:
 
@@ -778,10 +778,12 @@ nothing moves, and `START` plans the move again against the cluster as it is the
 When the leader running a waiting `START` loses its leadership, `START` is not
 refused: its outcome stays unknown, the answer names the new leader, and the statement repeated
 there under the same execution reference, which a client that follows the session protocol does on
-its own, waits on. When that node shuts down instead, `START` stops waiting and fails, saying that
-the node is shutting down; the domain stays stopped, and repeating the statement under the same
-execution reference returns that refusal. Nothing starts until every unit can be placed. `START`
-never runs inside a transaction, so it always places against the node rules already committed.
+its own, waits on. When that node shuts down instead, `START` is not refused either: like any
+command in progress, it continues on the leader that follows. The stopping node sends no answer
+and takes no further part in it, the leader that follows resumes it from its record, still holding
+the domain's mutation lease, and the statement repeated under the same execution reference joins it
+and answers once it ends. Nothing starts until every unit can be placed. `START` never runs inside a
+transaction, so it always places against the node rules already committed.
 
 The cluster can still change under an accepted rule:
 

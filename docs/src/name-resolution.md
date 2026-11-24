@@ -360,9 +360,13 @@ turn and sends to the first answer whose socket setup succeeds.
 
 A client library that resolves through a hook dials with its own connector. Reqwest, Smithy,
 ClickHouse's client and Tonic all dial through `hyper-util`'s `HttpConnector`, which tries the
-answers of the first answer's family in order, starts the other family's answers when 300
-milliseconds pass without a connection, as RFC 6555 describes, and divides a configured connect
-timeout evenly across the answers. The Redis driver dials every answer of a new command connection
+answers of the first answer's family in order, starts the other family's answers once a connection
+attempt delay passes without a connection, as RFC 8305 describes, and divides a configured connect
+timeout evenly across the answers. The native session client sets that delay from its
+`connection_attempt_delay` capability, 300 milliseconds by default and 10 milliseconds through 2
+seconds as RFC 8305 bounds it, and dials with `TCP_NODELAY` on and no kernel keepalive, as the
+[Rust Client Library](./client-library.md) chapter describes. Reqwest, Smithy and ClickHouse's
+client wait `hyper-util`'s own 300 milliseconds. The Redis driver dials every answer of a new command connection
 at once, TLS included, and keeps the first that completes.
 
 ## Connection Identity
@@ -611,7 +615,7 @@ contracts.
 | Evidence | Command | What it establishes | What it does not |
 | --- | --- | --- | --- |
 | The resolver's own checks against an in-process DNS authority | `just test-dns` | Literal and hosts-file answers without a question; search completion and fully qualified names; IPv4-first dual-stack answers; positive and negative TTL reuse and expiry; missing names, empty answers, refusals and invalid names as distinct failures; a silent server ended by the budget and, sooner, by the configured `timeout` and `attempts`; lookups beyond 64 waiting and freed by cancellation; a resolver rebuilt and torn down with its runtime; the configuration grammar and its rejections; both Reqwest hooks, the Hyper connector and the Smithy hook dialling a later answer, keeping the URL authority, following a redirect, reconnecting after TTL expiry, being cancelled by a request timeout, and keeping the typed failure and the lookup's whole report as a cause | The authority answers over UDP only, so truncation and DNS over TCP, a name server that cannot be reached, and the order in which several servers are asked are not exercised |
-| Connector and client unit checks | `just test-package-lib <package>` | Each dialling connector's ordered attempts, the time an unresponsive address leaves for the next, literal addresses without a lookup, typed lookup failures beneath the connector's error, TLS failures and budgets; the native client's ordered answers, deadline and typed failure; SigV4 headers naming the configured host | Behavior through a whole node |
+| Connector and client unit checks | `just test-package-lib <package>` | Each dialling connector's ordered attempts, the time an unresponsive address leaves for the next, literal addresses without a lookup, typed lookup failures beneath the connector's error, TLS failures and budgets; the native client's ordered answers, deadline and typed failure, and the IPv6 answer it reaches only once its connection attempt delay has passed while the IPv4 attempt hangs; SigV4 headers naming the configured host | Behavior through a whole node |
 | Public scenarios | `just test-scenarios --input <feature>` | Nodes whose resolver asks the harness's DNS authority, described in [DNS Authorities](./integration-test-lifecycle.md#dns-authorities), on one- and three-node clusters, with topology-specific cases on three: cluster formation through names and IPv6 literals, hosts-file and single-label names, a peer followed to a new address after its name stopped resolving, a stopped leader rejoining through its advertised name, and a recovered voter restoring quorum while its bootstrap name does not resolve; every migrated connector over plain and TLS transports through a fixture name; certificates checked against the configured host; outages answered as a missing name, no address or silence, with offsets held and delivery after recovery; changed answers followed after a restart; the CLI and a client's named seeds | Resolution through a real recursive resolver, and redirects to a named session endpoint, because every advertised client endpoint in the harness is a literal address |
 | The Turmoil simulation | `just test-turmoil` | The production transport resolving peer names through the simulated table on every connection, deterministically and under replay | Anything about Hickory, which the simulation never constructs |
 | Dependency graph checks | `just validate-dns-dependencies` | The feature selections of [Dependency Selection](#dependency-selection) in each affected crate's own graph | Runtime behavior |
@@ -760,8 +764,8 @@ The node's declared DNS policy selects cache capacity, positive and negative TTL
 DNS address families, negative-answer trust and the client-hook budget. Their server options,
 validation and restart procedure are listed in
 [Node Settings](node-settings.md#transport-resolver-and-database-capacities).
-Concurrent DNS lookups derive from the declared interconnect peer count, 64 by default; waiting
-for a lookup slot still spends the caller's existing operation budget. Hook adapters, including
+`--dns-concurrent-lookups` bounds the DNS lookups in flight at once, 64 by default; waiting for a
+lookup slot still spends the caller's existing operation budget. Hook adapters, including
 Redis, read the budget from their supplied resolver. Literal addresses and hosts-file answers
 retain their resolution order independently of the DNS query-family selection.
 

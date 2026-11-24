@@ -221,7 +221,7 @@ mod tests {
         let PulsarTopicPublishingMode::NoAck { retry_policy } = unconfirmed.mode else {
             panic!("NO ACK parses into the unconfirmed Pulsar mode");
         };
-        assert_eq!(retry_policy.backoff, "250ms");
+        assert_eq!(retry_policy.pacing.backoff, "250ms");
 
         let sequential = created_emitter(&statement(
             "orders",

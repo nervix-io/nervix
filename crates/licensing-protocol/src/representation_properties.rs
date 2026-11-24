@@ -97,7 +97,7 @@ fn bolero_protocol_json_roundtrip() {
             decision.license.plan.plan_code = text.clone();
             decision.license.assignment_revision = value;
             decision.conditions.usage.quotas.insert(
-                CLUSTER_NODES.to_owned(),
+                FIXTURE_QUOTA.to_owned(),
                 ConditionValue::Known(Quota::Bounded { value }),
             );
             decision.conditions.usage.quotas.insert(

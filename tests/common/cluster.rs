@@ -2170,9 +2170,7 @@ impl Cluster {
         let peer_target = PeerTarget::new(target_addr, server_name);
         let attempt = if let InterconnectCredentialFault::WrongNodeIdentity = fault {
             let addressed_node = ClusterNodeName::parse("node-254").map_err(io::Error::other)?;
-            transport
-                .register_outbound_target(addressed_node.clone(), peer_target.endpoint())
-                .map_err(io::Error::other)?;
+            transport.register_outbound_target(addressed_node.clone(), peer_target.endpoint());
             transport
                 .send(
                     &addressed_node,

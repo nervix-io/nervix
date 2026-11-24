@@ -19,8 +19,6 @@ impl InterconnectRequest for WindowProbe {
 
 fn options() -> TransportOptions {
     nervix_interconnect::TransportSettings::resolve(nervix_interconnect::TransportSettingValues {
-        max_peers: Some(16),
-        request_quota: Some(4),
         stream_receive_window: Some(ubyte::ByteUnit::Kibibyte(4)),
         connection_receive_window: Some(ubyte::ByteUnit::Byte(
             nervix_interconnect::HTTP2_INITIAL_CONNECTION_WINDOW_BYTES,

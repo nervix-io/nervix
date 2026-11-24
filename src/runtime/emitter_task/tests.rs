@@ -27,6 +27,7 @@ fn task_state(context: &EmitterConnectorContext) -> EmitterTaskState {
         },
         buffer,
         RuntimeReconnectBackoff::default(),
+        EmitterGiveUp::new(None),
         context,
     )
 }
@@ -102,6 +103,7 @@ fn emitter_error_classification_is_explicit_for_every_context() {
         EmitterRuntimeError::ConnectorWaiting,
         EmitterRuntimeError::PublishBatch,
         EmitterRuntimeError::PublishStalled,
+        EmitterRuntimeError::DestinationMisconfigured,
         EmitterRuntimeError::UnansweredEmitterRecords {
             unanswered: 1,
             records: 2,
@@ -112,6 +114,7 @@ fn emitter_error_classification_is_explicit_for_every_context() {
     }
     for terminal in [
         EmitterRuntimeError::InvalidConnectorConfig,
+        EmitterRuntimeError::CommitGivenUp,
         EmitterRuntimeError::InitializeConnector,
         EmitterRuntimeError::CloseConnector,
         EmitterRuntimeError::FlushPolicyNotInitialized,
@@ -220,6 +223,14 @@ fn every_emitter_failure_names_the_class_of_the_rows_it_ends() {
         (
             EmitterRuntimeError::InvalidConnectorConfig,
             MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::DestinationMisconfigured,
+            MessageErrorClass::REFUSED,
+        ),
+        (
+            EmitterRuntimeError::CommitGivenUp,
+            MessageErrorClass::UNAVAILABLE,
         ),
         (
             EmitterRuntimeError::InitializeConnector,
@@ -677,7 +688,7 @@ async fn connector_status_progress_keeps_publish_and_commit_failures() {
         let host = context.emitter_host();
         let reason = "the broker did not answer within ACK TIMEOUT 10s";
         let backoff = Duration::from_secs(1);
-        context.record_retry(reason, backoff, kind);
+        context.record_retry(reason, backoff, kind, None);
 
         host.clear_transient_error();
 
@@ -706,7 +717,7 @@ async fn connector_and_task_failures_are_both_described() {
     let connector_reason = "resolving MQTT host 'mqtt.nervix.test' failed: the name does not exist";
     let backoff = Duration::from_secs(1);
 
-    context.record_retry(task_reason, backoff, EmitterRetryKind::Infrastructure);
+    context.record_retry(task_reason, backoff, EmitterRetryKind::Infrastructure, None);
     host.record_transient_error(connector_reason.to_string(), Duration::from_millis(25));
 
     let observed = transient_error(&context).assured("both failures remain published");
@@ -890,6 +901,8 @@ async fn a_retry_keeps_its_held_acknowledgements_alive_at_the_committed_alive_in
             acks: EmitterAcknowledgements::from(acks),
             waiting_for_stall_clear: false,
             reason: None,
+            kind: EmitterRetryKind::Infrastructure,
+            give_up_at: None,
         },
     );
 
@@ -973,11 +986,13 @@ async fn stop_drain_with_emitter(
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
     let (_stop_tx, mut stop_rx) = watch::channel(Some(deadline));
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &fault_injection,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let context = emitter_context();
     let mut buffer = EmitterBatchBuffer::default();
@@ -1072,6 +1087,7 @@ fn holding_task_state(
         })),
         EmitterBatchBuffer::default(),
         RuntimeReconnectBackoff::default(),
+        EmitterGiveUp::new(None),
         context,
     );
     (state, finished)

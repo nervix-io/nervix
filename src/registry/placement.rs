@@ -617,8 +617,10 @@ impl PlacementTopology {
         source: NodeRef,
         destination: NodeRef,
     ) -> PlacementEndpointAnalysis {
+        // A domain's graph has no loops, so no path leads from a node back to itself, and a pair
+        // that names one node on both sides connects nothing.
         let connecting_path = if source == destination {
-            self.cycle_path(&source)
+            None
         } else {
             self.path(&source, &destination)
         };
@@ -701,20 +703,6 @@ impl PlacementTopology {
                     return Some(path);
                 }
                 pending.push_back(target.clone());
-            }
-        }
-        None
-    }
-
-    fn cycle_path(&self, start: &NodeRef) -> Option<Vec<NodeRef>> {
-        for target in self.adjacency.get(start).into_iter().flatten() {
-            if target == start {
-                return Some(vec![start.clone(), start.clone()]);
-            }
-            if let Some(path) = self.path(target, start) {
-                let mut cycle = vec![start.clone()];
-                cycle.extend(path);
-                return Some(cycle);
             }
         }
         None
@@ -1634,42 +1622,17 @@ mod tests {
     }
 
     #[test]
-    fn placement_cycle_corridor_captures_the_whole_cycle_with_member_witnesses() {
-        let cycle_a = NodeRef::new(ModelKind::Reingestor, named::<ModelName>("cycle_a"));
-        let cycle_b = NodeRef::new(ModelKind::Reingestor, named::<ModelName>("cycle_b"));
-        let cycle_c = NodeRef::new(ModelKind::Reingestor, named::<ModelName>("cycle_c"));
-        let tail = NodeRef::new(ModelKind::Emitter, named::<ModelName>("tail"));
+    fn a_pair_naming_one_node_on_both_sides_covers_nothing() {
+        let relay = NodeRef::new(ModelKind::Relay, named::<ModelName>("orders"));
+        let junction = NodeRef::new(ModelKind::Junction, named::<ModelName>("forward"));
         let topology = PlacementTopology {
-            adjacency: HashMap::from_iter([
-                (cycle_a.clone(), vec![cycle_b.clone(), tail]),
-                (cycle_b.clone(), vec![cycle_c.clone()]),
-                (cycle_c.clone(), vec![cycle_a.clone()]),
-            ]),
-            reverse: HashMap::from_iter([
-                (cycle_a.clone(), vec![cycle_c.clone()]),
-                (cycle_b.clone(), vec![cycle_a.clone()]),
-                (cycle_c.clone(), vec![cycle_b.clone()]),
-            ]),
+            adjacency: HashMap::from_iter([(relay.clone(), vec![junction.clone()])]),
+            reverse: HashMap::from_iter([(junction.clone(), vec![relay.clone()])]),
         };
 
-        let endpoint = topology.endpoint_analysis(cycle_a.clone(), cycle_a.clone());
-        assert_eq!(
-            endpoint.corridor,
-            vec![cycle_a, cycle_b.clone(), cycle_c.clone()]
-        );
-        assert_eq!(
-            endpoint
-                .witnesses
-                .iter()
-                .map(|(captured, _)| captured)
-                .collect::<Vec<_>>(),
-            vec![&cycle_b, &cycle_c]
-        );
-        assert!(endpoint.witnesses.iter().all(|(_, path)| {
-            path.first() == path.last()
-                && path
-                    .first()
-                    .is_some_and(|member| member.identifier == named("cycle_a"))
-        }));
+        let endpoint = topology.endpoint_analysis(junction.clone(), junction);
+
+        assert!(endpoint.corridor.is_empty());
+        assert!(endpoint.witnesses.is_empty());
     }
 }

@@ -30,8 +30,8 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, Executor, MemoryClass, QueueAdmission,
-    Reservation,
+    Attempt, BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, ExecutionFailure, Executor,
+    MemoryClass, Reservation,
 };
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
@@ -67,6 +67,22 @@ pub enum ArrowBodyError {
 }
 
 impl ArrowBodyError {
+    /// A growing encoding that produced no body: its charge was not granted, or its job did not
+    /// run to its end.
+    fn from_growing(failure: Report<ExecutionFailure>) -> Report<Self> {
+        let context = match failure.current_context() {
+            ExecutionFailure::Admission => Self::Admission,
+            ExecutionFailure::Execution => Self::Execution,
+        };
+        failure.change_context(context)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the typed Arrow encoding failure conversion"
+        )
+    )]
     fn encoding(error: impl ToString) -> Report<Self> {
         Report::new(Self::Encode {
             reason: error.to_string(),
@@ -151,7 +167,6 @@ struct BodyContract {
     max_sections: NonZeroUsize,
     /// The budget and ceilings this body travels under.
     carriage: ArrowBodyCarriage,
-    admission: QueueAdmission,
 }
 
 impl RuntimeRecordBatch {
@@ -160,107 +175,106 @@ impl RuntimeRecordBatch {
     /// The work runs on the executor's data workers, never on an async worker, and it writes into
     /// a buffer that fails at the configured relay body limit rather than growing past it. The
     /// returned handle carries the single charge that backs the allocation: cloning it for another
-    /// destination costs one refcount and no second copy of the bytes.
-    /// `admission` distinguishes a retryable request from accepted work the caller retains while
-    /// it waits for a worker place; dropping this future cancels that wait and the submitted job.
+    /// destination costs one refcount and no second copy of the bytes. A full class or queue holds
+    /// the encoding back until it has room; dropping this future ends the wait and the job.
     pub async fn encode_arrow_ipc(
         &self,
         executor: &Executor,
-        admission: QueueAdmission,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-        self.encode_body(executor, ArrowBodyCarriage::Relay, admission)
-            .await
+        self.encode_body(executor, ArrowBodyCarriage::Relay).await
     }
 
     /// Encode this batch as one Arrow section of a sealed runtime snapshot, charged to the bulk
-    /// budget and bounded by the section limit rather than by the relay body limit.
-    ///
-    /// `admission` says what a full bulk queue does with the job: state the node moves, captures
-    /// or restores for itself waits for a place, while a request may be refused.
+    /// budget and bounded by the section limit rather than by the relay body limit. A full bulk
+    /// class or queue holds the encoding back until it has room.
     pub async fn encode_arrow_snapshot_section(
         &self,
         executor: &Executor,
-        admission: QueueAdmission,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-        self.encode_body(executor, ArrowBodyCarriage::SnapshotSection, admission)
+        self.encode_body(executor, ArrowBodyCarriage::SnapshotSection)
             .await
     }
 
     /// Admit projection and its encoded result together, so neither allocation waits for a
     /// second grant while retaining the first. The projection and IPC writer run as one bounded
-    /// CPU job; only the encoded allocation survives that job, which `admission` queues or refuses
-    /// when the bulk queue is full.
+    /// CPU job; only the encoded allocation survives that job. When the encoded section outgrows
+    /// its estimate while the bulk class has no room for more, the job drops its projection and
+    /// runs again, projecting anew, once the whole larger charge is free.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the caller supplies the admitted bounded row projection")
     )]
     pub(crate) async fn encode_arrow_snapshot_projection<E: error_stack::Context>(
         executor: &Executor,
-        admission: QueueAdmission,
         projection_bytes: u64,
         encoded_estimate: u64,
-        project: impl FnOnce() -> error_stack::Result<Self, E> + Send + 'static,
+        project: impl FnMut() -> error_stack::Result<Self, E> + Send + 'static,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
         let limit = executor.limits().snapshot_section_bytes.as_u64();
         let encoded_bytes = encoded_estimate.min(limit);
         let bytes = projection_bytes
             .checked_add(encoded_bytes)
             .ok_or_else(|| Report::new(ArrowBodyError::Admission))?;
-        let reservation = executor
-            .try_reserve(MemoryClass::Bulk, bytes.max(1))
-            .change_context(ArrowBodyError::Admission)?;
         executor
-            .run_cpu_with(
+            .run_cpu_growing(
                 CpuClass::Bulk,
-                admission,
-                reservation,
-                move |charge, cancellation| {
-                    let (_projection_charge, encoded_charge) = charge
-                        .split(projection_bytes)
-                        .change_context(ArrowBodyError::Admission)?;
-                    cancellation
-                        .check()
-                        .change_context(ArrowBodyError::Cancelled)?;
-                    let batch = project().map_err(ArrowBodyError::encoding)?;
-                    cancellation
-                        .check()
-                        .change_context(ArrowBodyError::Cancelled)?;
-                    encode_admitted_body(batch.batch, encoded_charge, limit)
+                MemoryClass::Bulk,
+                bytes.max(1),
+                project,
+                move |mut project, charge, cancellation| {
+                    let projected = project_and_write(
+                        &mut project,
+                        projection_bytes,
+                        charge,
+                        limit,
+                        cancellation,
+                    );
+                    match projected {
+                        BodyWrite::Written(body) => Attempt::Finished(body),
+                        BodyWrite::Short { needed } => Attempt::Short {
+                            input: project,
+                            needed,
+                        },
+                    }
                 },
             )
             .await
-            .change_context(ArrowBodyError::Execution)?
+            .map_err(ArrowBodyError::from_growing)?
     }
 
     async fn encode_body(
         &self,
         executor: &Executor,
         carriage: ArrowBodyCarriage,
-        admission: QueueAdmission,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
         let limit = carriage.encoded_limit(executor);
         // Charge what the columns already occupy, bounded by the body limit, before the writer
-        // allocates anything. It grows from there only while the carriage's class can back it.
+        // allocates anything. It grows from there while the carriage's class can back it, and
+        // otherwise runs again under the charge it needs once the class has room for it.
         let estimate: u64 = self.batch.get_array_memory_size().arch_into();
-        let reservation = executor
-            .reserve(carriage.memory_class(), estimate.min(limit))
-            .await
-            .change_context(ArrowBodyError::Admission)?;
-        let batch = self.batch.clone();
         executor
-            .run_cpu_with(
+            .run_cpu_growing(
                 carriage.cpu_class(),
-                admission,
-                reservation,
-                move |charge, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(ArrowBodyError::Cancelled)?;
-                    encode_admitted_body(batch, charge, limit)
+                carriage.memory_class(),
+                estimate.min(limit),
+                self.batch.clone(),
+                move |batch, charge, cancellation| {
+                    if let Err(cancelled) = cancellation.check() {
+                        return Attempt::Finished(Err(
+                            Report::new(cancelled).change_context(ArrowBodyError::Cancelled)
+                        ));
+                    }
+                    match write_admitted_body(&batch, charge, limit) {
+                        BodyWrite::Written(body) => Attempt::Finished(body),
+                        BodyWrite::Short { needed } => Attempt::Short {
+                            input: batch,
+                            needed,
+                        },
+                    }
                 },
             )
             .await
-            .change_context(ArrowBodyError::Execution)?
+            .map_err(ArrowBodyError::from_growing)?
     }
 
     /// Decode a body whose schema the caller does not know in advance, concatenating the sections
@@ -277,7 +291,6 @@ impl RuntimeRecordBatch {
                 decoded_limit: executor.limits().relay_decoded_bytes.as_u64(),
                 max_sections: NonZeroUsize::MAX,
                 carriage: ArrowBodyCarriage::Relay,
-                admission: QueueAdmission::RefuseWhenFull,
             },
         )
         .await
@@ -288,7 +301,6 @@ impl RuntimeRecordBatch {
     /// than by the relay body limit; `admission` says what a full bulk queue does with the job.
     pub async fn decode_arrow_snapshot_section(
         executor: &Executor,
-        admission: QueueAdmission,
         expected_schema: StdArc<ArrowSchema>,
         body: ChargedBytes,
     ) -> Result<Self, Report<ArrowBodyError>> {
@@ -300,10 +312,40 @@ impl RuntimeRecordBatch {
                 decoded_limit: executor.limits().snapshot_section_bytes.as_u64(),
                 max_sections: NonZeroUsize::MIN,
                 carriage: ArrowBodyCarriage::SnapshotSection,
-                admission,
             },
         )
         .await
+    }
+
+    /// Decode one Arrow section of a sealed runtime snapshot under `scratch`, a bulk charge of at
+    /// least [`Self::snapshot_section_scratch`] that its caller took together with the section's
+    /// own bytes, while it held nothing else of the class. The charge comes back with the batch,
+    /// so the caller can reuse it for its next section.
+    pub async fn decode_arrow_snapshot_section_within(
+        executor: &Executor,
+        expected_schema: StdArc<ArrowSchema>,
+        body: ChargedBytes,
+        scratch: Reservation,
+    ) -> Result<(Self, Reservation), Report<ArrowBodyError>> {
+        decode_body_within(
+            executor,
+            body,
+            BodyContract {
+                schema: Some(expected_schema),
+                decoded_limit: executor.limits().snapshot_section_bytes.as_u64(),
+                max_sections: NonZeroUsize::MIN,
+                carriage: ArrowBodyCarriage::SnapshotSection,
+            },
+            scratch,
+        )
+        .await
+    }
+
+    /// The bulk scratch decoding a snapshot section of `encoded` bytes takes: the decoded columns
+    /// and the overlap of their conversion, bounded by the section limit.
+    pub fn snapshot_section_scratch(executor: &Executor, encoded: u64) -> u64 {
+        let decoded_limit = ArrowBodyCarriage::SnapshotSection.decoded_limit(executor);
+        decode_scratch(encoded, decoded_limit)
     }
 
     /// Rebuild one batch from the sections an IPC stream carried. An empty stream still declares a
@@ -335,20 +377,87 @@ impl RuntimeRecordBatch {
     }
 }
 
+/// How one attempt at writing an Arrow IPC body ended: with the body or its failure, or short of
+/// the charge it needs because its class had no room for the growth.
+enum BodyWrite {
+    Written(Result<ChargedBytes, Report<ArrowBodyError>>),
+    Short { needed: u64 },
+}
+
 /// The IPC writer shared by ordinary bodies and admitted snapshot projections. Its callers have
 /// already entered a charged CPU job and checked cancellation.
-fn encode_admitted_body(
-    batch: RecordBatch,
-    charge: Reservation,
-    limit: u64,
-) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-    let buffer = BudgetedBuffer::with_limit(charge, limit);
+fn write_admitted_body(batch: &RecordBatch, charge: Reservation, limit: u64) -> BodyWrite {
+    let mut buffer = BudgetedBuffer::with_limit(charge, limit);
+    let written = write_ipc_stream(&mut buffer, batch);
+    let Err(failure) = written else {
+        return BodyWrite::Written(Ok(ChargedBytes::from_buffer(buffer)));
+    };
+    match buffer.shortfall() {
+        Some(needed) => BodyWrite::Short { needed },
+        None => BodyWrite::Written(Err(failure)),
+    }
+}
+
+/// Write `batch` as one complete IPC stream into `buffer`.
+fn write_ipc_stream(
+    buffer: &mut BudgetedBuffer,
+    batch: &RecordBatch,
+) -> Result<(), Report<ArrowBodyError>> {
     let mut writer =
         StreamWriter::try_new(buffer, batch.schema_ref()).map_err(ArrowBodyError::encoding)?;
-    writer.write(&batch).map_err(ArrowBodyError::encoding)?;
+    writer.write(batch).map_err(ArrowBodyError::encoding)?;
     writer.finish().map_err(ArrowBodyError::encoding)?;
-    let buffer = writer.into_inner().map_err(ArrowBodyError::encoding)?;
-    Ok(ChargedBytes::from_buffer(buffer))
+    Ok(())
+}
+
+/// One attempt of an admitted snapshot projection: project the rows under the projection's share
+/// of `charge`, then write the section under the rest. An attempt short of room asks for the
+/// projection's share and the section's need together, and leaves no projection behind.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the caller supplies the projection of the rows the section encodes")
+)]
+fn project_and_write<E: error_stack::Context>(
+    project: &mut impl FnMut() -> error_stack::Result<RuntimeRecordBatch, E>,
+    projection_bytes: u64,
+    charge: Reservation,
+    limit: u64,
+    cancellation: &nervix_execution::Cancellation,
+) -> BodyWrite {
+    let split = charge
+        .split(projection_bytes)
+        .change_context(ArrowBodyError::Admission);
+    let (projection_charge, encoded_charge) = match split {
+        Ok(parts) => parts,
+        Err(failure) => return BodyWrite::Written(Err(failure)),
+    };
+    if let Err(cancelled) = cancellation.check() {
+        return BodyWrite::Written(Err(
+            Report::new(cancelled).change_context(ArrowBodyError::Cancelled)
+        ));
+    }
+    let batch = match project() {
+        Ok(batch) => batch,
+        Err(failure) => return BodyWrite::Written(Err(ArrowBodyError::encoding(failure))),
+    };
+    if let Err(cancelled) = cancellation.check() {
+        return BodyWrite::Written(Err(
+            Report::new(cancelled).change_context(ArrowBodyError::Cancelled)
+        ));
+    }
+    let written = write_admitted_body(&batch.batch, encoded_charge, limit);
+    // The projection's columns and their charge end together, before any wait for more room.
+    drop(batch);
+    drop(projection_charge);
+    match written {
+        BodyWrite::Short { needed } => {
+            let Some(needed) = projection_bytes.checked_add(needed) else {
+                return BodyWrite::Written(Err(Report::new(ArrowBodyError::Admission)));
+            };
+            BodyWrite::Short { needed }
+        }
+        written @ BodyWrite::Written(_) => written,
+    }
 }
 
 impl CompiledSchema {
@@ -369,7 +478,6 @@ impl CompiledSchema {
                 decoded_limit,
                 max_sections: NonZeroUsize::MIN,
                 carriage: ArrowBodyCarriage::Relay,
-                admission: QueueAdmission::WaitForPlace,
             },
         )
         .await?;
@@ -389,6 +497,49 @@ async fn decode_body(
     body: ChargedBytes,
     contract: BodyContract,
 ) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
+    let encoded: u64 = body.len().arch_into();
+    let decoded_limit = contract
+        .decoded_limit
+        .min(contract.carriage.decoded_limit(executor));
+    let charge = decode_scratch(encoded, decoded_limit);
+    // A relay body waits for its scratch while it holds nothing else of the relay class. A
+    // snapshot section draws its scratch from the bulk share its operation holds, so a section
+    // its share cannot cover reports the shortfall its operation waits for while holding nothing.
+    let reservation = match contract.carriage {
+        ArrowBodyCarriage::Relay => {
+            executor
+                .reserve(contract.carriage.memory_class(), charge)
+                .await
+        }
+        ArrowBodyCarriage::SnapshotSection => {
+            executor.try_reserve(contract.carriage.memory_class(), charge)
+        }
+    }
+    .change_context(ArrowBodyError::Admission)?;
+    let (batch, reservation) = decode_body_within(executor, body, contract, reservation).await?;
+    drop(reservation);
+    Ok(batch)
+}
+
+/// Charge the data a decoder of `encoded` bytes will produce and the scratch its conversion
+/// overlaps with. Uncompressed Arrow decodes to about the size it was encoded at, so one encoded
+/// size covers the decoded columns and a second covers the overlap. The charge scales with the
+/// body rather than with the largest one the class would accept: a kilobyte of relay traffic must
+/// not hold the whole scratch allowance.
+fn decode_scratch(encoded: u64, decoded_limit: u64) -> u64 {
+    match encoded.checked_mul(2) {
+        Some(doubled) => doubled.min(decoded_limit),
+        None => decoded_limit,
+    }
+}
+
+/// Decode `body` on the class's workers under `reservation`, which comes back with the batch.
+async fn decode_body_within(
+    executor: &Executor,
+    body: ChargedBytes,
+    contract: BodyContract,
+    reservation: Reservation,
+) -> Result<(RuntimeRecordBatch, Reservation), Report<ArrowBodyError>> {
     let encoded_limit = contract.carriage.encoded_limit(executor);
     let encoded: u64 = body.len().arch_into();
     // The encoded length is known before anything is decoded, so an oversized body is refused here
@@ -402,96 +553,74 @@ async fn decode_body(
     let decoded_limit = contract
         .decoded_limit
         .min(contract.carriage.decoded_limit(executor));
-    // Charge the data the decoder will produce and the scratch its conversion overlaps with, both
-    // before it allocates either. Uncompressed Arrow decodes to about the size it was encoded at,
-    // so one encoded size covers the decoded columns and a second covers the overlap. The charge
-    // scales with this body rather than with the largest one the class would accept: a kilobyte of
-    // relay traffic must not hold the whole scratch allowance.
-    let charge = encoded
-        .checked_mul(2)
-        .unwrap_or(decoded_limit)
-        .min(decoded_limit);
-    // A snapshot's input already occupies this bulk pool. Waiting for scratch while retaining
-    // that input can leave concurrent readers holding all the room each needs to finish.
-    let reservation = match contract.carriage {
-        ArrowBodyCarriage::Relay => {
-            executor
-                .reserve(contract.carriage.memory_class(), charge)
-                .await
-        }
-        ArrowBodyCarriage::SnapshotSection => {
-            executor.try_reserve(contract.carriage.memory_class(), charge)
-        }
-    }
-    .change_context(ArrowBodyError::Admission)?;
     let decoded = executor
-        .run_cpu_with(
+        .run_cpu(
             contract.carriage.cpu_class(),
-            contract.admission,
             reservation,
-            move |_charge, cancellation| {
-                cancellation
-                    .check()
-                    .change_context(ArrowBodyError::Cancelled)?;
-                // Arrow's reader sizes what it allocates from the lengths a stream declares, and
-                // panics on a stream that declares what it does not expect. The stream is
-                // therefore scanned first, and its sections counted, before any column is read.
-                let scanned = IpcMessages::new(body.as_ref())
-                    .scan(None)
-                    .map_err(ArrowBodyError::refused)?;
-                if scanned.record_batches > contract.max_sections.get() {
-                    return Err(Report::new(ArrowBodyError::TooManySections {
-                        sections: scanned.record_batches,
-                        limit: contract.max_sections.get(),
-                    }));
-                }
-                if scanned.record_batches == 0 && contract.schema.is_some() {
-                    return Err(Report::new(ArrowBodyError::NoSection));
-                }
-                let mut reader = scanned.reader().map_err(ArrowBodyError::decoding)?;
-                let schema = reader.schema();
-                if let Some(expected) = &contract.schema
-                    && schema.as_ref() != expected.as_ref()
-                {
-                    return Err(ArrowBodyError::decoding(
-                        "arrow ipc schema does not match the compiled schema",
-                    ));
-                }
-                let mut batches = Vec::new();
-                let mut decoded = 0_u64;
-                for next in reader.by_ref() {
+            move |charge, cancellation| {
+                let decoded = (|| {
                     cancellation
                         .check()
                         .change_context(ArrowBodyError::Cancelled)?;
-                    let batch = next.map_err(ArrowBodyError::decoding)?;
-                    let section = batch_payload_bytes(&batch);
-                    decoded = decoded.checked_add(section).ok_or_else(|| {
-                        Report::new(ArrowBodyError::DecodedTooLarge {
-                            size: u64::MAX,
-                            limit: decoded_limit,
-                        })
-                    })?;
-                    // Each section is measured as it lands, so a body whose declared buffers expand
-                    // past the limit stops at the section that crossed it.
-                    if decoded > decoded_limit {
-                        return Err(Report::new(ArrowBodyError::DecodedTooLarge {
-                            size: decoded,
-                            limit: decoded_limit,
+                    // Arrow's reader sizes what it allocates from the lengths a stream declares, and
+                    // panics on a stream that declares what it does not expect. The stream is
+                    // therefore scanned first, and its sections counted, before any column is read.
+                    let scanned = IpcMessages::new(body.as_ref())
+                        .scan(None)
+                        .map_err(ArrowBodyError::refused)?;
+                    if scanned.record_batches > contract.max_sections.get() {
+                        return Err(Report::new(ArrowBodyError::TooManySections {
+                            sections: scanned.record_batches,
+                            limit: contract.max_sections.get(),
                         }));
                     }
-                    batches.push(batch);
-                }
-                RuntimeRecordBatch::from_decoded_sections(schema, batches)
+                    if scanned.record_batches == 0 && contract.schema.is_some() {
+                        return Err(Report::new(ArrowBodyError::NoSection));
+                    }
+                    let mut reader = scanned.reader().map_err(ArrowBodyError::decoding)?;
+                    let schema = reader.schema();
+                    if let Some(expected) = &contract.schema
+                        && schema.as_ref() != expected.as_ref()
+                    {
+                        return Err(ArrowBodyError::decoding(
+                            "arrow ipc schema does not match the compiled schema",
+                        ));
+                    }
+                    let mut batches = Vec::new();
+                    let mut decoded = 0_u64;
+                    for next in reader.by_ref() {
+                        cancellation
+                            .check()
+                            .change_context(ArrowBodyError::Cancelled)?;
+                        let batch = next.map_err(ArrowBodyError::decoding)?;
+                        let section = batch_payload_bytes(&batch);
+                        decoded = decoded.checked_add(section).ok_or_else(|| {
+                            Report::new(ArrowBodyError::DecodedTooLarge {
+                                size: u64::MAX,
+                                limit: decoded_limit,
+                            })
+                        })?;
+                        // Each section is measured as it lands, so a body whose declared buffers expand
+                        // past the limit stops at the section that crossed it.
+                        if decoded > decoded_limit {
+                            return Err(Report::new(ArrowBodyError::DecodedTooLarge {
+                                size: decoded,
+                                limit: decoded_limit,
+                            }));
+                        }
+                        batches.push(batch);
+                    }
+                    RuntimeRecordBatch::from_decoded_sections(schema, batches)
+                })();
+                (decoded, charge)
             },
         )
         .await;
     match decoded {
-        Ok(batch) => batch,
+        Ok((decoded, charge)) => decoded.map(|batch| (batch, charge)),
         Err(error) => {
             let failure = match error.current_context() {
-                ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
-                    ArrowBodyError::Execution
-                }
+                ExecutionError::PoolClosed { .. } => ArrowBodyError::Execution,
                 // Arrow's reader panics only on a stream it failed to reject, so the body is
                 // what is wrong, and decoding it again would panic again.
                 ExecutionError::JobPanicked { .. } => ArrowBodyError::Decode {
@@ -509,26 +638,56 @@ mod projection_tests {
 
     use super::*;
 
+    /// A snapshot projection the bulk class has no room for waits for room before it converts a
+    /// row, and projects and encodes once the class frees.
     #[nervix_primitives::test]
-    async fn snapshot_projection_refuses_before_conversion_when_bulk_memory_is_busy() {
+    async fn snapshot_projection_waits_for_bulk_room_before_converting() {
+        use arrow_schema::{DataType, Field};
+        use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
+
         let config = nervix_execution::ExecutionConfig::default();
         let bulk_bytes = config.budgets.bulk.as_u64();
         let executor = Executor::new(config).assured("the default executor is valid");
-        let _busy = executor
+        let busy = executor
             .try_reserve(MemoryClass::Bulk, bulk_bytes)
             .assured("the test holds the bulk budget");
-        let result = RuntimeRecordBatch::encode_arrow_snapshot_projection::<
+        let projections = StdArc::new(AtomicUsize::new(0));
+        let counted = StdArc::clone(&projections);
+        let schema = StdArc::new(ArrowSchema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let mut projecting = Box::pin(RuntimeRecordBatch::encode_arrow_snapshot_projection::<
             super::super::RuntimeSchemaError,
-        >(&executor, QueueAdmission::WaitForPlace, 1024, 1024, || {
-            panic!("a refused projection must not allocate or convert rows")
+        >(&executor, 1024, 1024, move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+            RuntimeRecordBatch::from_record_batch(
+                StdArc::clone(&schema),
+                RecordBatch::new_empty(StdArc::clone(&schema)),
+            )
+        }));
+        let first_poll = std::future::poll_fn(|context| {
+            std::task::Poll::Ready(std::future::Future::poll(projecting.as_mut(), context))
         })
         .await;
-        assert!(matches!(
-            result
-                .expect_err("the occupied budget refuses projection")
-                .current_context(),
-            ArrowBodyError::Admission
-        ));
+        assert!(
+            first_poll.is_pending(),
+            "an occupied bulk class holds the projection back instead of refusing it"
+        );
+        assert_eq!(
+            projections.load(Ordering::Acquire),
+            0,
+            "a waiting projection converts no rows"
+        );
+        drop(busy);
+        let body = projecting
+            .await
+            .assured("the projection encodes once the bulk class has room");
+        assert!(!body.is_empty());
+        assert_eq!(projections.load(Ordering::Acquire), 1);
+        drop(body);
+        assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
     }
 }
 
@@ -585,7 +744,6 @@ mod framing_tests {
             .await
             .assured("the body opens after the worker place frees");
         assert_eq!(decoded.batch().num_rows(), 3);
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
         assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
     }
 
@@ -620,10 +778,7 @@ mod framing_tests {
             let batch = RuntimeRecordBatch::from_record_batch(StdArc::clone(&schema), batch)
                 .assured("the batch has the schema it was built with");
             let section = batch
-                .encode_arrow_snapshot_section(
-                    executor,
-                    nervix_execution::QueueAdmission::RefuseWhenFull,
-                )
+                .encode_arrow_snapshot_section(executor)
                 .await
                 .assured("a three-row section seals");
             Self {
@@ -645,7 +800,6 @@ mod framing_tests {
                 .assured("the bulk budget holds one small section");
             RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
-                nervix_execution::QueueAdmission::RefuseWhenFull,
                 StdArc::clone(&self.schema),
                 section,
             )
@@ -737,7 +891,6 @@ mod framing_tests {
 
         let result = RuntimeRecordBatch::decode_arrow_snapshot_section(
             &executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
             section.schema.clone(),
             input,
         )

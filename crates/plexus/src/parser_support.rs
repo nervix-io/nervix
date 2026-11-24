@@ -29,16 +29,16 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     AckMode, AckWindow, AlterProcessorOperation, AssignmentTargetScope, BranchSelection,
     ClientConfigEntry, ClientName, ClusterNodeName, CodecName, ConstructionAlteration,
-    CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName, EmitterName, EndpointName,
-    Expression, ExternalName, FieldName, FlushPolicy, GeneralErrorPolicy, GeneratorName,
-    InferencerName, IngestorName, InputCollectPolicy, InspectionFormat, JunctionName, LookupName,
-    MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos,
-    NameError, OutputBranch, ParametrizerName, PayloadSizeLimit, PlacementName,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, ReingestorName,
-    RelayName, ReordererName, RequestedResourceVersion, ResourceName, RetryPolicy,
-    RouteConstruction, SchemaName, SignalingProtocolName, SubscriptionName,
-    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName, EmitterName,
+    EmitterRetryPolicy, EndpointName, Expression, ExternalName, FieldName, FlushPolicy,
+    GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
+    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, ModelName, MqttQos, NameError, OutputBranch,
+    ParametrizerName, PayloadSizeLimit, PlacementName, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
+    SignalingProtocolName, SubscriptionName, TransactionOperationNumber, UdfName, UserName,
+    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -380,16 +380,42 @@ pub fn ack_timeout<'src>()
         .boxed()
 }
 
-pub fn retry_policy<'src>()
+/// The `BACKOFF <duration> MAX <duration>` pacing both retry policies share.
+fn retry_pacing<'src>()
 -> impl Parser<'src, &'src [Token], RetryPolicy, extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase2(Identifier::Retry, Identifier::Policy)
-        .ignore_then(kw(Identifier::Backoff))
+    kw(Identifier::Backoff)
         .ignore_then(duration_lit())
         .then_ignore(kw(Identifier::Max))
         .then(duration_lit())
         .map(|(backoff, max_backoff)| RetryPolicy {
             backoff,
             max_backoff,
+        })
+        .boxed()
+}
+
+/// An ingestor's `RETRY POLICY`, which paces how soon a payload is presented again and has no
+/// limit: ending a payload's repeats is not a timer's decision.
+pub fn ingestor_retry_policy<'src>()
+-> impl Parser<'src, &'src [Token], RetryPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Retry, Identifier::Policy)
+        .ignore_then(retry_pacing())
+        .boxed()
+}
+
+/// An emitter's `RETRY POLICY`: the shared pacing, then, optionally, `GIVE UP AFTER <duration>`.
+pub fn emitter_retry_policy<'src>()
+-> impl Parser<'src, &'src [Token], EmitterRetryPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Retry, Identifier::Policy)
+        .ignore_then(retry_pacing())
+        .then(
+            kw_phrase3(Identifier::Give, Identifier::Up, Identifier::After)
+                .ignore_then(duration_lit())
+                .or_not(),
+        )
+        .map(|(pacing, give_up_after)| EmitterRetryPolicy {
+            pacing,
+            give_up_after,
         })
         .boxed()
 }

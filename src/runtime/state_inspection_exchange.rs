@@ -14,9 +14,7 @@ use arrow_array::RecordBatch;
 use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, Executor, MemoryClass, QueueAdmission, Reservation,
-};
+use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_interconnect::{
     MaterializedStatePageDescriptor, MaterializedStatePageReply, MaterializedStatePageTransfer,
     PoolClass, ProcessorStatePageDescriptor, ProcessorStatePageReply,
@@ -54,13 +52,10 @@ async fn identified_body(
     executor: &Executor,
     body: ChargedBytes,
 ) -> Result<(StatePageBody, ChargedBytes), Report<StreamHandlerError>> {
-    let charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
-        .map_err(StreamHandlerError::with_cause)?;
+    let charge = executor.charge_nothing(MemoryClass::Bulk);
     executor
-        .run_cpu_with(
+        .run_cpu(
             nervix_execution::CpuClass::Bulk,
-            QueueAdmission::WaitForPlace,
             charge,
             move |_charge, cancellation| {
                 cancellation.check()?;
@@ -85,9 +80,9 @@ fn page_stream(
     header_charge: Reservation,
     bodies: Vec<ChargedBytes>,
 ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
-    let prefix_charge = executor
-        .try_reserve(MemoryClass::Bulk, 8)
-        .map_err(StreamHandlerError::with_cause)?;
+    // The eight-byte length rides on the page's own charges: this is no place to wait, since the
+    // descriptor and the bodies already hold part of the class.
+    let prefix_charge = executor.charge_nothing(MemoryClass::Bulk);
     let prefix = ChargedBytes::from_owned(
         u64::try_from(header.len())
             .assured("a resident descriptor fits u64")
@@ -184,12 +179,11 @@ pub(crate) async fn stream_materialized_page(
     };
     // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
     // encoding back; the caller's reset of the page stream ends the wait.
-    let (header, charge) = MaterializedStatePageReply::encode_rkyv_with(
+    let (header, charge) = MaterializedStatePageReply::encode_rkyv(
         reply,
         executor.clone(),
         PoolClass::Bulk,
         PoolClass::Bulk.payload_limit(executor),
-        QueueAdmission::WaitForPlace,
     )
     .await
     .map_err(StreamHandlerError::with_cause)?;
@@ -232,7 +226,7 @@ pub(crate) async fn stream_processor_page(
                 // The section holds rows the owner already read, so a full bulk queue holds its
                 // encoding back; the caller's reset of the page stream ends the wait.
                 let body = batch
-                    .encode_arrow_snapshot_section(executor, QueueAdmission::WaitForPlace)
+                    .encode_arrow_snapshot_section(executor)
                     .await
                     .map_err(StreamHandlerError::with_cause)?;
                 bytes = bytes
@@ -256,12 +250,11 @@ pub(crate) async fn stream_processor_page(
     };
     // The reply is the owner's answer to a read it already served, so a full bulk queue holds its
     // encoding back; the caller's reset of the page stream ends the wait.
-    let (header, charge) = ProcessorStatePageReply::encode_rkyv_with(
+    let (header, charge) = ProcessorStatePageReply::encode_rkyv(
         reply,
         executor.clone(),
         PoolClass::Bulk,
         PoolClass::Bulk.payload_limit(executor),
-        QueueAdmission::WaitForPlace,
     )
     .await
     .map_err(StreamHandlerError::with_cause)?;
@@ -273,11 +266,23 @@ pub(crate) struct ReceivedMaterializedPage {
     snapshot: Option<RestoredMaterializedSnapshot>,
 }
 
+/// A received page stream, and the room its descriptor's decoding takes, charged with it.
+struct ReceivedPageBytes {
+    bytes: ChargedBytes,
+    descriptor_room: Reservation,
+    /// The bulk scratch the page's body decoders draw from, one section at a time.
+    body_scratch: Reservation,
+}
+
+/// Receive one page stream whole. The page, the room its descriptor's decoding takes (a copy and
+/// a decoded value no longer than the page) and the scratch its body's decoders draw from are one
+/// charge the coordinator waits for while it holds nothing of the class, so no decoding of the page
+/// waits for room behind the page.
 async fn receive_page_bytes(
     executor: &Executor,
     mut stream: nervix_interconnect::IncomingByteStream,
     max_bytes: u64,
-) -> Result<ChargedBytes, Report<StatePageExchangeError>> {
+) -> Result<ReceivedPageBytes, Report<StatePageExchangeError>> {
     let header_bound = PoolClass::Bulk.payload_limit(executor);
     let with_header = max_bytes
         .checked_add(header_bound)
@@ -289,8 +294,25 @@ async fn receive_page_bytes(
     if length > bound || length < 8 {
         return Err(Report::new(StatePageExchangeError::Framing));
     }
+    let descriptor_room = header_bound
+        .min(length)
+        .checked_mul(2)
+        .ok_or_else(|| Report::new(StatePageExchangeError::Framing))?;
+    let body_scratch = RestoredMaterializedSnapshot::decode_scratch_bound(executor, length);
+    let whole = length
+        .checked_add(descriptor_room)
+        .ok_or_else(|| Report::new(StatePageExchangeError::Framing))?
+        .checked_add(body_scratch)
+        .ok_or_else(|| Report::new(StatePageExchangeError::Framing))?;
     let charge = executor
-        .try_reserve(MemoryClass::Bulk, length)
+        .reserve(MemoryClass::Bulk, whole)
+        .await
+        .change_context(StatePageExchangeError::Admission)?;
+    let (charge, rooms) = charge
+        .split(length)
+        .change_context(StatePageExchangeError::Admission)?;
+    let (descriptor_room, body_scratch) = rooms
+        .split(descriptor_room)
         .change_context(StatePageExchangeError::Admission)?;
     let mut buffer = BudgetedBuffer::with_limit(charge, length);
     while let Some(chunk) = stream
@@ -305,7 +327,11 @@ async fn receive_page_bytes(
     if u64::try_from(buffer.len()).assured("a bounded buffer fits u64") != length {
         return Err(Report::new(StatePageExchangeError::Framing));
     }
-    Ok(ChargedBytes::from_buffer(buffer))
+    Ok(ReceivedPageBytes {
+        bytes: ChargedBytes::from_buffer(buffer),
+        descriptor_room,
+        body_scratch,
+    })
 }
 
 /// Where a received page stream's descriptor ends. The descriptor is bounded before it is decoded.
@@ -332,7 +358,8 @@ fn descriptor_end(
     Ok(end)
 }
 
-/// Decodes the reply a page stream frames before `end`.
+/// Decodes the reply a page stream frames before `end`, within `room` the page was received with:
+/// the descriptor's copy and its decoded value wait for nothing behind the page.
 ///
 /// The reply is the owner's answer to a read it already served, so a full bulk queue holds the
 /// decoding back rather than discarding that answer; the caller's own read deadline bounds the
@@ -341,25 +368,16 @@ async fn decode_reply<R: RkyvMessage>(
     executor: &Executor,
     bytes: &ChargedBytes,
     end: usize,
+    room: Reservation,
 ) -> Result<R, Report<StatePageExchangeError>> {
-    let header_length = u64::try_from(
-        end.checked_sub(8)
-            .verified("a descriptor ends after its eight-byte length"),
-    )
-    .assured("a bounded descriptor length fits u64");
-    // The descriptor is bounded independently before copying for the shared rkyv decoder.
-    let header_charge = executor
-        .try_reserve(MemoryClass::Bulk, header_length.max(1))
-        .change_context(StatePageExchangeError::Admission)?;
-    let (reply, _decoded_charge) = R::decode_rkyv_with(
+    let (reply, _decoded_charge) = R::decode_rkyv_within(
         executor.clone(),
         PoolClass::Bulk,
-        QueueAdmission::WaitForPlace,
         bytes[8..end].to_vec(),
+        room,
     )
     .await
     .change_context(StatePageExchangeError::Descriptor)?;
-    drop(header_charge);
     Ok(reply)
 }
 
@@ -373,13 +391,10 @@ async fn verified_body(
     body: ChargedBytes,
     identity: StatePageBody,
 ) -> Result<ChargedBytes, Report<StatePageExchangeError>> {
-    let charge = executor
-        .try_reserve(MemoryClass::Bulk, 1)
-        .change_context(StatePageExchangeError::Admission)?;
+    let charge = executor.charge_nothing(MemoryClass::Bulk);
     executor
-        .run_cpu_with(
+        .run_cpu(
             nervix_execution::CpuClass::Bulk,
-            QueueAdmission::WaitForPlace,
             charge,
             move |_charge, cancellation| {
                 cancellation
@@ -405,9 +420,14 @@ pub(crate) async fn receive_materialized_page(
     Report<StatePageExchangeError>,
 > {
     let max_bytes = request.max_bytes;
-    let bytes = receive_page_bytes(executor, stream, max_bytes).await?;
+    let ReceivedPageBytes {
+        bytes,
+        descriptor_room,
+        body_scratch,
+    } = receive_page_bytes(executor, stream, max_bytes).await?;
     let end = descriptor_end(executor, &bytes)?;
-    let reply: MaterializedStatePageReply = decode_reply(executor, &bytes, end).await?;
+    let reply: MaterializedStatePageReply =
+        decode_reply(executor, &bytes, end, descriptor_room).await?;
     let transfer = match reply {
         Ok(transfer) => transfer,
         Err(reason) => {
@@ -453,10 +473,13 @@ pub(crate) async fn receive_materialized_page(
         return Err(Report::new(StatePageExchangeError::Framing));
     }
     let body = verified_body(executor, body, identity).await?;
-    let snapshot =
-        RestoredMaterializedSnapshot::open_relay(executor, schema, SealedSource::memory(body))
-            .await
-            .change_context(StatePageExchangeError::Columns)?;
+    let snapshot = RestoredMaterializedSnapshot::open_relay(
+        executor,
+        schema,
+        SealedSource::memory_with_working(body, body_scratch),
+    )
+    .await
+    .change_context(StatePageExchangeError::Columns)?;
     validate_received_snapshot(&snapshot, &descriptor, count)?;
     Ok(Ok(ReceivedMaterializedPage {
         descriptor,
@@ -566,6 +589,16 @@ struct ProcessorPageBodies<'a> {
     /// The body bytes taken so far.
     received: u64,
     max_bytes: u64,
+    /// The bulk scratch each body's decoder draws from in turn; absent only while one decodes.
+    scratch: Option<Reservation>,
+}
+
+/// The rooms a received page's decoders draw from, charged with the page.
+struct PageRooms {
+    /// The descriptor's decoding.
+    descriptor: Reservation,
+    /// The bodies' decoders, one section at a time.
+    body: Reservation,
 }
 
 impl ProcessorPageBodies<'_> {
@@ -601,16 +634,17 @@ impl ProcessorPageBodies<'_> {
         self.offset = end;
         let body = verified_body(executor, body, identity.clone()).await?;
         let schema = StdArc::new(SchemaField::arrow_schema(&transfer.fields));
-        // The section holds rows the owner already read, so a full bulk queue holds its decoding
-        // back; the caller's own read deadline bounds the wait.
-        let decoded = RuntimeRecordBatch::decode_arrow_snapshot_section(
-            executor,
-            QueueAdmission::WaitForPlace,
-            schema,
-            body,
+        // The section decodes within the scratch charged with the page, which covers the largest
+        // section a page of this size holds.
+        let scratch = self.scratch.take().verified(
+            "each section's decoding returns the page's scratch before the next takes it",
+        );
+        let (decoded, scratch) = RuntimeRecordBatch::decode_arrow_snapshot_section_within(
+            executor, schema, body, scratch,
         )
         .await
         .change_context(StatePageExchangeError::Columns)?;
+        self.scratch = Some(scratch);
         let decoded_rows =
             u64::try_from(decoded.batch().num_rows()).assured("a decoded row count fits u64");
         if decoded_rows != rows {
@@ -629,8 +663,22 @@ pub(crate) async fn receive_processor_page(
     payload: &[(ProcessorStateSection, Vec<SchemaField>)],
 ) -> Result<Result<ReceivedProcessorPage, StateInspectionRejection>, Report<StatePageExchangeError>>
 {
-    let bytes = receive_page_bytes(executor, stream, request.max_bytes).await?;
-    ReceivedProcessorPage::decode(executor, &bytes, request, payload).await
+    let ReceivedPageBytes {
+        bytes,
+        descriptor_room,
+        body_scratch,
+    } = receive_page_bytes(executor, stream, request.max_bytes).await?;
+    ReceivedProcessorPage::decode(
+        executor,
+        &bytes,
+        PageRooms {
+            descriptor: descriptor_room,
+            body: body_scratch,
+        },
+        request,
+        payload,
+    )
+    .await
 }
 
 impl ReceivedProcessorPage {
@@ -646,12 +694,14 @@ impl ReceivedProcessorPage {
     async fn decode(
         executor: &Executor,
         bytes: &ChargedBytes,
+        rooms: PageRooms,
         request: &ReadProcessorStatePage,
         payload: &[(ProcessorStateSection, Vec<SchemaField>)],
     ) -> Result<Result<Self, StateInspectionRejection>, Report<StatePageExchangeError>> {
         let framing = || Report::new(StatePageExchangeError::Framing);
         let end = descriptor_end(executor, bytes)?;
-        let reply: ProcessorStatePageReply = decode_reply(executor, bytes, end).await?;
+        let reply: ProcessorStatePageReply =
+            decode_reply(executor, bytes, end, rooms.descriptor).await?;
         let descriptor = match reply {
             Ok(descriptor) => descriptor,
             Err(reason) => {
@@ -667,6 +717,7 @@ impl ReceivedProcessorPage {
             offset: end,
             received: 0,
             max_bytes: request.max_bytes,
+            scratch: Some(rooms.body),
         };
         let mut sections = Vec::with_capacity(descriptor.sections.len());
         for (index, transfer) in descriptor.sections.iter().enumerate() {

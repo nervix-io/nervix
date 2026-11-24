@@ -257,11 +257,10 @@ for retention and admission semantics.
 
 ## Licensing Metrics
 
-The `nervix_licensing_` families expose the published policy and process-local admission events.
+The `nervix_licensing_` families expose the published policy and the leader's licensing requests.
 Label values come from fixed declarations, with every applicable labelled child initialized to
 zero. Replicated gauges describe the exporting node's applied state; use the leader's values for
-a cluster total. Sum refusal-counter rates across nodes as leadership moves. A process restart
-resets its counters.
+a cluster total. A process restart resets its counters.
 
 | Suffix | Kind and labels | Free policy |
 | --- | --- | --- |
@@ -272,27 +271,19 @@ resets its counters.
 | `requests_total` | Counter, `operation` and `outcome` | On the leader, every operation/outcome pair starts at 0. |
 | `stream_connected` | Gauge | On the leader, 0. |
 | `transitions_active` | Gauge | Number of committed transitions whose effective deadline is after committed licensing time, including pending acknowledgements; 0 in free mode. |
-| `over_limit` | Gauge, catalog `condition` | Every cluster quota starts at 0. |
-| `admissions_refused_total` | Counter, catalog `condition` and refusal `state` | Every cluster quota/refusal-state pair starts at 0. |
 
 Request operations are `activation.create`, `activation.refresh`, `activation.release`,
 `activation.rotate_key` and `events.subscribe`. Outcomes are `committed`, `rejected_by_cluster`,
-`refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
-`lapsed` and `stopped`. A leader counts a refused newcomer run once: it keeps that run's verdict
-without judging it again while gossip still shows it. Connectivity and request families are
-leader-local. Free mode supplies no decision or deadline and makes no licensing request. The
-shipped unlimited quotas produce no
-admission refusals. An activated record supplies its committed revision and existing signed
-deadlines. Deadline ticks change the state gauge without rewriting those deadlines.
+`refused_by_service`, `unreachable` and `timeout`. Connectivity and request families are
+leader-local. Free mode supplies no decision or deadline and makes no licensing request. Licensing
+limits no base feature, so no family counts nodes or domains. An activated record supplies its
+committed revision and existing signed deadlines. Deadline ticks change the state gauge without rewriting those deadlines.
 Released mode keeps its decision revision, reports `releasing` and exposes `next_grant` until the
 last grant ends. Confirmation and local key rotation never extend those deadlines.
 Activated mode also exposes `next_grant`. An unacknowledged grant uses the earlier of its committed
 grace deadline and the original introducing decision's offline deadline. A refresh cannot renew
 that bound. A signed acknowledgement replaces the grant; an administrator extension can move its
-deadline. `over_limit` remains 0 while active grants protect the committed usage and becomes 1
-when their allowance expires with usage still above the target. `within_grace` refusal counters
-count growth denied by the target while recovery remains permitted within the existing allowance.
-No metric or licensing deadline removes existing domains or cluster members.
+deadline. No metric or licensing deadline removes existing domains or cluster members.
 An invalid or unverifiable response increments `rejected_by_cluster`; typed service refusals increment
 `refused_by_service`, and failed transport attempts record `unreachable` or `timeout`. A request is
 `committed` after its verified decision applies. Counters describe attempts on this process and
@@ -409,8 +400,9 @@ Transport pools:
   differs, or a timing is outside the bound two nodes may hold apart
 - `nervix_interconnect_stream_resets_total`: streams that ended without a result, by `class` and
   `reason`, where `reason` is `deadline`, `capacity`, `peer`, `shutdown`, or `malformed`
-- `nervix_interconnect_quota_failures_total`: requests refused because their reserved subquota was
-  full, by `direction` and `operation`
+- `nervix_interconnect_quota_failures_total`: requests refused because every place of the shared
+  admission queue was held, by `direction` and `operation`; a request of a reserved subquota waits
+  for a stream slot instead, so only `operation="shared"` counts refusals
 - `nervix_interconnect_requests_total` and `nervix_interconnect_request_seconds_total`: typed
   requests completed and the round trip they took, by `operation`. Divide the seconds by the count
   for average latency; `operation="liveness"` is the peer health probe, so that ratio is health
@@ -460,23 +452,23 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
 - `nervix_execution_memory_capacity_bytes` and `nervix_execution_memory_reserved_bytes`: the
   transient memory reserved for one class, and what it is currently holding
 - `nervix_execution_memory_reservations_total` and `nervix_execution_memory_rejections_total`:
-  charges granted and charges refused outright
+  charges granted, and charges refused because they were larger than their whole class or their
+  class was closed. A charge that waits for room is not refused, and an optional charge that finds
+  no room, such as a retained read view, is not counted.
 - `nervix_execution_operation_limit_bytes` and `nervix_execution_resident_replication_batches`: resolved relay/bulk byte ceilings and replication window.
 - `nervix_execution_queue_capacity`: configured waiting places for each worker class. Workers,
   queues and memory capacities report the actual [resolved execution settings](node-settings.md#execution-capabilities).
 - `nervix_execution_workers`, `nervix_execution_jobs_running`, `nervix_execution_jobs_pending`: how
   many jobs one class may have on the blocking pool at once, how many it holds, and how many wait
 - `nervix_execution_jobs_waiting`: jobs that found their class's wait queue full and wait for a
-  place in it instead of being refused. They carry work no caller is waiting to be answered about,
-  such as a payload an ingestor handed over, a relay or subscription delivery, a checkpoint or the
-  compilation for a committed change. A nonzero value is backpressure, never loss: the jobs take
-  the places the class frees, in the order they asked
-- `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
-  `nervix_execution_job_rejections_total`: jobs admitted, jobs that left a worker, and jobs refused
-  because the class already held its whole wait queue
+  place in it. Every job waits this way, requests included, so a nonzero value is backpressure,
+  never loss: the jobs take the places the class frees, in the order they asked, and a caller that
+  stops waiting gives its place up
+- `nervix_execution_jobs_total` and `nervix_execution_jobs_completed_total`: jobs admitted and jobs
+  that left a worker. No job is refused for a full queue
 
-For `state_read_cache`, a rejected charge means the optional retained view had no room. The
-generator can still return a complete uncached read using `state_read` admission. Active decoded
+For `state_read_cache`, an optional retained view that finds no room is not retained, and the
+generator still returns a complete uncached read using `state_read` admission. Active decoded
 snapshots hold that class through installation or source evaluation and dispatch. Both read
 classes default to the relay budget, accept independent overrides and count separately in the startup total.
 - `nervix_execution_job_queue_seconds_total` and `nervix_execution_job_work_seconds_total`: time
@@ -624,7 +616,9 @@ due staged commit, including each retry. It never counts one attempt per record.
   the operation
 - `transient`: an existing retryable publish failure, a stop deadline or shutdown while stalled,
   or cancellation of an attempt before it has a definitive answer
-- `misconfigured`: the connector returned the host's invalid-connector-configuration outcome
+- `misconfigured`: the destination refused the write as the emitter is configured, which the host
+  retries on the emitter's retry policy like a `transient` failure while `DESCRIBE EMITTER` shows
+  the refusal on its `misconfigured:` line
 - `violation`: a terminal preparation or connector-contract failure, including an unknown or
   repeated record answer
 
@@ -654,10 +648,11 @@ The two wait counters preserve fractional seconds.
 | Family | Additional label | Meaning |
 | --- | --- | --- |
 | `nervix_emitter_records_rejected_total` | `code="refused\|limit\|validation\|evaluation\|codec"` | Source rows definitively rejected: refused by the destination, over a size limit, holding a value that does not fit, whose expression could not be computed, or that the codec could not encode. `code` is the [error class](./errors-and-diagnostics.md#the-message-error-record) of the row's own message error, the one its error route reads as `error.class`, so the two never disagree; a rejection is always of the `REJECTED` group. The host counts a row when its message-error handling settles its rejection. |
-| `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure. Delivered, rejected and connector-staged rows are excluded. |
+| `nervix_emitter_records_failed_total` | None | Previously unresolved source rows whose message-error handling completed after a terminal publish failure or after the emitter gave them up. Delivered, rejected and connector-staged rows are excluded. |
 | `nervix_emitter_records_retried_total` | None | Unresolved source rows selected by each retried host publish attempt, after transport acquisition. Drain retries count too. A staged commit alone presents no source rows again. |
 | `nervix_emitter_retries_total` | `cause="publish\|connect\|commit"` | Successfully scheduled retry deferrals and inline retry waits, classified by the typed operation being retried. |
 | `nervix_emitter_retry_wait_seconds_total` | None | Sum of the delays actually scheduled for those retries, rather than elapsed time or a suggested backoff. |
+| `nervix_emitter_give_ups_total` | None | Units of work the host stopped retrying because the emitter's [`GIVE UP AFTER`](./emitters.md#giving-up) passed since their first failed attempt: each buffered batch whose remaining rows failed as `unavailable`, and each staged commit whose rows the emitter dropped. A unit given up together with another because they share a retained payload counts once of its own. |
 | `nervix_emitter_opens_total` | `outcome="succeeded\|failed"` | Initial transport acquisition and every retained transport reacquisition. Failed local preparation counts once; successful local preparation delegates the outcome to acquisition. A ready instance requires no new acquisition. A cancelled acquisition counts as failed. |
 | `nervix_emitter_pool_waits_total` | None | Pending pooled-connection borrows that ended by success, failure or cancellation, attributed to the borrowing emitter. A borrow ready on its first poll contributes zero. |
 | `nervix_emitter_pool_wait_seconds_total` | None | Elapsed monotonic wall seconds of those pending borrows, including failed and cancelled waits. |
@@ -776,7 +771,7 @@ route, under the outcome that ingestor reached:
 | `accepted` | took it in: in `MODE NO ACK` it dispatched it into its graph or its endpoint `BUFFER` retained it (HTTP 202); in `MODE ACK` its acknowledgement root completed (HTTP 200, `completed`). |
 | `busy` | had no free slot in its `MODE ACK MAX` response window or could not fit an acknowledged request in the pause buffer (HTTP 503, `not_admitted` with `busy`). |
 | `refused` | refused new intake under quiesce, overflowed or ended a waiting `MODE NO ACK` request (HTTP 503), or in `MODE ACK` one of its routes refused the decoded input (HTTP 400). |
-| `not_admitted` | had no extension-worker capacity to unfold an HTTP body or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). Extension-worker refusals also count in `nervix_ingestor_unfolding_refused_total`. A WebSocket frame in `MODE NO ACK` waits for a place instead. |
+| `not_admitted` | could not unfold an HTTP body at all, because the node is stopping or the unfolding needs a charge larger than its whole memory class, or removed a waiting acknowledged body when its deadline or intake ended (HTTP 503). The first also counts in `nervix_ingestor_unfolding_refused_total`. Otherwise a body waits for an extension-worker place while its request lasts, as a WebSocket frame in `MODE NO ACK` does. |
 | `decode_rejected` | consumed it as a decode rejection because its codec refused the payload, which `nervix_ingestor_decode_rejections_total` counts too (HTTP 202 in `MODE NO ACK`, 400 in `MODE ACK`). |
 | `processing_failed` | admitted it without completing it: its `MODE NO ACK` dispatch into the graph failed (HTTP 202), or its `MODE ACK` acknowledgement root failed, its `ACK TIMEOUT` expired or its intake stopped while the response was held (HTTP 503). |
 
@@ -821,7 +816,7 @@ These three additional counters are available in `/metrics`:
 
 | Family | Meaning |
 | --- | --- |
-| `nervix_ingestor_unfolding_refused_total` | Endpoint request bodies answered as refused because the extension workers had no room to unfold them, which their senders send again. Every other payload, acknowledged or not, waits for a place, and waiting leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
+| `nervix_ingestor_unfolding_refused_total` | Endpoint request bodies answered as refused because the node could not unfold them at all: it is stopping, or the unfolding needs a charge larger than its whole memory class. Their senders send them again. Every payload, endpoint bodies included, otherwise waits for a place, and waiting leaves the count unchanged. [When The Extension Workers Are Full](ingestors.md#when-the-extension-workers-are-full) explains the admission paths. |
 | `nervix_ingestor_header_values_dropped_total` | Invalid UTF-8 header values skipped while retaining their valid siblings and the payload. Applies to `HTTP REQUEST` responses, `HTTP ENDPOINT` requests and `WEBSOCKETS ENDPOINT` upgrades. Requests and upgrades count once per invalid value for each bound ingestor. |
 | `nervix_ingestor_read_ahead_dropped_payloads_total` | QoS 0 publishes that exceed the separate read-ahead quota of an ACK-mode MQTT ingestor, counted immediately, including during a downstream acknowledgement wait. [MQTT ingestor connections](connector-contract.md#mqtt-ingestor-connections) owns the bound. |
 
@@ -925,6 +920,14 @@ explaining anything other than ordinary operation. `WAITING` means the emitter i
 no connection because it has asked a shared client's pool for one and has not been given it yet;
 see [Database Client Connection Pools](database-client-pools.md). A full pool is a waiting state,
 not a failure, so an acquisition timeout or a lost connection is reported as `ERROR` instead.
+
+Below it, `transient error:` shows the failure the emitter is retrying, and `reconnect backoff:` and
+`reconnect wait:` show the retry's delay and what remains of it. `misconfigured:` follows them and
+shows, in place of `transient error:`, a destination that refuses the writes as the emitter is
+configured, which it retries on the same policy until an operator repairs the setup; of those two
+lines, the one that does not apply reads `-`. `give up in:` shows how long remains before the
+emitter's [`GIVE UP AFTER`](./emitters.md#giving-up) gives up the oldest unit it retries, in
+milliseconds, or `-` when no unit's clock runs.
 
 `DESCRIBE INGESTOR` also reports the declared `quiesce:` policy, current `quiesce state:`, all
 four quiesce values and the node's `nervix_ingestor_transport_redeliveries_total`,

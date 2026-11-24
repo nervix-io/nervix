@@ -252,7 +252,7 @@ async fn materialized_branch_eviction_withdraws_its_record_before_recreation() {
             &placed.domain,
             branch_key.clone(),
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .assured("the branch installs")
@@ -355,7 +355,7 @@ async fn each_materialized_relay_installs_its_branch_owner_in_the_same_routing_e
             &placed.domain,
             key("acme"),
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .assured("the branch installs")
@@ -870,10 +870,15 @@ fn inspection_and_backup_capture_share_carriers_within_the_resolved_metadata_bud
             .assured("each branch is new");
     }
     let read = ReplicatedMaterializedRelayState::read(&state);
+    let mut memory = nervix_execution::GrowingCharge::new(
+        executor
+            .try_reserve(MemoryClass::Bulk, 0)
+            .assured("no bytes always fit"),
+    );
     let captured = read
-        .capture_for_inspection(&executor)
+        .capture_for_inspection(&mut memory)
         .assured("inspection admits row views independently of backup grouping metadata");
-    let generation = &captured.0;
+    let generation = &captured.generation;
     assert_eq!(generation.records().len(), count);
     assert!(
         generation

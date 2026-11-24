@@ -1110,10 +1110,10 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
-Request preflight refuses inspection when command memory or the filesystem wait queue is full.
-Applying a model step under an accepted transaction or restore instead waits for those existing
-capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
-The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+A full command memory class or filesystem wait queue holds the inspection back, during request
+preflight exactly as when a model step applies under an accepted transaction or restore; lack of
+room has not judged the configuration. The service task's existing shutdown cancellation ends the
+wait. A charge larger than the whole
 class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the WebSockets configuration owner, which holds a schema-valid
 WebSockets client to an endpoint without a fragment or user information, counts within their ranges
@@ -2264,11 +2264,36 @@ The node resolver and the ordinary MQTT dialer remain in use.
 
 Cleanup of the preceding endpoint is best-effort and reports every failure. A replacement
 independently prepares each changed identity at its own endpoint, so an unreachable preceding
-endpoint cannot pin the input there or make the replacement inherit its filter. Failure to prepare
-the replacement remains a runtime installation failure. Matching sessions keep their queues;
-retired subscriptions lose theirs. Each phase runs at most its declared instance count of
-connections concurrently, and keeps no discovery-map guard while awaiting a connection.
-The [ingestor manual](./ingestors.md#mqtt) owns the public behavior.
+endpoint cannot pin the input there or make the replacement inherit its filter. Matching sessions
+keep their queues; retired subscriptions lose theirs. Each phase runs at most its declared instance
+count of connections concurrently, and keeps no discovery-map guard while awaiting a connection.
+
+An entity swap orders these steps around the point after which it can no longer be undone. Before
+that point the host only prepares the replacement's changed sessions at a broker session the
+preceding input never connects: another endpoint, transport or client identity. A failure there
+fails the swap, and the restored previous ingestor finds every session it left, with what the broker
+queued in them meanwhile. Once nothing else of the swap can fail, and before the revision publishes
+and the replacement starts, the host retires the preceding sessions, including one the replacement
+shares: the same broker, transport and client identity under another filter or quality of service.
+Every instance of a persistent replacement whose shared session may still hold the preceding
+subscription carries an `MqttSessionRetirement` on the node that starts it. Its first resume then
+retires the session in the retirement phase a refused subscription uses before it subscribes, and
+completes the retirement once subscribed; a setup lost before `SUBACK` returns to that phase, and a
+retirement no instance finished stays outstanding for the unit's next instance. The host completes
+it beforehand when its own cleanup on that node retired the session, so only a failed cleanup or an
+instance started on another node pays the extra connection. The node keeps an outstanding
+retirement beyond its domain execution, so a stop, a start or a rebuild hands it to the instance
+that starts there next. A swap or a rebuild that would let an instance owing one run elsewhere, or
+nowhere, under the same session and subscription first retires that session while it can still
+fail, and its failure fails the change on that node: the instance's next node cannot know what the
+session holds, and a move waits for that node as it waits for any node that has not prepared the
+revision. A retirement is forgotten once no instance on that node can owe it any more: the new
+revision runs the instance elsewhere under another subscription of the same session, whose next node
+records a retirement of its own, or under another session, which holds nothing of the preceding one,
+or it no longer runs the instance or declares the ingestor. A domain rebuild, which never puts a
+previous execution back, runs both steps at once, and a failure to prepare the replacement there
+remains a runtime installation failure. The [ingestor manual](./ingestors.md#mqtt) owns the public
+behavior.
 
 ### Pulsar received metadata
 
@@ -2304,7 +2329,9 @@ creates an absent subscription before unsubscribing it.
 The plan of an input whose subscription its ingestor owns requires retirement when that ingestor
 changes or disappears. The same retirement step as MQTT's runs on the node the installed revision
 assigned the ingestor to, once that ingestor's exact tasks stopped, before its replacement
-starts; a stopped domain's passive plan participates too. The composition root resolves both
+starts; a stopped domain's passive plan participates too. In an entity swap it runs only once
+nothing else of the swap can fail, so a failed swap restores the previous ingestor on its
+subscription and backlog. The composition root resolves both
 clients through their pinned mounts. The connector compares service URL scheme, host and effective
 port, the topic qualified through the client's namespace, and subscription name, without connecting
 or resolving DNS. Implicit ports mean 6650 for `pulsar` and 6651 for `pulsar+ssl`; different host
@@ -2721,6 +2748,15 @@ advances as it would without it. The host ignores a delay whose end its monotoni
 represent, so the backoff alone decides that wait. Every emitter retains its instance across
 transient failures; lifecycle recovery never discards staged work, a persistent session or the
 transient failure its pending work is still waiting out.
+
+Every `EmitterWriteError` is retried on the emitter's declared retry policy, `Misconfigured`
+included: a destination that refuses the write as the emitter is configured says nothing about the
+records, so the host keeps them, shows the refusal as the emitter's misconfiguration and counts the
+attempt as `misconfigured`. Only the emitter's declared `GIVE UP AFTER` ends a retry, and the host
+alone applies it: it starts each buffered unit's clock at the unit's first failed attempt, decides
+between attempts, and fails the rows a unit still holds once its limit passed, with every unit that
+shares one of its retained payloads. A connector never measures the limit and never fails a record
+for it; the [give-up contract](./emitters.md#giving-up) states what the user observes.
 
 ### Finishing an emitter
 
@@ -3320,7 +3356,13 @@ includes the deadline in the emitter wake and commits once it is reached or the 
 size boundary. A retry and a drain force the commit without reading the domain clock, which a
 stopped domain no longer has. The host keeps retained ACKs alive during commit and retry, and
 reports sent metrics only after the commit reports publication. A failed commit retries on the
-emitter's declared backoff until it succeeds or the stop deadline ends the attempt. See
+emitter's declared backoff until it succeeds, the stop deadline ends the attempt, or the emitter's
+`GIVE UP AFTER`, counted from the first failed commit attempt, passes. Then the host calls
+`EmitterLifecycle::abandon_staged`, which drops what the emitter staged, with its staging state, and
+returns the staged rows' acknowledgements; the host reports them through the emitter's general error
+policy with the class `unavailable`. Giving up undoes nothing the destination applied, such as a
+commit it applied without its answer reaching the emitter. A connector that stages nothing keeps the
+default, which returns nothing. See
 [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery) for the
 user-visible delivery consequences.
 
@@ -3876,8 +3918,10 @@ Broker read results and scheduled polls are observed once through the host's typ
 `IngestorReadOutcome`. The host counts returned raw payloads and bytes before decoding and only
 times paced polls; internal buffer replay is not another transport read. Neither observation
 changes delivery, cancellation, acknowledgement, error reporting or retry policy. An
-extension-worker unfolding refusal is counted only for an endpoint request whose sender is answered
-that the node is busy; an ingestor's payload waits for admission instead, which is not a refusal. The request path records each endpoint request or frame
+extension-worker unfolding refusal is counted only for an endpoint request the node could not
+unfold at all, because it is stopping or the unfolding needs a charge larger than its whole memory
+class; every other payload, endpoint bodies included, waits for a place, which is not a refusal.
+The request path records each endpoint request or frame
 once for every ingestor bound to its route, through retained children of that ingestor's unit,
 from the typed outcome that ingestor reached. A route that refuses a request before reading it
 records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.
@@ -4006,8 +4050,9 @@ the address's failure and the parser's error, both at the ingestor's start and i
 emitter's configuration diagnostic.
 
 The endpoint ingestor also reports the full ingest-group dispatch or flush chain in its runtime event
-and log. A refusal to admit unfolding remains retryable and its diagnostic retains the executor
-cause without treating the payload as decoded or rejected.
+and log. A refusal to admit unfolding, which only a stopping node or an unfolding larger than its
+whole memory class leaves, keeps the executor cause in its diagnostic without treating the payload
+as decoded or rejected.
 
 Paced ingestor resume and poll status, ingestor suspend and close events, and cadence failures render
 the full report supplied by their owner. Kafka partition-watch failures similarly name the ingestor

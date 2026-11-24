@@ -217,6 +217,38 @@ async fn resetting_closes_forwarded_connections_and_the_proxy_keeps_listening() 
 }
 
 #[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reset_while_paused_ends_every_held_connection_before_it_returns() {
+    let mut dependency = EchoDependency::start().await;
+    let proxy = dependency.proxy().await;
+    let mut held = connect(&proxy).await;
+    write(&mut held, b"open").await;
+    dependency.next_read().await;
+    read_echo(&mut held, b"open").await;
+
+    proxy.set_paused(true);
+    write(&mut held, b"abandoned").await;
+    proxy
+        .reset_and_wait_for_ends(OUTCOME_BOUND)
+        .await
+        .assured("reset observes every connection it held ending");
+
+    // The connection's forwarding has ended, so nothing it held can reach the dependency once the
+    // proxy forwards again.
+    let connections = proxy.accepted_connections();
+    let [ended] = connections.as_slice() else {
+        panic!("the reset ends the one connection the proxy held: {connections:?}");
+    };
+    assert!(ended.ended_at.is_some());
+    read_closed(&mut held).await;
+
+    proxy.set_paused(false);
+    let mut after = connect(&proxy).await;
+    write(&mut after, b"after").await;
+    dependency.next_read().await;
+    read_echo(&mut after, b"after").await;
+}
+
+#[nervix_primitives::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_silent_endpoint_accepts_every_connection_and_holds_it_until_reset() {
     let endpoint = StallableTcpProxy::silent()
         .await

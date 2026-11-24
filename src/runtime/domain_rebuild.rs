@@ -299,6 +299,14 @@ impl Runtime {
             self.retiring_ingestor_inputs(domain, revision.as_deref(), Some(local_node_id));
         Box::pin(self.stop_replaced_ingestor_layouts(domain, revision.as_deref())).await?;
         Box::pin(self.stop_domain_ingestors(domain)).await;
+        // What an MQTT ingestor instance owes its broker session here outlives the execution; the
+        // rebuild settles it only for an instance the revision no longer runs here.
+        Box::pin(self.settle_mqtt_session_retirements_for_rebuild(
+            domain,
+            revision.as_deref(),
+            Some(local_node_id),
+        ))
+        .await?;
         for retirement in retiring.into_values() {
             nervix_primitives::task::consume_budget().await;
             Box::pin(self.retire_ingestor_input(retirement)).await?;

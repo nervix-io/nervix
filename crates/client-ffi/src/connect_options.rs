@@ -3,14 +3,15 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Copying credentials and CA bytes, parsing configured seed URLs, and projecting
-//!   timeout and TLS choices into the Rust client's connection options.
+//!   timeout, keepalive, receive window, HTTP/2 and connection limit and TLS choices into the Rust
+//!   client's connection options.
 //! - **Depends on.** The Rust client's connection options and the C ABI boundary.
 //! - **Must not know.** How a session connects, validates endpoints, or retries them.
 
 use std::time::Duration;
 
 use nervix_client_core::{ConnectOptions, TlsRequirement};
-use nervix_client_host::Failure;
+use nervix_client_host::{Failure, Session};
 use url::Url;
 
 use crate::abi;
@@ -144,11 +145,78 @@ pub unsafe extern "C" fn nx_connect_options_timeout(
             2 => options.request_timeout = timeout,
             3 => options.retry_timeout = timeout,
             4 => options.backup_wait_timeout = timeout,
+            5 => options.keepalive_interval = timeout,
+            6 => options.keepalive_timeout = timeout,
+            7 => options.reset_stream_duration = timeout,
+            8 => options.connection_attempt_delay = timeout,
             _ => {
                 return Err(Failure::invalid_argument(
                     "kind",
                     "is not an nx_timeout_kind",
                 ));
+            }
+        }
+        Ok(())
+    })())
+}
+
+/// Sets the stream (`1`) or connection (`2`) receive window, in bytes. A window that no `u32`
+/// holds, zero included, is refused here; one outside its HTTP/2 bounds is refused when the
+/// session connects, as every other option is.
+///
+/// # Safety
+///
+/// `options` is a live, exclusively used handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_connect_options_window(
+    options: *mut ConnectionOptions,
+    kind: i32,
+    bytes: u64,
+) -> *mut Failure {
+    // SAFETY: the caller guarantees a live, exclusively used options handle.
+    abi::outcome((|| unsafe {
+        let options = &mut abi::handle_mut(options, "options")?.0;
+        let window = Session::byte_bound("bytes", bytes)?;
+        match kind {
+            1 => options.stream_window_bytes = window,
+            2 => options.connection_window_bytes = window,
+            _ => {
+                return Err(Failure::invalid_argument(
+                    "kind",
+                    "is not an nx_window_kind",
+                ));
+            }
+        }
+        Ok(())
+    })())
+}
+
+/// Sets one of the connection's limits: the call queue capacity (`1`), the header list bytes
+/// (`2`), the send buffer bytes (`3`), the error-reset streams (`4`) or the remembered reset
+/// streams (`5`). Zero, and a byte bound or stream count above `u32::MAX`, are refused here; a call
+/// queue beyond the native channel limit is refused when the session connects, as every other
+/// option is.
+///
+/// # Safety
+///
+/// `options` is a live, exclusively used handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_connect_options_limit(
+    options: *mut ConnectionOptions,
+    kind: i32,
+    value: u64,
+) -> *mut Failure {
+    // SAFETY: the caller guarantees a live, exclusively used options handle.
+    abi::outcome((|| unsafe {
+        let options = &mut abi::handle_mut(options, "options")?.0;
+        match kind {
+            1 => options.call_queue_capacity = Session::queue_capacity("value", value)?,
+            2 => options.header_list_bytes = Session::byte_bound("value", value)?,
+            3 => options.send_buffer_bytes = Session::byte_bound("value", value)?,
+            4 => options.max_error_reset_streams = Session::stream_count("value", value)?,
+            5 => options.remembered_reset_streams = Session::stream_count("value", value)?,
+            _ => {
+                return Err(Failure::invalid_argument("kind", "is not an nx_limit_kind"));
             }
         }
         Ok(())

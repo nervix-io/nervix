@@ -167,8 +167,8 @@ mod tests {
         assert_eq!(emitter.client.as_str(), "broker");
         match (emitter.mode, window) {
             (RabbitMqQueuePublishingMode::NoAck { retry_policy }, None) => {
-                assert_eq!(retry_policy.backoff, "200ms");
-                assert_eq!(retry_policy.max_backoff, "3s");
+                assert_eq!(retry_policy.pacing.backoff, "200ms");
+                assert_eq!(retry_policy.pacing.max_backoff, "3s");
             }
             (
                 RabbitMqQueuePublishingMode::Ack {
@@ -180,8 +180,8 @@ mod tests {
             ) => {
                 assert_eq!(window, expected);
                 assert_eq!(ack_timeout, "7s");
-                assert_eq!(retry_policy.backoff, "200ms");
-                assert_eq!(retry_policy.max_backoff, "3s");
+                assert_eq!(retry_policy.pacing.backoff, "200ms");
+                assert_eq!(retry_policy.pacing.max_backoff, "3s");
             }
             _ => panic!("the complete publishing policy must match the statement"),
         }
@@ -247,8 +247,8 @@ mod tests {
         assert_eq!(emitter.client.as_str(), "broker");
         match (emitter.mode, window) {
             (RabbitMqExchangePublishingMode::NoAck { retry_policy }, None) => {
-                assert_eq!(retry_policy.backoff, "200ms");
-                assert_eq!(retry_policy.max_backoff, "3s");
+                assert_eq!(retry_policy.pacing.backoff, "200ms");
+                assert_eq!(retry_policy.pacing.max_backoff, "3s");
             }
             (
                 RabbitMqExchangePublishingMode::Ack {

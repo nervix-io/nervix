@@ -87,7 +87,7 @@ that fills one cannot take what another class needs.
 | Pool | Option | Share of memory | At least | With unknown memory | Holds |
 | --- | --- | --- | --- | --- | --- |
 | `intake` | `--execution-intake-memory-bytes` | 1/16 | 128 MiB | 128 MiB | Public request input a listener retains |
-| `management` | `--execution-management-memory-bytes` | 1/128 | 64 KiB | 8 MiB | Management messages, licensing exchanges and small storage jobs |
+| `management` | `--execution-management-memory-bytes` | 1/128 | 272 KiB | 8 MiB | Management messages, licensing exchanges and small storage jobs |
 | `commands` | `--execution-commands-memory-bytes` | 1/32 | 24 MiB | 24 MiB | Consensus commands and replication batches |
 | `relay` | `--execution-relay-memory-bytes` | 1/16 | | 192 MiB | Relay batches being encoded, decoded and delivered |
 | `state_read` | `--execution-state-read-memory-bytes` | The relay pool | | The relay pool | Decoded materialized snapshots |
@@ -163,7 +163,7 @@ it. When it does not, the node exits with status `1`, reporting
 `the startup preflight refused this node` above one of these causes:
 
 ```text
-the execution memory budgets of 229.25MiB exceed node memory 32MiB
+the execution memory budgets of 229.27MiB exceed node memory 32MiB
 memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB
 ```
 
@@ -366,7 +366,7 @@ them.
 | Cluster identity | `--cluster-id`, `default` unless given, which the node's certificate also names | Equal | Provision it with the cluster; a node with another identity is refused |
 | Trust root | The trust anchors in `--interconnect-tls-ca` | Equal | Replace the anchors on every node; a node reloads its credentials without a restart, every `--interconnect-tls-reload-interval` (`1s`), and connections between nodes that hold different anchors are refused until both ends hold the same ones |
 | Wire contract | The build | Equal | Run every node on a build that speaks the same contract |
-| Largest command and largest management event | The build: 1 MiB and 64 KiB | Equal | Run every node on a build with the same floors |
+| Largest command and largest management event | The build: 1 MiB and 68 KiB | Equal | Run every node on a build with the same floors |
 | Durability promise | The build: `fsync every append` | Equal | Run every node on a build with the same promise |
 | Raft heartbeat | `--raft-heartbeat-interval`, `250ms` | Within a factor of two | A rolling restart that moves it by less than a factor of two |
 | Gossip interval | `--gossip-interval`, `500ms` | Within a factor of two | A rolling restart that moves it by less than a factor of two |
@@ -458,7 +458,7 @@ node=node-3 cluster parameters running=not installed
 
 Byte values print as byte counts: `memory-bytes=8589934592` is 8 GiB, and a byte parameter reads
 like `udf-code-bytes committed=65536B revision=4`. The consensus-floor prerequisite lines print in
-binary units instead, as `largest command: 1MiB` and `largest management event: 64KiB`. `SHOW CLUSTER STATUS` repeats the parameter
+binary units instead, as `largest command: 1MiB` and `largest management event: 68KiB`. `SHOW CLUSTER STATUS` repeats the parameter
 lines under `[cluster parameters]`, and reports the answering node's `node.initialization`,
 `initializing` until its initialization completes and then `ready`. A node's `/readyz`, on its
 observability listener, answers 200 only once its initialization has completed with the committed

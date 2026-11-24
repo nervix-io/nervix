@@ -289,7 +289,10 @@ jobs:
 
       - name: Install Latest LLVM
         run: |
-          sudo apt-get update --allow-releaseinfo-change
+          # llvm.sh runs its own APT updates, which take no flags, so APT's configuration accepts a
+          # source's changed release information for them, as --allow-releaseinfo-change does.
+          echo 'Acquire::AllowReleaseInfoChange "true";' \
+            | sudo tee /etc/apt/apt.conf.d/99-allow-releaseinfo-change > /dev/null
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23

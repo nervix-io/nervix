@@ -200,7 +200,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::test_fixtures::{emitter_context, input_schema, named},
+        runtime::{
+            emitter_retry::EmitterGiveUp,
+            test_fixtures::{emitter_context, input_schema, named},
+        },
         runtime_schema::compile_codec,
     };
 
@@ -425,11 +428,13 @@ mod tests {
         let mut backoff = RuntimeReconnectBackoff::default();
         let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (_stop_tx, mut stop_rx) = watch::channel(None);
+        let mut give_up = EmitterGiveUp::new(None);
         let mut control = EmitterPublishControl {
             fault_injection: &fault_injection,
             shutdown_rx: &mut shutdown_rx,
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
+            give_up: &mut give_up,
         };
         let mut connector = EmitterConnectorState::opened(Box::new(PreparedRequestEmitter::new(
             Box::new(FakeEmitter::<HttpRequests>::new([Answer::RejectFirst])),

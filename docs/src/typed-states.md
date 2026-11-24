@@ -358,7 +358,7 @@ transport offset conversion. The SDK's indexed authoring and typed-inspection vi
 empty JSON value arrays. These driver representations never enter semantic Models or plans.
 
 A NATS ingestor or emitter Model distinguishes `NATS SUBJECT` and `NATS STREAM` entities in its archived union.
-The registry's `NERVIX WASM TBLS` archive signature identifies the current Model layout, including
+The registry's `NERVIX GIVE UP A` archive signature identifies the current Model layout, including
 the `parametrizer` kind text of the declared entity that defines a parametrization, that union, a
 placement's colocation or node rule with its `FOR` members or domain-wide scope and its
 `REQUIRE NODES`, `PREFER NODES` or `ANY NODE` policy and selector, the ordered `RATE LIMIT` clauses an ingestor body writes, the endpoint kind and an endpoint pause buffer’s response timing, the separate JSON and CBOR wire type enums (CBOR has six types), AVRO representation types whose arrays declare their item type, explicit `BASE64` codec
@@ -373,7 +373,8 @@ mappings, a `REDIS PUBSUB` ingestor's subscription, which is either a `CHANNEL` 
 that header state, inferencer state bindings with their initial expressions, an inferencer's
 required working memory, the typed `payload` expression scope, an emitter's `INSTANCES`
 declaration, the `DURATION` type with the duration literals expressions, subscription
-bindings and branch selections hold, and a WASM processor's required `MAX TABLE ELEMENTS`.
+bindings and branch selections hold, a WASM processor's required `MAX TABLE ELEMENTS`, and an
+emitter's `RETRY POLICY` with its optional `GIVE UP AFTER`.
 Placement coverage is one semantic choice: a corridor with named endpoints or a domain-wide
 rule. Domain configuration contains its pace; named placement rules belong to the Model index.
 Relocation selects whole nodes or exact partition/instance indices using the shared node identity.
@@ -384,10 +385,10 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_` keyspaces and `ClusterState`
-metadata encoding 56 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_` keyspaces and `ClusterState`
+metadata encoding 60 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
-inferencer working memory, each WASM processor's `MAX TABLE ELEMENTS`, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, each node's WASM memory guard and growth reserve, the database volume size each node record's capacity claim carries, interconnect capabilities
+inferencer working memory, each WASM processor's `MAX TABLE ELEMENTS`, each emitter's `RETRY POLICY` with its optional `GIVE UP AFTER`, the `DURATION` type with the duration literals Models hold, each node's trace export and web console pacing capabilities, each node's WASM memory guard and growth reserve, the database volume size each node record's capacity claim carries, interconnect capabilities
 that carry no relay watermark count, listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits,
 the HTTP/1 header count and the WebSocket write buffer, and the partition
 count of every resolved
@@ -458,12 +459,18 @@ instead of certifying discarded bytes. A deadline leaves the pending state intac
 volatile connector state, never a stored shape or a separate representation of the host's rows.
 
 **MQTT subscription admission.** An instance's connection is disconnected, running, or waiting
-to retire a refused or downgraded broker subscription. The last state survives a failed or
-cancelled cleanup and suspension of the connector; only the completed retirement exchange permits
-another resume.
+to retire a broker session: a refused or downgraded subscription, or a session its preceding
+input left with another subscription, which an instance opened with an outstanding
+`MqttSessionRetirement` starts in. The last state survives a failed or cancelled cleanup and
+suspension of the connector, and a subscription setup lost while that retirement is outstanding
+returns to it; only the completed retirement exchange permits another resume.
 It is not ordinary disconnection: trusting a retained session there would bypass the refused
-subscription or QoS grant. This is exclusively owned, in-memory connection state, separate from a
-retained accepted broker session and from the runtime's input-plan retirement.
+subscription or QoS grant, or read the preceding filter. This is exclusively owned, in-memory
+connection state, separate from a retained accepted broker session and from the runtime's
+input-plan retirement. The `MqttSessionRetirement` itself has two states, outstanding and
+complete, and only moves to complete: once an instance has retired the session and subscribed, or
+once the host's own cleanup retired it before any instance connected or before the host let the
+instance run on another node.
 
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
@@ -472,7 +479,9 @@ validates each configured endpoint and effective client identity once and borrow
 plan. It represents each broker session once even if an invalid explicit identity is repeated.
 Cleanup failure at a preceding endpoint is reported separately from failure to prepare the
 replacement. A failed preceding configuration supplies no preservation proof: the explicit
-replacement must prepare all of its sessions. An absent `client_id` selects the domain-qualified
+replacement must prepare all of its sessions. An entity swap keeps the preceding sessions until it
+can no longer be undone, so its preparation reaches only the replacement sessions the preceding
+input never connects. An absent `client_id` selects the domain-qualified
 default, with an instance suffix when needed.
 
 **Pulsar received messages.** The driver message crosses one conversion boundary into checked

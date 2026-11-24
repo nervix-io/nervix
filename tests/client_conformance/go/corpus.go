@@ -681,7 +681,11 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 		if err := union(message.Body, value); err != nil {
 			return nil, err
 		}
-		return []string{fmt.Sprintf("EVENT SESSION_OPENED frame=%d transfer=%d depth=%d entries=%d string=%d", *value.FrameBytes(), *value.TransferBytes(), *value.NestingDepth(), *value.CollectionEntries(), *value.StringBytes())}, nil
+		validity := "absent"
+		if nanos := value.CommandRetryValidityNanos(); nanos != nil {
+			validity = fmt.Sprintf("%d", *nanos)
+		}
+		return []string{fmt.Sprintf("EVENT SESSION_OPENED frame=%d transfer=%d depth=%d entries=%d string=%d snapshot_interval_nanos=%d command_retry_validity_nanos=%s web_console_request_timeout_nanos=%d web_console_connect_timeout_nanos=%d web_console_retry_backoff_nanos=%d web_console_retry_max_backoff_nanos=%d web_console_restoration_backoff_nanos=%d web_console_restore_frame_capacity=%d", *value.FrameBytes(), *value.TransferBytes(), *value.NestingDepth(), *value.CollectionEntries(), *value.StringBytes(), *value.SnapshotIntervalNanos(), validity, *value.WebConsoleRequestTimeoutNanos(), *value.WebConsoleConnectTimeoutNanos(), *value.WebConsoleRetryBackoffNanos(), *value.WebConsoleRetryMaxBackoffNanos(), *value.WebConsoleRestorationBackoffNanos(), *value.WebConsoleRestoreFrameCapacity())}, nil
 	case session.ServerBodyReply:
 		value := new(session.Reply)
 		if err := union(message.Body, value); err != nil {

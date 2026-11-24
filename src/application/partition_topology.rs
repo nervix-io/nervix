@@ -165,6 +165,7 @@ impl ConnectedSource {
                         ),
                         service.inner.runtime.executor().clone(),
                     )
+                    .await
                     .change_context_lazy(context)?,
                     topic: topic.as_str().to_string(),
                 }

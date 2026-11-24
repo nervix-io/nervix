@@ -84,34 +84,29 @@ impl ApplicationStartup {
             .change_context(AppError::OpenRegistry)?;
         let opened_path = path.clone();
         let opened = executor
-            .run_storage_with(
-                StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_, _| {
-                    let db = Database::builder(opened_path)
-                        .cache_size(capacity.cache_bytes)
-                        .max_journaling_size(capacity.journal_bytes)
-                        .worker_threads(
-                            usize::try_from(capacity.workers.get())
-                                .assured("resolved database workers fit this node"),
-                        )
-                        .max_cached_files(Some(
-                            usize::try_from(capacity.max_open_files.get())
-                                .assured("validated open-file limits fit this platform"),
-                        ))
-                        .open()
-                        .change_context(NodeDatabaseOpenError::Open)?;
-                    if db
-                        .list_keyspace_names()
-                        .iter()
-                        .any(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX))
-                    {
-                        return Err(Report::new(NodeDatabaseOpenError::ConsensusNotDedicated));
-                    }
-                    Ok(db)
-                },
-            )
+            .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
+                let db = Database::builder(opened_path)
+                    .cache_size(capacity.cache_bytes)
+                    .max_journaling_size(capacity.journal_bytes)
+                    .worker_threads(
+                        usize::try_from(capacity.workers.get())
+                            .assured("resolved database workers fit this node"),
+                    )
+                    .max_cached_files(Some(
+                        usize::try_from(capacity.max_open_files.get())
+                            .assured("validated open-file limits fit this platform"),
+                    ))
+                    .open()
+                    .change_context(NodeDatabaseOpenError::Open)?;
+                if db
+                    .list_keyspace_names()
+                    .iter()
+                    .any(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX))
+                {
+                    return Err(Report::new(NodeDatabaseOpenError::ConsensusNotDedicated));
+                }
+                Ok(db)
+            })
             .await
             .change_context(AppError::OpenRegistry)?;
         match opened {
@@ -196,12 +191,7 @@ impl ApplicationStartup {
             .await
             .change_context(AppError::CloseStores)?;
         executor
-            .run_storage_with(
-                StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_, _| stores(),
-            )
+            .run_storage(StorageClass::Filesystem, reservation, move |_, _| stores())
             .await
             .change_context(AppError::CloseStores)
     }

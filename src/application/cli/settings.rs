@@ -260,6 +260,8 @@ pub struct SettingsArgs {
     pub listeners: super::listeners::ListenerArgs,
     #[command(flatten)]
     pub trace_export: super::trace_export::TraceExportArgs,
+    #[command(flatten)]
+    pub web_console: super::web_console::WebConsoleArgs,
 }
 
 impl TryFrom<SettingsArgs> for NodeSettings {
@@ -306,7 +308,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .change_context(AppError::InvalidTransportSettings)?;
         let dns = args
             .dns
-            .settings(interconnect.max_peers())
+            .settings()
             .change_context(AppError::InvalidDnsSettings)?;
         let mut runtime = args
             .runtime
@@ -332,6 +334,10 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .trace_export
             .settings()
             .change_context(AppError::InvalidTraceExportSettings)?;
+        let web_console = args
+            .web_console
+            .settings()
+            .change_context(AppError::InvalidWebConsoleSettings)?;
         Ok(Self {
             node_database: args
                 .database
@@ -350,7 +356,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             interconnect,
             operational: args
                 .operational
-                .settings(traces)
+                .settings(traces, web_console)
                 .change_context(AppError::InvalidOperationalCapabilities)?,
             listeners: args
                 .listeners
@@ -424,6 +430,9 @@ impl From<&NodeSettings> for SettingsArgs {
             trace_export: super::trace_export::TraceExportArgs::from_settings(
                 &settings.operational.traces,
             ),
+            web_console: super::web_console::WebConsoleArgs::from_settings(
+                &settings.operational.web_console,
+            ),
             execution: ExecutionArgs::from_overrides(
                 &settings.execution,
                 &settings.client_endpoints,
@@ -457,6 +466,7 @@ impl SettingsArgs {
         self.operational.render(&mut command_line);
         self.listeners.render(&mut command_line);
         self.trace_export.render(&mut command_line);
+        self.web_console.render(&mut command_line);
         command_line.arguments
     }
 }

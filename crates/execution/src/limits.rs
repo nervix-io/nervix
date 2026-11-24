@@ -46,6 +46,23 @@ const _: () = assert!(
      budget that holds the vote also holds every operation bounded by one event",
 );
 
+/// One management or discovery event, its typed request fields and envelope included. The largest
+/// is a gossip exchange: one message of the gossip library, at most 65,510 bytes whatever carries
+/// it, the largest IPv4 UDP payload the library budgets each message that carries state to and the
+/// 3-byte header it writes outside that budget. The event leaves 4 KiB beyond that message for the
+/// exchange's other fields and its request envelope, and a node refuses to start when its bound
+/// cannot carry the largest exchange.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Cluster Interconnect chapter carries each gossip message, at most the \
+                  65,510 bytes the gossip library builds, as one management event with 4 KiB for \
+                  its typed request fields and envelope"
+    )
+)]
+const MANAGEMENT_EVENT_BYTES: ByteUnit = ByteUnit::Kibibyte(68);
+
 /// AWS-LC's constant-time verifier allocates one buffer for the profile's 512-bit digest.
 /// Native PBKDF2 HMAC scratch is fixed stack state on the already bounded credentials worker.
 #[cfg_attr(
@@ -190,8 +207,8 @@ pub struct WorkerCounts {
     pub consensus_storage: NonZeroUsize,
     pub filesystem_storage: NonZeroUsize,
     pub connector_storage: Setting<ConnectorStorageWorkers>,
-    /// The number of jobs one class may hold waiting for a worker. Beyond it, admission is refused
-    /// with typed backpressure rather than growing an unbounded queue in front of the pool.
+    /// The number of jobs one class may hold waiting for a worker. Beyond it, a job waits for a
+    /// place rather than growing an unbounded queue in front of the pool.
     pub pending_jobs: crate::PendingJobCounts,
 }
 
@@ -343,7 +360,7 @@ impl Default for OperationLimits {
             command_bytes: ByteUnit::Mebibyte(1),
             replication_batch_bytes: ByteUnit::Mebibyte(2),
             resident_replication_batches: NonZeroU32::new(4).unwrap_or(NonZeroU32::MIN),
-            management_event_bytes: ByteUnit::Kibibyte(64),
+            management_event_bytes: MANAGEMENT_EVENT_BYTES,
             bulk_chunk_bytes: ByteUnit::Kibibyte(64),
             snapshot_header_bytes: ByteUnit::Kibibyte(64),
             snapshot_section_bytes: ByteUnit::Mebibyte(8),
@@ -552,8 +569,27 @@ impl ExecutionConfig {
                 ExecutionConfigError::UnaddressableCommandStorage,
             ));
         };
-        let (commands_operation, commands_required) = if storage_required >= replication_required {
-            ("normalized command state storage", storage_required)
+        // A follower keeps its resident window charged while the durable append of those entries
+        // waits for one command state storage working set from this same class. The budget holds
+        // both at once, so that append never waits for room only its own window can release; it
+        // waits only for room other work frees.
+        let Some(resident_window) =
+            resident_batches.checked_mul(self.limits.replication_batch_bytes.as_u64())
+        else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableReplicationBatch,
+            ));
+        };
+        let Some(follower_required) = resident_window.checked_add(storage_required) else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableCommandStorage,
+            ));
+        };
+        let (commands_operation, commands_required) = if follower_required >= replication_required {
+            (
+                "resident replication batches beside one command state storage working set",
+                follower_required,
+            )
         } else {
             (
                 "resident replication batches beside one being encoded",

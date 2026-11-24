@@ -40,7 +40,21 @@ TLS connection needs that explicit authority. `REQUIRED` refuses a plaintext URI
 needs. Seeds let it reach the cluster when the initial address is unavailable. Connection, request,
 retry and backup-wait timeouts are seconds; the request and call timeouts count only time without
 the answer or a server progress report, which restarts them. Cancellation deadlines can bound an
-individual call.
+individual call. `keepaliveInterval` and `keepaliveTimeout`, also seconds (30 and 20 by default),
+make the session ping its node after that long without hearing from it while a call is open, and
+treat the connection as lost when the ping goes unanswered within the timeout; the session then
+reconnects and restores its subscriptions as after any other dropped connection. `streamWindowBytes`
+and `connectionWindowBytes` set how many bytes of one call, and of all calls on a connection
+together, the node may send before the session reads them (2 MiB and 5 MiB by default). The other
+connection limits are also options: `callQueueCapacity`, the calls that queue while a connection is
+opened (1,024); `headerListBytes`, the largest header list the session accepts from the node on one
+call (16 KiB); `sendBufferBytes`, the request bytes one call queues before it waits for the node to
+read (1 MiB); `maxErrorResetStreams`, the calls reset for the node's protocol errors before the
+session ends the connection (1,024); `rememberedResetStreams`, the cancelled calls remembered at
+once so that frames the node had already sent for them are ignored (50); and, in seconds,
+`resetStreamDuration`, how long each is remembered (1), and `connectionAttemptDelay`, how long an
+attempt to one address family of a node's host name runs before the other family is tried too (0.3,
+from 0.01 through 2 as RFC 8305 bounds it).
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:seeds}}
@@ -122,10 +136,9 @@ page fields. A refusal has no counts or units; a successful empty page has zero 
 `json()` preserves the complete typed envelope.
 
 `DESCRIBE LICENSE;` uses this envelope for cluster scope: `entityKind()` is `"LICENSE"`, while
-`domain()` and `entityName()` are `null`. Its unit's `summary`, `quotas`, `capabilities` and
-`transitions` sections describe the answering node's committed policy: one summary row, one row per
-cluster quota, one row per catalog capability, and one row per quota under a committed licensing
-transition. The command also works without selecting a domain.
+`domain()` and `entityName()` are `null`. Its unit's `summary`, `capabilities` and `transitions`
+sections describe the answering node's committed policy: one summary row, one row per catalog
+capability, and one row per condition under a committed licensing transition. The command also works without selecting a domain.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

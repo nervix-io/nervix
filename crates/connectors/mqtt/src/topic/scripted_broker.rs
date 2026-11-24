@@ -149,6 +149,15 @@ impl ScriptedBroker {
         connection
     }
 
+    /// Answers a connection that keeps its session rather than retiring it: a persistent connection
+    /// without a clean start, to which this broker resumes no session.
+    pub(crate) async fn accept_persistent_session(&self) -> ScriptedConnection {
+        let (mut connection, connect) = self.accept_connect().await;
+        assert_eq!(connect[7] & 0x02, 0, "the connection keeps its session");
+        connection.write(&[0x20, 0x03, 0x00, 0x00, 0x00]).await;
+        connection
+    }
+
     /// Answer a cleanup connection, whose clean start must discard its rejected subscription.
     pub(crate) async fn accept_expiring_session(&self) -> ScriptedConnection {
         let (mut connection, connect) = self.accept_connect().await;

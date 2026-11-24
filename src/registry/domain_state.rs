@@ -31,6 +31,7 @@ pub(in crate::registry) use crate::registry::validation::{
 use crate::registry::{
     error::RegistryError,
     graph::{ActiveGraph, ActiveNode, EdgeKind, expect_kind, expect_node, has_required_by_cycle},
+    graph_loop::find_graph_loop,
     placement::PlacementAnalysis,
     storage::StoredModelRecord,
     validation::{
@@ -1731,6 +1732,14 @@ impl DomainState {
         if has_required_by_cycle(&graph) {
             return Err(Report::new(RegistryError::ConfigurationCycle {
                 domain: domain.as_str().to_string(),
+            }));
+        }
+        // Every edge data travels is in place: routes, error routes and correlation timeouts were
+        // added with each node above, and so were its reads of materialized state.
+        if let Some(graph_loop) = find_graph_loop(&graph) {
+            return Err(Report::new(RegistryError::GraphLoop {
+                domain: domain.clone(),
+                graph_loop,
             }));
         }
 

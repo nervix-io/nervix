@@ -37,6 +37,7 @@ fn description(fields: Vec<SchemaField>) -> ClientEmitterDescription {
         ack_timeout: Duration::from_secs(30),
         retry_backoff: Duration::ZERO,
         retry_max_backoff: Duration::ZERO,
+        give_up_after: None,
     }
 }
 

@@ -184,54 +184,6 @@ Feature: Web console execution graph
     And branch group "by_tenant_user" does not contain graph item "notifications_ingestor"
     And no graph edge crosses any graph item
 
-  Scenario: Execution graph marks a reingestor feedback loop as a return path
-    Given a 1 node nervix cluster is started
-    When these Plexus commands are executed on the leader node
-      """
-      CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA retry_record (
-        attempt I64,
-        payload STRING
-      );
-      CREATE WIRE JSON SCHEMA retry_wire MODE STRICT (
-        attempt integer,
-        payload string
-      );
-      CREATE WIRE JSON CODEC retry_codec FROM WIRE SCHEMA retry_wire TO SCHEMA retry_record;
-      CREATE RELAY pending SCHEMA retry_record UNBRANCHED;
-      CREATE RELAY retried SCHEMA retry_record UNBRANCHED;
-      CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE HTTP ENDPOINT retry_ingress ON edge PATH '/retries';
-      CREATE HTTP ENDPOINT INGESTOR retry_ingestor
-        FROM retry_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING retry_codec
-        TO pending
-        INHERIT ALL
-        UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG;
-      CREATE JUNCTION retry_router FROM pending
-        UNBRANCHED
-        TO retried
-        INHERIT ALL
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG;
-      CREATE REINGESTOR retry_loop FROM retried
-        TO pending
-        INHERIT ALL
-        UNBRANCHED
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG;
-      """
-    And the web console is opened on the leader node
-    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
-    And selector ".graph-hit-layer" contains "retry_loop"
-    And graph edge from "retry_loop" to "pending" is a return path
-    And graph item "pending" is left of graph item "retry_router"
-    And graph item "retry_router" is left of graph item "retry_loop"
-    And no graph edge crosses any graph item
-
   Scenario: Execution graph reports its framing, feed state and every node kind
     Given a 1 node nervix cluster is started
     When these Plexus commands are executed on the leader node
@@ -270,3 +222,28 @@ Feature: Web console execution graph
     And the whole graph is visible in the graph viewport
     And graph zoom stays within 25 and 300 percent
     And graph geometry does not change while snapshots arrive
+
+  Scenario Outline: Execution graph stays live between the on-time snapshots of a node with a slow snapshot interval on <cluster_size> nodes
+    Given node-1 starts with session-snapshot-interval = 5s
+    And node-2 starts with session-snapshot-interval = 5s
+    And node-3 starts with session-snapshot-interval = 5s
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_record (
+        order_id STRING,
+        amount I64
+      );
+      CREATE RELAY orders SCHEMA order_record UNBRANCHED;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".graph-hit-layer" contains "orders"
+    And selector ".graph-title [data-freshness]" contains "LIVE"
+    And selector ".graph-title [data-freshness]" contains "LIVE" for 12000 milliseconds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

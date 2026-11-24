@@ -185,7 +185,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn serve_console_session<S, E>(
         &self,
         user: UserName,
-        limits: SessionLimits,
+        opening: nervix_client_wire::SessionOpened,
         connection: S,
     ) where
         S: Stream<Item = Result<Message, tungstenite::Error>>
@@ -195,6 +195,7 @@ impl SessionServiceImpl {
             + 'static,
         E: std::fmt::Display + Send + 'static,
     {
+        let limits = opening.limits;
         let codec = ServerWebSocketCodec::new(limits);
         let (connector, messages) = connection.split();
         let (violation_sender, violation) = oneshot::channel();
@@ -209,9 +210,9 @@ impl SessionServiceImpl {
         let inbound = Box::pin(inbound);
         let (outbound, frames) =
             outbound::channel(CancellationToken::new(), &self.inner.operational.session);
-        let opening = nervix_client_wire::SessionOpened { limits }
+        let opening = opening
             .encode()
-            .assured("the fixed opening holds five checked scalar bounds");
+            .assured("the fixed opening holds the checked bounds and pacing scalars");
         if outbound.send(opening).await.is_err() {
             return;
         }

@@ -49,8 +49,8 @@ reason = "These threads drive the production slot owner inside Shuttle's schedul
 [[permission]]
 bound = "Two contender threads register one peer each, synchronize with the test through a three-party barrier, and are joined before both fixture transports shut down."
 items = ["thread::spawn"]
-owner = "The ordinary transport registration-limit regression."
-path = "crates/interconnect/src/tests/lease.rs"
+owner = "The ordinary racing target registration regression."
+path = "crates/interconnect/src/connection/target_table_tests.rs"
 reason = "The test races synchronous public target registration from external threads with an entered ordinary runtime; it is a harness, not a node's accepted work."
 
 [[permission]]

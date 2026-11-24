@@ -1875,8 +1875,12 @@ impl Runtime {
         }
         let failure = self.inner.emitter_statuses.get(key)?.snapshot()?;
         let retry = failure.retry.as_ref()?;
+        // A destination refusing writes as it is configured holds the drain the way an outage
+        // does: the emitter retries until it is repaired or gives the work up.
         let state = match retry.kind {
-            EmitterRetryKind::Infrastructure => EmitterPublishingDrainState::RetryingInfrastructure,
+            EmitterRetryKind::Infrastructure | EmitterRetryKind::Misconfigured => {
+                EmitterPublishingDrainState::RetryingInfrastructure
+            }
             EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,
         };
         Some(EmitterPublishingDrainStatus {
@@ -2043,7 +2047,7 @@ impl Runtime {
                 continue;
             };
             let state = match retry.kind {
-                EmitterRetryKind::Infrastructure => {
+                EmitterRetryKind::Infrastructure | EmitterRetryKind::Misconfigured => {
                     EmitterPublishingDrainState::RetryingInfrastructure
                 }
                 EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,

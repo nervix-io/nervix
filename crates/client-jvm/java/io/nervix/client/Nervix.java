@@ -590,6 +590,28 @@ public final class Nervix {
         public ConnectOptions requestTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 2, seconds)); return this; }
         public ConnectOptions retryTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 3, seconds)); return this; }
         public ConnectOptions backupWaitTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 4, seconds)); return this; }
+        /** Seconds a connection with a call open may go without hearing from the node before it is pinged; 30 by default. */
+        public ConnectOptions keepaliveInterval(double seconds) { write(p -> Native.optionsTimeout(p, 5, seconds)); return this; }
+        /** Seconds that ping may go unanswered before the connection is lost and recovered; 20 by default. */
+        public ConnectOptions keepaliveTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 6, seconds)); return this; }
+        /** Bytes of one call the node may send before the session reads them; 2 MiB by default. */
+        public ConnectOptions streamWindowBytes(long bytes) { write(p -> Native.optionsWindow(p, 1, bytes)); return this; }
+        /** Bytes of all calls on one connection the node may send before the session reads them; 5 MiB by default. */
+        public ConnectOptions connectionWindowBytes(long bytes) { write(p -> Native.optionsWindow(p, 2, bytes)); return this; }
+        /** Calls that wait for a connection while it is opened before the next caller waits; 1,024 by default. */
+        public ConnectOptions callQueueCapacity(long calls) { write(p -> Native.optionsLimit(p, 1, calls)); return this; }
+        /** Largest header list accepted from the node on one call, each field counted as its name and value plus 32 bytes; 16 KiB by default. */
+        public ConnectOptions headerListBytes(long bytes) { write(p -> Native.optionsLimit(p, 2, bytes)); return this; }
+        /** Request bytes one call queues for the connection before it waits for the node to read; 1 MiB by default. */
+        public ConnectOptions sendBufferBytes(long bytes) { write(p -> Native.optionsLimit(p, 3, bytes)); return this; }
+        /** Calls reset for the node's protocol errors before the connection is ended; 1,024 by default. */
+        public ConnectOptions maxErrorResetStreams(long streams) { write(p -> Native.optionsLimit(p, 4, streams)); return this; }
+        /** Cancelled calls remembered at once, so that frames the node sent for them are ignored; 50 by default. */
+        public ConnectOptions rememberedResetStreams(long streams) { write(p -> Native.optionsLimit(p, 5, streams)); return this; }
+        /** Seconds each cancelled call is remembered; 1 by default. */
+        public ConnectOptions resetStreamDuration(double seconds) { write(p -> Native.optionsTimeout(p, 7, seconds)); return this; }
+        /** Seconds a connection attempt to an address of one family runs before an address of the other family is tried too; 0.3 by default, 0.01 through 2 (RFC 8305). */
+        public ConnectOptions connectionAttemptDelay(double seconds) { write(p -> Native.optionsTimeout(p, 8, seconds)); return this; }
     }
     public static final class Fields extends Handle {
         public Fields() { super(Native.fieldsNew()); }

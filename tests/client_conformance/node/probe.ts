@@ -96,9 +96,20 @@ class Exchange {
       opened.nestingDepth(),
       opened.collectionEntries(),
       opened.stringBytes(),
+      opened.snapshotIntervalNanos(),
+      opened.webConsoleRequestTimeoutNanos(),
+      opened.webConsoleConnectTimeoutNanos(),
+      opened.webConsoleRetryBackoffNanos(),
+      opened.webConsoleRetryMaxBackoffNanos(),
+      opened.webConsoleRestorationBackoffNanos(),
+      opened.webConsoleRestoreFrameCapacity(),
     ];
     if (values.some((value) => value === null || value <= 0n)) {
-      throw new Error('the announcement requires five positive limits');
+      throw new Error('the announcement requires five positive limits and its positive pacing');
+    }
+    const validity = opened.commandRetryValidityNanos();
+    if (validity !== null && validity <= 0n) {
+      throw new Error('an announced command retry validity is positive');
     }
     exchange.frameBytes = Number(opened.frameBytes());
     return exchange;
@@ -1126,7 +1137,10 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
   switch (message.bodyType()) {
     case wire.ServerBody.SessionOpened: {
       const opened = member(message.body(new wire.SessionOpened()) as wire.SessionOpened | null);
-      return [`EVENT SESSION_OPENED frame=${opened.frameBytes()} transfer=${opened.transferBytes()} depth=${opened.nestingDepth()} entries=${opened.collectionEntries()} string=${opened.stringBytes()}`];
+      const validity = opened.commandRetryValidityNanos() ?? 'absent';
+      return [
+        `EVENT SESSION_OPENED frame=${opened.frameBytes()} transfer=${opened.transferBytes()} depth=${opened.nestingDepth()} entries=${opened.collectionEntries()} string=${opened.stringBytes()} snapshot_interval_nanos=${opened.snapshotIntervalNanos()} command_retry_validity_nanos=${validity} web_console_request_timeout_nanos=${opened.webConsoleRequestTimeoutNanos()} web_console_connect_timeout_nanos=${opened.webConsoleConnectTimeoutNanos()} web_console_retry_backoff_nanos=${opened.webConsoleRetryBackoffNanos()} web_console_retry_max_backoff_nanos=${opened.webConsoleRetryMaxBackoffNanos()} web_console_restoration_backoff_nanos=${opened.webConsoleRestorationBackoffNanos()} web_console_restore_frame_capacity=${opened.webConsoleRestoreFrameCapacity()}`,
+      ];
     }
     case wire.ServerBody.Reply: {
       const reply = member(message.body(new wire.Reply()) as wire.Reply | null);

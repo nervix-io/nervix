@@ -170,12 +170,12 @@ traffic does not delay readiness; its connection is opened when needed. The two 
 allow unrelated relay channels to make progress independently while preserving ordering within each
 logical channel.
 
-A node retains at most `--interconnect-max-peers` other node identities, 64 by default. It admits
-twelve incoming and outgoing connections per declared peer, 768 by default, which covers the six
-possible connections in each direction for every peer: five preconnected connections plus the
-on-demand bulk connection. It performs at most `--interconnect-concurrent-handshakes` connection
-handshakes concurrently, 32 by default. [Node Settings](node-settings.md) owns these options and
-their derivations.
+A node keeps this layout for every peer it has, and no count limits the peers: every member must
+reach every other member, so a node dials every peer the application publishes and accepts the
+connections of every peer that authenticates. The layout bounds each peer's connections to six in
+each direction, the five preconnected connections plus the on-demand bulk connection, and a node
+performs at most `--interconnect-concurrent-handshakes` connection handshakes at once, 32 by
+default. [Node Settings](node-settings.md) owns these options.
 
 ## Peer Name Resolution
 
@@ -513,15 +513,16 @@ answer arrived.
 
 ## Wire Contract And Payloads
 
-The current contract includes the free licensing singleton in snapshots, captured domain quotas in
-creation and restore commands, and typed quota refusals in membership verdicts. These shapes advance
-the same fingerprint as every other consensus and prerequisite shape.
+The current contract includes the free licensing singleton in snapshots. Licensing limits no base
+feature, so creation and restore commands capture no domain quota, membership verdicts carry no
+quota refusal and committed grace periods protect no member names. These shapes advance the same
+fingerprint as every other consensus and prerequisite shape.
 
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
 It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
-record retains, the typed `LicensingStop` refusal of a change that would run a domain, the start of
-a domain included, and the `stopped` admission refusal state. It fences the domain start a `START`
+record retains, and the typed `LicensingStop` refusal of a change that would run a domain, the start
+of a domain included. It fences the domain start a `START`
 command commits on its own, with the start revision its execution records, and transaction commit
 plans and step effects that carry no lifecycle step.
 
@@ -536,7 +537,8 @@ supported operations and their encoded shapes. It is one of the prerequisites ev
 so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of
 another shape fails as a malformed handshake before its record can be judged. There is no version
 negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
-cluster stop and start with all nodes on the same version.
+cluster stop and start with all nodes on the same version. The contract includes that every request
+and answer body declares its length, which its receiver charges before reading any of it.
 The contract includes `InstallClusterIdentity` and the complete validated identity record in Raft
 commands and snapshots. Its private key travels only over the authenticated interconnect. Public
 identity observation and backup source metadata use their separate public projections.
@@ -548,7 +550,9 @@ That claim carries the size of the volume holding the node's database directory 
 limit of each of the node's databases, and a parameter conflict can carry the typed refusal of a
 resource quota above an admitted node's volume or of a node-unavailability timeout that an admitted
 node's health-probe interval does not fit. Its listener bounds carry the gRPC listener's HTTP/2
-windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer.
+windows, send buffer and reset limits, the HTTP/1 header count and the WebSocket write buffer, and
+its operational capabilities carry the web console pacing the node announces to its console
+sessions.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup. The fingerprint also covers
 the opening of a client consumer stream with the largest delivery chunk its serving node announces.
@@ -588,8 +592,11 @@ reserve among them), the ordered `RATE LIMIT`
 clauses of an ingestor body with their `SET RATE LIMIT` and `DROP RATE LIMIT` alterations, and the
 rate-limit hold, hold time, rejection and program rejection counters a `DESCRIBE INGESTOR` answer
 carries for a unit whose ingestor writes `RATE LIMIT`. The fingerprint also includes the
-`node` expression scope and the `SHOW NODES` statement in the archived vocabulary. Peers must
-match it exactly.
+`node` expression scope and the `SHOW NODES` statement in the archived vocabulary, an emitter
+retry policy's optional `GIVE UP AFTER`, the client emitter description a forwarded consumer
+receives with that limit, and the dataflow node status that says whether an emitter's retried
+failure is a misconfiguration and how long remains before it gives up its oldest retried unit.
+Peers must match it exactly.
 
 Execution-unit identities use an eight-byte rank with four-byte archive alignment. Single and
 partition relay grants retain that bounded footprint when other entities declare external
@@ -647,7 +654,7 @@ The primary payload limits are:
 
 | Payload | Default | Set by |
 | --- | ---: | --- |
-| Management event | 64 KiB | fixed; every member must bring the same bound to join |
+| Management event | 68 KiB | fixed: the largest gossip exchange, a 65,510-byte Chitchat message with its typed request fields and envelope, with room to spare; every member must bring the same bound to join |
 | Command | 1 MiB | fixed |
 | Replication batch | 2 MiB | fixed |
 | Encoded relay batch | 32 MiB | `--execution-relay-encoded-bytes`, one sixth of the relay pool at most 32 MiB; a receiver announces `--interconnect-relay-batch-bytes`, which defaults to it |
@@ -696,7 +703,7 @@ connection carries toward its peer arrive under that peer's 64 KiB windows.
 
 ## Traffic And Resource Isolation
 
-An operation's type fixes its pool, admission quota, response type, and deadline policy. Callers do
+An operation's type fixes its pool, subquota, response type, and deadline policy. Callers do
 not select a less restricted pool at the call site. This preserves traffic isolation even when a
 busy subsystem issues many requests.
 
@@ -718,24 +725,15 @@ replication slots. The bulk pool reserves two slots for resources, one for snaps
 other bulk work, which backup section fetches use. Commands and relay bodies use the shared capacity
 of their dedicated pools.
 
-Typed requests also have independent node-wide admission quotas, applied separately to incoming
-and outgoing work across all peers and connections. They derive from `--interconnect-max-peers` and
-`--interconnect-incoming-queue-capacity`; with the default 64 peers and 1,024 queued requests:
+A typed request of a reserved subquota has no node-wide count of its own: it waits for a stream
+slot of its subquota on its peer's connection, within its own deadline, and its bytes are charged to
+its class's memory budget as their size becomes known. Every peer brings its own connections, so a
+node's capacity for each subquota follows the peers it has. Requests of the shared subquota are also
+admitted against `--interconnect-incoming-queue-capacity`, 1,024 by default, separately for incoming
+and outgoing work across all peers; one that finds every place held is refused with a typed capacity
+outcome. Every admitted request is counted in flight by direction and subquota until it resolves.
 
-| Request use | Default admissions per direction | Derivation |
-| --- | ---: | --- |
-| Shared | 1,024 | `--interconnect-incoming-queue-capacity` |
-| Consensus append | 128 | `--interconnect-request-quota`, as an independent reserve of the same size |
-| Resource transfer | 128 | `--interconnect-request-quota`: two per declared peer, bounded by the incoming queue |
-| Snapshot transfer | 128 | `--interconnect-request-quota` |
-| Discovery | 128 | `--interconnect-request-quota` |
-| Application liveness | 64 | one per declared peer |
-| Domain-clock progress | 128 | `--interconnect-request-quota` |
-| Runtime and relay admission | 128 | `--interconnect-request-quota` |
-| Relay cancellation | 4 | one per sixteen declared peers, at least one |
-| Relay terminal outcomes | 4 | one per sixteen declared peers, at least one |
-
-These reservations mean that ordinary management traffic cannot consume the capacity required to
+These reserved slots mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
 Consensus heartbeats use the management pool independently of log replication. The worker waits
@@ -744,7 +742,7 @@ and its interconnect request uses the same full bound. An answer after one heart
 but before that lease expires can therefore reach Raft; timeout or transport failure still ends the
 request and releases its management stream. Initial empty replication probes continue to use their
 shorter soft deadline and the same typed management response. This changes neither the wire shape
-nor pool and admission quotas.
+nor the pools and their stream slots.
 
 Leasing an established stream allocates nothing and acquires no shared discovery map. An immutable
 persistent target table selects the peer's fixed pool arrays. Each slot retains its cancellation
@@ -803,26 +801,30 @@ follower whose receive window is full can still produce the answer that releases
 validates the relationships among operation limits and these budgets, including the paired work
 that must fit for independent operations to keep making progress.
 
-A typed stream request admits its envelope without queueing while its nested payload remains
-charged; bounded writer growth also refuses immediately when the class has no room. The encoding
-job owns that payload and charge through cancellation, and returns the payload charge once the
-envelope is encoded, before waiting for a connection lease or response headers. Insufficient room
-for both allocations is a typed encoding admission failure, which releases both allocations
-rather than waiting while retaining the input. The request is not sent after such a refusal.
+No stage of a request waits for room while it holds a charge of the same class. A typed request's
+caller gives the payload's charge back before the envelope's encoding copies the payload, and the
+answer envelope's charge back before the typed answer's decoding copies its payload. A request
+without a reserved kind holds a place of the incoming queue meanwhile, which bounds those copies.
+A request of a reserved kind holds no place, so it leases its stream before it encodes its payload
+and keeps the stream until its answer is decoded, and a peer connection's stream slots bound its
+copies. An encoding whose output outgrows its charge gives back what it holds and waits for the
+larger charge, holding nothing.
 
-Receive-side rkyv decoding follows the same admission rule. A charged body never waits for a
-second reservation while keeping its input, and a nested request never waits while its outer
-envelope remains charged. Both refuse immediately when the class has no free room, including
-room assigned to an earlier queued reservation. A nested decoder gives its input an independent
-charge that travels into the CPU job; cancellation of the enclosing request cannot release that
-charge before the job releases its bytes. The decoded value retains its own reservation.
-Memory-budget and execution-queue refusals carry typed remote outcomes with their traffic class
-and requested bytes or queue count. Temporary admission refusals while opening byte and duplex streams
-answer HTTP 503; an operation exceeding the whole memory budget answers 413. Neither means that
-the input was malformed. The relay quota probe retains its distinct `NoRoom` outcome.
+Every request and answer body declares its length (`content-length`), and its receiver waits for
+the body and the room its decoding takes as one charge while it holds nothing of the class, then
+reads and decodes within that charge, which the decoded value keeps. A body without a declared
+length, or carrying more or fewer bytes than it declared, is malformed. A nested payload decodes the
+same way at its own stage: once the envelope that carried it has given its charge back, its copy and
+its decoded value are one charge, waited for while the decoder holds nothing. That charge travels
+into the CPU job, so cancellation of the enclosing request cannot release it before the job releases
+its bytes. A typed request's charge is given back before its handler runs, so a handler's own work
+never waits for room behind the request it serves; the connection's stream places bound the request
+meanwhile. A memory charge larger than its whole budget answers HTTP 413 while a byte or duplex
+stream opens, and a budget or pool closed because the node stops answers 503; neither means that
+the input was malformed. A full class answers nothing, because every opening waits for its room.
 
-Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
-and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
+Stream slots are isolated per connection, and therefore per peer. Memory budgets and CPU wait
+queues are isolated per class, and they and the shared admission queue serve every peer of the node. A slow or stalled
 peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
 management streams of a connection, a further shared operation to that peer waits for a slot
 until its own deadline, while liveness, cancellation, and discovery still use the reserved streams
@@ -838,54 +840,57 @@ only the batch's body and decoded columns charged while its runtime takes the ba
 
 A CPU class admits each job separately: one of its workers runs, a bounded number wait, and no job
 joins an unbounded queue. A typed request runs several jobs of its class in turn, encoding its
-payload and envelope and later decoding the response. The request's own jobs are refused at once
-when the queue is full: the caller still holds the request, so it fails with
-`RequestError::Encode` and can be sent again, and the peer refuses a request it cannot decode now
-the same way. A refused job holds no memory charge, so a burst beyond the queue cannot hold the
-class's memory. The response's jobs wait for a place instead, because the response carries
-work the handler already did: the peer's encoding of the answer waits until the caller resets the
-stream, and the caller's decoding of it waits within the request's own deadline. A request that
-fails at one of its later stages fails with `RequestError::Transport`. Every other class keeps
-admitting independently.
+payload and envelope and later decoding the response. A full queue holds each of them back until a
+place frees, the request's own jobs as well as its answer's: the executor's pools are backpressure
+on the node's resources, never a reason to refuse a frame. The caller's reset and the request's own
+deadline end every wait, and a request that fails at one of its later stages fails with
+`RequestError::Transport`. Every other class keeps admitting independently.
 
-Every protocol between nodes decides its frames by what a refusal would cost. A frame that carries
-work a peer already did is an answer: a full queue holds it back, holding only its own charge,
-until a place frees or the exchange it answers ends. A frame its opener still holds, and whose
-answer it waits on, is a request: a full queue refuses it at once, and the opener sends it again or
-opens again. A duplex stream's frames after its opening wait as well, because its codec cannot tell
-a request among them from a frame whose refusal would end the stream. Each protocol decides its
-frames as follows.
+Every frame between nodes therefore waits for its place and its room, in both directions. What
+differs between protocols is what ends a wait: an answer waits until the exchange it answers ends,
+and its decoding until the request's own deadline. Each protocol's waits end as follows.
 
-| Protocol | Refused when the queue is full (the request case) | Waits for a place | What ends the wait |
-|---|---|---|---|
-| Typed request | The caller's encoding of the request and the peer's decoding of it | The peer's encoding of the answer and the caller's decoding of it | The caller's reset; the request's own deadline |
-| Connection handshake | The dialing node's hello and the accepting node's decoding of it | The accepting node's answer, accepted or refused, and the dialing node's decoding of it | The dialing node's setup deadline, which closes the connection |
-| Relay admission status and cancellation | The sender's query and the receiver's decoding of it | The receiver's status and the sender's decoding of it | The sender's reset; the query's deadline |
-| Relay grant | The sender's grant request and the receiver's decoding of it, which takes only free relay memory | The receiver's disposition and the sender's decoding of it | The sender's reset; the delivery's deadline |
-| Ack resolution | Nothing | The sender's encoding of the ack and the registrar's decoding of it | The send's deadline |
-| Duplex stream | The opening, encoded and decoded | Every frame the initiator submits and every answer the responder produces, encoded and decoded | The stream's reset or end; the leader's answer deadline on a Raft append stream, and either side's heartbeat silence limit on a client consumer stream or producer link |
-| Byte stream | The opening, encoded and decoded | Every job of the answer once the handler has done its work, and the caller's decoding of it | The caller's reset; the stream's progress timeout; the caller's own deadline |
+| Protocol | What its frames wait for | What ends the wait |
+|---|---|---|
+| Typed request | The caller's encoding of the request, the peer's reading and decoding of it, the peer's encoding of the answer and the caller's reading and decoding of it | The caller's reset; the request's own deadline |
+| Connection handshake | The dialing node's hello and the accepting node's reading of it, then the accepting node's answer, accepted or refused, and the dialing node's reading of it | The dialing node's setup deadline, which closes the connection |
+| Relay admission status and cancellation | The sender's query, the receiver's reading of it, the watermark charge of a cancellation that fences a position the receiver never granted, the receiver's status and the sender's reading of it | The sender's reset; the query's deadline |
+| Relay grant | The sender's grant request, the receiver's reading of it and the whole charge of the operation it grants, then the receiver's disposition and the sender's reading of it | The sender's reset; the wait the sender declared, after which the receiver answers a capacity refusal; the delivery's deadline |
+| Ack resolution | The sender's encoding of the ack and the registrar's reading and decoding of it | The sender's reset; the send's deadline |
+| One-way control frame | The sender's encoding of the frame and the receiver's reading and decoding of it | The sender's reset; the send's deadline |
+| Duplex stream | The opening and every frame either side submits, encoded and decoded | The stream's reset or end; the leader's answer deadline on a Raft append stream, and either side's heartbeat silence limit on a client consumer stream or producer link |
+| Byte stream | The opening, encoded and decoded, every job of the answer once the handler has done its work, and the caller's reading of it | The caller's reset; the stream's progress timeout; the caller's own deadline |
 
 The reasons, protocol by protocol:
 
-- **Connection handshake.** The dialing node keeps its hello and dials again. The accepting node's
-  answer carries a binding it has already validated and registered, and losing it would make the
+- **Connection handshake.** The accepting node's answer carries a binding it has already validated
+  and registered, and losing it would make the
   dialing node set its connection up again from the TLS handshake. A refusal is the accepting
   node's verdict on the dialing node's prerequisites, which the dialing node reports and counts as
   the reason its connection did not bind.
-- **Relay admission status and cancellation.** The sender keeps its delivery and asks again. The
-  status is the receiver's verdict on the attempt, and a cancellation it answers is already
-  applied. A terminal status whose answer never left stays answerable, so the query the sender
+- **Relay admission status and cancellation.** The status is the receiver's verdict on the attempt,
+  and a cancellation it answers is already applied. A cancellation that must fence a position waits
+  for its watermark's charge while the query holds nothing of the relay class, since the fence is
+  what makes the cancellation hold. A terminal status whose answer never left stays answerable, so the query the sender
   repeats finds the same status.
-- **Relay grant.** The sender keeps its delivery. A grant the receiver issued already holds its
-  relay memory, so losing its answer would leave the grant held until the sender reconciles the
-  indeterminate attempt. The relay's memory backpressure stays the `FreeRoom` refusal of a grant
-  the receiver has no relay memory for; only a full CPU queue no longer refuses the answer.
+- **Relay grant.** A grant the receiver has no relay memory for waits for that memory. Its request is
+  read and decoded under one charge, and once it is known the whole charge of the operation it
+  grants, the batch's body, its decoded columns, decode scratch, the metadata the grant keeps and
+  the watermark the delivery's outcome records, is waited for while the grant holds nothing of the
+  class. The sender declares how long the
+  receiver may hold the grant (`x-nervix-grant-wait-nanos`): half the delivery's dispatch timeout,
+  the same half it waits between asks, and at most half of what its exchange has left. A grant
+  still without room, or without a worker to decode it, when that wait ends is answered with the
+  capacity refusal `RelayGrantRefusal::Memory`, which the delivery is held back on and asks again
+  with, so the exchange never outlasts the stall bound its sender gives it. An operation larger
+  than the whole relay budget, or a budget closed because the node stops, is refused with it too. A grant the receiver issued already holds its relay memory, so losing
+  its answer would leave the grant held until the sender reconciles the indeterminate attempt.
 - **Ack resolution.** An ack carries the outcome of a delivery its sender already resolved, which
   nothing presents again.
-- **Duplex streams.** The initiator keeps its opening and opens the stream again. After the
-  opening, one codec decodes each frame before it knows its kind, and a stream's frames include
-  answers and frames nobody answers, so every frame waits, in both directions. A client consumer
+- **Duplex streams.** One codec encodes and decodes every frame, the opening included, and every
+  frame waits, in both directions. A frame reader gives back what it holds before it waits to grow,
+  and hands each frame over with its bytes out of its charge, so the frame's decoding never waits
+  for room behind the reader. A client consumer
   stream's serving node sends heartbeats and a close besides its settlements, and a producer
   link's serving node sends clearances, which answer the owning node's admission, besides
   heartbeats, closes and detaches. A refused heartbeat or clearance would end the stream and every
@@ -896,19 +901,23 @@ The reasons, protocol by protocol:
   delivery, an admission or a settlement. A Raft follower decodes one batch at a time into its
   resident window and encodes its answers one at a time, after the batch each one answers has
   given back its charge, so an append stream holds at most one waiting frame in each direction on
-  each node. A heartbeat or vote, whose own request frames keep the refusal, therefore waits
+  each node. A heartbeat or vote therefore waits
   behind at most two short jobs per stream, far inside an election timeout of six heartbeat
   intervals or more.
-- **Byte streams.** The caller keeps its request and opens again. State inspection pages are the
-  owner's answer to a read it has already served: the encoding of their rows, the identity of each
-  body and the reply wait, and so do the reply's decoding, the body's identity check and the rows'
-  decoding at the coordinator. The owner's own reading of its state is part of serving the read and
-  keeps the refusal. Checkpoint, offset, captured-section, snapshot and resource-archive transfers
+- **Byte streams.** State inspection pages are the owner's answer to a read it has already served:
+  the encoding of their rows, the identity of each body and the reply wait, and so do the reply's
+  decoding, the body's identity check and the rows' decoding at the coordinator, which receives the
+  page together with the room its descriptor's decoding and its body's decoders take. Checkpoint, offset, captured-section, snapshot and resource-archive transfers
   already wait for a place on every job of their answers.
 
-A one-way control frame, such as a state replication ack, a checkpoint announcement or a runtime
-error event, keeps the refusal, because the receiving node decodes it on the same path as a typed
-request, whose decoding must refuse.
+A one-way control frame waits like every frame: a replica's state replication ack
+(`StateReplicationAck`), a checkpoint announcement (`StateCheckpointAvailable`), a runtime error
+event (`RuntimeErrorEvent`) and a termination notice (`Terminate`). Each carries a fact its sender
+already established and nobody sends again, so a full class holds the frame back rather than losing
+it. The receiving node reads and decodes the frame under one charge, its body and the room its
+decoding takes, while it holds nothing else of the class, and the charge stays with the frame until
+the application takes it. The sender's reset ends the wait for room and the wait for a place alike
+and gives the charge back, so a frame waits no longer than the exchange that carries it.
 
 The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
 bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of
@@ -978,7 +987,11 @@ visibility all answer in these terms. A dataflow node status request names one e
 its node, so an emitter with several [instances](emitters.md#emitter-instances) is asked about each
 instance at that instance's owner; a node scheduled as one unit is asked about its `Single` unit.
 A domain or entity drain status reports each publishing emitter with the unit that publishes, so
-instances of one emitter are reported apart. An ingestor description is the execution owner's
+instances of one emitter are reported apart. An emitter's dataflow node status carries its
+retried failure with whether that failure is a misconfiguration, and the milliseconds that remained
+before the owner gives up its oldest retried unit when the owner answered, so `DESCRIBE EMITTER` on
+any node shows the owner's `misconfigured:` and `give up in:` lines. An ingestor description is the
+execution owner's
 report of the ingestor. Its last decode rejection crosses as a typed record: a reference, an
 instant, a codec name, field paths, an optional Kafka or syslog position and the rendered codec
 diagnostic. The asking node renders that record; it never parses one.
@@ -1068,7 +1081,7 @@ A delivery proceeds as follows:
    [Held Deliveries](#held-deliveries) describes.
 2. The sender leases a relay-body stream before requesting receiver capacity. This prevents a
    saturated body pool from holding a remote reservation that it cannot use.
-3. The sender requests a grant over the reserved management admission quota. The request identifies
+3. The sender requests a grant over the management connection's reserved admission streams. The request identifies
    the delivery process, channel, sequence, encoded and logical decoded lengths, branch, relay, and acknowledgement shape.
 4. The receiver verifies the sender process epoch and delivery order. Before issuing a grant, it
    reserves the encoded body, maximum decoded batch and scratch memory, an incoming queue item, and
@@ -1299,14 +1312,17 @@ work in flight. The channel watermarks that keep a channel's position and last o
 work resolved are part of what that channel's deliveries need, so no count bounds them and nothing
 forgets one to make room. Each is charged to the receiver's relay memory class for as long as it is
 retained: about 180 bytes for its entries in the peer's channel table and expiry order, plus the
-text of a rejection reason it keeps. The grant of a delivery reserves that charge together with the
-delivery's own grant reservation, so a relay memory class without room refuses the grant as a
-capacity refusal, and the sender holds the delivery back and asks again, as
+text of a rejection reason it keeps. The grant of a delivery takes that charge as part of the one
+charge it waits for while it holds nothing of the class, so a relay memory class without room holds
+the grant back, as [Traffic And Resource Isolation](#traffic-and-resource-isolation) describes. A
+grant still without room when the wait its sender declared ends is answered with a capacity
+refusal, and the sender holds the delivery back and asks again, as
 [Held Deliveries](#held-deliveries) describes. The outcome the delivery records takes that charge
 when its channel has no watermark yet, and returns it when the channel's watermark already holds
-one. A cancellation that fences a position the receiver never granted reserves the same charge;
-while the class has no room for it, the cancellation is answered `Unknown` and its sender asks
-again. When the class has no room for a rejection reason's text, the watermark keeps the rejection
+one. A cancellation that fences a position the receiver never granted takes the same charge. It
+waits for room for as long as its sender keeps the query open, and only a closed budget leaves it
+unrecorded, answered `Unknown`, so its sender asks again. A rejection reason's text is the one
+charge that does not wait: when the class has no room for it, the watermark keeps the rejection
 without it: the outcome is what reconciling the channel needs, and its reason only explains it.
 [Capacity Planning](./capacity-planning.md) describes sizing the relay memory class for the channels
 a graph keeps between two nodes.
@@ -1364,8 +1380,8 @@ stopped using that incarnation. `nervix_interconnect_relay_channel_watermarks` s
 node retains. Authentication before gossip membership permits discovery, while relay operations
 wait for live membership. An owner still awaiting membership ends after twice the installed
 committed `REMOTE_RELAY_TOTAL_TIMEOUT`, ten minutes by default, and closes its bound intake
-connections. Routing publication has at most the configured peer limit; normal frame and ACK
-operations use retained owners rather than a node-wide shared-map guard.
+connections. Routing publication holds one relay owner for each peer the node keeps; normal frame
+and ACK operations use retained owners rather than a node-wide shared-map guard.
 
 ### Held Deliveries
 
@@ -1585,24 +1601,34 @@ state can change while its incarnation stays live. Application readiness travels
 [progress reports and queries](#application-progress), and clock installation through
 [receiver attachments](#domain-clock-progress). Neither becomes a per-revision gossip key.
 
-Cluster membership gossip uses management discovery capacity. It discovers topology and
-incarnations but does not replace application health checks. Gossip payloads remain below the
-management-event bound, so discovery cannot allocate an arbitrary wire message: both peers hold an
-exchange's payload to 60 KiB, and a node refuses to start when its management-event bound cannot
-carry the largest exchange, its typed request fields and envelope included, encoded as a send
-encodes it. A node that cannot
-take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
-bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
-shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination. One
-worker per destination drives its interconnect requests in order, under the one-second request
+Cluster membership gossip uses management discovery capacity. It discovers topology and incarnations
+but does not replace application health checks. Chitchat decides what each gossip message carries,
+and the interconnect carries each message as one exchange in the Management class. Chitchat budgets
+each message that carries state, a SynAck or an Ack, to the largest IPv4 UDP payload, 65,507 bytes,
+whatever transport carries it: the message type, the sender's digest and the state delta fit that
+budget together, and the 3-byte header Chitchat writes before them, its magic number and protocol
+version, comes on top. It gossips state larger than one message over several rounds, one message per
+exchange. The gossip bound is the largest message Chitchat builds, 65,510 bytes, and both peers hold
+an exchange's payload to it. The management event is 68 KiB so that the largest exchange, that
+payload with its typed request fields and envelope, travels as one management request; a node
+refuses to start when its management-event bound cannot carry the largest exchange, encoded as a
+send encodes it. Every SynAck and Ack therefore fits one exchange. Chitchat does not budget a Syn,
+which carries only the sender's digest, with an entry for every known node, and the cluster
+identifier; a Syn outgrows the bound only once that digest and identifier no longer fit one message.
+The sender refuses any message above the bound and logs it at `warn`, because Chitchat discards the
+error of a reply it cannot send and builds the same reply again on the next round. A node that
+cannot take an exchange answers with a typed refusal rather than text: the message exceeds the
+gossip bound, the sending node could not be registered as an outbound peer, or its gossip receiver
+has shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination.
+One worker per destination drives its interconnect requests in order, under the one-second request
 deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
 to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
 retries. Closing the transport cancels queued work and exchanges in flight.
 
 Incoming exchanges take one bounded queue between the interconnect handler and Chitchat, which
 reads it as its socket. The node capability `--gossip-receive-queue-capacity` sets how many
-datagrams it holds, 1,024 by default. Each holds at most the 60 KiB gossip bound, so the queue
-retains at most its capacity times that bound. A full queue holds an exchange's answer until
+datagrams it holds, 1,024 by default. Each holds at most the 65,510-byte gossip bound, so the
+queue retains at most its capacity times that bound. A full queue holds an exchange's answer until
 Chitchat takes a datagram; an exchange that waits beyond its request deadline fails at its sender,
 and the next gossip round retries.
 
@@ -1797,7 +1823,7 @@ content kind and digest, and the leader stages and verifies the stream before ad
 archive. The owner keeps a
 staged section only for the coordinator process that requested it, serves it once in 1 MiB reads,
 and releases a stage nobody fetched 600 seconds after staging it. One owner's inventory of a
-domain's capture is one management reply, at most 64 KiB.
+domain's capture is one management reply, at most 68 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
@@ -2452,10 +2478,11 @@ and outbound connections through a Chitchat liveness loss while application heal
 observation of it from the node-unavailability interval, as described below. A different
 incarnation or advertised endpoint must establish a new target.
 
-Each health round has at most one probe in flight for each peer and at most
-`interconnect-max-peers` probes across the node, 64 by default. A probe's total deadline is the
-probe timeout, a tenth of the node-unavailability interval: one second at the default ten seconds.
-Results are published as they complete, so a silent peer occupies only its own concurrency slot.
+Each health round probes every peer together, with one probe for each peer: a peer's management
+connection reserves liveness streams of its own, so a probe never waits behind another peer's. A
+probe's total deadline is the probe timeout, a tenth of the node-unavailability interval: one second
+at the default ten seconds, so a round ends within one probe timeout however many peers the node
+has. Results are published as they complete, so a silent peer delays only its own observation.
 The next regular round begins one `--control-plane-health-probe-interval` after the previous round
 finishes, one second by default. Gossip updates remain pending while those bounded probes finish and
 start the next round immediately afterward. They never cancel an in-flight round: repeated gossip
@@ -2764,8 +2791,8 @@ count grows with every bulk stream it opens.
 Typed-request observations are labeled by the subquota a request uses: operation `liveness` counts
 application health together with the other requests of that subquota, the drain-status polls of
 backups, domains and entities among them, and operation `progress` counts replaceable domain-clock
-delivery and HTTPS listener installation probes, so their request counts, outcomes, latency, and
-quota failures can be evaluated independently. Only unary requests are counted there; a streamed
+delivery and HTTPS listener installation probes, so their request counts, outcomes and latency can
+be evaluated independently. Only unary requests are counted there; a streamed
 response, such as a backup section fetch, appears in the bulk-transfer byte series. A client
 producer link's opening, failure, silence, and the producers it ends or detaches are logged at
 `debug` on both ends; the owning node's client-ingestor metrics count forwarded producers apart
@@ -2862,7 +2889,7 @@ and its grouping, confirmation, integrity and admission behavior remain unchange
 ## Declared Transport Policy
 
 [Node Settings](node-settings.md#transport-resolver-and-database-capacities) lists the transport
-capacity and deadline options, derived request reserves and the committed per-node view.
+capacity and deadline options and the committed per-node view.
 The application root constructs transport options from those validated declarations. Bulk
 receive windows retain their independent memory backing and their receiver-specific bounds.
 

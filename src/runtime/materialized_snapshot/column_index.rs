@@ -68,12 +68,13 @@ impl ColumnarCheckpointIndex {
         let identity_limit = limits.snapshot_record_bytes.as_u64();
         let column_limit = limits.snapshot_section_bytes.as_u64();
         let working = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Bulk,
                 header_limit
                     .checked_mul(4)
                     .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?,
             )
+            .await
             .change_context(MaterializedSnapshotError::Admission)?;
         let inspecting = executor.clone();
         view.inspect(working, move |bytes, _working, cancellation| {
@@ -240,7 +241,8 @@ impl ColumnarCheckpointIndex {
             .checked_add(u64::try_from(row_bytes).map_err(MaterializedSnapshotError::decoding)?)
             .ok_or_else(|| Report::new(MaterializedSnapshotError::Admission))?;
         let memory = executor
-            .try_reserve(MemoryClass::RestoreMetadata, retained.max(1))
+            .reserve(MemoryClass::RestoreMetadata, retained.max(1))
+            .await
             .change_context(MaterializedSnapshotError::Admission)?;
         let mut rows = Vec::with_capacity(range.len());
         for group in &self.groups[first..last] {
@@ -254,7 +256,6 @@ impl ColumnarCheckpointIndex {
                 .change_context(MaterializedSnapshotError::Execution)?;
             let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
                 executor,
-                nervix_execution::QueueAdmission::RefuseWhenFull,
                 StdArc::clone(schema),
                 bytes,
             )

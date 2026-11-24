@@ -21,7 +21,7 @@ use crate::application::{
 };
 
 /// The headings of the settings areas, in the order help lists them.
-const SETTINGS_HEADINGS: [&str; 21] = [
+const SETTINGS_HEADINGS: [&str; 22] = [
     "Databases",
     "Consensus capacities",
     "DNS",
@@ -43,10 +43,11 @@ const SETTINGS_HEADINGS: [&str; 21] = [
     "Operational node capabilities",
     "Listeners",
     "Trace export",
+    "Web console pacing",
 ];
 
 /// Every setting the settings groups declare, by the name its definition gives it.
-const SETTING_NAMES: [&str; 264] = [
+const SETTING_NAMES: [&str; 269] = [
     "runtime-delivery-capacity",
     "runtime-ingest-group-max-rows",
     "runtime-ingest-group-idle-flush",
@@ -119,11 +120,10 @@ const SETTING_NAMES: [&str; 264] = [
     "dns-hook-lookup-budget",
     "dns-address-family-policy",
     "dns-trust-negative-answers",
+    "dns-concurrent-lookups",
     "interconnect-reconnect-jitter-permille",
-    "interconnect-max-peers",
     "interconnect-concurrent-handshakes",
     "interconnect-incoming-queue-capacity",
-    "interconnect-request-quota",
     "interconnect-stream-receive-window",
     "interconnect-connection-receive-window",
     "interconnect-connection-setup-timeout",
@@ -311,6 +311,12 @@ const SETTING_NAMES: [&str; 264] = [
     "otel-trace-export-interval",
     "otel-trace-queue-capacity",
     "otel-trace-export-batch-spans",
+    "web-console-request-timeout",
+    "web-console-connect-timeout",
+    "web-console-retry-backoff",
+    "web-console-retry-max-backoff",
+    "web-console-restoration-backoff",
+    "web-console-restore-frame-capacity",
 ];
 
 #[test]
@@ -570,8 +576,7 @@ fn help_lists_each_settings_area_under_its_own_heading() {
 fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() {
     let settings = NodeSettings::default()
         .with_overrides(&[
-            override_of("interconnect-max-peers", "16"),
-            override_of("interconnect-request-quota", "4"),
+            override_of("dns-concurrent-lookups", "16"),
             override_of("interconnect-request-timeout", "20s"),
             override_of("database-workers", "2"),
             override_of("raft-database-max-open-files", "64"),
@@ -582,7 +587,6 @@ fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() 
         .assured("consistent local infrastructure bounds");
     let rendered = settings.with_overrides(&[]).assured("settings read back");
     assert_eq!(rendered, settings);
-    assert_eq!(settings.interconnect.request_quota(), 4);
     assert_eq!(*settings.dns.concurrent_lookups.value(), 16);
     assert_eq!(*settings.node_database.workers.value(), Some(2));
     assert_eq!(*settings.consensus_database.workers.value(), None);
@@ -592,15 +596,9 @@ fn infrastructure_overrides_preserve_derived_inputs_and_refuse_invalid_bounds() 
         NodeSettings::default().node_database.max_open_files,
         "an omitted open-file limit keeps the platform default"
     );
-    assert_eq!(
-        NodeSettings::default().interconnect.values().request_quota,
-        None
-    );
 
     for (name, value) in [
-        ("interconnect-max-peers", "0"),
-        ("interconnect-request-quota", "0"),
-        ("interconnect-request-quota", "1025"),
+        ("dns-concurrent-lookups", "0"),
         ("interconnect-request-timeout", "0s"),
         ("interconnect-stream-receive-window", "2GiB"),
         ("interconnect-reconnect-jitter-permille", "1001"),
@@ -978,6 +976,63 @@ fn trace_export_capabilities_render_and_read_back_and_refuse_a_batch_beyond_the_
             queue: 2048,
         })
     );
+}
+
+#[test]
+fn web_console_pacing_renders_and_reads_back_and_refuses_a_ceiling_below_a_first_wait() {
+    let settings = NodeSettings::default()
+        .with_overrides(&[
+            override_of("web-console-request-timeout", "45s"),
+            override_of("web-console-connect-timeout", "4s"),
+            override_of("web-console-retry-backoff", "300ms"),
+            override_of("web-console-retry-max-backoff", "6s"),
+            override_of("web-console-restoration-backoff", "2s"),
+            override_of("web-console-restore-frame-capacity", "8"),
+        ])
+        .assured("the overrides are valid web console pacing");
+    let web_console = settings.operational.web_console;
+    assert_eq!(web_console.request_timeout(), Duration::from_secs(45));
+    assert_eq!(web_console.connect_timeout(), Duration::from_secs(4));
+    assert_eq!(web_console.retry_backoff(), Duration::from_millis(300));
+    assert_eq!(web_console.retry_max_backoff(), Duration::from_secs(6));
+    assert_eq!(web_console.restoration_backoff(), Duration::from_secs(2));
+    assert_eq!(web_console.restore_frame_capacity().get(), 8);
+    let read = settings
+        .with_overrides(&[])
+        .assured("rendered settings read back");
+    assert_eq!(read, settings);
+
+    let refused = NodeSettings::default()
+        .with_overrides(&[override_of("web-console-retry-max-backoff", "100ms")])
+        .err()
+        .assured("a 100 ms ceiling is below the 250 ms first retry wait");
+    assert!(matches!(
+        refused.current_context(),
+        AppError::InvalidWebConsoleSettings
+    ));
+    assert_eq!(
+        refused.downcast_ref::<nervix_models::NodeOperationalError>(),
+        Some(
+            &nervix_models::NodeOperationalError::WebConsoleBackoffCeiling {
+                setting: "web-console-retry-max-backoff",
+                value: Duration::from_millis(100),
+                first_setting: "web-console-retry-backoff",
+                first: Duration::from_millis(250),
+            }
+        )
+    );
+
+    let refused = NodeSettings::default()
+        .with_overrides(&[override_of("web-console-request-timeout", "1500us")])
+        .err()
+        .assured("a browser timer cannot keep part of a millisecond");
+    assert!(matches!(
+        refused.downcast_ref::<nervix_models::NodeOperationalError>(),
+        Some(nervix_models::NodeOperationalError::WebConsoleWait {
+            setting: "web-console-request-timeout",
+            ..
+        })
+    ));
 }
 
 fn override_of(name: &str, value: &str) -> SettingOverride {

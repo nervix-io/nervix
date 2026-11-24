@@ -417,7 +417,6 @@ pub(crate) struct PendingArguments {
 /// soon as they are admitted, keeping their archived Arrow sections whenever the rows' identities
 /// fit one identity record, so the window never exists whole in memory however much it retains.
 pub(crate) struct WindowCheckpointBuilder {
-    executor: Executor,
     window: ArchivedWindow,
     /// How many of the window's rows the admitted input rows and argument columns covered.
     admitted_input: usize,
@@ -432,20 +431,15 @@ impl Runtime {
         &self,
         window: ArchivedWindow,
     ) -> WindowCheckpointBuilder {
-        WindowCheckpointBuilder::new(&self.inner.executor, &self.inner.snapshot_staging, window)
+        WindowCheckpointBuilder::new(&self.inner.snapshot_staging, window)
     }
 }
 
 impl WindowCheckpointBuilder {
-    pub(in crate::runtime) fn new(
-        executor: &Executor,
-        staging: &SnapshotStaging,
-        window: ArchivedWindow,
-    ) -> Self {
+    pub(in crate::runtime) fn new(staging: &SnapshotStaging, window: ArchivedWindow) -> Self {
         let pieces =
             WindowCheckpointPieces::new(staging, window.revision, Some(window.incarnation));
         Self {
-            executor: executor.clone(),
             window,
             admitted_input: 0,
             admitted_arguments: 0,
@@ -476,13 +470,13 @@ impl WindowCheckpointBuilder {
         Ok(metadata)
     }
 
-    /// Admits one group's input rows and seals them before this returns. The group's argument
-    /// columns, which must hold the same rows, complete it.
+    /// Admits one group's input rows and seals them before this returns, charging through
+    /// `executor`. The group's argument columns, which must hold the same rows, complete it.
     ///
-    /// A failure leaves the checkpoint as it was, so a caller the node refused only for room can
-    /// release what it holds and admit the same section again.
+    /// A failure leaves the checkpoint as it was.
     pub(crate) async fn admit_input(
         &mut self,
+        executor: &Executor,
         input: ArchivedRows,
     ) -> error_stack::Result<PendingArguments, WindowArchiveError> {
         if self.admitted_arguments != self.admitted_input {
@@ -519,7 +513,7 @@ impl WindowCheckpointBuilder {
         }
         let generation = self.pieces.nested_generation(schema, records);
         self.pieces
-            .append_encoded_input(&self.executor, first_sequence, &generation, input.bytes)
+            .append_encoded_input(executor, first_sequence, &generation, input.bytes)
             .await
             .change_context(WindowArchiveError::Checkpoint)?;
         self.admitted_input = first_row
@@ -531,10 +525,11 @@ impl WindowCheckpointBuilder {
     /// Admits the argument columns of the group whose input rows `pending` names, which must hold
     /// the same number of rows, and seals them before this returns.
     ///
-    /// Like [`Self::admit_input`], a failure leaves the checkpoint as it was, so a caller the node
-    /// refused only for room can release what it holds and admit the same section again.
+    /// Like [`Self::admit_input`], it charges through `executor`, and a failure leaves the
+    /// checkpoint as it was.
     pub(crate) async fn admit_arguments(
         &mut self,
+        executor: &Executor,
         pending: &PendingArguments,
         arguments: ArchivedRows,
     ) -> error_stack::Result<(), WindowArchiveError> {
@@ -557,7 +552,7 @@ impl WindowCheckpointBuilder {
         }
         let generation = self.pieces.nested_generation(schema, records);
         self.pieces
-            .append_encoded_arguments(&self.executor, &generation, arguments.bytes)
+            .append_encoded_arguments(executor, &generation, arguments.bytes)
             .await
             .change_context(WindowArchiveError::Checkpoint)?;
         self.admitted_arguments = pending
@@ -568,8 +563,11 @@ impl WindowCheckpointBuilder {
     }
 
     /// The native checkpoint the window's branch task restores and re-admits, in one quota-owned
-    /// artifact.
-    pub(crate) async fn finish(self) -> error_stack::Result<StagedArtifact, WindowArchiveError> {
+    /// artifact, charging through `executor`.
+    pub(crate) async fn finish(
+        self,
+        executor: &Executor,
+    ) -> error_stack::Result<StagedArtifact, WindowArchiveError> {
         if self.admitted_arguments != self.admitted_input {
             return Err(Report::new(WindowArchiveError::GroupRows));
         }
@@ -601,7 +599,7 @@ impl WindowCheckpointBuilder {
             accumulators.push(snapshot);
         }
         self.pieces
-            .finish(&self.executor, self.window.next_sequence, &accumulators)
+            .finish(executor, self.window.next_sequence, &accumulators)
             .await
             .change_context(WindowArchiveError::Checkpoint)
     }
@@ -911,7 +909,6 @@ mod tests {
         let resident_native = decode_window_processor_snapshot(
             &native,
             executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
             WindowSnapshotSchemas {
                 input: &input,
                 arguments: &arguments,
@@ -993,7 +990,6 @@ mod tests {
         let opened = from_stored;
         let groups = stored_groups;
         let mut builder = WindowCheckpointBuilder::new(
-            executor,
             &staging,
             ArchivedWindow {
                 revision: opened.revision(),
@@ -1027,16 +1023,16 @@ mod tests {
             )
             .await;
             let pending = builder
-                .admit_input(input_rows)
+                .admit_input(executor, input_rows)
                 .await
                 .assured("a group of the archived input rows is admitted");
             builder
-                .admit_arguments(&pending, argument_rows)
+                .admit_arguments(executor, &pending, argument_rows)
                 .await
                 .assured("the group's row-aligned argument columns are admitted");
         }
         let artifact = builder
-            .finish()
+            .finish(executor)
             .await
             .assured("the rebuilt window seals as a native checkpoint");
         let checkpoint = std::fs::read(artifact.path()).assured("the sealed checkpoint reads");
@@ -1048,7 +1044,6 @@ mod tests {
         decode_window_processor_snapshot(
             &checkpoint,
             executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
             WindowSnapshotSchemas {
                 input: &input,
                 arguments: &arguments,
@@ -1068,7 +1063,6 @@ mod tests {
     ) -> ArchivedRows {
         let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
             executor,
-            nervix_execution::QueueAdmission::RefuseWhenFull,
             StdArc::clone(schema),
             bytes.clone(),
         )
@@ -1472,28 +1466,28 @@ mod tests {
             executor.clone(),
             SnapshotStagingLimits::default(),
         );
-        let builder = |window| WindowCheckpointBuilder::new(&executor, &staging, window);
+        let builder = |window| WindowCheckpointBuilder::new(&staging, window);
         let input_rows = window.input_rows(&executor, 0..2).await;
         let one_argument_row = window.argument_rows(&executor, 0..1).await;
 
         let mut misaligned = builder(window.archived());
         let pending = misaligned
-            .admit_input(same_rows(&input_rows))
+            .admit_input(&executor, same_rows(&input_rows))
             .await
             .assured("the group's input rows are admitted");
         let error = misaligned
-            .admit_arguments(&pending, one_argument_row)
+            .admit_arguments(&executor, &pending, one_argument_row)
             .await
             .expect_err("a group's input rows and arguments are row-aligned");
         assert_eq!(error.current_context(), &WindowArchiveError::GroupRows);
 
         let mut incomplete = builder(window.archived());
         let _pending = incomplete
-            .admit_input(same_rows(&input_rows))
+            .admit_input(&executor, same_rows(&input_rows))
             .await
             .assured("the group's input rows are admitted");
         let error = incomplete
-            .finish()
+            .finish(&executor)
             .await
             .expect_err("a group's argument columns complete it");
         assert_eq!(error.current_context(), &WindowArchiveError::GroupRows);
@@ -1501,7 +1495,7 @@ mod tests {
         let mut short = window.archived();
         short.rows.truncate(1);
         let error = builder(short)
-            .admit_input(same_rows(&input_rows))
+            .admit_input(&executor, same_rows(&input_rows))
             .await
             .expect_err("groups hold no more rows than the descriptor lists");
         assert_eq!(
@@ -1513,7 +1507,7 @@ mod tests {
         );
 
         let error = builder(window.archived())
-            .finish()
+            .finish(&executor)
             .await
             .expect_err("every row the descriptor lists arrives in some group");
         assert_eq!(
@@ -1527,7 +1521,7 @@ mod tests {
         let mut overflowing = window.archived();
         overflowing.first_sequence = Some(u64::MAX);
         let error = builder(overflowing)
-            .admit_input(input_rows)
+            .admit_input(&executor, input_rows)
             .await
             .expect_err("row sequences never pass u64::MAX");
         assert_eq!(error.current_context(), &WindowArchiveError::Sequence);
@@ -1551,18 +1545,17 @@ mod tests {
             executor.clone(),
             SnapshotStagingLimits::default(),
         );
-        let mut unrefused =
-            WindowCheckpointBuilder::new(&executor, &unrefused_staging, window.archived());
+        let mut unrefused = WindowCheckpointBuilder::new(&unrefused_staging, window.archived());
         let pending = unrefused
-            .admit_input(same_rows(&input_rows))
+            .admit_input(&executor, same_rows(&input_rows))
             .await
             .assured("the input rows are admitted");
         unrefused
-            .admit_arguments(&pending, same_rows(&argument_rows))
+            .admit_arguments(&executor, &pending, same_rows(&argument_rows))
             .await
             .assured("the argument columns are admitted");
         let expected = unrefused
-            .finish()
+            .finish(&executor)
             .await
             .assured("the unrefused checkpoint seals");
         let expected = std::fs::read(expected.path()).assured("the sealed checkpoint reads");
@@ -1579,13 +1572,13 @@ mod tests {
                 snapshot_bytes: 16 * MEBIBYTE,
             },
         );
-        let mut refused = WindowCheckpointBuilder::new(&executor, &staging, window.archived());
+        let mut refused = WindowCheckpointBuilder::new(&staging, window.archived());
         let held = staging
             .try_stage(14 * MEBIBYTE)
             .await
             .assured("another transfer holds most of the quota");
         let failure = refused
-            .admit_input(same_rows(&input_rows))
+            .admit_input(&executor, same_rows(&input_rows))
             .await
             .expect_err("the quota has no room for the group's columns");
         let mut full = false;
@@ -1607,15 +1600,15 @@ mod tests {
         drop(held);
 
         let pending = refused
-            .admit_input(same_rows(&input_rows))
+            .admit_input(&executor, same_rows(&input_rows))
             .await
             .assured("the same input rows are admitted again");
         refused
-            .admit_arguments(&pending, same_rows(&argument_rows))
+            .admit_arguments(&executor, &pending, same_rows(&argument_rows))
             .await
             .assured("the argument columns are admitted");
         let sealed = refused
-            .finish()
+            .finish(&executor)
             .await
             .assured("the checkpoint seals after its refusal");
         assert_eq!(

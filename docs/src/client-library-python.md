@@ -54,18 +54,34 @@ again when the session reconnects. Every timeout is in seconds: `connect_timeout
 connection, `request_timeout` one request, `retry_timeout` a call with all of its retries and
 redirects, and `backup_wait_timeout` a backup's wait for its archive. The request and call timeouts
 count only time without the answer or a server progress report, which restarts them, so a
-long-running statement such as a waiting `STOP` is still answered.
+long-running statement such as a waiting `STOP` is still answered. `keepalive_interval` and
+`keepalive_timeout`, also in seconds (30 and 20 by default), make the session ping its node after
+that long without hearing from it while a call is open, and treat the connection as lost when the
+ping goes unanswered within the timeout; the session then reconnects and restores its subscriptions
+as after any other dropped connection. `stream_window_bytes` and `connection_window_bytes` are
+integers: how many bytes of one call, and of all calls on a connection together, the node may send
+before the session reads them (2 MiB and 5 MiB by default). The other connection limits are integers
+too: `call_queue_capacity`, the calls that queue while a connection is opened (1,024);
+`header_list_bytes`, the largest header list the session accepts from the node on one call (16
+KiB); `send_buffer_bytes`, the request bytes one call queues before it waits for the node to read (1
+MiB); `max_error_reset_streams`, the calls reset for the node's protocol errors before the session
+ends the connection (1,024); and `remembered_reset_streams`, the cancelled calls remembered at once
+so that frames the node had already sent for them are ignored (50). `reset_stream_duration` is how
+long each is remembered and `connection_attempt_delay` how long an attempt to one address family of
+a node's host name runs before the other family is tried too, in seconds (1 and 0.3 by default; the
+delay takes 0.01 through 2, as RFC 8305 bounds it).
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:seeds}}
 ```
 
-An option the session cannot use, such as a username without a password, a seed that is not a URL
-or a negative timeout, raises `InvalidArgumentError` and sends nothing. Opening a session tries the
-server and then each seed once, within `retry_timeout`. A server no connection reaches, a
-certificate the session does not trust, a TLS requirement a plaintext address cannot meet and a
-wrong password, which the server refuses before the session starts, raise `ConnectError`, whose
-message never repeats the password.
+An option the session cannot use, such as a username without a password, a seed that is not a URL, a
+negative timeout or a window, limit or delay outside its bounds, raises `InvalidArgumentError` and
+sends nothing.
+Opening a session tries the server and then each seed once, within `retry_timeout`. A server no
+connection reaches, a certificate the session does not trust, a TLS requirement a plaintext address
+cannot meet and a wrong password, which the server refuses before the session starts, raise
+`ConnectError`, whose message never repeats the password.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:wrong_password}}
@@ -153,10 +169,9 @@ page fields. A refusal has no counts or units; a successful empty page has zero 
 `json` preserves the complete typed envelope.
 
 `DESCRIBE LICENSE;` uses this envelope for cluster scope: `entity_kind` is `"LICENSE"`, while
-`domain` and `entity_name` are `None`. Its unit's `summary`, `quotas`, `capabilities` and
-`transitions` sections describe the answering node's committed policy: one summary row, one row per
-cluster quota, one row per catalog capability, and one row per quota under a committed licensing
-transition. The command also works without selecting a domain.
+`domain` and `entity_name` are `None`. Its unit's `summary`, `capabilities` and `transitions`
+sections describe the answering node's committed policy: one summary row, one row per catalog
+capability, and one row per condition under a committed licensing transition. The command also works without selecting a domain.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

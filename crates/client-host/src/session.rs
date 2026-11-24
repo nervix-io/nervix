@@ -1,9 +1,10 @@
 //! A session a host holds, and the commands it prepares.
 //!
-//! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, sharing it
-//!   with the producers, consumers and deliveries opened on it, running a blocking call on the
-//!   host's thread, preparing and executing commands, waiting for subscription and domain clock
-//!   events and for server notices, and reading the clock of a domain the session follows.
+//! - **Owns.** The Tokio runtime a session runs on, opening and ending the session, the byte
+//!   bounds, stream counts and queue capacities a host passes for it, sharing it with the
+//!   producers, consumers and deliveries opened on it, running a blocking call on the host's
+//!   thread, preparing and executing commands, waiting for subscription and domain clock events
+//!   and for server notices, and reading the clock of a domain the session follows.
 //! - **Depends on.** The Rust session client, cancellation, and the outcomes, events, clock
 //!   events, notices and domain clocks it returns.
 //! - **Must not know.** Which host is calling, or how it schedules its threads.
@@ -14,7 +15,10 @@
 //! delivery opened on it, in whichever order, because each of them keeps the runtime its own
 //! calls block on.
 
-use std::future::Future;
+use std::{
+    future::Future,
+    num::{NonZeroU32, NonZeroUsize},
+};
 
 use meticulous::OptionExt as _;
 use nervix_client_core::{
@@ -72,6 +76,66 @@ impl Execution {
 }
 
 impl Session {
+    /// A byte bound a host passed, a receive window, header list or send buffer, as a session's
+    /// options take it. A bound no `u32` holds, zero included, is refused here as `argument`; one
+    /// outside the option's own bounds is refused when the session connects, as every other
+    /// option is.
+    pub fn byte_bound(
+        argument: &'static str,
+        bytes: impl TryInto<u32>,
+    ) -> Result<NonZeroU32, Failure> {
+        let bound = match bytes.try_into() {
+            Ok(bytes) => NonZeroU32::new(bytes),
+            Err(_) => None,
+        };
+        let Some(bound) = bound else {
+            return Err(Failure::invalid_argument(
+                argument,
+                "must be a positive number of bytes that fits 32 bits",
+            ));
+        };
+        Ok(bound)
+    }
+
+    /// A count of HTTP/2 streams a host passed, as a session's options take it. A count no `u32`
+    /// holds, zero included, is refused here as `argument`.
+    pub fn stream_count(
+        argument: &'static str,
+        streams: impl TryInto<u32>,
+    ) -> Result<NonZeroU32, Failure> {
+        let count = match streams.try_into() {
+            Ok(streams) => NonZeroU32::new(streams),
+            Err(_) => None,
+        };
+        let Some(count) = count else {
+            return Err(Failure::invalid_argument(
+                argument,
+                "must be a positive number of streams that fits 32 bits",
+            ));
+        };
+        Ok(count)
+    }
+
+    /// A queue capacity a host passed, as a session's options take it. A capacity no `usize`
+    /// holds, zero included, is refused here as `argument`; one beyond the native channel limit is
+    /// refused when the session connects.
+    pub fn queue_capacity(
+        argument: &'static str,
+        capacity: impl TryInto<usize>,
+    ) -> Result<NonZeroUsize, Failure> {
+        let queue = match capacity.try_into() {
+            Ok(capacity) => NonZeroUsize::new(capacity),
+            Err(_) => None,
+        };
+        let Some(queue) = queue else {
+            return Err(Failure::invalid_argument(
+                argument,
+                "must be a positive capacity this platform can address",
+            ));
+        };
+        Ok(queue)
+    }
+
     /// Opens a session on `server` with the Rust client's `options`, blocking the calling thread
     /// until it is open.
     pub fn connect(
@@ -288,5 +352,73 @@ impl Drop for SessionRuntime {
         drop(client);
         drop(entered);
         runtime.shutdown_background();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FailureKind;
+
+    /// Every host's byte bound reaches the options unchanged when a `u32` holds it, and is refused
+    /// under the host's own argument name otherwise; the option's own bounds are left to connect.
+    #[test]
+    fn a_byte_bound_is_kept_or_refused_under_the_hosts_argument() {
+        for bytes in [1_i64, 65_534, i64::from(u32::MAX)] {
+            let bound = Session::byte_bound("stream_window_bytes", bytes)
+                .unwrap_or_else(|failure| panic!("{bytes} fits a bound: {}", failure.message()));
+            assert_eq!(i64::from(bound.get()), bytes);
+        }
+        for bytes in [0_i64, -1, i64::from(u32::MAX) + 1] {
+            let Err(failure) = Session::byte_bound("header_list_bytes", bytes) else {
+                panic!("{bytes} is refused as a byte bound");
+            };
+            assert_eq!(failure.kind(), FailureKind::InvalidArgument);
+            assert!(
+                failure.message().contains("header_list_bytes"),
+                "the refusal names the host's argument: {}",
+                failure.message()
+            );
+        }
+        let Err(failure) = Session::byte_bound("bytes", u64::MAX) else {
+            panic!("a C host's largest value is refused as a byte bound");
+        };
+        assert_eq!(failure.kind(), FailureKind::InvalidArgument);
+    }
+
+    /// A stream count and a queue capacity reach the options unchanged when their type holds them,
+    /// and are refused under the host's own argument name otherwise.
+    #[test]
+    fn stream_counts_and_queue_capacities_are_kept_or_refused_under_the_hosts_argument() {
+        for streams in [1_i64, 50, i64::from(u32::MAX)] {
+            let count = Session::stream_count("remembered_reset_streams", streams)
+                .unwrap_or_else(|failure| panic!("{streams} fits a count: {}", failure.message()));
+            assert_eq!(i64::from(count.get()), streams);
+        }
+        for streams in [0_i64, -1, i64::from(u32::MAX) + 1] {
+            let Err(failure) = Session::stream_count("max_error_reset_streams", streams) else {
+                panic!("{streams} is refused as a stream count");
+            };
+            assert_eq!(failure.kind(), FailureKind::InvalidArgument);
+            assert!(
+                failure.message().contains("max_error_reset_streams"),
+                "the refusal names the host's argument: {}",
+                failure.message()
+            );
+        }
+        let queue = Session::queue_capacity("call_queue_capacity", 1_024_i64)
+            .unwrap_or_else(|failure| panic!("1,024 fits a queue: {}", failure.message()));
+        assert_eq!(queue.get(), 1_024);
+        for capacity in [0_i64, -1] {
+            let Err(failure) = Session::queue_capacity("call_queue_capacity", capacity) else {
+                panic!("{capacity} is refused as a queue capacity");
+            };
+            assert_eq!(failure.kind(), FailureKind::InvalidArgument);
+            assert!(
+                failure.message().contains("call_queue_capacity"),
+                "the refusal names the host's argument: {}",
+                failure.message()
+            );
+        }
     }
 }
