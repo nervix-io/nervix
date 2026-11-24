@@ -3678,6 +3678,32 @@ claim. The turn is an async mutex, outside Deloxide's tracked-lock detection. Th
 `@abandoned_installation` scenario cover the stopped domain's teardown that a dropped drain-status
 request handler began.
 
+A node's licensing requests take one request turn, `LicensingRequests` in
+`src/application/licensing/request_turn.rs`: an operator's statement through `foreground`, and an
+automatic refresh, a resumed release or an activation's preparation through `background`. The turn
+publishes how many operators wait for it through a watch, counting each request from the moment it
+asks until it holds the turn or its statement stops waiting. The attempt holding the turn waits on
+that watch, which observes every change after the value it last read: a release gives the turn back
+while any operator waits, and a refresh between retries retries at once for every operator request
+it has not been hurried for. One stored wakeup could not carry this: two operators asking together
+leave one, and a release that took the turn between them never learned that the second still
+waited. `shuttle_a_release_holding_the_turn_always_gives_it_back_to_a_waiting_operator` and
+`shuttle_a_refresh_retry_holding_the_turn_is_always_hurried_for_a_waiting_operator` in
+`src/application/licensing/request_turn_shuttle_tests.rs` race two operators against a background
+attempt holding the turn; the model has no clock, so a request that reaches no attempt leaves an
+operator waiting behind an attempt that never wakes, which Shuttle reports as a deadlock. The
+checks found that schedule against the stored wakeup.
+`shuttle_an_uncontended_operator_request_leaves_no_wakeup_for_the_next_attempt` requires that an
+operator's own request never hurries the attempt it makes, and that nothing hurries or interrupts
+the next attempt once every operator has had its turn;
+`shuttle_a_notification_hurries_a_refresh_retry_but_never_takes_an_operators_place` that a service
+notification hurries a refresh retry and never makes a release give its turn away; and
+`shuttle_a_queued_background_attempt_consumes_the_notification_that_preceded_its_turn` that an
+attempt's first retry keeps its backoff against a notification it already represents. This is a
+control-plane ordering check without a memory-ordering claim. The turn, the watch and the
+notification are asynchronous and outside Deloxide's tracked-lock detection; the owner tests beside
+the turn replay the found order step by step.
+
 Consensus storage admits each Commands or Bulk working set through independent class-specific
 turns before asking its memory class, and a working set returns its bytes before its turn passes.
 Each Shuttle check holds one working set while a second admission waits for its turn and a progress

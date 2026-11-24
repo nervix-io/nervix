@@ -150,6 +150,11 @@ name = "nervix-connector-rabbitmq"
 checks = [
   "application::client_producers::link::shuttle_tests::shuttle_the_link_opening_precedes_a_heartbeat_racing_receiver_close",
   "application::listener_input::shuttle_checks::shuttle_read_allocation_racing_input_cancellation_returns_its_entire_charge",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_release_holding_the_turn_always_gives_it_back_to_a_waiting_operator",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_refresh_retry_holding_the_turn_is_always_hurried_for_a_waiting_operator",
+  "application::licensing::request_turn::shuttle_tests::shuttle_an_uncontended_operator_request_leaves_no_wakeup_for_the_next_attempt",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_notification_hurries_a_refresh_retry_but_never_takes_an_operators_place",
+  "application::licensing::request_turn::shuttle_tests::shuttle_a_queued_background_attempt_consumes_the_notification_that_preceded_its_turn",
   "application::backup::retained::shuttle_tests::shuttle_a_download_stays_bounded_and_waits_for_its_client",
   "application::backup::retained::shuttle_tests::shuttle_a_lost_client_releases_its_hold_exactly_once",
   "application::backup::retained::shuttle_tests::shuttle_concurrent_downloads_collect_an_archive_exactly_once",
