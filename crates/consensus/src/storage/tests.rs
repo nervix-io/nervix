@@ -148,7 +148,6 @@ async fn restore_installation_authority_and_start_gate_survive_restart() -> Test
                 reference: reference.clone(),
                 step: RestoreStep::CreateDomain(domain.clone()),
                 effect: Box::new(RestoreStepEffect::Domain {
-                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     state: Box::new(Harness::domain("restored")),
                     resources: vec![],
                 }),
@@ -547,7 +546,6 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         .apply(
             2,
             ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(domain.clone()),
                 mutation: None,
             },
@@ -694,7 +692,6 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
             .apply(
                 2,
                 ConsensusCommand::PutDomain {
-                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(domain.clone()),
                     mutation: None,
                 },
@@ -721,7 +718,6 @@ async fn record_state_and_applied_position_recover_together_at_each_boundary() -
         let mut changed_domain = domain.clone();
         changed_domain.status = DomainStatus::Running;
         let command = ConsensusCommand::PutDomain {
-            domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
             domain: Box::new(changed_domain.clone()),
             mutation: None,
         };
@@ -870,7 +866,6 @@ async fn responses_and_notifications_wait_for_storage_on_a_single_async_worker()
                             Harness::entry(
                                 1,
                                 ConsensusCommand::PutDomain {
-                                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                                     domain: Box::new(Harness::domain("tenant")),
                                     mutation: None,
                                 },
@@ -903,7 +898,6 @@ async fn a_committed_range_is_published_once_after_its_single_durable_write() ->
             Harness::entry(
                 index,
                 ConsensusCommand::PutDomain {
-                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(Harness::domain(name)),
                     mutation: None,
                 },
@@ -1666,7 +1660,6 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
             labels: labels.clone(),
         },
         ConsensusCommand::PutDomain {
-            domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
             domain: Box::new(domain),
             mutation: None,
         },
@@ -1690,7 +1683,6 @@ async fn snapshots_recover_state_and_snapshot_metadata_atomically() -> TestResul
             .apply(
                 1,
                 ConsensusCommand::PutDomain {
-                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(Harness::domain("target")),
                     mutation: None,
                 },
@@ -1757,7 +1749,6 @@ async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult 
         .apply(
             1,
             ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(Harness::domain("source")),
                 mutation: None,
             },
@@ -1773,7 +1764,6 @@ async fn an_interrupted_installation_finishes_on_the_next_start() -> TestResult 
                 .apply(
                     1,
                     ConsensusCommand::PutDomain {
-                        domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                         domain: Box::new(Harness::domain("target")),
                         mutation: None,
                     },
@@ -1823,7 +1813,6 @@ async fn a_snapshot_is_sealed_as_bounded_sections() -> TestResult {
             .apply(
                 index,
                 ConsensusCommand::PutDomain {
-                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(Harness::domain(&format!("domain_{index}"))),
                     mutation: None,
                 },
@@ -2027,7 +2016,6 @@ async fn a_superseded_generation_is_deleted_once_nothing_reads_it() -> TestResul
         .apply(
             1,
             ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(Harness::domain("first")),
                 mutation: None,
             },
@@ -2039,7 +2027,6 @@ async fn a_superseded_generation_is_deleted_once_nothing_reads_it() -> TestResul
         .apply(
             2,
             ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(Harness::domain("second")),
                 mutation: None,
             },
@@ -2284,7 +2271,6 @@ async fn transaction_append_and_preview_recover_as_one_revision() -> TestResult 
             .apply(
                 1,
                 ConsensusCommand::PutDomain {
-                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(domain.clone()),
                     mutation: None,
                 },
@@ -2381,7 +2367,6 @@ async fn transaction_report_and_frozen_plan_survive_snapshot_installation() -> T
         .apply(
             1,
             ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(domain.clone()),
                 mutation: None,
             },
@@ -2593,7 +2578,6 @@ async fn transaction_effect_progress_and_cleanup_recover_with_the_applied_positi
             .apply(
                 2,
                 ConsensusCommand::PutDomain {
-                    domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                     domain: Box::new(domain.clone()),
                     mutation: None,
                 },
@@ -2895,7 +2879,6 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
         .apply(
             1,
             ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(Harness::domain("tenant")),
                 mutation: None,
             },
