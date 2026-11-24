@@ -144,7 +144,7 @@ passing the turn; cancellation while waiting retains neither a turn nor a memory
 
 Vote and committed-marker reads and writes, the check for stored Raft state and the store's idle
 barrier are management work. Each reserves four management events from the Management class,
-256 KiB with the fixed 64 KiB event, and takes no turn. A durable write charges at most half of that
+272 KiB with the fixed 68 KiB event, and takes no turn. A durable write charges at most half of that
 reservation, two events, to the records and keys it writes, which holds a record as large as a whole
 management event while its encoding buffer doubles; the votes and log positions it writes are far
 smaller. The other half is retained for Fjall's journal encoding and moving batch descriptors, as in
@@ -768,7 +768,7 @@ validation and derivations, and the rest are fixed by the encoded operation and 
 | Follower decoded resident window | 4 batches per live append stream | `--execution-resident-replication-batches` |
 | Commands memory budget | 1/32 of the node's memory, at least 24 MiB | `--execution-commands-memory-bytes` |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation | fixed |
-| Vote or metadata storage | 256 KiB working reservation from the Management class | fixed: four 64 KiB management events, which `--execution-management-memory-bytes` must hold |
+| Vote or metadata storage | 272 KiB working reservation from the Management class | fixed: four 68 KiB management events, which `--execution-management-memory-bytes` must hold |
 | Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them | fixed |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds | half of `--interconnect-request-timeout` / `--raft-append-idle-bound` |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB | fixed |

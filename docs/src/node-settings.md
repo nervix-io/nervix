@@ -872,7 +872,7 @@ them all, and each has one source:
 | Cluster identity | `--cluster-id`, which the node's certificate must also name | `default` | equal |
 | Trust root | Detected: a SHA-256 fingerprint over the SHA-256 digests of the trust anchors in `--interconnect-tls-ca`, sorted and without repeats, so the order of the file does not change it | none | equal |
 | Wire contract | Fixed by the build: the fingerprint of the one node-to-node contract it speaks | none | equal |
-| Largest command, largest management event | Detected: the executor's operation limits | 1 MiB, 64 KiB | equal |
+| Largest command, largest management event | Detected: the executor's operation limits | 1 MiB, 68 KiB | equal |
 | Durability promise | Fixed by the build: every Raft log append is synchronized, data and metadata, before the node acknowledges it, written `fsync every append` | none | equal |
 | Raft heartbeat | `--raft-heartbeat-interval` | `250ms` | within a factor of two |
 | Gossip interval | `--gossip-interval` | `500ms` | within a factor of two |
@@ -1053,7 +1053,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB`, for the executor pools alone, or `memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB`, for the complete total |
+| Memory budgets | `the execution memory budgets of 229.27MiB exceed node memory 32MiB`, for the executor pools alone, or `memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB`, for the complete total |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
@@ -1121,7 +1121,7 @@ Each pool has `--execution-<pool>-memory-bytes`. With known memory, defaults are
 | Pool | Memory fraction | Minimum working set |
 | --- | --- | --- |
 | `intake` | 1/16 | 128 MiB |
-| `management` | 1/128 | 256 KiB, one consensus vote or metadata write |
+| `management` | 1/128 | 272 KiB, one consensus vote or metadata write |
 | `commands` | 1/32 | 24 MiB |
 | `relay` | 1/16 | Enough for its two admitted operations |
 | `state-read` | Resolved relay capacity | Enough for its two admitted operations |
@@ -1137,7 +1137,7 @@ silently reduced. With unknown memory, defaults are respectively 128, 8, 24, 192
 64 bytes and its creation policy remains the committed `PASSWORD_ITERATIONS` parameter.
 
 The management pool must hold its largest operation, one consensus vote or metadata write. The
-consensus store reserves four management events for each, 256 KiB with the fixed 64 KiB event (see
+consensus store reserves four management events for each, 272 KiB with the fixed 68 KiB event (see
 [Consensus Storage And Replication](consensus-storage-and-replication.md#storage-working-sets)).
 A smaller explicit `--execution-management-memory-bytes` refuses startup before any store opens,
 and the refusal names both values. A derived management pool never falls below this working set.
@@ -1467,7 +1467,7 @@ change takes effect when that node restarts.
 
 | Server option | Default | Owner and bound |
 | --- | --- | --- |
-| `--gossip-receive-queue-capacity` | 1,024 datagrams | positive, within the native channel permit bound; incoming gossip datagrams queued between the interconnect handler and Chitchat, each at most the 60 KiB gossip bound, so the queue retains up to its capacity times 60 KiB |
+| `--gossip-receive-queue-capacity` | 1,024 datagrams | positive, within the native channel permit bound; incoming gossip datagrams queued between the interconnect handler and Chitchat, each at most the 65,510-byte gossip bound, so the queue retains up to its capacity times 65,510 bytes |
 | `--gossip-tombstone-grace-period` | 60 s | positive, at most `u32::MAX` whole seconds, so Chitchat can add it to the instant a key was deleted; how long a deleted gossip key's tombstone stays before Chitchat collects it |
 
 Each has the environment twin `NERVIX_` followed by its uppercase name with underscores. Both are
