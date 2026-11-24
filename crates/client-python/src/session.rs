@@ -18,7 +18,10 @@
 //! collecting it does; a call another thread is in keeps its own share until it returns, so the
 //! release never waits for it, and every later call raises `ClosedError`.
 
-use std::{num::NonZeroU32, time::Duration};
+use std::{
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 use nervix_client_core::{CommandExecutionReference, ConnectOptions, DomainName, SourceSpan};
 use nervix_client_host as host;
@@ -132,6 +135,50 @@ struct Connection<'a> {
     keepalive_timeout: Option<f64>,
     stream_window_bytes: Option<i64>,
     connection_window_bytes: Option<i64>,
+    transport: TransportLimits,
+}
+
+/// The connection's HTTP/2 and connector limits a host passed: the call queue, the header list
+/// and send buffer in bytes, the reset-stream counts and duration and the connection attempt
+/// delay in seconds.
+struct TransportLimits {
+    call_queue_capacity: Option<i64>,
+    header_list_bytes: Option<i64>,
+    send_buffer_bytes: Option<i64>,
+    max_error_reset_streams: Option<i64>,
+    remembered_reset_streams: Option<i64>,
+    reset_stream_duration: Option<f64>,
+    connection_attempt_delay: Option<f64>,
+}
+
+impl TransportLimits {
+    /// `options` with every limit the host passed; the Rust client's default for every other.
+    fn apply(self, py: Python<'_>, mut options: ConnectOptions) -> PyResult<ConnectOptions> {
+        if let Some(capacity) = self.call_queue_capacity {
+            options.call_queue_capacity = queue(py, "call_queue_capacity", capacity)?;
+        }
+        if let Some(bytes) = self.header_list_bytes {
+            options.header_list_bytes = byte_bound(py, "header_list_bytes", bytes)?;
+        }
+        if let Some(bytes) = self.send_buffer_bytes {
+            options.send_buffer_bytes = byte_bound(py, "send_buffer_bytes", bytes)?;
+        }
+        if let Some(streams) = self.max_error_reset_streams {
+            options.max_error_reset_streams =
+                streams_count(py, "max_error_reset_streams", streams)?;
+        }
+        if let Some(streams) = self.remembered_reset_streams {
+            options.remembered_reset_streams =
+                streams_count(py, "remembered_reset_streams", streams)?;
+        }
+        if let Some(duration) = self.reset_stream_duration {
+            options.reset_stream_duration = seconds(py, "reset_stream_duration", duration)?;
+        }
+        if let Some(delay) = self.connection_attempt_delay {
+            options.connection_attempt_delay = seconds(py, "connection_attempt_delay", delay)?;
+        }
+        Ok(options)
+    }
 }
 
 impl Connection<'_> {
@@ -190,18 +237,28 @@ impl Connection<'_> {
             options.keepalive_timeout = seconds(py, "keepalive_timeout", timeout)?;
         }
         if let Some(bytes) = self.stream_window_bytes {
-            options.stream_window_bytes = window(py, "stream_window_bytes", bytes)?;
+            options.stream_window_bytes = byte_bound(py, "stream_window_bytes", bytes)?;
         }
         if let Some(bytes) = self.connection_window_bytes {
-            options.connection_window_bytes = window(py, "connection_window_bytes", bytes)?;
+            options.connection_window_bytes = byte_bound(py, "connection_window_bytes", bytes)?;
         }
-        Ok(options)
+        self.transport.apply(py, options)
     }
 }
 
-/// A receive window a host passed in bytes.
-fn window(py: Python<'_>, argument: &'static str, bytes: i64) -> PyResult<NonZeroU32> {
-    host::Session::receive_window(argument, bytes).map_err(|failure| errors::raise(py, failure))
+/// A byte bound a host passed: a receive window, header list or send buffer.
+fn byte_bound(py: Python<'_>, argument: &'static str, bytes: i64) -> PyResult<NonZeroU32> {
+    host::Session::byte_bound(argument, bytes).map_err(|failure| errors::raise(py, failure))
+}
+
+/// A count of HTTP/2 streams a host passed.
+fn streams_count(py: Python<'_>, argument: &'static str, streams: i64) -> PyResult<NonZeroU32> {
+    host::Session::stream_count(argument, streams).map_err(|failure| errors::raise(py, failure))
+}
+
+/// A queue capacity a host passed.
+fn queue(py: Python<'_>, argument: &'static str, capacity: i64) -> PyResult<NonZeroUsize> {
+    host::Session::queue_capacity(argument, capacity).map_err(|failure| errors::raise(py, failure))
 }
 
 impl Session {
@@ -221,8 +278,9 @@ impl Session {
     /// Opens a session on `server`, blocking until it is open.
     ///
     /// Every option the host leaves out takes the Rust client's default. `seeds` are further
-    /// servers the session may reach, the timeouts and keepalive values are in seconds, and the
-    /// receive windows in bytes.
+    /// servers the session may reach, the timeouts, keepalive values, reset-stream duration and
+    /// connection attempt delay are in seconds, and the receive windows, header list and send
+    /// buffer in bytes.
     #[new]
     #[pyo3(signature = (
         server,
@@ -241,6 +299,13 @@ impl Session {
         keepalive_timeout = None,
         stream_window_bytes = None,
         connection_window_bytes = None,
+        call_queue_capacity = None,
+        header_list_bytes = None,
+        send_buffer_bytes = None,
+        max_error_reset_streams = None,
+        remembered_reset_streams = None,
+        reset_stream_duration = None,
+        connection_attempt_delay = None,
         cancel = None,
     ))]
     #[expect(
@@ -264,6 +329,13 @@ impl Session {
         keepalive_timeout: Option<f64>,
         stream_window_bytes: Option<i64>,
         connection_window_bytes: Option<i64>,
+        call_queue_capacity: Option<i64>,
+        header_list_bytes: Option<i64>,
+        send_buffer_bytes: Option<i64>,
+        max_error_reset_streams: Option<i64>,
+        remembered_reset_streams: Option<i64>,
+        reset_stream_duration: Option<f64>,
+        connection_attempt_delay: Option<f64>,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Self> {
         let connection = Connection {
@@ -280,6 +352,15 @@ impl Session {
             keepalive_timeout,
             stream_window_bytes,
             connection_window_bytes,
+            transport: TransportLimits {
+                call_queue_capacity,
+                header_list_bytes,
+                send_buffer_bytes,
+                max_error_reset_streams,
+                remembered_reset_streams,
+                reset_stream_duration,
+                connection_attempt_delay,
+            },
         };
         let options = connection.options(py)?;
         let cancel = token(cancel.as_ref());

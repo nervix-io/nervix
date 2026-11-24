@@ -60,14 +60,24 @@ that long without hearing from it while a call is open, and treat the connection
 ping goes unanswered within the timeout; the session then reconnects and restores its subscriptions
 as after any other dropped connection. `stream_window_bytes` and `connection_window_bytes` are
 integers: how many bytes of one call, and of all calls on a connection together, the node may send
-before the session reads them (2 MiB and 5 MiB by default).
+before the session reads them (2 MiB and 5 MiB by default). The other connection limits are integers
+too: `call_queue_capacity`, the calls that queue while a connection is opened (1,024);
+`header_list_bytes`, the largest header list the session accepts from the node on one call (16
+KiB); `send_buffer_bytes`, the request bytes one call queues before it waits for the node to read (1
+MiB); `max_error_reset_streams`, the calls reset for the node's protocol errors before the session
+ends the connection (1,024); and `remembered_reset_streams`, the cancelled calls remembered at once
+so that frames the node had already sent for them are ignored (50). `reset_stream_duration` is how
+long each is remembered and `connection_attempt_delay` how long an attempt to one address family of
+a node's host name runs before the other family is tried too, in seconds (1 and 0.3 by default; the
+delay takes 0.01 through 2, as RFC 8305 bounds it).
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:seeds}}
 ```
 
 An option the session cannot use, such as a username without a password, a seed that is not a URL, a
-negative timeout or a window outside its bounds, raises `InvalidArgumentError` and sends nothing.
+negative timeout or a window, limit or delay outside its bounds, raises `InvalidArgumentError` and
+sends nothing.
 Opening a session tries the server and then each seed once, within `retry_timeout`. A server no
 connection reaches, a certificate the session does not trust, a TLS requirement a plaintext address
 cannot meet and a wrong password, which the server refuses before the session starts, raise

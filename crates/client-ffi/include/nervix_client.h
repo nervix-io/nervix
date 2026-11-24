@@ -109,7 +109,14 @@ typedef enum nx_timeout_kind {
     NX_TIMEOUT_KEEPALIVE_INTERVAL = 5,
     /* How long that ping may go unanswered before the connection is lost and recovered; 20
        seconds by default. */
-    NX_TIMEOUT_KEEPALIVE_TIMEOUT = 6
+    NX_TIMEOUT_KEEPALIVE_TIMEOUT = 6,
+    /* How long the session remembers a call it cancelled, so that frames the node sent for it are
+       ignored; 1 second by default. */
+    NX_TIMEOUT_RESET_STREAM_DURATION = 7,
+    /* How long a connection attempt to an address of one family runs before an address of the
+       other family is tried too; 300 milliseconds by default, 10 milliseconds through 2 seconds
+       (RFC 8305). */
+    NX_TIMEOUT_CONNECTION_ATTEMPT_DELAY = 8
 } nx_timeout_kind;
 
 /* The HTTP/2 receive windows: how many bytes the node may send before the session reads them. */
@@ -120,6 +127,25 @@ typedef enum nx_window_kind {
        bytes. */
     NX_WINDOW_CONNECTION = 2
 } nx_window_kind;
+
+/* The connection's other limits. */
+typedef enum nx_limit_kind {
+    /* Calls that wait for a connection while it is opened before the next caller waits: 1024 by
+       default. */
+    NX_LIMIT_CALL_QUEUE_CAPACITY = 1,
+    /* The largest header list, headers or trailers, accepted from the node on one call, each field
+       counted as its name and value plus 32 bytes: 16 KiB by default. */
+    NX_LIMIT_HEADER_LIST_BYTES = 2,
+    /* Request bytes one call queues for the connection before it waits for the node to read: 1
+       MiB by default. */
+    NX_LIMIT_SEND_BUFFER_BYTES = 3,
+    /* Calls reset for the node's protocol errors before the connection is ended: 1024 by
+       default. */
+    NX_LIMIT_MAX_ERROR_RESET_STREAMS = 4,
+    /* Cancelled calls remembered at once, so that frames the node sent for them are ignored: 50
+       by default. */
+    NX_LIMIT_REMEMBERED_RESET_STREAMS = 5
+} nx_limit_kind;
 
 /* What kind of failure an `nx_error` reports. */
 typedef enum nx_error_kind {
@@ -540,12 +566,17 @@ nx_error *nx_connect_options_ca_certificate(nx_connect_options *options, const u
                                             size_t pem_len);
 nx_error *nx_connect_options_add_seed(nx_connect_options *options, const uint8_t *server,
                                       size_t server_len);
-/* Milliseconds; each deadline must be from 1 millisecond through 24 hours. Invalid values are
-   rejected when the session connects. */
+/* Milliseconds; each deadline must be from 1 millisecond through 24 hours, and the connection
+   attempt delay from 10 milliseconds through 2 seconds. Invalid values are rejected when the
+   session connects. */
 nx_error *nx_connect_options_timeout(nx_connect_options *options, int32_t kind, uint64_t millis);
 /* Bytes; zero and a value above UINT32_MAX are rejected at once, and a window outside its
    nx_window_kind bounds when the session connects. */
 nx_error *nx_connect_options_window(nx_connect_options *options, int32_t kind, uint64_t bytes);
+/* A count or bytes, by nx_limit_kind; zero, and a byte bound or stream count above UINT32_MAX,
+   are rejected at once, and a call queue beyond the native channel limit when the session
+   connects. */
+nx_error *nx_connect_options_limit(nx_connect_options *options, int32_t kind, uint64_t value);
 
 /* Opens a session on `server`, an http or https URI of a node's session endpoint. `domain` may
    be NULL for no selected domain. `options` is required and is read as a snapshot; the host must

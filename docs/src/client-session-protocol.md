@@ -2873,5 +2873,10 @@ client pings in the other direction: while a call such as the session exchange i
 HTTP/2 ping once its `keepalive_interval` passes without call data or a ping answer arriving, and
 ends the connection as a transport failure when no answer arrives within its `keepalive_timeout` (30
 and 20 seconds by default), so a session that is only waiting for subscription or consumer data also
-notices a node that fell silent without closing the connection. These transport bounds introduce no
-session wire message and do not change command admission or recovery identity.
+notices a node that fell silent without closing the connection. The Rust client bounds the node in
+turn: it refuses a call whose header list reaches its `header_list_bytes`, queues at most
+`send_buffer_bytes` of one call's request for a node that stops reading, ignores frames for the
+`remembered_reset_streams` calls it most recently cancelled within `reset_stream_duration`, and ends
+the connection with `ENHANCE_YOUR_CALM` once it has reset `max_error_reset_streams` calls for the
+node's protocol errors. It lets the node open no stream towards it. These transport bounds introduce
+no session wire message and do not change command admission or recovery identity.

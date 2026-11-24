@@ -56,7 +56,16 @@ is open, and treat the connection as lost when the ping goes unanswered within t
 session then reconnects and restores its subscriptions as after any other dropped connection.
 `stream_window_bytes` and `connection_window_bytes` are integers: how many bytes of one call, and of
 all calls on a connection together, the node may send before the session reads them (2 MiB and 5 MiB
-by default). Optional connection keywords accept `nil`.
+by default). The other connection limits are integers too: `call_queue_capacity`, the calls that
+queue while a connection is opened (1,024); `header_list_bytes`, the largest header list the session
+accepts from the node on one call (16 KiB); `send_buffer_bytes`, the request bytes one call queues
+before it waits for the node to read (1 MiB); `max_error_reset_streams`, the calls reset for the
+node's protocol errors before the session ends the connection (1,024); and
+`remembered_reset_streams`, the cancelled calls remembered at once so that frames the node had
+already sent for them are ignored (50). `reset_stream_duration` is how long each is remembered and
+`connection_attempt_delay` how long an attempt to one address family of a node's host name runs
+before the other family is tried too, in seconds (1 and 0.3 by default; the delay takes 0.01 through
+2, as RFC 8305 bounds it). Optional connection keywords accept `nil`.
 
 ```ruby
 {{#include ../../tests/client_conformance/ruby/suite/cluster/commands_test.rb:seeds}}

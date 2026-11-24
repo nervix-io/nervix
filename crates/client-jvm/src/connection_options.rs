@@ -10,7 +10,10 @@
     nervix::layer(edge, reason = "owns Java connection arguments")
 )]
 
-use std::{num::NonZeroU32, time::Duration};
+use std::{
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 
 use nervix_client_core::{ConnectDns, ConnectOptions, TlsRequirement, capabilities as caps};
 use nervix_models::SettingDefinition as _;
@@ -33,6 +36,13 @@ pub(crate) struct ConnectionOptions {
     pub(crate) keepalive_timeout: Duration,
     pub(crate) stream_window_bytes: NonZeroU32,
     pub(crate) connection_window_bytes: NonZeroU32,
+    pub(crate) call_queue_capacity: NonZeroUsize,
+    pub(crate) header_list_bytes: NonZeroU32,
+    pub(crate) send_buffer_bytes: NonZeroU32,
+    pub(crate) max_error_reset_streams: NonZeroU32,
+    pub(crate) remembered_reset_streams: NonZeroU32,
+    pub(crate) reset_stream_duration: Duration,
+    pub(crate) connection_attempt_delay: Duration,
 }
 
 impl Default for ConnectionOptions {
@@ -53,6 +63,13 @@ impl Default for ConnectionOptions {
             keepalive_timeout: options.keepalive_timeout,
             stream_window_bytes: options.stream_window_bytes,
             connection_window_bytes: options.connection_window_bytes,
+            call_queue_capacity: options.call_queue_capacity,
+            header_list_bytes: options.header_list_bytes,
+            send_buffer_bytes: options.send_buffer_bytes,
+            max_error_reset_streams: options.max_error_reset_streams,
+            remembered_reset_streams: options.remembered_reset_streams,
+            reset_stream_duration: options.reset_stream_duration,
+            connection_attempt_delay: options.connection_attempt_delay,
         }
     }
 }
@@ -89,6 +106,13 @@ impl ConnectionOptions {
             keepalive_timeout: self.keepalive_timeout,
             stream_window_bytes: self.stream_window_bytes,
             connection_window_bytes: self.connection_window_bytes,
+            call_queue_capacity: self.call_queue_capacity,
+            header_list_bytes: self.header_list_bytes,
+            send_buffer_bytes: self.send_buffer_bytes,
+            max_error_reset_streams: self.max_error_reset_streams,
+            remembered_reset_streams: self.remembered_reset_streams,
+            reset_stream_duration: self.reset_stream_duration,
+            connection_attempt_delay: self.connection_attempt_delay,
         }
     }
 }
@@ -115,6 +139,13 @@ mod tests {
             keepalive_timeout: Duration::from_millis(6_750),
             stream_window_bytes: NonZeroU32::new(1_000).assured("a positive window"),
             connection_window_bytes: NonZeroU32::new(300_000).assured("a positive window"),
+            call_queue_capacity: NonZeroUsize::new(3).assured("a positive queue"),
+            header_list_bytes: NonZeroU32::new(8_192).assured("a positive bound"),
+            send_buffer_bytes: NonZeroU32::new(65_536).assured("a positive bound"),
+            max_error_reset_streams: NonZeroU32::new(7).assured("a positive count"),
+            remembered_reset_streams: NonZeroU32::new(9).assured("a positive count"),
+            reset_stream_duration: Duration::from_millis(7_875),
+            connection_attempt_delay: Duration::from_millis(250),
             ..ConnectionOptions::default()
         };
         let native = draft.clone().into_native();
@@ -133,6 +164,22 @@ mod tests {
         assert_eq!(
             native.connection_window_bytes,
             draft.connection_window_bytes
+        );
+        assert_eq!(native.call_queue_capacity, draft.call_queue_capacity);
+        assert_eq!(native.header_list_bytes, draft.header_list_bytes);
+        assert_eq!(native.send_buffer_bytes, draft.send_buffer_bytes);
+        assert_eq!(
+            native.max_error_reset_streams,
+            draft.max_error_reset_streams
+        );
+        assert_eq!(
+            native.remembered_reset_streams,
+            draft.remembered_reset_streams
+        );
+        assert_eq!(native.reset_stream_duration, draft.reset_stream_duration);
+        assert_eq!(
+            native.connection_attempt_delay,
+            draft.connection_attempt_delay
         );
         match (&native.dns, &draft.dns) {
             (ConnectDns::Configuration(left), ConnectDns::Configuration(right)) => {
