@@ -176,8 +176,8 @@ impl SettingDefinition for ClockSkewTolerance {
 }
 
 /// How many incoming gossip datagrams wait between the interconnect handler that receives them
-/// and Chitchat, which reads them as its socket. Each holds at most the 60 KiB gossip bound, so
-/// the queue retains at most this many times that bound.
+/// and Chitchat, which reads them as its socket. Each holds at most the 65,510-byte gossip bound,
+/// so the queue retains at most this many times that bound.
 pub struct GossipReceiveQueueCapacity;
 
 impl SettingDefinition for GossipReceiveQueueCapacity {

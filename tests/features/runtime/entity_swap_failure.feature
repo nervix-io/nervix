@@ -223,3 +223,168 @@ Feature: A failed entity swap keeps the running domain
       | cluster_size |
       | 1            |
       | 3            |
+
+  @entity_swap_failure_mqtt_input
+  Scenario Outline: An MQTT alteration whose swap fails keeps the previous broker session and every publish queued in it
+    Given MQTT is running
+    And a <cluster_size> node nervix cluster is started
+    And an MQTT session ingestor named "events" runs with client id "swap_{{test_id}}"
+    When these Plexus statements are executed
+      """
+      CREATE SUBSCRIPTION swap_output TO output;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "events" is saved as placeholder "ingestor_owner"
+    When MQTT QoS 1 message is published to topic "session_{{test_id}}"
+      """
+      {"user_id":71}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":71
+      """
+    # The alteration keeps the client id and changes the topic, so the previous input and its
+    # replacement use one broker session. The swap on the ingestor's node fails once the ingestor's
+    # units have stopped, before the replacement starts, and keeps failing until the fault is
+    # cleared. A publish arrives while the swap holds there, and the broker queues it in the
+    # stopped session.
+    Given every entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" fails while replacing ingestor "events"
+    And the entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" pauses while replacing ingestor "events"
+    When these Plexus commands begin executing in the background
+      """
+      ALTER MQTT TOPIC INGESTOR events
+        SET FROM broker TOPIC 'replacement_{{test_id}}'
+        SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND;
+      """
+    Then the entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" reaches its replacement pause
+    When MQTT QoS 2 message is published directly to broker topic "session_{{test_id}}"
+      """
+      {"user_id":72}
+      """
+    And the entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" is released from its replacement pause
+    Then the background Plexus execution fails with "injected entity-level schedule apply failure"
+    # The previous ingestor is back with its session and reads what the broker queued in it.
+    And within "30s" the relay subscription receives a payload
+      """
+      "user_id":72
+      """
+    When MQTT QoS 1 message is published to topic "session_{{test_id}}"
+      """
+      {"user_id":73}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":73
+      """
+    And the relay subscription does not receive a payload within "1s"
+    # Once its swap can succeed, the node applies the newest change, and the replacement reads its
+    # own topic only.
+    When entity swaps in domain "{{domain}}" on node "{{ingestor_owner}}" stop failing
+    And these Plexus statements are executed
+      """
+      ALTER MQTT TOPIC INGESTOR events
+        SET FROM broker TOPIC 'final_{{test_id}}'
+        SESSION PERSISTENT QOS 1 MODE NO ACK ON QUIESCE SUSPEND;
+      """
+    Then within "30s" DESCRIBE INGESTOR "events" on the leader node contains
+      """
+      ready: true
+      """
+    When MQTT QoS 1 message is published to topic "session_{{test_id}}"
+      """
+      {"user_id":74}
+      """
+    And MQTT QoS 1 message is published to topic "final_{{test_id}}"
+      """
+      {"user_id":75}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":75
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @entity_swap_failure_pulsar_input
+  Scenario Outline: A Pulsar alteration whose swap fails keeps the previous owned subscription and every message on it
+    Given Pulsar is running
+    And a <cluster_size> node nervix cluster is started
+    And Pulsar subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" is provisioned
+    And Pulsar subscription "replacement_{{test_id}}" of topic "replacement_{{test_id}}" is provisioned
+    And a Pulsar domain graph reads through "{{pulsar_addr}}"
+    And Pulsar ingestor "events" reads subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" declared "OWNED BY INGESTOR START AT EARLIEST TYPE SHARED"
+    Then within "30s" Pulsar subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" has 1 consumer
+    When these Plexus statements are executed
+      """
+      CREATE SUBSCRIPTION swap_output TO output;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "events" is saved as placeholder "ingestor_owner"
+    When Pulsar message is published to topic "preceding_{{test_id}}"
+      """
+      {"user_id":81}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":81
+      """
+    # The replacement reads another subscription, so the alteration retires the owned one. The swap
+    # on the ingestor's node fails once the ingestor's units have stopped, before the replacement
+    # starts. A message arrives while the swap holds there, and the subscription keeps it.
+    Given every entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" fails while replacing ingestor "events"
+    And the entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" pauses while replacing ingestor "events"
+    When these Plexus commands begin executing in the background
+      """
+      ALTER PULSAR TOPIC INGESTOR events
+        SET FROM broker TOPIC 'replacement_{{test_id}}' SUBSCRIPTION 'replacement_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 2s ON QUIESCE SUSPEND;
+      """
+    Then the entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" reaches its replacement pause
+    When Pulsar message is published to topic "preceding_{{test_id}}"
+      """
+      {"user_id":82}
+      """
+    And the entity swap in domain "{{domain}}" on node "{{ingestor_owner}}" is released from its replacement pause
+    Then the background Plexus execution fails with "injected entity-level schedule apply failure"
+    # The previous ingestor is back on its subscription and reads on from where it stopped: what
+    # arrived meanwhile, once, and nothing it had already read.
+    And within "30s" the relay subscription receives a payload
+      """
+      "user_id":82
+      """
+    And the relay subscription does not receive a payload within "1s"
+    And within "30s" Pulsar subscription "preceding_{{test_id}}" of topic "preceding_{{test_id}}" has 1 consumer
+    # Once its swap can succeed, the node applies the newest change and removes the subscription
+    # only the previous input read.
+    When entity swaps in domain "{{domain}}" on node "{{ingestor_owner}}" stop failing
+    And these Plexus statements are executed
+      """
+      ALTER PULSAR TOPIC INGESTOR events
+        SET FROM broker TOPIC 'replacement_{{test_id}}' SUBSCRIPTION 'replacement_{{test_id}}' OWNED BY INGESTOR START AT EARLIEST TYPE SHARED
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 3s ON QUIESCE SUSPEND;
+      """
+    Then within "30s" Pulsar subscription "replacement_{{test_id}}" of topic "replacement_{{test_id}}" has 1 consumer
+    And within "60s" Pulsar topic "preceding_{{test_id}}" has no durable subscription "preceding_{{test_id}}"
+    When Pulsar message is published to topic "replacement_{{test_id}}"
+      """
+      {"user_id":83}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":83
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

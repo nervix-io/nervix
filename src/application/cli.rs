@@ -40,6 +40,7 @@ mod shutdown;
 mod tests;
 mod trace_export;
 mod transactions;
+mod web_console;
 
 #[cfg(feature = "deloxide")]
 pub use self::diagnostics::DiagnosticArgs;
