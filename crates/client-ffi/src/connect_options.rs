@@ -3,14 +3,14 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Copying credentials and CA bytes, parsing configured seed URLs, and projecting
-//!   timeout and TLS choices into the Rust client's connection options.
+//!   timeout, keepalive, receive window and TLS choices into the Rust client's connection options.
 //! - **Depends on.** The Rust client's connection options and the C ABI boundary.
 //! - **Must not know.** How a session connects, validates endpoints, or retries them.
 
 use std::time::Duration;
 
 use nervix_client_core::{ConnectOptions, TlsRequirement};
-use nervix_client_host::Failure;
+use nervix_client_host::{Failure, Session};
 use url::Url;
 
 use crate::abi;
@@ -144,10 +144,43 @@ pub unsafe extern "C" fn nx_connect_options_timeout(
             2 => options.request_timeout = timeout,
             3 => options.retry_timeout = timeout,
             4 => options.backup_wait_timeout = timeout,
+            5 => options.keepalive_interval = timeout,
+            6 => options.keepalive_timeout = timeout,
             _ => {
                 return Err(Failure::invalid_argument(
                     "kind",
                     "is not an nx_timeout_kind",
+                ));
+            }
+        }
+        Ok(())
+    })())
+}
+
+/// Sets the stream (`1`) or connection (`2`) receive window, in bytes. A window that no `u32`
+/// holds, zero included, is refused here; one outside its HTTP/2 bounds is refused when the
+/// session connects, as every other option is.
+///
+/// # Safety
+///
+/// `options` is a live, exclusively used handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_connect_options_window(
+    options: *mut ConnectionOptions,
+    kind: i32,
+    bytes: u64,
+) -> *mut Failure {
+    // SAFETY: the caller guarantees a live, exclusively used options handle.
+    abi::outcome((|| unsafe {
+        let options = &mut abi::handle_mut(options, "options")?.0;
+        let window = Session::receive_window("bytes", bytes)?;
+        match kind {
+            1 => options.stream_window_bytes = window,
+            2 => options.connection_window_bytes = window,
+            _ => {
+                return Err(Failure::invalid_argument(
+                    "kind",
+                    "is not an nx_window_kind",
                 ));
             }
         }

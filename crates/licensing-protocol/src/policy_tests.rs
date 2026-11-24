@@ -4,15 +4,31 @@ use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{conditions::*, documents::*, impact::*, test_fixture::*};
 
-pub fn usage(nodes: Quota, domains: Quota) -> UsageConditions {
+/// A second cluster quota name no catalog declares, so one reduction can affect two quotas.
+pub const SECOND_FIXTURE_QUOTA: &str = "fixture.second_quota";
+
+/// Usage conditions with the free policy's capabilities and the two fixture cluster quotas.
+pub fn usage(first: Quota, second: Quota) -> UsageConditions {
     let mut usage = FREE_POLICY.usage();
     usage
         .quotas
-        .insert(CLUSTER_NODES.to_owned(), ConditionValue::Known(nodes));
+        .insert(FIXTURE_QUOTA.to_owned(), ConditionValue::Known(first));
+    usage.quotas.insert(
+        SECOND_FIXTURE_QUOTA.to_owned(),
+        ConditionValue::Known(second),
+    );
     usage
-        .quotas
-        .insert(CLUSTER_DOMAINS.to_owned(), ConditionValue::Known(domains));
-    usage
+}
+
+/// The committed usage of the two fixture cluster quotas.
+pub fn counts(first: u64, second: u64) -> UsageSnapshot {
+    UsageSnapshot {
+        quotas: [
+            (FIXTURE_QUOTA.to_owned(), first),
+            (SECOND_FIXTURE_QUOTA.to_owned(), second),
+        ]
+        .into(),
+    }
 }
 
 pub fn context(from: u64, to: u64, started: i64) -> ImpactContext {
@@ -37,11 +53,14 @@ pub fn policy() -> TransitionPolicy {
 #[test]
 fn resolution_overrides_every_map_and_derives_status_without_a_clock() {
     let mut plan = plan();
-    plan.usage = usage(Quota::Bounded { value: 10 }, Quota::Bounded { value: 4 });
+    plan.usage.capabilities.insert(
+        LICENSING_DUMMY.to_owned(),
+        ConditionValue::Known(Capability::Enabled),
+    );
     let mut overrides = empty_conditions();
-    overrides.usage.quotas.insert(
-        CLUSTER_NODES.to_owned(),
-        ConditionValue::Known(Quota::Bounded { value: 0 }),
+    overrides.usage.capabilities.insert(
+        LICENSING_DUMMY.to_owned(),
+        ConditionValue::Known(Capability::Disabled),
     );
     overrides.operating.quotas.insert(
         PERSISTENT_ACTIVATIONS.to_owned(),
@@ -55,9 +74,9 @@ fn resolution_overrides_every_map_and_derives_status_without_a_clock() {
         active
             .values()
             .usage
-            .quota(CLUSTER_NODES)
-            .assured("resolved nodes"),
-        Quota::Bounded { value: 0 }
+            .capability(LICENSING_DUMMY)
+            .assured("resolved capability"),
+        Capability::Disabled
     );
     assert_eq!(
         active.values().operating.quotas[PERSISTENT_ACTIVATIONS],
@@ -244,20 +263,16 @@ fn licensing_dummy_is_a_cluster_capability_a_complete_plan_may_leave_out() {
 
 #[test]
 fn further_reductions_protect_only_new_amounts_and_keep_each_deadline() {
-    let free = FREE_POLICY.usage();
+    let unlimited = usage(Quota::Unlimited, Quota::Unlimited);
     let four = usage(Quota::Bounded { value: 4 }, Quota::Unlimited);
     let three = usage(Quota::Bounded { value: 3 }, Quota::Unlimited);
-    let counts = UsageSnapshot {
-        cluster_nodes: 7,
-        cluster_domains: 0,
-    };
     let first = assess_impact(
         EffectiveUsage {
-            conditions: &free,
+            conditions: &unlimited,
             transitions: &[],
         },
         ImpactTarget::Usage(&four),
-        counts,
+        &counts(7, 0),
         policy(),
         context(1, 2, 0),
         limits().bytes,
@@ -276,7 +291,7 @@ fn further_reductions_protect_only_new_amounts_and_keep_each_deadline() {
             transitions: &first,
         },
         ImpactTarget::Usage(&three),
-        counts,
+        &counts(7, 0),
         policy(),
         context(2, 3, 10),
         limits().bytes,
@@ -297,19 +312,19 @@ fn further_reductions_protect_only_new_amounts_and_keep_each_deadline() {
     };
     assert_eq!(
         current
-            .quota(CLUSTER_NODES, at(99))
+            .quota(FIXTURE_QUOTA, at(99))
             .assured("both grants active"),
         Quota::Bounded { value: 7 }
     );
     assert_eq!(
         current
-            .quota(CLUSTER_NODES, at(100))
+            .quota(FIXTURE_QUOTA, at(100))
             .assured("earlier amount expired"),
         Quota::Bounded { value: 4 }
     );
     assert_eq!(
         current
-            .quota(CLUSTER_NODES, at(110))
+            .quota(FIXTURE_QUOTA, at(110))
             .assured("all grace expired"),
         Quota::Bounded { value: 3 }
     );
@@ -317,7 +332,7 @@ fn further_reductions_protect_only_new_amounts_and_keep_each_deadline() {
         assess_impact(
             current,
             ImpactTarget::Usage(&three),
-            counts,
+            &counts(7, 0),
             policy(),
             context(3, 3, 20),
             limits().bytes
@@ -329,20 +344,16 @@ fn further_reductions_protect_only_new_amounts_and_keep_each_deadline() {
 
 #[test]
 fn improvements_safe_reductions_expiry_and_deadline_overflow_are_explicit() {
-    let free = FREE_POLICY.usage();
+    let unlimited = usage(Quota::Unlimited, Quota::Unlimited);
     let bounded = usage(Quota::Bounded { value: 2 }, Quota::Bounded { value: 3 });
-    let counts = UsageSnapshot {
-        cluster_nodes: 2,
-        cluster_domains: 3,
-    };
     assert!(
         assess_impact(
             EffectiveUsage {
-                conditions: &free,
+                conditions: &unlimited,
                 transitions: &[]
             },
             ImpactTarget::Usage(&bounded),
-            counts,
+            &counts(2, 3),
             policy(),
             context(1, 2, 0),
             limits().bytes
@@ -356,8 +367,8 @@ fn improvements_safe_reductions_expiry_and_deadline_overflow_are_explicit() {
                 conditions: &bounded,
                 transitions: &[]
             },
-            ImpactTarget::Usage(&free),
-            counts,
+            ImpactTarget::Usage(&unlimited),
+            &counts(2, 3),
             policy(),
             context(1, 2, 0),
             limits().bytes
@@ -368,11 +379,11 @@ fn improvements_safe_reductions_expiry_and_deadline_overflow_are_explicit() {
     assert!(
         assess_impact(
             EffectiveUsage {
-                conditions: &free,
+                conditions: &unlimited,
                 transitions: &[]
             },
             ImpactTarget::Expired,
-            counts,
+            &counts(2, 3),
             policy(),
             context(1, 2, 0),
             limits().bytes
@@ -385,14 +396,11 @@ fn improvements_safe_reductions_expiry_and_deadline_overflow_are_explicit() {
     assert!(
         assess_impact(
             EffectiveUsage {
-                conditions: &free,
+                conditions: &unlimited,
                 transitions: &[]
             },
             ImpactTarget::Usage(&bounded),
-            UsageSnapshot {
-                cluster_nodes: 3,
-                cluster_domains: 4
-            },
+            &counts(3, 4),
             overflow,
             context(1, 2, 0),
             limits().bytes
@@ -401,14 +409,11 @@ fn improvements_safe_reductions_expiry_and_deadline_overflow_are_explicit() {
     );
     let transition = assess_impact(
         EffectiveUsage {
-            conditions: &free,
+            conditions: &unlimited,
             transitions: &[],
         },
         ImpactTarget::Usage(&bounded),
-        UsageSnapshot {
-            cluster_nodes: 3,
-            cluster_domains: 4,
-        },
+        &counts(3, 4),
         policy(),
         context(1, 2, 0),
         limits().bytes,
@@ -422,7 +427,7 @@ fn improvements_safe_reductions_expiry_and_deadline_overflow_are_explicit() {
 
 #[test]
 fn tick_and_release_assess_a_reduction_without_inventing_a_conditions_revision() {
-    let current = FREE_POLICY.usage();
+    let current = usage(Quota::Unlimited, Quota::Unlimited);
     let target = usage(Quota::Bounded { value: 1 }, Quota::Unlimited);
     for trigger in [
         crate::documents::TransitionTrigger::Tick {
@@ -440,10 +445,7 @@ fn tick_and_release_assess_a_reduction_without_inventing_a_conditions_revision()
                 transitions: &[],
             },
             ImpactTarget::Usage(&target),
-            UsageSnapshot {
-                cluster_nodes: 2,
-                cluster_domains: 0,
-            },
+            &counts(2, 0),
             policy(),
             change,
             limits().bytes,
@@ -462,18 +464,15 @@ fn tick_and_release_assess_a_reduction_without_inventing_a_conditions_revision()
 
 #[test]
 fn overlapping_transitions_cap_full_width_allowances_without_overflow() {
-    let free = FREE_POLICY.usage();
+    let unlimited = usage(Quota::Unlimited, Quota::Unlimited);
     let target = usage(Quota::Bounded { value: 1 }, Quota::Unlimited);
     let mut transitions = assess_impact(
         EffectiveUsage {
-            conditions: &free,
+            conditions: &unlimited,
             transitions: &[],
         },
         ImpactTarget::Usage(&target),
-        UsageSnapshot {
-            cluster_nodes: u64::MAX,
-            cluster_domains: 0,
-        },
+        &counts(u64::MAX, 0),
         policy(),
         context(1, 2, 0),
         limits().bytes,
@@ -489,19 +488,19 @@ fn overlapping_transitions_cap_full_width_allowances_without_overflow() {
     };
     assert_eq!(
         effective
-            .quota(CLUSTER_NODES, at(99))
+            .quota(FIXTURE_QUOTA, at(99))
             .assured("a capped grant sum fits u64"),
         Quota::Bounded { value: u64::MAX }
     );
     assert_eq!(
         effective
-            .quota(CLUSTER_NODES, at(100))
+            .quota(FIXTURE_QUOTA, at(100))
             .assured("one full-width grant remains"),
         Quota::Bounded { value: u64::MAX }
     );
     assert_eq!(
         effective
-            .quota(CLUSTER_NODES, at(200))
+            .quota(FIXTURE_QUOTA, at(200))
             .assured("both deadlines remove their allowances"),
         Quota::Bounded { value: 1 }
     );
@@ -525,7 +524,10 @@ fn transition_policy_comes_from_complete_bounded_signed_operating_values() {
 #[test]
 fn organization_suspension_uses_free_usage_with_an_active_license() {
     let mut plan = plan();
-    plan.usage = usage(Quota::Bounded { value: 2 }, Quota::Bounded { value: 3 });
+    plan.usage.capabilities.insert(
+        LICENSING_DUMMY.to_owned(),
+        ConditionValue::Known(Capability::Enabled),
+    );
     let mut facts = resolution_facts();
     facts.organization_status = OrganizationStatus::Suspended;
     let resolved = plan

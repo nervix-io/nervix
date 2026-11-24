@@ -562,7 +562,6 @@ pub enum ConsensusCommand {
     PutDomain {
         domain: Box<DomainState>,
         mutation: Option<Box<DomainMutationLease>>,
-        domain_quota: nervix_licensing_vocabulary::Quota,
     },
     /// Asks a domain to stop. A running domain no other execution holds begins stopping, a paused
     /// one only under the mutation that pauses it, and a stopping one takes the request beside the
@@ -780,11 +779,6 @@ pub enum ConsensusConflict {
     LicenseDecision {
         #[source]
         reason: LicenseDecisionError,
-    },
-    #[error("licensing refused this state change")]
-    LicensingQuota {
-        #[source]
-        refusal: nervix_licensing_vocabulary::LicensingRefusal,
     },
     /// The closed licensing stop gate refuses every change that would make a domain run.
     #[error("licensing stopped processing")]
@@ -1454,12 +1448,10 @@ impl MembershipSnapshot {
                 // The run stops on this refusal once it reads it, so admitting it now would leave
                 // a member that never runs.
                 verdicts.insert(run.clone(), refusal.verdict());
-                if let Some(reason) = refusal.reported_reason() {
-                    refusals.push(AdmissionRefusal {
-                        candidate: run,
-                        reason,
-                    });
-                }
+                refusals.push(AdmissionRefusal {
+                    candidate: run,
+                    reason: refusal.reported_reason(),
+                });
                 continue;
             }
             if !voters.contains(&node.node_id)
@@ -1687,6 +1679,22 @@ impl IncompatibleVoter {
         }
         None
     }
+
+    /// The verdict the leader publishes on a run refused beside this voter.
+    fn verdict(&self) -> AdmissionVerdict {
+        AdmissionVerdict::Refused {
+            voter: self.voter.clone(),
+            mismatch: self.mismatch.clone(),
+        }
+    }
+
+    /// Why the leader leaves a run refused beside this voter outside the membership.
+    fn reported_reason(&self) -> AdmissionRefusalReason {
+        AdmissionRefusalReason::Incompatible {
+            voter: self.voter.clone(),
+            mismatch: self.mismatch.clone(),
+        }
+    }
 }
 
 /// The admission refusals the leader has reported, so each is logged once while it holds.
@@ -1722,66 +1730,22 @@ impl ReportedAdmissionRefusals {
     }
 }
 
-/// Why the leader refused a run outside the membership.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RunRefusal {
-    /// Admitting the run would exceed the cluster's node quota.
-    NodeQuota(nervix_licensing_vocabulary::LicensingRefusal),
-    /// The run cannot run beside a live voter whose run the leader accepted.
-    Prerequisites(IncompatibleVoter),
-}
-
-impl RunRefusal {
-    /// The verdict the leader publishes on the refused run.
-    fn verdict(&self) -> AdmissionVerdict {
-        match self {
-            Self::NodeQuota(refusal) => AdmissionVerdict::QuotaRefused { refusal: *refusal },
-            Self::Prerequisites(IncompatibleVoter { voter, mismatch }) => {
-                AdmissionVerdict::Refused {
-                    voter: voter.clone(),
-                    mismatch: mismatch.clone(),
-                }
-            }
-        }
-    }
-
-    /// Why the leader leaves the refused run outside the membership, when it reports that reason
-    /// among a reconciliation's refusals. A node-quota refusal is reported where licensing refuses
-    /// the run instead.
-    fn reported_reason(&self) -> Option<AdmissionRefusalReason> {
-        match self {
-            Self::NodeQuota(_) => None,
-            Self::Prerequisites(IncompatibleVoter { voter, mismatch }) => {
-                Some(AdmissionRefusalReason::Incompatible {
-                    voter: voter.clone(),
-                    mismatch: mismatch.clone(),
-                })
-            }
-        }
-    }
-}
-
-/// The runs outside the membership that this node, while it led, refused, with the refusal each
-/// received: for the cluster's node quota, or because the run cannot run beside a live voter.
+/// The runs outside the membership that this node, while it led, refused because each cannot run
+/// beside a live voter, with the voter it was refused beside.
 ///
 /// A refused run stops once it reads its verdict, yet the failure detector keeps it live in gossip
 /// for several of its heartbeat intervals, so later reconciliations still see it as a candidate.
-/// The leader keeps refusing such a run with the verdict it gave, whatever the licensing policy or
-/// the live voters have become since, because admitting a run that has stopped would leave a
-/// member that never runs. A run is forgotten once it is no longer the current run of an admission
-/// candidate; the node's next run is judged again.
+/// The leader keeps refusing such a run with the verdict it gave, whatever the live voters have
+/// become since, because admitting a run that has stopped would leave a member that never runs. A
+/// run is forgotten once it is no longer the current run of an admission candidate; the node's next
+/// run is judged again.
 #[derive(Debug, Default)]
-struct RefusedRuns(BTreeMap<ClusterNodeIdentity, RunRefusal>);
+struct RefusedRuns(BTreeMap<ClusterNodeIdentity, IncompatibleVoter>);
 
 impl RefusedRuns {
-    /// The refusal this node gave `run`, if it refused it.
-    fn refusal_of(&self, run: &ClusterNodeIdentity) -> Option<&RunRefusal> {
+    /// The voter this node refused `run` beside, if it refused it.
+    fn refusal_of(&self, run: &ClusterNodeIdentity) -> Option<&IncompatibleVoter> {
         self.0.get(run)
-    }
-
-    /// Records that this node refused `run`.
-    fn record(&mut self, run: ClusterNodeIdentity, refusal: RunRefusal) {
-        self.0.insert(run, refusal);
     }
 
     /// Records that this node refused each run of `refused_newcomers` because it cannot run
@@ -1790,9 +1754,7 @@ impl RefusedRuns {
         &mut self,
         refused_newcomers: BTreeMap<ClusterNodeIdentity, IncompatibleVoter>,
     ) {
-        for (run, incompatible) in refused_newcomers {
-            self.record(run, RunRefusal::Prerequisites(incompatible));
-        }
+        self.0.extend(refused_newcomers);
     }
 
     /// Forgets every refused run that is no longer the current run of one of `candidates`: its
@@ -2444,8 +2406,7 @@ impl ConsensusError {
         };
         match error {
             Self::Conflict(
-                ConsensusConflict::LicensingQuota { .. }
-                | ConsensusConflict::LicenseDecision { .. }
+                ConsensusConflict::LicenseDecision { .. }
                 | ConsensusConflict::ClusterKeyRotation { .. }
                 | ConsensusConflict::LicensingStop { .. },
             ) => format!("{report:#}"),
@@ -4149,9 +4110,6 @@ impl Proposer {
             ConsensusResponse::Applied => Ok(()),
             ConsensusResponse::Conflict(reason) => {
                 let report = match &reason {
-                    ConsensusConflict::LicensingQuota { refusal } => {
-                        Report::new(*refusal).change_context(ConsensusError::Conflict(reason))
-                    }
                     ConsensusConflict::LicenseDecision { reason: cause } => {
                         Report::new(*cause).change_context(ConsensusError::Conflict(reason))
                     }
@@ -4455,12 +4413,10 @@ impl Proposer {
         &self,
         domain: DomainState,
         mutation: Option<&DomainMutationLease>,
-        domain_quota: nervix_licensing_vocabulary::Quota,
     ) -> error_stack::Result<(), ConsensusError> {
         let response = self
             .inner
             .client_write(ConsensusCommand::PutDomain {
-                domain_quota,
                 domain: Box::new(domain),
                 mutation: mutation.cloned().map(Box::new),
             })
@@ -5024,12 +4980,7 @@ impl Administrator {
         }
     }
 
-    pub async fn maybe_initialize(
-        &self,
-        admit: impl Fn(u64) -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
-        + Send
-        + Sync,
-    ) -> error_stack::Result<bool, ConsensusError> {
+    pub async fn maybe_initialize(&self) -> error_stack::Result<bool, ConsensusError> {
         let _membership_mutation = self.inner.membership_mutation.lock().await;
         if self
             .inner
@@ -5041,7 +4992,6 @@ impl Administrator {
             return Ok(false);
         }
 
-        admit(0).map_err(|report| report.change_context(ConsensusError::Startup))?;
         let mut nodes = BTreeMap::new();
         nodes.insert(
             self.inner.local_node_id.clone(),
@@ -5069,13 +5019,6 @@ impl Administrator {
     pub async fn reconcile_nodes(
         &self,
         gossip: impl Future<Output = GossipState>,
-        admit: impl Fn(
-            &ClusterNodeName,
-            u64,
-        )
-            -> error_stack::Result<(), nervix_licensing_vocabulary::LicensingRefusal>
-        + Send
-        + Sync,
     ) -> error_stack::Result<(), ConsensusError> {
         let mut judgments = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
@@ -5099,7 +5042,7 @@ impl Administrator {
             let MembershipPlan {
                 mutations,
                 refusals,
-                mut verdicts,
+                verdicts,
                 refused_newcomers,
             } = current.automatic_mutations(&gossip, &admission_fences, &judgments.refused);
             judgments.reported.report(&refusals);
@@ -5112,7 +5055,6 @@ impl Administrator {
                     metrics.current_term,
                     verdicts.clone(),
                 )));
-            let mut quota_refused = BTreeSet::new();
             for mutation in mutations {
                 nervix_primitives::task::consume_budget().await;
                 match mutation {
@@ -5148,42 +5090,6 @@ impl Administrator {
                         }
                     }
                     MembershipMutation::AddLearner { node_id, endpoint } => {
-                        let (new_member, count) = {
-                            let committed = self.inner.store.inner.state();
-                            let membership = committed.last_membership.membership();
-                            (
-                                membership.get_node(&node_id).is_none(),
-                                u64::try_from(membership.nodes().count())
-                                    .assured("a materialized membership fits u64"),
-                            )
-                        };
-                        if new_member && let Err(refusal) = admit(&node_id, count) {
-                            quota_refused.insert(node_id.clone());
-                            let run = candidates
-                                .get(&node_id)
-                                .verified(
-                                    "a learner mutation names a candidate from this gossip cut",
-                                )
-                                .identity();
-                            // Later reconciliations keep this verdict for the run until it leaves
-                            // gossip, whatever the licensing policy has become.
-                            judgments.refused.record(
-                                run.clone(),
-                                RunRefusal::NodeQuota(*refusal.current_context()),
-                            );
-                            // Publish only the fixed membership verdict; the report stays at its reporting boundary.
-                            verdicts.insert(
-                                run,
-                                AdmissionVerdict::QuotaRefused {
-                                    refusal: *refusal.current_context(),
-                                },
-                            );
-                            self.inner.admission_verdicts.send_replace(Some(
-                                AdmissionVerdicts::new(metrics.current_term, verdicts.clone()),
-                            ));
-                            tracing::warn!(node = %node_id, error = %format_args!("{refusal:#}"), "licensing refused a new cluster member");
-                            continue;
-                        }
                         let operation = if current.node(&node_id).is_some() {
                             format!("wait for learner '{node_id}' to catch up at {endpoint}")
                         } else {
@@ -5214,10 +5120,6 @@ impl Administrator {
                         }
                     }
                     MembershipMutation::ChangeVoters { voters } => {
-                        let voters = voters
-                            .difference(&quota_refused)
-                            .cloned()
-                            .collect::<BTreeSet<_>>();
                         if voters == current.voter_ids() {
                             continue;
                         }
@@ -6821,11 +6723,7 @@ fn apply_consensus_command_at(
             changes.schedule_changed = true;
         }
         ConsensusCommand::ReconcileOwnershipHandoffPreparations { .. } => {}
-        ConsensusCommand::PutDomain {
-            domain,
-            mutation,
-            domain_quota,
-        } => {
+        ConsensusCommand::PutDomain { domain, mutation } => {
             if domain.status != DomainStatus::Stopped
                 && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
             {
@@ -6840,13 +6738,6 @@ fn apply_consensus_command_at(
             }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
-            }
-            if !state.domains.contains_key(&domain.id)
-                && let Err(refusal) = licensing::admit_domain(state, *domain_quota, false)
-            {
-                return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingQuota {
-                    refusal: *refusal.current_context(),
-                });
             }
             if let Err(issue) = state.validate_label_set(&domain.labels) {
                 return AppliedConsensusCommand::conflict(ConsensusConflict::EntityLabels {
@@ -7032,13 +6923,6 @@ fn apply_consensus_command_at(
             if let Err(error) =
                 restore::apply_restore_step(state, reference, step, effect, &mut changes)
             {
-                if let Some(refusal) =
-                    error.downcast_ref::<nervix_licensing_vocabulary::LicensingRefusal>()
-                {
-                    return AppliedConsensusCommand::conflict(ConsensusConflict::LicensingQuota {
-                        refusal: *refusal,
-                    });
-                }
                 return AppliedConsensusCommand::conflict(format!("{error:#}"));
             }
         }
@@ -8270,14 +8154,13 @@ mod tests {
         CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusConflict,
         ConsensusResponse, FjallLogReader, FjallStore, GossipNode, GossipState,
         IncomingSnapshotTransfer, IncompatibleVoter, LeaderTenure, MembershipMutation,
-        MembershipSnapshot, ProtocolOriginError, RefusedRuns, ResourceRecords, RunRefusal,
-        SnapshotChunkPart, SnapshotMeta, SnapshotTransferError, SnapshotTransferIds,
-        StateMachineData, StoredMembership, TransactionApplicationOutcome,
-        TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionMutationError,
-        TransactionOutcome, TransactionStatement, TransactionStatementRequest,
-        TransactionStepEffect, TransactionStepResult, TypeConfig, UserRecord,
-        apply_consensus_command, apply_consensus_command_at, io_error, storage_decode,
-        validate_protocol_origin,
+        MembershipSnapshot, ProtocolOriginError, RefusedRuns, ResourceRecords, SnapshotChunkPart,
+        SnapshotMeta, SnapshotTransferError, SnapshotTransferIds, StateMachineData,
+        StoredMembership, TransactionApplicationOutcome, TransactionCommandResult,
+        TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
+        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+        TransactionStepResult, TypeConfig, UserRecord, apply_consensus_command,
+        apply_consensus_command_at, io_error, storage_decode, validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LeadershipObservation, LogIdOf, ReplicatedTransaction,
@@ -9789,143 +9672,9 @@ mod tests {
         );
     }
 
-    /// The refusal a lapsed one-node cluster gives a newcomer.
-    fn lapsed_node_refusal() -> nervix_licensing_vocabulary::LicensingRefusal {
-        nervix_licensing_vocabulary::LicensingRefusal {
-            state: nervix_licensing_vocabulary::AdmissionState::Lapsed,
-            condition: nervix_licensing_vocabulary::QuotaName::ClusterNodes,
-            limit: 1,
-            current_usage: 1,
-            requested: 1,
-        }
-    }
-
-    /// The refusals a leader remembers after refusing `runs` for the node quota.
-    fn quota_refused(runs: &[ClusterNodeIdentity]) -> RefusedRuns {
-        let mut refused = RefusedRuns::default();
-        for run in runs {
-            refused.record(run.clone(), RunRefusal::NodeQuota(lapsed_node_refusal()));
-        }
-        refused
-    }
-
     #[test]
-    fn a_newcomer_refused_for_the_node_quota_keeps_its_refusal_while_gossip_shows_its_run() {
-        // The policy that refused the run no longer reaches the planner: nothing else keeps
-        // node-2 out, so only the remembered refusal does.
-        let gossip = GossipState {
-            live_nodes: vec![
-                live_voter("node-1", 1, Duration::from_millis(250)),
-                live_voter("node-2", 2, Duration::from_millis(250)),
-            ],
-            dead_node_ids: BTreeSet::new(),
-            dead_node_identities: BTreeSet::new(),
-        };
-
-        let plan = voters(&["node-1"]).automatic_mutations(
-            &gossip,
-            &BTreeMap::new(),
-            &quota_refused(&[node_identity("node-2", 2)]),
-        );
-
-        assert!(plan.mutations.is_empty());
-        assert!(plan.refusals.is_empty());
-        assert_eq!(
-            plan.verdicts,
-            BTreeMap::from([
-                (node_identity("node-1", 1), AdmissionVerdict::Accepted),
-                (
-                    node_identity("node-2", 2),
-                    AdmissionVerdict::QuotaRefused {
-                        refusal: lapsed_node_refusal(),
-                    },
-                ),
-            ])
-        );
-    }
-
-    #[test]
-    fn the_next_run_of_a_node_refused_for_the_node_quota_is_judged_again() {
-        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
-        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
-        let gossip = GossipState {
-            live_nodes: vec![
-                live_voter("node-1", 1, Duration::from_millis(250)),
-                live_voter("node-2", 3, Duration::from_millis(250)),
-            ],
-            dead_node_ids: BTreeSet::new(),
-            dead_node_identities: BTreeSet::new(),
-        };
-
-        let plan = voters(&["node-1"]).automatic_mutations(
-            &gossip,
-            &BTreeMap::new(),
-            &quota_refused(&[node_identity("node-2", 2)]),
-        );
-
-        assert_eq!(
-            plan.mutations,
-            vec![
-                MembershipMutation::AddLearner {
-                    node_id: joining.clone(),
-                    endpoint: node_endpoint("node-2.test:7443"),
-                },
-                MembershipMutation::ChangeVoters {
-                    voters: BTreeSet::from([first, joining]),
-                },
-            ]
-        );
-        assert_eq!(
-            plan.verdicts,
-            BTreeMap::from([(node_identity("node-1", 1), AdmissionVerdict::Accepted)])
-        );
-    }
-
-    #[test]
-    fn a_remembered_node_quota_refusal_never_holds_back_a_member() {
-        // node-2 is already a learner of the membership: the refusal of its run judged no member,
-        // so it changes nothing about the member's catch-up and promotion.
-        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
-        let learner = ClusterNodeName::parse("node-2").assured("the test node name is valid");
-        let gossip = GossipState {
-            live_nodes: vec![live_voter("node-2", 2, Duration::from_millis(250))],
-            dead_node_ids: BTreeSet::new(),
-            dead_node_identities: BTreeSet::new(),
-        };
-        let membership = uniform_membership_snapshot(
-            BTreeSet::from([first.clone()]),
-            BTreeMap::from([
-                (first.clone(), "node-1.test:7443".to_string()),
-                (learner.clone(), "node-2.test:7443".to_string()),
-            ]),
-        );
-
-        let remembered = membership.automatic_mutations(
-            &gossip,
-            &BTreeMap::new(),
-            &quota_refused(&[node_identity("node-2", 2)]),
-        );
-        let unremembered =
-            membership.automatic_mutations(&gossip, &BTreeMap::new(), &RefusedRuns::default());
-
-        assert_eq!(remembered, unremembered);
-        assert_eq!(
-            remembered.mutations,
-            vec![
-                MembershipMutation::AddLearner {
-                    node_id: learner.clone(),
-                    endpoint: node_endpoint("node-2.test:7443"),
-                },
-                MembershipMutation::ChangeVoters {
-                    voters: BTreeSet::from([first, learner]),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn node_quota_refusals_are_forgotten_once_their_run_is_no_longer_a_candidate() {
-        let mut refused = quota_refused(&[
+    fn prerequisite_refusals_are_forgotten_once_their_run_is_no_longer_a_candidate() {
+        let mut refused = prerequisites_refused(&[
             node_identity("node-2", 2),
             node_identity("node-3", 3),
             node_identity("node-4", 4),
@@ -9947,7 +9696,7 @@ mod tests {
 
         assert_eq!(
             refused.refusal_of(&node_identity("node-2", 2)),
-            Some(&RunRefusal::NodeQuota(lapsed_node_refusal()))
+            Some(&refused_beside_node_4())
         );
         assert_eq!(refused.refusal_of(&node_identity("node-3", 3)), None);
         assert_eq!(refused.refusal_of(&node_identity("node-3", 5)), None);
@@ -9964,13 +9713,12 @@ mod tests {
 
     /// The refusals a leader remembers after refusing `runs` because node-4 cannot run beside them.
     fn prerequisites_refused(runs: &[ClusterNodeIdentity]) -> RefusedRuns {
-        let mut refused = RefusedRuns::default();
+        let mut newcomers = BTreeMap::new();
         for run in runs {
-            refused.record(
-                run.clone(),
-                RunRefusal::Prerequisites(refused_beside_node_4()),
-            );
+            newcomers.insert(run.clone(), refused_beside_node_4());
         }
+        let mut refused = RefusedRuns::default();
+        refused.record_refused_newcomers(newcomers);
         refused
     }
 
@@ -10844,7 +10592,6 @@ mod tests {
         let domain_change = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: None,
             },
@@ -11194,7 +10941,6 @@ mod tests {
         let blocked = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: None,
             },
@@ -11252,7 +10998,6 @@ mod tests {
         let authorized = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: Some(Box::new(first_lease.clone())),
             },
@@ -11261,7 +11006,6 @@ mod tests {
         let independent_write = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("independent")),
                 mutation: None,
             },
@@ -11324,7 +11068,6 @@ mod tests {
         let stale = apply_consensus_command(
             &mut state,
             &ConsensusCommand::PutDomain {
-                domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
                 domain: Box::new(running_domain_state("tenant")),
                 mutation: Some(Box::new(first_lease)),
             },

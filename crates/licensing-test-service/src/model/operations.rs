@@ -48,18 +48,6 @@ impl HeldActivation {
 }
 
 impl Model {
-    pub fn reduce_domain_quota_with_grace(&mut self) {
-        let mut plan = self.conditions();
-        plan.usage.quotas.insert(
-            CLUSTER_DOMAINS.to_owned(),
-            ConditionValue::Known(Quota::Bounded { value: 1 }),
-        );
-        self.plan(plan);
-        self.transition_usage = Some(nervix_licensing_protocol::impact::UsageSnapshot {
-            cluster_nodes: 3,
-            cluster_domains: 2,
-        });
-    }
     pub(super) fn verify_request(
         &self,
         compact: &str,

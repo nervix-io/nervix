@@ -2,9 +2,10 @@
 //! elapse at once, and archives, archive files and session storage held in memory.
 //!
 //! Test harness outside the product layer order.
-//! - **Owns.** Connections that answer from a script and record what was sent, timers that elapse
-//!   at once and are recorded, archives kept and saved in memory, archive files held as bytes that
-//!   may stop being readable after a number of reads, and a storage map.
+//! - **Owns.** Connections that answer from a script after an opening that announces the pacing
+//!   the test chose and record what was sent, timers that elapse at once, are recorded and move the
+//!   browser's clock on, archives kept and saved in memory, archive files held as bytes that may
+//!   stop being readable after a number of reads, and a storage map.
 //! - **Depends on.** The browser traits the dialog's drivers and its pending backup record speak
 //!   to.
 //! - **Must not know.** What a download, a restore or a record decides.
@@ -18,6 +19,8 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::SessionPacing;
+use nervix_models::Timestamp;
 
 use super::{
     ArchiveFile, ArchiveSaveFailed, Browser, CallSocket, DownloadedArchive, Received,
@@ -80,14 +83,36 @@ pub(crate) struct Observed {
     pub(crate) saved: Option<SavedArchive>,
 }
 
+/// The UTC the in-memory browser's clock starts at: the UUIDv7 time of the execution reference
+/// the dialog's tests issue, so a download's retention and a restore's retry validity end a known
+/// span after it.
+pub(crate) fn clock_start() -> Timestamp {
+    Timestamp::from_unix_nanos(1_730_148_596_534_000_000)
+}
+
 /// The browser the tests drive. Each connection it opens follows the next script, it refuses to
-/// open one once the scripts run out, and every timer elapses at once.
-#[derive(Default)]
+/// open one once the scripts run out, and every timer elapses at once and moves its clock on.
 pub(crate) struct InMemoryBrowser {
     scripts: RefCell<VecDeque<Script>>,
     observed: Rc<RefCell<Observed>>,
     /// Whether the browser refuses to save an archive, as one out of space does.
     refuses_saves: bool,
+    /// What every scripted server announces when its connection opens.
+    pacing: SessionPacing,
+    /// The browser's UTC: [`clock_start`] and every timer that ran out since.
+    clock: Rc<Cell<Timestamp>>,
+}
+
+impl Default for InMemoryBrowser {
+    fn default() -> Self {
+        Self {
+            scripts: RefCell::default(),
+            observed: Rc::default(),
+            refuses_saves: false,
+            pacing: SessionPacing::default(),
+            clock: Rc::new(Cell::new(clock_start())),
+        }
+    }
 }
 
 impl InMemoryBrowser {
@@ -107,6 +132,11 @@ impl InMemoryBrowser {
         }
     }
 
+    /// The same browser, whose scripted servers announce `pacing` when a connection opens.
+    pub(crate) fn announcing(self, pacing: SessionPacing) -> Self {
+        Self { pacing, ..self }
+    }
+
     /// What the browser saw so far.
     pub(crate) fn observed(&self) -> std::cell::Ref<'_, Observed> {
         self.observed.borrow()
@@ -122,6 +152,7 @@ impl Browser for InMemoryBrowser {
         let mut script = self.scripts.borrow_mut().pop_front()?;
         let opening = nervix_client_wire::SessionOpened {
             limits: nervix_client_wire::SessionLimits::DEFAULT,
+            pacing: self.pacing,
         }
         .encode()
         .assured("the scripted server's complete numeric opening fits");
@@ -140,10 +171,20 @@ impl Browser for InMemoryBrowser {
 
     fn wait(&self, duration: Duration) -> impl Future<Output = ()> {
         let observed = Rc::clone(&self.observed);
+        let clock = Rc::clone(&self.clock);
         async move {
             // Recorded as it elapses: a timer the caller drops unpolled never ran out.
             observed.borrow_mut().waits.push(duration);
+            let now = clock
+                .get()
+                .checked_add(duration)
+                .assured("a test's timers stay far inside the timestamp range");
+            clock.set(now);
         }
+    }
+
+    fn now(&self) -> Timestamp {
+        self.clock.get()
     }
 
     fn new_archive(&self) -> MemoryArchive {

@@ -5,7 +5,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use crate::{
     conditions::*,
     impact::*,
-    policy_tests::{context, policy, usage},
+    policy_tests::{context, counts, policy, usage},
     representation_properties::{number, text},
     requests::*,
     test_fixture::*,
@@ -19,17 +19,20 @@ fn bolero_conditions_resolution() {
         .for_each(|input| {
             let value = number(input);
             let mut plan = plan();
-            plan.usage = usage(Quota::Bounded { value }, Quota::Unlimited);
+            plan.operating.quotas.insert(
+                PERSISTENT_ACTIVATIONS.to_owned(),
+                ConditionValue::Known(Quota::Bounded { value }),
+            );
             let mut overrides = empty_conditions();
-            overrides.usage.quotas.insert(
-                CLUSTER_DOMAINS.to_owned(),
+            overrides.operating.quotas.insert(
+                EPHEMERAL_ACTIVATIONS.to_owned(),
                 ConditionValue::Known(Quota::Bounded { value }),
             );
             let resolved = plan
                 .resolve(&overrides, resolution_facts(), limits().bytes)
                 .assured("complete bounded plan");
             let mut expected = plan.clone();
-            expected.usage.quotas.extend(overrides.usage.quotas);
+            expected.operating.quotas.extend(overrides.operating.quotas);
             assert_eq!(resolved.values(), &expected);
             assert_eq!(
                 resolved.conditions_digest(),
@@ -81,10 +84,7 @@ fn bolero_impact_assessment() {
             let count = value.checked_add(1).assured("value is below 1000");
             let current = usage(Quota::Bounded { value: previous }, Quota::Unlimited);
             let target = usage(Quota::Bounded { value }, Quota::Unlimited);
-            let snapshot = UsageSnapshot {
-                cluster_nodes: count,
-                cluster_domains: 0,
-            };
+            let snapshot = counts(count, 0);
             let trigger = match value % 3 {
                 0 => crate::documents::TransitionTrigger::Decision {
                     decision_id: id(100),
@@ -104,7 +104,7 @@ fn bolero_impact_assessment() {
                     transitions: &[],
                 },
                 ImpactTarget::Usage(&target),
-                snapshot,
+                &snapshot,
                 policy(),
                 impact.clone(),
                 limits().bytes,
@@ -126,7 +126,7 @@ fn bolero_impact_assessment() {
                     transitions: &[],
                 },
                 ImpactTarget::Usage(&target),
-                snapshot,
+                &snapshot,
                 policy(),
                 impact.clone(),
                 limits().bytes,
@@ -138,7 +138,7 @@ fn bolero_impact_assessment() {
                     conditions: &target,
                     transitions: &transitions
                 }
-                .quota(CLUSTER_NODES, at(99))
+                .quota(FIXTURE_QUOTA, at(99))
                 .assured("temporary amount"),
                 Quota::Bounded { value: count }
             );
@@ -147,7 +147,7 @@ fn bolero_impact_assessment() {
                     conditions: &target,
                     transitions: &transitions
                 }
-                .quota(CLUSTER_NODES, at(100))
+                .quota(FIXTURE_QUOTA, at(100))
                 .assured("deadline removes amount"),
                 Quota::Bounded { value }
             );

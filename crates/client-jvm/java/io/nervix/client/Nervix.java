@@ -590,6 +590,14 @@ public final class Nervix {
         public ConnectOptions requestTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 2, seconds)); return this; }
         public ConnectOptions retryTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 3, seconds)); return this; }
         public ConnectOptions backupWaitTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 4, seconds)); return this; }
+        /** Seconds a connection with a call open may go without hearing from the node before it is pinged; 30 by default. */
+        public ConnectOptions keepaliveInterval(double seconds) { write(p -> Native.optionsTimeout(p, 5, seconds)); return this; }
+        /** Seconds that ping may go unanswered before the connection is lost and recovered; 20 by default. */
+        public ConnectOptions keepaliveTimeout(double seconds) { write(p -> Native.optionsTimeout(p, 6, seconds)); return this; }
+        /** Bytes of one call the node may send before the session reads them; 2 MiB by default. */
+        public ConnectOptions streamWindowBytes(long bytes) { write(p -> Native.optionsWindow(p, 1, bytes)); return this; }
+        /** Bytes of all calls on one connection the node may send before the session reads them; 5 MiB by default. */
+        public ConnectOptions connectionWindowBytes(long bytes) { write(p -> Native.optionsWindow(p, 2, bytes)); return this; }
     }
     public static final class Fields extends Handle {
         public Fields() { super(Native.fieldsNew()); }

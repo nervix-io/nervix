@@ -15,9 +15,11 @@
 //! Every attempt sends the same reference, statement and archive, so a restore the leader already
 //! admitted is joined or its outcome recovered, never applied twice. A redirect streams the restore
 //! again to the leader, an unknown outcome streams it again after a pause, and a failure in
-//! transport streams it again from its first byte. No attempt is bounded as a whole: the connection
-//! must take each chunk within the frame timeout, and the reply must arrive within it once the
-//! last chunk was sent. A reply that arrives as that timeout ends still counts.
+//! transport streams it again from its first byte, until the reference's retry validity ends: its
+//! UUIDv7 issue time on the browser's clock plus the validity the cluster committed, after which
+//! the leader holds no restore under it. No attempt is bounded as a whole: the connection must take
+//! each chunk within the request timeout of the node the attempt reached, and the reply must arrive
+//! within it once the last chunk was sent. A reply that arrives as that timeout ends still counts.
 //!
 //! The leader admits a restore only once it holds the whole archive. An attempt that handed its
 //! connection the archive's last byte and learned no outcome, or a reply that leaves the outcome
@@ -36,30 +38,29 @@ use futures_util::future::{Either, select};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     CommandDisposition, CommandOutcome, LeaderRedirect, OutcomeOrigin, RequestId, RestoreChunk,
-    RestoreDisposition, RestoreReply, RestoreStart, RestoreUploadFailure,
+    RestoreDisposition, RestoreReply, RestoreStart, RestoreUploadFailure, SessionLimits,
     websocket::{CONSOLE_RESTORE_PATH, ClientRestoreWebSocketCodec, WebSocketData},
 };
-use nervix_models::{ArchiveDigest, CommandExecutionReference, RestoreArchive};
+use nervix_models::{
+    ArchiveDigest, CommandExecutionReference, RestoreArchive, Timestamp,
+    WebConsoleRestoreFrameCapacity,
+};
 use thiserror::Error;
 use url::Url;
 
 use super::{
-    FRAME_TIMEOUT, RETRY_DELAY,
     browser::{ArchiveFile, Browser, CallSocket as _, Received},
+    redirect_chain::{NextAttempt, RedirectChain},
 };
-use crate::web_console_websocket_url_from_base;
+use crate::{pacing::ConsolePacing, web_console_websocket_url_from_base};
 
-/// The most archive bytes one restore frame carries, as the native clients send them: a stream's
-/// chunk is the smaller of this and half the session frame limit the leader announced.
-#[cfg_attr(
-    nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "the backup and restore chapter's limits cap restore chunks from the Rust client \
-                  and the console alike at 256 KiB, or half the session frame when that is smaller"
-    )
-)]
-pub(crate) const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
+/// The archive bytes one restore frame carries under `limits`, as the native clients send them:
+/// the smaller of the largest restore chunk and half the session frame limit the leader announced.
+pub(crate) fn restore_chunk_bytes(limits: &SessionLimits) -> usize {
+    let largest = usize::try_from(WebConsoleRestoreFrameCapacity::CHUNK_BYTES)
+        .assured("a quarter mebibyte fits usize on every target");
+    largest.min(limits.frame_bytes() / 2)
+}
 
 /// Archive bytes one read of the file digests at a time.
 #[cfg_attr(
@@ -72,47 +73,40 @@ pub(crate) const RESTORE_CHUNK_BYTES: usize = 256 * 1024;
 )]
 pub(crate) const MEASURE_SLICE_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Bytes the browser may hold queued on the connection before the stream waits for it to drain.
+/// How often a stream that waits for its connection to drain looks again. The browser reports how
+/// many bytes a WebSocket holds queued only when asked and signals no drain, so a stream that
+/// waits for room asks again at this period, for at most the request timeout.
 #[cfg_attr(
     nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how much a restore should queue on its connection depends on the network, and \
-                  the console has no settings carrier yet; it stays fixed until its repair task \
-                  counts the queue in served frames https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-pub(crate) const MAX_BUFFERED_BYTES: u32 = 1024 * 1024;
-
-/// How often a stream that waits for its connection to drain looks again.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how often to look at a draining connection depends on how fast the network \
-                  drains the retained queue, and the console has no settings carrier yet; it \
-                  stays fixed until its repair task derives it from the queue or states its \
-                  reason https://app.clickup.com/t/86bd5vvdq"
+    nervix::constant(
+        fixed,
+        reason = "the web console chapter looks at a restore connection's queued bytes every 10 \
+                  milliseconds while the stream waits for room, because the browser's WebSocket \
+                  reports them only when asked"
     )
 )]
 pub(crate) const DRAIN_POLL: Duration = Duration::from_millis(10);
 
-/// How many times a stream looks at a connection that does not drain before it counts as stalled.
-pub(crate) const MAX_DRAIN_POLLS: u128 = FRAME_TIMEOUT.as_millis() / DRAIN_POLL.as_millis();
-const _: () = assert!(MAX_DRAIN_POLLS > 0);
+/// How many times a stream looks at a connection that does not drain before it counts as
+/// stalled: as many drain polls as the request timeout holds, and at least one.
+pub(crate) fn drain_polls(request_timeout: Duration) -> u128 {
+    let polls = request_timeout
+        .as_nanos()
+        .checked_div(DRAIN_POLL.as_nanos())
+        .assured("the drain poll is a positive duration");
+    polls.max(1)
+}
 
-/// How many times one restore is streamed again before the console gives up on learning its
-/// outcome: about ten minutes of pauses, well inside the reference's retry validity.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how long a restore keeps asking for its outcome depends on the cluster, and the \
-                  console has no settings carrier yet; it stays fixed until its repair task \
-                  retries until the served retry validity ends https://app.clickup.com/t/86bd5vvdq"
+/// The bytes the browser may hold queued on a restore's connection before the stream waits for it
+/// to drain: the announced restore frame capacity at the chunk size `limits` allow.
+pub(crate) fn queued_bytes_limit(frame_capacity: NonZeroU64, limits: &SessionLimits) -> u64 {
+    let chunk = u64::try_from(restore_chunk_bytes(limits))
+        .assured("a chunk of at most a quarter mebibyte is counted in u64 on every target");
+    frame_capacity.get().checked_mul(chunk).assured(
+        "the frame capacity is validated so its largest chunks fit the browser's 32-bit queue \
+         count",
     )
-)]
-pub(crate) const MAX_RESTORE_ATTEMPTS: usize = 600;
+}
 
 /// The request identity of a restore's start. Each attempt is a stream of its own that exactly one
 /// reply answers, so the identity only has to be non-zero.
@@ -129,10 +123,13 @@ pub(crate) enum RestoreStreamError {
     NoAddress,
     #[error("the restore's connection failed")]
     Transport,
-    #[error("the restore's connection took no bytes within {} seconds", FRAME_TIMEOUT.as_secs())]
-    Stalled,
-    #[error("no reply arrived within {} seconds of the archive's last byte", FRAME_TIMEOUT.as_secs())]
-    NoReply,
+    #[error("the restore's connection took no bytes within {}", nervix_models::timing_text(*.timeout))]
+    Stalled { timeout: Duration },
+    #[error(
+        "no reply arrived within {} of the archive's last byte",
+        nervix_models::timing_text(*.timeout)
+    )]
+    NoReply { timeout: Duration },
     #[error("the restore request does not fit the peer session limits")]
     InvalidRequest,
     #[error("the restore's reply does not decode")]
@@ -145,8 +142,8 @@ pub(crate) enum RestoreStreamError {
         received: CommandExecutionReference,
     },
     #[error(
-        "the restore was sent elsewhere, or its outcome stayed unknown, more times than the \
-         console waits"
+        "the restore was still being sent elsewhere, or its outcome was still unknown, when its \
+         execution reference's retry validity ended"
     )]
     Exhausted,
     /// The leader refused one stream of the restore before it ran anything from that stream. It
@@ -174,7 +171,7 @@ impl RestoreStreamError {
     /// Whether streaming the restore again may still learn its outcome.
     fn is_retryable(&self) -> bool {
         match self {
-            Self::Transport | Self::Stalled | Self::NoReply => true,
+            Self::Transport | Self::Stalled { .. } | Self::NoReply { .. } => true,
             Self::ReadArchive
             | Self::InvalidRequest
             | Self::EmptyArchive
@@ -193,8 +190,8 @@ impl RestoreStreamError {
     pub(crate) fn leaves_outcome_unknown(&self) -> bool {
         match self {
             Self::Transport
-            | Self::Stalled
-            | Self::NoReply
+            | Self::Stalled { .. }
+            | Self::NoReply { .. }
             | Self::Exhausted
             | Self::InvalidReply
             | Self::UnexpectedReply
@@ -455,19 +452,29 @@ pub(crate) struct RestoreUpload<F> {
     /// The console the restore is streamed to: the leader's, as the session follows it.
     pub(crate) base_url: Option<String>,
     pub(crate) auth_token: String,
+    /// The pacing the restore follows: the session's when it starts, and then that of the node
+    /// each attempt's opening reached.
+    pub(crate) pacing: ConsolePacing,
 }
 
 impl<F: ArchiveFile> RestoreUpload<F> {
-    /// Streams the restore from `browser` until a reply ends it, telling `progress` every count of
-    /// bytes sent on the current attempt and the archive's size.
+    /// Streams the restore from `browser` until a reply ends it or the reference's retry validity
+    /// ends, telling `progress` every count of bytes sent on the current attempt and the archive's
+    /// size.
     pub(crate) async fn run<B: Browser>(
         mut self,
         browser: &B,
         progress: impl Fn(u64, u64) + Copy,
     ) -> Result<RestoreEnd, Report<RestoreStreamError>> {
+        let issued_at = self
+            .reference
+            .retry_issued_at()
+            .assured("the console issues every restore under a UUIDv7 execution reference");
         let mut admission = Admission::Impossible;
-        let mut last_failure = Report::new(RestoreStreamError::Exhausted);
-        for _ in 0..MAX_RESTORE_ATTEMPTS {
+        // Every attempt that does not end the restore names why, before the validity is checked.
+        let mut last_failure: Report<RestoreStreamError>;
+        let mut consoles = RedirectChain::starting_at(self.base_url.as_deref());
+        loop {
             progress(0, self.archive.total_bytes.get());
             let attempt = self.attempt(browser, progress).await;
             let reply = match attempt.reply {
@@ -478,7 +485,10 @@ impl<F: ArchiveFile> RestoreUpload<F> {
                         return Err(admission.ending(failure));
                     }
                     last_failure = failure;
-                    browser.wait(RETRY_DELAY).await;
+                    if self.retry_validity_ended(browser, issued_at) {
+                        return Err(admission.ending(last_failure));
+                    }
+                    self.pause(browser, &mut consoles).await;
                     continue;
                 }
             };
@@ -486,7 +496,7 @@ impl<F: ArchiveFile> RestoreUpload<F> {
                 Ok(step) => step,
                 Err(failure) => return Err(admission.after(attempt.streamed).ending(failure)),
             };
-            match step {
+            let next = match step {
                 // The leader refused this attempt's stream before it ran anything from it, which
                 // settles nothing an earlier attempt may have had admitted.
                 ReplyStep::End(RestoreEnd::Refused { failure, message }) => {
@@ -496,29 +506,58 @@ impl<F: ArchiveFile> RestoreUpload<F> {
                 ReplyStep::Redirect(console) => {
                     // A leader that loses its leadership while the restore applies redirects too.
                     admission = admission.after(attempt.streamed);
-                    self.base_url = Some(console.to_string());
-                    last_failure = Report::new(RestoreStreamError::Exhausted);
+                    let console = console.to_string();
+                    let next = consoles.follow(&console);
+                    self.base_url = Some(console);
+                    next
                 }
                 ReplyStep::AwaitElection => {
                     admission = admission.after(attempt.streamed);
-                    last_failure = Report::new(RestoreStreamError::Exhausted);
-                    browser.wait(RETRY_DELAY).await;
+                    NextAttempt::AfterPause
                 }
                 ReplyStep::AwaitOutcome => {
                     admission = Admission::Possible;
-                    last_failure = Report::new(RestoreStreamError::Exhausted);
-                    browser.wait(RETRY_DELAY).await;
+                    NextAttempt::AfterPause
                 }
                 // The leader admits nothing under a reference it no longer holds, so only an
                 // earlier attempt can have had the restore admitted.
                 ReplyStep::ReferenceExpired(outcome) => return admission.expired(outcome),
+            };
+            last_failure = Report::new(RestoreStreamError::Exhausted);
+            // Once the reference's retry validity ends, the leader holds no restore under it.
+            if self.retry_validity_ended(browser, issued_at) {
+                return Err(admission.ending(last_failure));
+            }
+            if let NextAttempt::AfterPause = next {
+                self.pause(browser, &mut consoles).await;
             }
         }
-        Err(admission.ending(last_failure))
+    }
+
+    /// Whether the retry validity of the restore's reference, issued at `issued_at` on the
+    /// browser's clock, has ended.
+    fn retry_validity_ended<B: Browser>(&self, browser: &B, issued_at: Timestamp) -> bool {
+        match issued_at.checked_add(self.pacing.command_retry_validity()) {
+            Ok(ends) => browser.now() >= ends,
+            // A validity that would end past the last representable instant has not ended.
+            Err(_) => false,
+        }
+    }
+
+    /// Pauses before the next attempt, which goes to the console the restore is addressed to.
+    async fn pause<B: Browser>(&self, browser: &B, consoles: &mut RedirectChain) {
+        consoles.paused_at(self.base_url.as_deref());
+        browser
+            .wait(self.pacing.web_console().restoration_backoff())
+            .await;
     }
 
     /// Streams the restore once and waits for the reply that answers it.
-    async fn attempt<B: Browser>(&self, browser: &B, progress: impl Fn(u64, u64)) -> AttemptEnd {
+    async fn attempt<B: Browser>(
+        &mut self,
+        browser: &B,
+        progress: impl Fn(u64, u64),
+    ) -> AttemptEnd {
         let sending = self.send_archive(browser, progress).await;
         let (mut socket, codec) = match sending {
             Ok(Sending::Sent(socket, codec)) => (socket, codec),
@@ -535,7 +574,8 @@ impl<F: ArchiveFile> RestoreUpload<F> {
                 };
             }
         };
-        let reply = next_reply(browser, &mut socket, &codec).await;
+        let timeout = self.pacing.web_console().request_timeout();
+        let reply = next_reply(browser, &mut socket, &codec, timeout).await;
         AttemptEnd {
             streamed: Streamed::Whole,
             reply,
@@ -545,7 +585,7 @@ impl<F: ArchiveFile> RestoreUpload<F> {
     /// Opens one attempt's connection and hands it the start and every chunk of the archive,
     /// unless the leader answers first.
     async fn send_archive<B: Browser>(
-        &self,
+        &mut self,
         browser: &B,
         progress: impl Fn(u64, u64),
     ) -> Result<Sending<B::Socket>, Report<RestoreStreamError>> {
@@ -555,17 +595,28 @@ impl<F: ArchiveFile> RestoreUpload<F> {
         let Some(mut socket) = browser.open(&url) else {
             return Err(Report::new(RestoreStreamError::Transport));
         };
-        let opening = super::browser::read_opening(browser, &mut socket, FRAME_TIMEOUT).await;
-        let limits = match opening {
-            Ok(limits) => limits,
+        let opening_timeout = self.pacing.web_console().request_timeout();
+        let opening = super::browser::read_opening(browser, &mut socket, opening_timeout).await;
+        let opened = match opening {
+            Ok(opened) => opened,
             Err(report) => {
                 let context = match report.current_context() {
                     super::browser::CallOpeningError::Transport => RestoreStreamError::Transport,
-                    super::browser::CallOpeningError::TimedOut => RestoreStreamError::Stalled,
+                    super::browser::CallOpeningError::TimedOut => RestoreStreamError::Stalled {
+                        timeout: opening_timeout,
+                    },
                     super::browser::CallOpeningError::Invalid => RestoreStreamError::InvalidReply,
                 };
                 return Err(report.change_context(context));
             }
+        };
+        // This attempt and the pauses after it follow the node its opening reached.
+        self.pacing.adopt(opened.pacing);
+        let limits = opened.limits;
+        let web_console = self.pacing.web_console();
+        let room = ConnectionRoom {
+            queued_bytes: queued_bytes_limit(web_console.restore_frame_capacity(), &limits),
+            timeout: web_console.request_timeout(),
         };
         let codec = ClientRestoreWebSocketCodec::new(limits);
         let start = RestoreStart {
@@ -581,13 +632,13 @@ impl<F: ArchiveFile> RestoreUpload<F> {
             return Err(Report::new(RestoreStreamError::Transport));
         }
         let total = self.archive.total_bytes.get();
-        let chunk_bytes = u64::try_from(RESTORE_CHUNK_BYTES.min(limits.frame_bytes() / 2))
+        let chunk_bytes = u64::try_from(restore_chunk_bytes(&limits))
             .assured("a chunk of a quarter mebibyte is counted in u64 on every target");
         let mut sent = 0_u64;
         while sent < total {
             // The leader may answer before every byte arrived, as when it refuses the restore or
             // recovers the outcome of one it already ran; nothing more is sent then.
-            if let Some(reply) = wait_for_room(browser, &mut socket, &codec).await? {
+            if let Some(reply) = wait_for_room(browser, &mut socket, &codec, room).await? {
                 return Ok(Sending::Answered(reply));
             }
             let remaining = total
@@ -625,43 +676,57 @@ impl<F: ArchiveFile> RestoreUpload<F> {
     }
 }
 
+/// How much a restore's connection may hold queued, and how long the stream waits for it to drain
+/// below that, as the node the attempt reached announced.
+#[derive(Debug, Clone, Copy)]
+struct ConnectionRoom {
+    queued_bytes: u64,
+    timeout: Duration,
+}
+
 /// Waits until the connection has room for another chunk, and returns the reply when it arrives
 /// first.
 async fn wait_for_room<B: Browser>(
     browser: &B,
     socket: &mut B::Socket,
     codec: &ClientRestoreWebSocketCodec,
+    room: ConnectionRoom,
 ) -> Result<Option<RestoreReply>, Report<RestoreStreamError>> {
+    let most_polls = drain_polls(room.timeout);
     let mut polls = 0_u128;
     loop {
         if let Some(received) = socket.try_receive() {
             let reply = reply_of(received, codec)?;
             return Ok(Some(reply));
         }
-        if socket.buffered_amount() <= MAX_BUFFERED_BYTES {
+        if u64::from(socket.buffered_amount()) <= room.queued_bytes {
             return Ok(None);
         }
-        if polls >= MAX_DRAIN_POLLS {
-            return Err(Report::new(RestoreStreamError::Stalled));
+        if polls >= most_polls {
+            return Err(Report::new(RestoreStreamError::Stalled {
+                timeout: room.timeout,
+            }));
         }
         browser.wait(DRAIN_POLL).await;
         polls = polls
             .checked_add(1)
-            .verified("the polls stop at MAX_DRAIN_POLLS, far below u128::MAX");
+            .verified("the polls stop at the request timeout's drain polls, far below u128::MAX");
     }
 }
 
-/// The reply once the last chunk was sent, which must arrive within the frame timeout.
+/// The reply once the last chunk was sent, which must arrive within `timeout`, the request timeout
+/// of the node the attempt reached.
 async fn next_reply<B: Browser>(
     browser: &B,
     socket: &mut B::Socket,
     codec: &ClientRestoreWebSocketCodec,
+    timeout: Duration,
 ) -> Result<RestoreReply, Report<RestoreStreamError>> {
     let received = pin!(socket.receive());
-    let timeout = pin!(browser.wait(FRAME_TIMEOUT));
-    let received = match select(received, timeout).await {
+    let waited = pin!(browser.wait(timeout));
+    let received = match select(received, waited).await {
         Either::Left((received, _)) => received,
-        Either::Right(((), _)) => return Err(Report::new(RestoreStreamError::NoReply)),
+        Either::Right(((), _)) => return Err(Report::new(RestoreStreamError::NoReply { timeout })),
     };
     reply_of(received, codec)
 }

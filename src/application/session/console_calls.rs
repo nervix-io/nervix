@@ -42,7 +42,7 @@ use arch_into::ArchInto as _;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _, stream};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
-    BackupDownloadFrame, EncodedFrame, FrameRoot, RestoreFrame, RestoreMessage, SessionLimits,
+    BackupDownloadFrame, EncodedFrame, FrameRoot, RestoreFrame, RestoreMessage, SessionOpened,
     VerifiedFrame,
     websocket::{ServerBackupDownloadWebSocketCodec, ServerRestoreWebSocketCodec},
 };
@@ -129,7 +129,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn serve_console_download<S, E>(
         &self,
         user: UserName,
-        limits: SessionLimits,
+        opening: SessionOpened,
         connection: S,
     ) where
         S: Stream<Item = Result<Message, tungstenite::Error>>
@@ -139,10 +139,11 @@ impl SessionServiceImpl {
             + 'static,
         E: Display + Send + 'static,
     {
+        let limits = opening.limits;
         let codec = ServerBackupDownloadWebSocketCodec::new(limits);
         let (mut connector, mut messages) = connection.split();
         if let Err(ending) =
-            send_opening(&mut connector, limits, &self.inner.admission_shutdown).await
+            send_opening(&mut connector, opening, &self.inner.admission_shutdown).await
         {
             ending.finish(&mut connector).await;
             return;
@@ -255,7 +256,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn serve_console_restore<S, E>(
         &self,
         user: UserName,
-        limits: SessionLimits,
+        opening: SessionOpened,
         connection: S,
     ) where
         S: Stream<Item = Result<Message, tungstenite::Error>>
@@ -265,10 +266,11 @@ impl SessionServiceImpl {
             + 'static,
         E: Display + Send + 'static,
     {
+        let limits = opening.limits;
         let codec = ServerRestoreWebSocketCodec::new(limits);
         let (mut connector, messages) = connection.split();
         if let Err(ending) =
-            send_opening(&mut connector, limits, &self.inner.admission_shutdown).await
+            send_opening(&mut connector, opening, &self.inner.admission_shutdown).await
         {
             ending.finish(&mut connector).await;
             return;
@@ -422,16 +424,16 @@ mod tests;
 /// Publish only the bounded scalar opening before a companion call consumes ordinary frames.
 async fn send_opening<S>(
     connector: &mut S,
-    limits: SessionLimits,
+    opening: SessionOpened,
     admission: &nervix_primitives::sync::CancellationToken,
 ) -> Result<(), ConsoleCallEnd>
 where
     S: Sink<Message> + Unpin,
     S::Error: Display,
 {
-    let frame = nervix_client_wire::SessionOpened { limits }
+    let frame = opening
         .encode()
-        .assured("five bounded numeric fields fit the fixed opening envelope");
+        .assured("the bounded numeric fields of the opening fit its fixed envelope");
     nervix_primitives::select! {
         biased;
         _ = admission.cancelled() => Err(ConsoleCallEnd::ShuttingDown),

@@ -145,6 +145,24 @@ notice charged its text and its in-memory header. The
 [CLI capability table](client-tools-cli.md#connection-capabilities) lists the corresponding Rust
 field names with hyphens in place of underscores and their complete bounds.
 
+`ConnectOptions` also sets the HTTP/2 transport of every connection the client opens. While a call
+is open on a connection, and the session exchange is one for as long as a session lives, the client
+pings its node once `keepalive_interval` (30 seconds by default) passes without a frame of any call
+or the answer to an earlier ping arriving, and treats the connection as lost when the ping is not
+answered within `keepalive_timeout` (20 seconds). A node that vanishes without closing the
+connection, after a network cut or on a frozen host, is therefore noticed within about 50 seconds
+even when no request waits for an answer: a subscription or consumer that is only waiting for data
+is interrupted and restored on a new session, exactly as after any other transport failure. A
+connection that carries data sends no pings, and a quiet one sends one per interval. Both keepalive
+values take the deadline bounds above. `stream_window_bytes` (2 MiB by default) and
+`connection_window_bytes` (5 MiB) are the HTTP/2 receive windows: how many bytes of one call, and of
+all calls on the connection together, the node may send before the client has read them. A stream
+window takes 1 through 2,147,483,647 bytes, the HTTP/2 maximum; a connection window takes 65,535
+bytes, the window every HTTP/2 connection starts with, through the same maximum. Two transport
+choices are fixed rather than options: the client does not ping a connection that has no call open,
+because the next call's connect and request deadlines find a dead connection, and it never sizes its
+windows adaptively, because adaptive sizing would grow them past the declared windows.
+
 `ConnectOptions::seed_servers` lists the further servers the client opens its first session on,
 after the server it connects to, and reconnects through later. It holds at most
 `ConnectOptions::MAX_SEED_SERVERS`, 32 servers, the same bound as the endpoints the client learns
@@ -767,8 +785,8 @@ order. Each branch entry names its opaque fingerprint, absent for the unbranched
 carries its current-lifetime checkpoint, its recorded recovery, or both.
 
 `DESCRIBE LICENSE;` returns the same typed envelope with `StateInspectionEntity::ClusterLicense`
-and its `summary`, `quotas`, `capabilities` and `transitions` sections, including when no domain
-is selected.
+and its `summary`, `capabilities` and `transitions` sections, including when no domain is
+selected.
 Match `StateInspectionEntity::DomainNode` to access the domain and graph-node reference of a
 materialized-state observation.
 
