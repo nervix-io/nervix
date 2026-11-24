@@ -1058,6 +1058,14 @@ other preparation. Replacement, discard, activation, and reconciliation compare 
 operation identity, so duplicate or reordered work is idempotent and cannot affect another
 operation's preparation.
 
+A preparation that a destination reloads at startup names the earlier run of that node. An
+activation request that matches it names that earlier run too, and the destination refuses it before
+it activates anything. Only the preparation's committed transition activates it: the node's
+application of the committed schedule installs it as it installs every planned move, in the domain's
+first build at startup, or in place when the transition commits later. An activation request never
+rebuilds a destination's running domain; it waits until the node's schedule application has
+activated the move, so the domain's other entities keep running with what they hold.
+
 Entity-gate leases are deadline-bound. They release their relay fences and ingestor holds at the
 configured entity-gate deadline even if the coordinator disappears. A node that joins during a hold
 applies the published schedule through its normal revision path.
