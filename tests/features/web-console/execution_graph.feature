@@ -270,3 +270,28 @@ Feature: Web console execution graph
     And the whole graph is visible in the graph viewport
     And graph zoom stays within 25 and 300 percent
     And graph geometry does not change while snapshots arrive
+
+  Scenario Outline: Execution graph stays live between the on-time snapshots of a node with a slow snapshot interval on <cluster_size> nodes
+    Given node-1 starts with session-snapshot-interval = 5s
+    And node-2 starts with session-snapshot-interval = 5s
+    And node-3 starts with session-snapshot-interval = 5s
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_record (
+        order_id STRING,
+        amount I64
+      );
+      CREATE RELAY orders SCHEMA order_record UNBRANCHED;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".graph-hit-layer" contains "orders"
+    And selector ".graph-title [data-freshness]" contains "LIVE"
+    And selector ".graph-title [data-freshness]" contains "LIVE" for 12000 milliseconds
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

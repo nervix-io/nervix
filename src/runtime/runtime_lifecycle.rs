@@ -122,7 +122,7 @@ impl Runtime {
                         base_schedule_fingerprint: persisted.base_schedule_fingerprint,
                         target_schedule_fingerprint: persisted.target_schedule_fingerprint,
                         activation_authorization: super::state_replication::
-                            OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest,
+                            OwnershipHandoffActivationAuthorization::AuthorizedByCommittedTransition,
                         activation: watch::channel(
                             super::state_replication::OwnershipHandoffActivation::Prepared,
                         )

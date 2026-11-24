@@ -384,10 +384,10 @@ complete unsigned 64-bit range. Duration settings preserve their declared range 
 precision in eight bytes. Decoding validates the same declaration before publishing a parameter
 value.
 
-Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_free_tier_` keyspaces and `ClusterState`
-metadata encoding 57 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
+Consensus's `raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_` keyspaces and `ClusterState`
+metadata encoding 58 identify its stored shapes, including the `parametrizer` kind text, endpoint pause response choices,
 domain, resource and user labels, the one label edit that sets and removes keys, node selector statements, placement node rules,
-inferencer working memory, each WASM processor's `MAX TABLE ELEMENTS`, the `DURATION` type with the duration literals Models hold, each node's trace export capabilities, each node's WASM memory guard and growth reserve, the database volume size each node record's capacity claim carries, interconnect capabilities
+inferencer working memory, each WASM processor's `MAX TABLE ELEMENTS`, the `DURATION` type with the duration literals Models hold, each node's trace export and web console pacing capabilities, each node's WASM memory guard and growth reserve, the database volume size each node record's capacity claim carries, interconnect capabilities
 that carry no relay watermark count, listener bounds that carry the gRPC listener's HTTP/2 windows, send buffer and reset limits,
 the HTTP/1 header count and the WebSocket write buffer, and the partition
 count of every resolved

@@ -47,6 +47,24 @@ redirect changes it. If the redirect has no leader console URL, the console prin
 notice and retries its current destination. Configure each node's advertised console address so
 the browser can reach it after a leadership change.
 
+### How The Console Paces Itself
+
+The browser has no command line, so the node that serves the console declares how it waits and
+retries, as the node capabilities of [Web Console Pacing](node-settings.md#web-console-pacing).
+Every console WebSocket's opening announces them, with the node's
+`--session-snapshot-interval` and the cluster's committed `COMMAND_RETRY_VALIDITY`. The console
+follows the pacing of the last opening it read and keeps it across reconnects; before its first
+opening it uses each value's declared default.
+
+- A lost connection is opened again after `--web-console-retry-backoff`, 250 milliseconds by
+  default, and each further failed attempt doubles the wait up to `--web-console-retry-max-backoff`,
+  five seconds by default. A connection that opened starts that sequence again.
+- When a connection fails before it opens, the console asks `GET /console/auth` whether the
+  credentials are still accepted, and waits `--web-console-connect-timeout`, three seconds by
+  default, for the answer. A slow or failed answer keeps the credentials for the next attempt.
+- The REPL asks for completions once typing pauses for 50 milliseconds, so a burst of keystrokes
+  sends one request.
+
 ## Signing In
 
 Without credentials in the URL the console shows a login form for a registry user. Automation and
@@ -575,7 +593,10 @@ graph moves only when the topology changes, and never because traffic changed.
 
 The header carries the domain's lifecycle state — `RUNNING`, `PAUSED`, or `STOPPED` — and the state
 of the feed: `LIVE` while snapshots arrive, `STALE` when they stop, and `OFFLINE` when the session
-is disconnected. A stopped domain still draws its whole graph, with no rates and no pulses.
+is disconnected. The node sends a snapshot every `--session-snapshot-interval`, which its session
+opening announces; the feed reads `STALE` once five intervals pass without one, and the console
+looks again at least once per interval. At the default interval that is after 2.5 seconds, looked
+at every 500 milliseconds. A stopped domain still draws its whole graph, with no rates and no pulses.
 
 A domain with no installed graph shows `NO ACTIVE DATAFLOW GRAPH` instead.
 
@@ -646,10 +667,12 @@ offers the same **↻** resubscribe action as a subscription the server ended.
 
 Other restoration failures leave the tab **interrupted**. Each attempt reports its typed refusal,
 server diagnostics and next wait in that tab, preserving the REPL's history. Retry waits start at
-one second and double to five seconds while the session holds no transaction. The shared retry
-timer may add up to one second to that minimum wait. Closing the waiting tab stops its retries and
-frees its name immediately. A replacement connection restores desired tabs immediately before
-reattaching a transaction and starts a fresh retry sequence.
+the node's `--web-console-restoration-backoff`, one second by default, and double up to its
+`--web-console-retry-max-backoff`, five seconds by default, while the session holds no
+transaction. The shared retry timer ticks at the restoration backoff and may add up to one tick to
+that minimum wait. Closing the waiting tab stops its retries and frees its name immediately. A
+replacement connection restores desired tabs immediately before reattaching a transaction and
+starts a fresh retry sequence.
 
 When a relay is redefined or removed, the server ends the subscriptions that read it. Such a tab
 turns **ended**: it keeps the rows it showed together with the reason, receives nothing more, and
@@ -713,10 +736,11 @@ to refresh it after another queued statement or a stale-preview refusal.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
 follows leadership. When its outcome is not known yet, the console repeats it on the open session
-after a wait that starts at 250 milliseconds and doubles to at most five seconds. The command keeps
-its position ahead of later held commands, while session messages continue to arrive. The selected
-domain, clock and relay tabs keep their existing attachments. A redirect or an ended connection
-triggers recovery; an uncertain reply alone leaves the connection open. A reply whose outcome names
+after a wait that starts at the node's `--web-console-retry-backoff`, 250 milliseconds by default,
+and doubles to at most its `--web-console-retry-max-backoff`, five seconds by default. The command
+keeps its position ahead of later held commands, while session messages continue to arrive. The
+selected domain, clock and relay tabs keep their existing attachments. A redirect or an ended
+connection triggers recovery; an uncertain reply alone leaves the connection open. A reply whose outcome names
 another execution reference than its command's is a protocol violation: the console reports it with
 both references, takes nothing from that reply, neither its result nor its redirect, transaction or
 retry, and stops reading the connection. It reconnects as after a lost connection and sends the
@@ -794,7 +818,11 @@ its session delivers, and says where it left something out:
 - A backup's download moves each 256 KiB chunk of the archive into the browser's own blob storage
   as it arrives, and the page holds one chunk at a time. A restore reads its archive file one slice
   at a time, at most 4 MiB while it digests the file and, while it streams it, the smaller of
-  256 KiB and half the announced session frame, and keeps at most 1 MiB queued on its connection.
+  256 KiB and half the announced session frame. It keeps at most
+  `--web-console-restore-frame-capacity` such chunks queued on its connection, four by default,
+  which is 1 MiB at the default session frame. While the connection holds that much, the restore
+  looks at it again every 10 milliseconds, because the browser reports a WebSocket's queued bytes
+  only when asked.
 
 ## Entity Labels
 
@@ -959,8 +987,13 @@ only later uses, so the release never cuts a download short: the 60 seconds only
 browser keeps the archive's memory for the page after handing it over.
 
 A download that fails in transport, stalls, or ends early starts again from the first byte after a
-one-second pause, for up to eight attempts and redirects in all, while the leader retains the
-archive, and **Download again** retries one that stopped for such a reason.
+pause of the node's `--web-console-restoration-backoff`, one second by default, for as long as the
+leader retains the archive: until the instant the backup's summary names, which the console
+compares with the browser's clock. Each frame must arrive within the node's
+`--web-console-request-timeout`, two minutes by default. A redirect to the leader or to the node
+that retains the archive is followed at once, unless it sends the download back to a console it
+reached since its last pause, which pauses first. **Download again** retries a download that
+stopped for such a reason.
 A download the leader refuses, because the archive expired, a download already collected it, or the
 node that assembled it restarted, ends with that reason; the backup itself completed, and running
 it again assembles a new archive.
@@ -1010,10 +1043,15 @@ message.
 
 A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
 sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
-streams the archive again, from its first byte, until the leader answers. After about ten minutes
-of retry pauses without learning the outcome, the dialog reports it as unknown and names its
-execution reference. An unreadable reply, or a reply naming another request or execution, stops
-that restore call and likewise reports **unknown** under the restore's original reference. It
+streams the archive again, from its first byte, after a pause of the node's
+`--web-console-restoration-backoff`, until the leader answers. Once the reference's retry validity
+ends without the outcome, the dialog reports it as unknown and names its execution reference: the
+cluster's committed `COMMAND_RETRY_VALIDITY`, 15 minutes by default, after the console issued the
+reference, when the leader no longer holds a restore under it. The connection must take each chunk,
+and the reply must arrive once the last chunk was sent, within the node's
+`--web-console-request-timeout`. An unreadable reply, or a reply naming another request or
+execution, stops that restore call and likewise reports **unknown** under the restore's original
+reference. It
 cannot establish that the restore was refused or that nothing changed; a foreign outcome is never
 shown as this restore's result.
 

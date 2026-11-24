@@ -53,6 +53,33 @@ fn limits() -> SessionLimits {
     SessionLimits::DEFAULT
 }
 
+/// The opening the tests hand each call: the default limits, and pacing whose every value differs
+/// from its default, so a call is seen to announce what it was handed.
+fn opening() -> nervix_client_wire::SessionOpened {
+    let web_console =
+        nervix_models::WebConsoleCapabilities::resolve(nervix_models::WebConsoleCapabilityValues {
+            request_timeout: Some(Duration::from_secs(45)),
+            connect_timeout: Some(Duration::from_secs(4)),
+            retry_backoff: Some(Duration::from_millis(300)),
+            retry_max_backoff: Some(Duration::from_secs(6)),
+            restoration_backoff: Some(Duration::from_secs(2)),
+            restore_frame_capacity: std::num::NonZeroU64::new(8),
+        })
+        .assured("the test waits are whole milliseconds within their bounds");
+    nervix_client_wire::SessionOpened {
+        limits: limits(),
+        pacing: nervix_client_wire::SessionPacing::new(
+            nervix_models::Setting::new(Duration::from_secs(2), &())
+                .assured("two seconds is a snapshot interval"),
+            Some(
+                nervix_models::Setting::new(Duration::from_secs(600), &())
+                    .assured("ten minutes is a retry validity"),
+            ),
+            web_console,
+        ),
+    }
+}
+
 fn user() -> UserName {
     UserName::parse("default").assured("the test user is a valid literal name")
 }
@@ -209,9 +236,9 @@ async fn announced_opening(console: &mut ConsoleEnd) {
     let Message::Binary(payload) = next_message(console).await else {
         panic!("an authenticated call starts with a binary opening");
     };
-    let opening = nervix_client_wire::SessionOpened::verify(payload.into())
+    let announced = nervix_client_wire::SessionOpened::verify(payload.into())
         .assured("the complete opening fits the fixed envelope and validates its dimensions");
-    assert_eq!(opening.limits, limits());
+    assert_eq!(announced, opening());
 }
 
 #[nervix_primitives::test]
@@ -226,7 +253,7 @@ async fn a_console_download_answers_its_request_and_closes_normally() {
         let service = service.clone();
         async move {
             service
-                .serve_console_download(user(), limits(), server)
+                .serve_console_download(user(), opening(), server)
                 .await;
         }
     });
@@ -314,7 +341,7 @@ async fn a_text_message_closes_a_console_download_with_its_close_code() {
         let service = service.clone();
         async move {
             service
-                .serve_console_download(user(), limits(), server)
+                .serve_console_download(user(), opening(), server)
                 .await;
         }
     });
@@ -343,7 +370,7 @@ async fn a_console_restore_is_answered_once_its_declared_bytes_arrived() {
         let service = service.clone();
         async move {
             service
-                .serve_console_restore(user(), limits(), server)
+                .serve_console_restore(user(), opening(), server)
                 .await;
         }
     });
@@ -389,7 +416,7 @@ async fn a_console_restore_whose_client_leaves_early_is_not_answered() {
         let service = service.clone();
         async move {
             service
-                .serve_console_restore(user(), limits(), server)
+                .serve_console_restore(user(), opening(), server)
                 .await;
         }
     });
@@ -427,7 +454,7 @@ async fn a_console_download_ends_going_away_when_the_node_stops() {
         let service = service.clone();
         async move {
             service
-                .serve_console_download(user(), limits(), server)
+                .serve_console_download(user(), opening(), server)
                 .await;
         }
     });
@@ -454,7 +481,7 @@ async fn a_console_restore_ends_going_away_when_the_node_stops() {
         let service = service.clone();
         async move {
             service
-                .serve_console_restore(user(), limits(), server)
+                .serve_console_restore(user(), opening(), server)
                 .await;
         }
     });
@@ -513,7 +540,7 @@ async fn a_console_download_takes_its_request_after_a_ping() {
         let service = service.clone();
         async move {
             service
-                .serve_console_download(user(), limits(), server)
+                .serve_console_download(user(), opening(), server)
                 .await;
         }
     });
@@ -554,7 +581,7 @@ async fn a_second_request_on_a_console_download_breaks_the_call() {
         let service = service.clone();
         async move {
             service
-                .serve_console_download(user(), limits(), server)
+                .serve_console_download(user(), opening(), server)
                 .await;
         }
     });
@@ -586,7 +613,7 @@ async fn a_message_above_the_frame_limit_closes_a_console_download_with_its_clos
         let service = service.clone();
         async move {
             service
-                .serve_console_download(user(), limits(), server)
+                .serve_console_download(user(), opening(), server)
                 .await;
         }
     });
@@ -619,7 +646,7 @@ async fn a_console_download_whose_client_vanishes_ends_quietly() {
         let service = service.clone();
         async move {
             service
-                .serve_console_download(user(), limits(), server)
+                .serve_console_download(user(), opening(), server)
                 .await;
         }
     });
@@ -675,7 +702,7 @@ async fn a_console_restore_whose_client_leaves_after_its_last_chunk_is_not_answe
         let service = service.clone();
         async move {
             service
-                .serve_console_restore(user(), limits(), server)
+                .serve_console_restore(user(), opening(), server)
                 .await;
         }
     });
@@ -715,7 +742,7 @@ async fn a_text_message_closes_a_console_session_with_its_close_code() {
         let service = service.clone();
         async move {
             service
-                .serve_console_session(user(), limits(), server)
+                .serve_console_session(user(), opening(), server)
                 .await;
         }
     });

@@ -145,9 +145,7 @@ fn notice_code(
         Some(previous) if current.acknowledged && !previous.acknowledged => {
             Some(LicensingNoticeCode::Acknowledged)
         }
-        Some(previous) if current.until > previous.until => {
-            Some(LicensingNoticeCode::Extended)
-        }
+        Some(previous) if current.until > previous.until => Some(LicensingNoticeCode::Extended),
         None => Some(LicensingNoticeCode::Started),
         _ => None,
     }

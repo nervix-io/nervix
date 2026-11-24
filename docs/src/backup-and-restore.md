@@ -786,9 +786,10 @@ describes the dialog itself.
   reported the backup and following it to the console of the node that retains the archive when
   that is another node. It hands the archive to the browser as a download only once its size and BLAKE3
   digest match the backup's summary, under the last component of the file the statement names.
-  A download that fails in transport starts again from the first byte after a one-second pause,
-  for up to eight attempts and redirects in all, while the archive is retained. A download the
-  server refuses ends with its reason, and the backup itself completed.
+  A download that fails in transport starts again from the first byte after a pause of the node's
+  `--web-console-restoration-backoff`, one second by default, for as long as the archive is
+  retained: until the instant the backup's summary names. A download the server refuses ends with
+  its reason, and the backup itself completed.
 - **A reload resumes a backup.** The browser tab records the backup's execution reference, query
   text, and domain until its archive is downloaded. A reloaded page sends the backup again under
   that reference, which returns the recorded outcome instead of running the backup twice, and
@@ -803,8 +804,11 @@ describes the dialog itself.
   for the state the restore skipped.
 - **Retries.** Every attempt of a restore sends the same execution reference, statement, and
   archive. A redirect streams it again to the leader, and a lost connection or an unknown outcome
-  streams it again from its first byte, for about ten minutes; after that the console reports the
-  outcome as unknown and names the reference. An attempt that sent the whole archive without
+  streams it again from its first byte, until the reference's retry validity ends: the committed
+  `COMMAND_RETRY_VALIDITY`, 15 minutes by default, after the console issued the reference. After
+  that the console reports the outcome as unknown and names the reference. The node's
+  [web console pacing](node-settings.md#web-console-pacing) sets the pause between attempts and
+  how long each frame and reply may take. An attempt that sent the whole archive without
   learning the outcome, or an answer that the outcome is not known yet, may have had the restore
   admitted. The console then also reports the outcome as unknown under the reference, never as
   refused, when the restore ends without it: when the browser can no longer read the archive file,
