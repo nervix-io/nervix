@@ -899,16 +899,37 @@ impl Runtime {
         if start > counts.rows || after.is_some_and(|(expected, _)| expected != previous_branch) {
             return Err(Report::new(ProcessorStatePageError::Position));
         }
-        let sections = held_row_sections(processor.kind)?;
-        let memory = HeldRowsMemory::new(
-            &self.inner.executor,
-            bounds.reply,
-            sections,
-            bounds.rows != 0,
-        )?;
-        let held = self
-            .processor_state_sections(processor.kind, copies, memory)
-            .await?;
+        let copied = CopiedPage {
+            copies,
+            start,
+            counts,
+            generation,
+            digest,
+        };
+        self.held_rows_page(processor.kind, bounds.reply, bounds.rows != 0, copied)
+            .await
+    }
+
+    /// The page of the rows `copied` holds for a `kind` unit: admitted to the bulk memory the
+    /// page holds, those it keeps gathered into columns, and what it set aside for `reply`. A read
+    /// that `returns_rows` admits rows; a count-only read admits none.
+    async fn held_rows_page(
+        &self,
+        kind: ModelKind,
+        reply: PageReply,
+        returns_rows: bool,
+        copied: CopiedPage,
+    ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
+        let CopiedPage {
+            copies,
+            start,
+            counts,
+            generation,
+            digest,
+        } = copied;
+        let sections = held_row_sections(kind)?;
+        let memory = HeldRowsMemory::new(&self.inner.executor, reply, sections, returns_rows)?;
+        let held = self.processor_state_sections(kind, copies, memory).await?;
         let offset = start
             .checked_add(held.admitted.returned)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Position))?;
@@ -971,6 +992,17 @@ impl Runtime {
             .await
             .change_context(ProcessorStatePageError::Admission)?
     }
+}
+
+/// What reading a unit's selected branches came to before their rows are admitted to a page:
+/// every branch's copied rows, the offset the page starts at, the complete counts, the newest
+/// incarnation and the fingerprint so far.
+struct CopiedPage {
+    copies: Vec<CopiedBranch>,
+    start: u64,
+    counts: StateInspectionCounts,
+    generation: u64,
+    digest: nervix_crypto::digest::Sha256,
 }
 
 /// The columns of a page of held rows, the memory that holds them, and what admitting its rows

@@ -2963,8 +2963,9 @@ The inspection deadline controls stream admission and setup through
 `request_stream_with_timeout`, and the request type's `DEADLINE` projects from the configured request budget, like the materialized page operation. The caller's explicit remaining inspection deadline remains authoritative.
 
 An owner that serves a processor page to another node sets aside, before it admits any row, what
-encoding the descriptor and each section body's Arrow framing take, and every row it admits sets
-aside the bytes of the body that carries it. The page therefore ends where the bulk pool cannot
+encoding the descriptor, the eight-byte length that frames it on the stream, the job that computes
+each body's digest and each section body's Arrow framing take, and every row it admits sets aside
+the bytes of the body that carries it. The page therefore ends where the bulk pool cannot
 hold a row's working memory and its body together, with complete counts and a continuation. The
 owner encodes the bodies and the descriptor from that memory and never waits for memory while the
 reply holds a body: a body the set-aside memory falls short of takes the rest from the pool at once,

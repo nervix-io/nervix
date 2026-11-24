@@ -228,10 +228,6 @@ impl RuntimeRecordBatch {
     /// second grant while retaining the first. The projection and IPC writer run as one bounded
     /// CPU job; only the encoded allocation survives that job, which `admission` queues or refuses
     /// when the bulk queue is full.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::dispatch(reason = "the caller supplies the admitted bounded row projection")
-    )]
     pub(crate) async fn encode_arrow_snapshot_projection<E: error_stack::Context>(
         executor: &Executor,
         admission: QueueAdmission,
@@ -261,6 +257,10 @@ impl RuntimeRecordBatch {
     /// [`Self::encode_arrow_snapshot_projection`] does, on memory its caller already holds:
     /// `projection` for the projected columns while they exist, which comes back with the section,
     /// and `encoded` for the section's bytes, which the section keeps.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the admitted bounded row projection")
+    )]
     pub(crate) async fn encode_arrow_snapshot_projection_within<E: error_stack::Context>(
         executor: &Executor,
         admission: QueueAdmission,

@@ -169,20 +169,96 @@ impl Runtime {
         let memory = CaptureMemory::admit(&executor, &census, &query).await?;
         let CaptureMemory {
             views,
-            sources,
-            state,
+            sources: source_charge,
+            state: state_charge,
             selection: selection_memory,
         } = memory;
-        let captured = UnitCapture {
-            executor: executor.clone(),
-            routing: routing.clone(),
-            relay: relay.clone(),
-            unit: query.unit,
-            schema: schema.clone(),
-            census,
-        }
-        .run(views, sources, state)
-        .await?;
+        let captured_routing = routing.clone();
+        let captured_relay = relay.clone();
+        let captured_schema = schema.clone();
+        let unit = query.unit;
+        let captured = executor
+            .run_cpu(CpuClass::Bulk, views, move |mut charge, cancellation| {
+                let reads = captured_routing
+                    .materialized_stream_reads
+                    .get(&captured_relay)
+                    .ok_or_else(|| Report::new(StatePageReadError::NotReady))?;
+                let mut records = Vec::with_capacity(census.records);
+                #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
+                let mut sources = Vec::with_capacity(census.states);
+                let mut source_charge = source_charge;
+                let mut state_charge = Some(state_charge);
+                reads.visit_unit_states(unit, |branch, state| {
+                    cancellation
+                        .check()
+                        .change_context(StatePageReadError::Admission)?;
+                    let admitted = state_charge
+                        .take()
+                        .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+                    // Keep the generation and its admission in one owner: tuple fields drop in
+                    // order, so row-view metadata is freed before its charge is released.
+                    let captured = state
+                        .capture_for_inspection(admitted)
+                        .change_context(StatePageReadError::Admission)?;
+                    let generation = &captured.0;
+                    reserve_views(&mut records, generation.records().len(), &mut charge)?;
+                    records.extend_from_slice(generation.records());
+                    reserve_views(&mut sources, 1, &mut source_charge)?;
+                    sources.push((
+                        branch.map(|branch| branch.fingerprint()),
+                        state.inspection_instance(),
+                        generation.revision(),
+                        generation.fence(),
+                        generation.branch_generation(),
+                    ));
+                    let (generation, admitted) = captured;
+                    drop(generation);
+                    state_charge = Some(admitted);
+                    Ok::<_, Report<StatePageReadError>>(())
+                })?;
+                if sources.is_empty() {
+                    return Ok(None);
+                }
+                records.sort_unstable_by(|a, b| {
+                    super::BranchKey::canonical_order(&a.branch, &b.branch)
+                });
+                sources.sort_unstable();
+                let mut digest = nervix_crypto::digest::Sha256::new();
+                digest.update(b"nervix/state-inspection/unit-generations");
+                let mut revision = 0;
+                let mut fence = 0;
+                let mut generation = 0;
+                for (branch, instance, rev, source_fence, membership) in sources {
+                    match branch {
+                        Some(branch) => {
+                            digest.update(&[1]);
+                            digest.update(branch.fingerprint());
+                        }
+                        None => digest.update(&[0]),
+                    }
+                    digest.update(&instance.to_be_bytes());
+                    digest.update(&rev.to_be_bytes());
+                    digest.update(&source_fence.to_be_bytes());
+                    digest.update(&membership.to_be_bytes());
+                    revision = revision.max(rev);
+                    fence = fence.max(source_fence);
+                    generation = generation.max(membership);
+                }
+                Ok::<_, Report<StatePageReadError>>(Some(PageSource {
+                    generation: MaterializedGeneration::new(
+                        revision,
+                        fence,
+                        generation,
+                        captured_schema,
+                        records,
+                    ),
+                    views: charge,
+                    stored: StoredSource::Live,
+                    sources: digest.finish(),
+                }))
+            })
+            .await
+            .change_context(StatePageReadError::Admission)??;
         let source = match captured {
             Some(captured) => captured,
             None => {
@@ -325,16 +401,6 @@ impl UnitCensus {
     }
 }
 
-/// The identity of one captured state, which the page's fingerprint covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct SourceIdentity {
-    branch: Option<BranchKeyFingerprint>,
-    instance: u64,
-    revision: u64,
-    fence: u64,
-    branch_generation: u64,
-}
-
 /// The bytes `count` values of `T` take.
 fn bytes_of<T>(count: usize) -> Result<u64, Report<StatePageReadError>> {
     let bytes = count
@@ -418,7 +484,9 @@ impl CaptureMemory {
     ) -> Result<Self, Report<StatePageReadError>> {
         let too_large = || Report::new(StatePageReadError::CaptureTooLarge);
         let views = bytes_of::<MaterializedGenerationRecord>(census.records)?;
-        let sources = bytes_of::<SourceIdentity>(census.states)?;
+        // Each captured state's branch, instance, revision, fence and branch generation.
+        let sources =
+            bytes_of::<(Option<BranchKeyFingerprint>, u64, u64, u64, u64)>(census.states)?;
         let state = bytes_of::<MaterializedGenerationRecord>(census.largest)?;
         let selection = SelectionNeed::of(
             census.records,
@@ -491,120 +559,6 @@ struct PageSource {
     stored: StoredSource,
     /// The digest of the captured states' identities.
     sources: [u8; 32],
-}
-
-/// The live capture of one counted unit.
-struct UnitCapture {
-    executor: Executor,
-    routing: nervix_primitives::sync::StdArc<super::DomainRoutingSnapshot>,
-    relay: RelayName,
-    unit: Unit,
-    schema: nervix_primitives::sync::StdArc<arrow_schema::Schema>,
-    census: UnitCensus,
-}
-
-impl UnitCapture {
-    /// Captures the unit's states into the admitted `views`, `sources` and `state` memory; none
-    /// when the unit has no installed state on this node.
-    async fn run(
-        self,
-        views: Reservation,
-        sources: Reservation,
-        state: Reservation,
-    ) -> Result<Option<PageSource>, Report<StatePageReadError>> {
-        let executor = self.executor.clone();
-        executor
-            .run_cpu(CpuClass::Bulk, views, move |views, cancellation| {
-                self.capture(views, sources, state, cancellation)
-            })
-            .await
-            .change_context(StatePageReadError::Admission)?
-    }
-
-    fn capture(
-        self,
-        views: Reservation,
-        sources: Reservation,
-        state: Reservation,
-        cancellation: &nervix_execution::Cancellation,
-    ) -> Result<Option<PageSource>, Report<StatePageReadError>> {
-        let reads = self
-            .routing
-            .materialized_stream_reads
-            .get(&self.relay)
-            .ok_or_else(|| Report::new(StatePageReadError::NotReady))?;
-        let mut records = Vec::with_capacity(self.census.records);
-        let mut identities = Vec::with_capacity(self.census.states);
-        let mut views = views;
-        let mut sources = sources;
-        let mut state_charge = Some(state);
-        reads.visit_unit_states(self.unit, |branch, state| {
-            cancellation
-                .check()
-                .change_context(StatePageReadError::Admission)?;
-            let charge = state_charge
-                .take()
-                .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-            // Keep the generation and its admission in one owner: tuple fields drop in order, so
-            // row-view metadata is freed before its charge is released.
-            let captured = state
-                .capture_for_inspection(charge)
-                .change_context(StatePageReadError::Admission)?;
-            let generation = &captured.0;
-            reserve_views(&mut records, generation.records().len(), &mut views)?;
-            records.extend_from_slice(generation.records());
-            reserve_views(&mut identities, 1, &mut sources)?;
-            identities.push(SourceIdentity {
-                branch: branch.map(|branch| branch.fingerprint()),
-                instance: state.inspection_instance(),
-                revision: generation.revision(),
-                fence: generation.fence(),
-                branch_generation: generation.branch_generation(),
-            });
-            let (generation, charge) = captured;
-            drop(generation);
-            state_charge = Some(charge);
-            Ok::<_, Report<StatePageReadError>>(())
-        })?;
-        if identities.is_empty() {
-            return Ok(None);
-        }
-        records.sort_unstable_by(|a, b| super::BranchKey::canonical_order(&a.branch, &b.branch));
-        identities.sort_unstable();
-        let mut digest = nervix_crypto::digest::Sha256::new();
-        digest.update(b"nervix/state-inspection/unit-generations");
-        let mut revision = 0;
-        let mut fence = 0;
-        let mut branch_generation = 0;
-        for identity in identities {
-            match identity.branch {
-                Some(branch) => {
-                    digest.update(&[1]);
-                    digest.update(branch.fingerprint());
-                }
-                None => digest.update(&[0]),
-            }
-            digest.update(&identity.instance.to_be_bytes());
-            digest.update(&identity.revision.to_be_bytes());
-            digest.update(&identity.fence.to_be_bytes());
-            digest.update(&identity.branch_generation.to_be_bytes());
-            revision = revision.max(identity.revision);
-            fence = fence.max(identity.fence);
-            branch_generation = branch_generation.max(identity.branch_generation);
-        }
-        Ok(Some(PageSource {
-            generation: MaterializedGeneration::new(
-                revision,
-                fence,
-                branch_generation,
-                self.schema,
-                records,
-            ),
-            views,
-            stored: StoredSource::Live,
-            sources: digest.finish(),
-        }))
-    }
 }
 
 /// One page's selection from its captured records.
