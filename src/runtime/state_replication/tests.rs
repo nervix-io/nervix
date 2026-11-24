@@ -300,13 +300,13 @@ async fn surviving_authority_reconciles_a_dead_coordinators_preparation() {
         .assured("the handoff fixture has a complete cluster revision");
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(&surviving_authority, &revision_plan,)
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &revision_plan)
             .expect("the surviving authority should reconcile the abandoned operation"),
         1
     );
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(&surviving_authority, &revision_plan,)
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &revision_plan)
             .expect("duplicate reconciliation should be idempotent"),
         0
     );
@@ -385,7 +385,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
     let surviving_authority = CoordinationIdentity::new(named("coordinator-b"), 12, 1);
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(&surviving_authority, &committed_revision,)
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &committed_revision)
             .expect("committed preparation should survive reconciliation"),
         0
     );
@@ -427,7 +427,7 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
         .expect("duplicate activation should be idempotent");
     assert_eq!(
         runtime
-            .reconcile_prepared_ownership_handoffs(&surviving_authority, &committed_revision,)
+            .reconcile_prepared_ownership_handoffs(&surviving_authority, &committed_revision)
             .expect("reconciliation reordered after activation should be idempotent"),
         0
     );
