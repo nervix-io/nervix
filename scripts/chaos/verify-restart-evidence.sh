@@ -78,15 +78,15 @@ case "${phase}" in
             printf '%s did not exit cleanly\n' "${service}" >&2
             exit 1
         fi
-        for phase_name in admission drain-support terminal-teardown; do
+        for phase_name in admission save move terminal-teardown; do
             if ! grep -Fq "shutdown ${phase_name} phase finished" "${shutdown_log}"; then
                 printf '%s did not finish shutdown phase %s\n' "${service}" "${phase_name}" >&2
                 exit 1
             fi
         done
-        if grep -Eq 'outcome=Forced|shutdown deadline expired|repeated termination signal received; abandoning' \
+        if grep -Eq 'outcome=Disrupted|repeated termination signal received; abandoning' \
             "${shutdown_log}"; then
-            printf '%s reported a forced shutdown\n' "${service}" >&2
+            printf '%s reported a disrupted or forced shutdown\n' "${service}" >&2
             exit 1
         fi
         ;;

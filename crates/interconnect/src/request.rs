@@ -2769,7 +2769,7 @@ mod tests {
             ..Default::default()
         })
         .assured("a four-request quota fits node admission");
-        let options = settings.options(None, None);
+        let options = settings.options(None);
         let quotas = RequestQuotas::new(&options);
         let held: Vec<_> = (0..4)
             .map(|_| {

@@ -99,7 +99,7 @@ use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, ModelPublicationRefusalKind, SchedulerMode, WasmStateResetRequestError,
     application::{
-        InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownPhaseOutcome,
+        InternalTransportMode, NODE_TAGS_OPTION, SettingOverride, ShutdownMoveOutcome,
         run_server_process,
     },
     memory_pressure::MemoryPressureConfig,
@@ -226,6 +226,7 @@ mod database_batches;
 #[cfg(feature = "deloxide")]
 mod deadlock_diagnostics;
 mod deadlock_reports;
+mod delivery_lower_bounds;
 mod domain_clock_attachment;
 mod domain_resume;
 mod emitter_destinations;
@@ -601,9 +602,10 @@ struct ScenarioWorld {
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
     /// The payloads single-payload subscription waits read and passed over while waiting for
-    /// another payload, so a later wait that times out can name the payload it expects when it
-    /// already arrived before that wait began.
-    passed_over_subscription_payloads: Vec<String>,
+    /// another payload, with when each was read. A later wait that a publication bounds judges
+    /// the one it expects by when it was read, and a wait that times out names the payload it
+    /// expects when it already arrived before that wait began.
+    passed_over_subscription_payloads: Vec<PassedOverPayload>,
     /// The metric values each named subscription passed from sampling, recorded once every value
     /// that was sampled had been drawn for.
     sampled_metric_values: BTreeMap<String, Vec<i64>>,
@@ -620,6 +622,9 @@ struct ScenarioWorld {
     /// The instant a rate-limit scenario recorded before its ingestor could admit a payload, and
     /// when each payload it then received arrived.
     rate_limit: ingestor_rate_limit::RateLimitObservation,
+    /// The runtime revision each node applied when the scenario last recorded them, before it
+    /// published what a lower bound then measures.
+    recorded_runtime_revisions: Option<delivery_lower_bounds::RecordedRuntimeRevisions>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
     last_command_disposition: Option<nervix_client_wire::CommandDisposition>,
@@ -1130,6 +1135,21 @@ impl ScenarioWorld {
         wait: Option<Duration>,
         step: &Step,
     ) {
+        self.observability_metric_value_reached(node_id, metric_name, expected_value, wait, step)
+            .await
+            .expect("observability endpoint did not report the expected metric value");
+    }
+
+    /// Waits for the metric the step's labels select on `node_id` to equal `expected_value`, and
+    /// returns why it did not instead of failing the step.
+    async fn observability_metric_value_reached(
+        &self,
+        node_id: &str,
+        metric_name: &str,
+        expected_value: i64,
+        wait: Option<Duration>,
+        step: &Step,
+    ) -> std::io::Result<()> {
         let node_id = expand_placeholders(self, node_id);
         let metric_name = expand_placeholders(self, metric_name);
         let label_fragments = docstring(step)
@@ -1147,7 +1167,6 @@ impl ScenarioWorld {
                 wait,
             )
             .await
-            .expect("observability endpoint did not report the expected metric value");
     }
 
     async fn wait_for_observability_metric_at_least(
@@ -4334,16 +4353,6 @@ async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schem
     world.last_command_output = Some(output);
 }
 
-#[given(expr = "a nervix-server process is started with drain timeout {string}")]
-async fn given_nervix_server_process_is_started_with_drain_timeout(
-    world: &mut ScenarioWorld,
-    drain_timeout: String,
-) {
-    let drain_timeout =
-        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
-    start_ready_server_process(world, &[ServerProcessOption::DrainTimeout(drain_timeout)]).await;
-}
-
 #[given(expr = "a nervix-server process is started with state snapshot interval {string}")]
 async fn given_nervix_server_process_is_started_with_state_snapshot_interval(
     world: &mut ScenarioWorld,
@@ -4392,24 +4401,21 @@ async fn given_nervix_server_process_is_started_with_transaction_retention(
     start_ready_server_process(world, &options).await;
 }
 
-#[given(
-    expr = "a nervix-server process is started with drain timeout {string} and shutdown timeout \
-            {string}"
-)]
-async fn given_nervix_server_process_is_started_with_shutdown_timeouts(
+/// Starts the server process with `shutdown_timeout` for its moves. The cluster's domain drain
+/// timeout and entity gate deadline, which may not exceed a node's shutdown timeout, are seeded no
+/// longer than it.
+#[given(expr = "a nervix-server process is started with shutdown timeout {string}")]
+async fn given_nervix_server_process_is_started_with_shutdown_timeout(
     world: &mut ScenarioWorld,
-    drain_timeout: String,
     shutdown_timeout: String,
 ) {
-    let drain_timeout =
-        parse_duration_text(&drain_timeout).expect("drain timeout must be a valid duration");
     let shutdown_timeout =
         parse_duration_text(&shutdown_timeout).expect("shutdown timeout must be a valid duration");
+    let runtime_deadline = shutdown_timeout.min(nervix_models::DomainDrainTimeout::DEFAULT);
     let options = [
-        ServerProcessOption::DrainTimeout(drain_timeout),
         ServerProcessOption::ShutdownTimeout(shutdown_timeout),
-        ServerProcessOption::DomainDrainTimeout(drain_timeout),
-        ServerProcessOption::EntityGateDeadline(drain_timeout),
+        ServerProcessOption::DomainDrainTimeout(runtime_deadline),
+        ServerProcessOption::EntityGateDeadline(runtime_deadline),
     ];
     start_ready_server_process(world, &options).await;
 }
@@ -10531,6 +10537,23 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
 }
 
+/// Stalls the TCP forwarder at `address`: it refuses new connections, and every connection it
+/// carries stays open but passes no further byte either way. A client connected through it sees
+/// its node fall silent without the connection closing, as after a network cut or a frozen host.
+#[when(expr = "the TCP forwarder at {string} stalls its connections")]
+async fn when_the_tcp_forwarder_stalls(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders")
+        .stall(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stall: {error}"));
+}
+
 /// Stops the TCP forwarder at `address` and starts it again `seconds` later. Every session through
 /// it ends when it stops, and no client can open another through it until it starts again.
 #[when(expr = "the TCP forwarder at {string} stays stopped for {int} seconds and then restarts")]
@@ -10734,32 +10757,26 @@ fn given_node_starts_with_setting(
     }
 }
 
-#[given(expr = "drain timeout is configured as {string}")]
-async fn given_drain_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
-    assert!(
-        world.cluster.is_none(),
-        "drain timeout must be configured before cluster startup"
-    );
-    world.cluster_config.drain_timeout =
-        parse_duration_text(&timeout).expect("shutdown drain timeout must be valid");
-    // This fixture intentionally exercises a short node drain. Its domains and entity gate
-    // must use a policy that the node can honor, through the same first-bootstrap path.
-    let budget = world
-        .cluster_config
-        .drain_timeout
-        .min(world.cluster_config.shutdown_timeout);
-    world.cluster_config.runtime_parameters.domain_drain_timeout = Some(budget);
-    world.cluster_config.runtime_parameters.entity_gate_deadline = Some(budget);
-}
-
+/// Gives every node `timeout` for its moves. The cluster's domain drain timeout and entity gate
+/// deadline, which may not exceed a node's shutdown timeout, are seeded no longer than it, through
+/// the same first-bootstrap path.
 #[given(expr = "shutdown timeout is configured as {string}")]
 async fn given_shutdown_timeout_is_configured(world: &mut ScenarioWorld, timeout: String) {
     assert!(
         world.cluster.is_none(),
         "shutdown timeout must be configured before cluster startup"
     );
-    world.cluster_config.shutdown_timeout =
-        parse_duration_text(&timeout).expect("shutdown timeout must be valid");
+    let timeout = parse_duration_text(&timeout).expect("shutdown timeout must be valid");
+    world.cluster_config.shutdown_timeout = timeout;
+    let runtime_parameters = &mut world.cluster_config.runtime_parameters;
+    let domain_drain_timeout = runtime_parameters
+        .domain_drain_timeout
+        .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
+    runtime_parameters.domain_drain_timeout = Some(domain_drain_timeout.min(timeout));
+    let entity_gate_deadline = runtime_parameters
+        .entity_gate_deadline
+        .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
+    runtime_parameters.entity_gate_deadline = Some(entity_gate_deadline.min(timeout));
 }
 
 #[given(expr = "schema change drain timeout is configured as {string}")]
@@ -10773,7 +10790,6 @@ async fn given_schema_change_drain_timeout_is_configured(
     );
     let timeout = parse_duration_text(&timeout).expect("schema drain timeout must be valid");
     world.cluster_config.runtime_parameters.domain_drain_timeout = Some(timeout);
-    world.cluster_config.drain_timeout = world.cluster_config.drain_timeout.max(timeout);
     world.cluster_config.shutdown_timeout = world.cluster_config.shutdown_timeout.max(timeout);
 }
 
@@ -10785,7 +10801,6 @@ async fn given_entity_gate_deadline_is_configured(world: &mut ScenarioWorld, tim
     );
     let timeout = parse_duration_text(&timeout).expect("entity gate deadline must be valid");
     world.cluster_config.runtime_parameters.entity_gate_deadline = Some(timeout);
-    world.cluster_config.drain_timeout = world.cluster_config.drain_timeout.max(timeout);
     world.cluster_config.shutdown_timeout = world.cluster_config.shutdown_timeout.max(timeout);
 }
 
@@ -14544,21 +14559,21 @@ fn when_materialized_snapshot_opening_pause_released(world: &mut ScenarioWorld, 
         .release_materialized_snapshot_opening(&materialized_snapshot_relay(world, &relay));
 }
 
-#[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
-async fn then_last_shutdown_reports_drain_support_phase(
+#[then(expr = "the last shutdown of node {string} reports its moves {string}")]
+async fn then_last_shutdown_reports_its_moves(
     world: &mut ScenarioWorld,
     node_id: String,
     outcome: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
     let expected = outcome
-        .parse::<ShutdownPhaseOutcome>()
-        .unwrap_or_else(|error| panic!("unknown shutdown phase outcome '{outcome}': {error}"));
+        .parse::<ShutdownMoveOutcome>()
+        .unwrap_or_else(|error| panic!("unknown shutdown move outcome '{outcome}': {error}"));
     let Some(shutdown) = world.cluster().last_shutdown_outcome(&node_id) else {
         panic!("node '{node_id}' has no finished shutdown that the scenario waited for");
     };
     assert_eq!(
-        shutdown.drain_support, expected,
+        shutdown.moves, expected,
         "node '{node_id}' finished its last shutdown with {shutdown:?}"
     );
 }
@@ -14570,6 +14585,38 @@ async fn when_all_nodes_are_stopped(world: &mut ScenarioWorld) {
         .shutdown()
         .await
         .expect("failed to stop all nodes");
+}
+
+#[when("every node begins stopping")]
+async fn when_every_node_begins_stopping(world: &mut ScenarioWorld) {
+    world.cluster_mut().begin_stopping_all_nodes();
+}
+
+/// Holds a node to a save that cannot end yet: after `wait`, it is still saving what it holds, or
+/// still moving its units and saving what did not move.
+#[then(expr = "node {string} is still saving or moving its units after {string}")]
+async fn then_node_is_still_saving_or_moving_after(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    wait: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let wait = parse_duration_text(&wait).expect("the wait must be a valid duration");
+    nervix_primitives::time::sleep(wait).await;
+    let progress = world.cluster_mut().node_stop_progress(&node_id);
+    let still_saving_or_moving = match progress {
+        Some(progress) => matches!(
+            progress.phase,
+            nervix_server::application::ShutdownPhase::Saving
+                | nervix_server::application::ShutdownPhase::Moving
+        ),
+        None => false,
+    };
+    assert!(
+        still_saving_or_moving,
+        "node '{node_id}' was expected to be still saving or moving after {wait:?}, but its \
+         shutdown stood {progress:?}"
+    );
 }
 
 #[when("all nodes are gracefully stopped")]
@@ -17027,23 +17074,23 @@ async fn then_last_cluster_operation_takes_at_least(world: &mut ScenarioWorld, d
     );
 }
 
-#[then(expr = "node {string} reports that its last shutdown passed its deadline")]
-async fn then_node_reports_that_its_last_shutdown_passed_its_deadline(
+#[then(expr = "node {string} reports that its last shutdown disrupted the cluster")]
+async fn then_node_reports_that_its_last_shutdown_disrupted_the_cluster(
     world: &mut ScenarioWorld,
     node_id: String,
 ) {
     let node_id = expand_placeholders(world, &node_id);
     let Some(failure) = world.cluster().node_run_failure(&node_id) else {
-        panic!("node '{node_id}' stopped without reporting that its shutdown deadline passed");
+        panic!("node '{node_id}' stopped without reporting a cluster disruption");
     };
     assert!(
-        failure.contains("did not finish before its shutdown deadline"),
+        failure.contains("a cluster disruption"),
         "node '{node_id}' stopped with an unrelated failure: {failure}"
     );
 }
 
-#[then(expr = "node {string} reports that its last shutdown finished before its deadline")]
-async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+#[then(expr = "node {string} reports that its last shutdown finished cleanly")]
+async fn then_node_reports_that_its_last_shutdown_finished_cleanly(
     world: &mut ScenarioWorld,
     node_id: String,
 ) {
@@ -17053,8 +17100,8 @@ async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
     }
 }
 
-#[then("every node reports that its last shutdown finished before its deadline")]
-async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+#[then("every node reports that its last shutdown did not disrupt the cluster")]
+async fn then_every_node_reports_that_its_last_shutdown_did_not_disrupt_the_cluster(
     world: &mut ScenarioWorld,
 ) {
     for node_id in world.cluster().node_ids() {
@@ -17068,8 +17115,8 @@ async fn then_every_node_reports_that_its_last_shutdown_finished_before_its_dead
             );
         }
         assert!(
-            !shutdown.deadline_expired(),
-            "node '{node_id}' finished its last shutdown past its deadline: {shutdown:?}"
+            !shutdown.disrupted(),
+            "node '{node_id}' left units it could have moved: {shutdown:?}"
         );
     }
 }
@@ -28830,6 +28877,34 @@ async fn then_node_observability_metric_with_labels_eventually_equals(
         .await;
 }
 
+/// The value holds only while no node applies a runtime revision newer than the ones the scenario
+/// recorded before it published: applying one force-flushes the domain, which sends what a node
+/// collects or holds in more batches than its cadence would. See [`delivery_lower_bounds`].
+#[then(
+    expr = "node {string} observability metric {string} with labels eventually equals {int}, \
+            unless a node applied a newer runtime revision"
+)]
+async fn then_node_observability_metric_with_labels_eventually_equals_unless_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    metric_name: String,
+    expected_value: i64,
+    #[step] step: &Step,
+) {
+    let reached = world
+        .observability_metric_value_reached(&node_id, &metric_name, expected_value, None, step)
+        .await;
+    if let Err(error) = reached {
+        let published_at = world
+            .last_publish_at
+            .assured("a metric a publication's hold decides follows a publishing step");
+        let node = expand_placeholders(world, &node_id);
+        let unmet =
+            format!("node {node} did not report {metric_name} equal to {expected_value}: {error}");
+        delivery_lower_bounds::require_newer_runtime_revision(world, published_at, &unmet).await;
+    }
+}
+
 #[then(expr = "node {string} observability metric {string} with labels is eventually absent")]
 async fn then_node_observability_metric_with_labels_is_eventually_absent(
     world: &mut ScenarioWorld,
@@ -34571,10 +34646,12 @@ async fn then_subscription_payloads_survive_a_delayed_caller(
 /// earlier than the scenario's first HTTP post, so the collected payloads cannot be read sooner
 /// than the window after that post. This step must start while the window is still open: then it
 /// reads each payload as it arrives, and a step that starts late can only lengthen the measured
-/// delay.
+/// delay. A node that applies a runtime revision newer than the ones the scenario recorded before
+/// that post force-flushes the domain, which cuts the window short; see [`delivery_lower_bounds`].
 #[then(
     expr = "within {string} the relay subscription receives payloads no sooner than {string} \
-            after the first http payload was posted"
+            after the first http payload was posted, unless a node applied a newer runtime \
+            revision"
 )]
 async fn then_within_duration_the_relay_subscription_receives_payloads_after_collection(
     world: &mut ScenarioWorld,
@@ -34597,11 +34674,15 @@ async fn then_within_duration_the_relay_subscription_receives_payloads_after_col
         "first collected subscription payload was read {first_read_after:?} after the first http \
          post"
     ));
-    assert!(
-        first_read_after >= expected_delay,
-        "expected the collected payloads no sooner than {expected_delay:?} after the first http \
-         post, but the first was read after {first_read_after:?}"
-    );
+    if first_read_after < expected_delay {
+        let early = format!(
+            "the first collected payload was read {first_read_after:?} after the first http post, \
+             sooner than {expected_delay:?}"
+        );
+        delivery_lower_bounds::EarlyArrival::ReleasedByNewerRuntimeRevision
+            .judge(world, first_posted_at, &early)
+            .await;
+    }
 }
 
 /// The payload fragments a step's docstring expects, one for each non-empty line.
@@ -35062,18 +35143,59 @@ async fn then_subscription_payloads_arrive_after_publication_delay(
     delay: String,
     #[step] step: &Step,
 ) {
-    let delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    receive_payloads_no_sooner_than(
+        world,
+        &duration,
+        &delay,
+        step,
+        delivery_lower_bounds::EarlyArrival::Refused,
+    )
+    .await;
+}
+
+/// The lower bound holds only while no node applies a runtime revision newer than the ones the
+/// scenario recorded before it published: applying one force-flushes the domain, which sends a
+/// held row early. See [`delivery_lower_bounds`].
+#[then(
+    expr = "within {string} the relay subscription receives payloads no sooner than {string} \
+            after they were published, unless a node applied a newer runtime revision"
+)]
+async fn then_subscription_payloads_arrive_after_publication_delay_unless_released(
+    world: &mut ScenarioWorld,
+    duration: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    receive_payloads_no_sooner_than(
+        world,
+        &duration,
+        &delay,
+        step,
+        delivery_lower_bounds::EarlyArrival::ReleasedByNewerRuntimeRevision,
+    )
+    .await;
+}
+
+/// Waits for every fragment set the step's docstring names, and judges each that arrived sooner
+/// than `delay` after the last publication.
+async fn receive_payloads_no_sooner_than(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    delay: &str,
+    step: &Step,
+    early_arrival: delivery_lower_bounds::EarlyArrival,
+) {
+    let delay = parse_duration_text(delay).expect("step delay must be a valid duration");
     let published_at = world
         .last_publish_at
         .expect("a delivery-delay assertion must follow a publishing step");
-    receive_subscription_fragment_sets(
-        world,
-        &duration,
-        step,
-        UnmatchedPayloads::Fail,
-        Some(published_at + delay),
-    )
-    .await;
+    let bound = delivery_lower_bounds::DeliveryLowerBound {
+        published_at,
+        delay,
+        early_arrival,
+    };
+    receive_subscription_fragment_sets(world, duration, step, UnmatchedPayloads::Fail, Some(bound))
+        .await;
 }
 
 /// Every payload matching a fragment set carries the same value in the
@@ -35145,7 +35267,7 @@ async fn receive_subscription_fragment_sets(
     duration: &str,
     step: &Step,
     unmatched: UnmatchedPayloads,
-    delivery_not_before: Option<Instant>,
+    lower_bound: Option<delivery_lower_bounds::DeliveryLowerBound>,
 ) -> Vec<String> {
     let expected_fragment_sets = docstring_fragment_sets(world, step);
     assert!(
@@ -35157,20 +35279,20 @@ async fn receive_subscription_fragment_sets(
         duration,
         expected_fragment_sets,
         unmatched,
-        delivery_not_before,
+        lower_bound,
     )
     .await
 }
 
 /// Waits until each of `expected_fragment_sets` is found whole in one subscription payload, and
 /// returns the payloads that matched, in the order they arrived. A matching payload that arrives
-/// before `delivery_not_before` fails the wait.
+/// before `lower_bound` allows is judged as the bound says, once every set has arrived.
 async fn receive_expected_fragment_sets(
     world: &mut ScenarioWorld,
     duration: &str,
     expected_fragment_sets: Vec<Vec<String>>,
     unmatched: UnmatchedPayloads,
-    delivery_not_before: Option<Instant>,
+    lower_bound: Option<delivery_lower_bounds::DeliveryLowerBound>,
 ) -> Vec<String> {
     let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let session = world
@@ -35181,6 +35303,7 @@ async fn receive_expected_fragment_sets(
     let mut remaining = expected_fragment_sets;
     let mut observed = Vec::new();
     let mut matched = Vec::new();
+    let mut early_deliveries = lower_bound.map(delivery_lower_bounds::EarlyDeliveries::new);
 
     while !remaining.is_empty() {
         let now = Instant::now();
@@ -35212,12 +35335,8 @@ async fn receive_expected_fragment_sets(
             .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)));
         match (position, unmatched) {
             (Some(index), _) => {
-                if let Some(not_before) = delivery_not_before {
-                    assert!(
-                        Instant::now() >= not_before,
-                        "subscription payload {payload:?} arrived before its publication-relative \
-                         delivery bound"
-                    );
+                if let Some(early_deliveries) = early_deliveries.as_mut() {
+                    early_deliveries.check(&payload);
                 }
                 remaining.remove(index);
                 matched.push(payload);
@@ -35228,6 +35347,9 @@ async fn receive_expected_fragment_sets(
                  remaining {remaining:?}, observed {observed:?}"
             ),
         }
+    }
+    if let Some(early_deliveries) = early_deliveries {
+        early_deliveries.judge(world).await;
     }
     matched
 }
@@ -37287,10 +37409,13 @@ async fn then_within_duration_iceberg_table_contains_row(
 
 /// Measures when a published row reached the table rather than asserting that it had not yet: the
 /// publishing step records its instant before the row leaves the harness, and the row is observed
-/// no earlier than its commit, so load only lengthens the measured delay.
+/// no earlier than its commit, so load only lengthens the measured delay. A node that applies a
+/// runtime revision newer than the ones the scenario recorded before the publication
+/// force-flushes the domain, which sends what the emitter holds at once; see
+/// [`delivery_lower_bounds`].
 #[then(
     expr = "within {string} the Iceberg table {string} contains a row no sooner than {string} \
-            after it was published"
+            after it was published, unless a node applied a newer runtime revision"
 )]
 async fn then_within_duration_iceberg_table_contains_row_no_sooner_than(
     world: &mut ScenarioWorld,
@@ -37315,11 +37440,15 @@ async fn then_within_duration_iceberg_table_contains_row_no_sooner_than(
     append_cucumber_log_line(&format!(
         "Iceberg row in table {table} arrived {arrived_after:?} after it was published"
     ));
-    assert!(
-        arrived_after >= expected_delay,
-        "expected the Iceberg row {expected} in table {table} no sooner than {expected_delay:?} \
-         after publishing, but it arrived after {arrived_after:?}"
-    );
+    if arrived_after < expected_delay {
+        let early = format!(
+            "the Iceberg row {expected} in table {table} arrived {arrived_after:?} after it was \
+             published, sooner than {expected_delay:?}"
+        );
+        delivery_lower_bounds::EarlyArrival::ReleasedByNewerRuntimeRevision
+            .judge(world, published_at, &early)
+            .await;
+    }
 }
 
 /// Waits until the Iceberg table contains `expected`, failing once `duration` has passed.
@@ -38975,8 +39104,47 @@ async fn capture_and_assert_subscription_payload(
         if carries_topic_key && payload.contains(&expected_payload) {
             break;
         }
-        world.passed_over_subscription_payloads.push(payload);
+        world
+            .passed_over_subscription_payloads
+            .push(PassedOverPayload::read_now(payload));
     }
+}
+
+/// A subscription payload a wait read and passed over while it waited for another one.
+#[derive(Debug)]
+struct PassedOverPayload {
+    payload: String,
+    read_at: Instant,
+}
+
+impl PassedOverPayload {
+    /// A payload the wait has just read.
+    fn read_now(payload: String) -> Self {
+        Self {
+            payload,
+            read_at: Instant::now(),
+        }
+    }
+
+    /// Whether this is the payload containing `expected_payload` that a wait for a publication
+    /// made at `published_at` expects: one read before that publication cannot be its delivery.
+    fn delivers(&self, expected_payload: &str, published_at: Instant) -> bool {
+        self.read_at >= published_at && self.payload.contains(expected_payload)
+    }
+}
+
+/// Takes the payload an earlier wait passed over that delivers `expected_payload` after
+/// `published_at`, if one did.
+fn take_passed_over_delivery(
+    world: &mut ScenarioWorld,
+    expected_payload: &str,
+    published_at: Instant,
+) -> Option<PassedOverPayload> {
+    let position = world
+        .passed_over_subscription_payloads
+        .iter()
+        .position(|passed| passed.delivers(expected_payload, published_at))?;
+    Some(world.passed_over_subscription_payloads.remove(position))
 }
 
 /// What a timed-out single-payload wait adds when an earlier wait already read past the payload it
@@ -38984,9 +39152,9 @@ async fn capture_and_assert_subscription_payload(
 /// step still waits for another branch's row, and that step reads past it.
 fn earlier_arrival_note(world: &ScenarioWorld, expected_payload: &str) -> String {
     let mut arrived_earlier = Vec::new();
-    for payload in &world.passed_over_subscription_payloads {
-        if payload.contains(expected_payload) {
-            arrived_earlier.push(payload.as_str());
+    for passed in &world.passed_over_subscription_payloads {
+        if passed.payload.contains(expected_payload) {
+            arrived_earlier.push(passed.payload.as_str());
         }
     }
     if arrived_earlier.is_empty() {
@@ -39008,8 +39176,47 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     delay: String,
     #[step] step: &Step,
 ) {
+    receive_payload_no_sooner_than(
+        world,
+        &delay,
+        step,
+        delivery_lower_bounds::EarlyArrival::Refused,
+    )
+    .await;
+}
+
+/// The lower bound holds only while no node applies a runtime revision newer than the ones the
+/// scenario recorded before it published: applying one force-flushes the domain, which sends a
+/// held row early. See [`delivery_lower_bounds`].
+#[then(
+    expr = "the relay subscription receives a payload no sooner than {string} after it was \
+            published, unless a node applied a newer runtime revision"
+)]
+async fn then_stream_subscription_receives_payload_no_sooner_than_unless_released(
+    world: &mut ScenarioWorld,
+    delay: String,
+    #[step] step: &Step,
+) {
+    receive_payload_no_sooner_than(
+        world,
+        &delay,
+        step,
+        delivery_lower_bounds::EarlyArrival::ReleasedByNewerRuntimeRevision,
+    )
+    .await;
+}
+
+/// Waits for the payload the step's docstring names, and judges it when it arrived sooner than
+/// `delay` after the last publication. A payload an earlier wait passed over is judged by when that
+/// wait read it.
+async fn receive_payload_no_sooner_than(
+    world: &mut ScenarioWorld,
+    delay: &str,
+    step: &Step,
+    early_arrival: delivery_lower_bounds::EarlyArrival,
+) {
     let expected_delay =
-        parse_duration_text(&delay).expect("step duration must be a valid duration");
+        parse_duration_text(delay).expect("step duration must be a valid duration");
     let published_at = world
         .last_publish_at
         .expect("a delivery-delay assertion must follow a publishing step");
@@ -39023,6 +39230,42 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
     ));
 
     let deadline = Instant::now() + expected_delay + SUBSCRIPTION_DELIVERY_BUDGET;
+    let arrived_after = receive_delivery(world, &expected_payload, published_at, deadline).await;
+    if arrived_after < expected_delay {
+        let early = format!(
+            "the payload containing {expected_payload} arrived {arrived_after:?} after it was \
+             published, sooner than {expected_delay:?}"
+        );
+        early_arrival.judge(world, published_at, &early).await;
+    }
+}
+
+/// How long after `published_at` the payload containing `expected_payload` was read: by an earlier
+/// wait that passed it over, or else by this one from the active subscription before `deadline`.
+async fn receive_delivery(
+    world: &mut ScenarioWorld,
+    expected_payload: &str,
+    published_at: Instant,
+    deadline: Instant,
+) -> Duration {
+    match take_passed_over_delivery(world, expected_payload, published_at) {
+        Some(passed) => {
+            let read_after = passed.read_at.duration_since(published_at);
+            world.last_subscription_payload = Some(passed.payload);
+            read_after
+        }
+        None => await_subscription_delivery(world, expected_payload, published_at, deadline).await,
+    }
+}
+
+/// Reads the active subscription until a payload contains `expected_payload`, and returns how long
+/// after `published_at` it arrived. Every other payload it reads is passed over for a later wait.
+async fn await_subscription_delivery(
+    world: &mut ScenarioWorld,
+    expected_payload: &str,
+    published_at: Instant,
+    deadline: Instant,
+) -> Duration {
     let mut observed = Vec::new();
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -39049,15 +39292,12 @@ async fn then_stream_subscription_receives_payload_no_sooner_than(
         let payload = event.payload;
         observed.push(payload.clone());
         world.last_subscription_payload = Some(payload.clone());
-        if !payload.contains(&expected_payload) {
-            continue;
+        if payload.contains(expected_payload) {
+            return arrived_after;
         }
-        assert!(
-            arrived_after >= expected_delay,
-            "expected the payload no sooner than {expected_delay:?} after publishing, but it \
-             arrived after {arrived_after:?}"
-        );
-        break;
+        world
+            .passed_over_subscription_payloads
+            .push(PassedOverPayload::read_now(payload));
     }
 }
 
@@ -39085,46 +39325,16 @@ async fn then_stream_subscription_receives_payload_within_publication_budget(
     let deadline = published_at
         .checked_add(budget)
         .assured("a scenario's receive budget lies seconds after a recent instant");
-    let mut observed = Vec::new();
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let now = Instant::now();
-        assert!(
-            now < deadline,
-            "timed out waiting for subscription payload containing {expected_payload} within \
-             {budget:?} after publishing. observed {observed:?}"
-        );
-        let event = world
-            .active_session
-            .as_mut()
-            .assured("the scenario opened its subscription before publishing")
-            .try_next_subscription(deadline.saturating_duration_since(now))
-            .await
-            .unwrap_or_else(|error| panic!("the subscription session failed: {error}"));
-        let Some(event) = event else {
-            panic!(
-                "timed out waiting for subscription payload containing {expected_payload} within \
-                 {budget:?} after publishing. observed {observed:?}"
-            );
-        };
-        let read_after = published_at.elapsed();
-        let payload = event.payload;
-        observed.push(payload.clone());
-        world.last_subscription_payload = Some(payload.clone());
-        if !payload.contains(&expected_payload) {
-            continue;
-        }
-        append_cucumber_log_line(&format!(
-            "subscription payload containing {} read {read_after:?} after publishing",
-            expected_payload.replace('\n', "\\n")
-        ));
-        assert!(
-            read_after <= budget,
-            "expected the payload within {budget:?} after publishing, but it was read after \
-             {read_after:?}"
-        );
-        break;
-    }
+    let read_after = receive_delivery(world, &expected_payload, published_at, deadline).await;
+    append_cucumber_log_line(&format!(
+        "subscription payload containing {} read {read_after:?} after publishing",
+        expected_payload.replace('\n', "\\n")
+    ));
+    assert!(
+        read_after <= budget,
+        "expected the payload within {budget:?} after publishing, but it was read after \
+         {read_after:?}"
+    );
 }
 
 #[when("the next relay subscription payload is timed")]
@@ -39150,9 +39360,13 @@ async fn when_the_next_subscription_payload_is_timed(world: &mut ScenarioWorld) 
     world.subscription_arrival = Some(observation);
 }
 
+/// A node that applies a runtime revision newer than the ones the scenario recorded before the
+/// publication force-flushes the domain, which asks a guest to release what it buffers before its
+/// timer; see [`delivery_lower_bounds`].
 #[then(
     expr = "within {string} the timed relay subscription payload arrives no sooner than {string} \
-            after publication and contains all fragments"
+            after publication and contains all fragments, unless a node applied a newer runtime \
+            revision"
 )]
 async fn then_the_timed_subscription_payload_arrives_after_publication(
     world: &mut ScenarioWorld,
@@ -39191,13 +39405,17 @@ async fn then_the_timed_subscription_payload_arrives_after_publication(
         event.payload,
         expected[0]
     );
-    assert!(
-        on_time,
-        "subscription payload {:?} arrived {:?} after publication, before its {delay:?} lower \
-         bound",
-        event.payload,
-        received_at.checked_duration_since(published_at)
-    );
+    if !on_time {
+        let early = format!(
+            "subscription payload {:?} arrived {:?} after publication, before its {delay:?} lower \
+             bound",
+            event.payload,
+            received_at.checked_duration_since(published_at)
+        );
+        delivery_lower_bounds::EarlyArrival::ReleasedByNewerRuntimeRevision
+            .judge(world, published_at, &early)
+            .await;
+    }
 }
 
 async fn try_capture_any_subscription_payload(

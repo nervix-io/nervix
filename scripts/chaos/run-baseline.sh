@@ -2453,7 +2453,7 @@ if [[ "${uses_pumba}" == true ]]; then
     run_bounded 30 docker run --rm \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" --version >"${artifact_dir}/pumba-version.txt"
-    pumba_preflight=(stop --time 60 impossible-chaos-preflight-target)
+    pumba_preflight=(stop --time 720 impossible-chaos-preflight-target)
     if [[ "${scenario}" == *-crash || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart \
         || "${fault}" == *-crash || "${fault}" == cluster-restart ]]; then
         pumba_preflight=(kill --signal SIGKILL impossible-chaos-preflight-target)

@@ -541,8 +541,8 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
         .join(" ");
     format!(
         "  capabilities: committed {} cpu-count={cpu} memory-bytes={memory} \
-         database-volume-bytes={} {} {} {} {} drain-timeout={} shutdown-timeout={} \
-         task-grace-period={} listeners={:?} {operational}",
+         database-volume-bytes={} {} {} {} {} shutdown-timeout={} task-grace-period={} \
+         listeners={:?} {operational}",
         record.identity,
         capabilities.database_volume_bytes,
         bounds_line(capabilities.receive),
@@ -555,7 +555,6 @@ fn capability_line(record: &NodeCapabilityRecord) -> String {
             .map(|(name, value)| format!("{name}={value}"))
             .collect::<Vec<_>>()
             .join(" "),
-        timing_text(capabilities.shutdown.drain_timeout),
         timing_text(capabilities.shutdown.shutdown_timeout),
         timing_text(capabilities.shutdown.task_grace_period),
         capabilities.listeners,

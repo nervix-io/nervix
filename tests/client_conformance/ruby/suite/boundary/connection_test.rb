@@ -14,11 +14,24 @@ module RubySuite
       assert_match(/password/, error.message)
       # ANCHOR_END: typed_error
       [Float::NAN, Float::INFINITY, -1].each do |invalid|
-        %i[connect_timeout request_timeout retry_timeout backup_wait_timeout].each do |option|
+        %i[connect_timeout request_timeout retry_timeout backup_wait_timeout keepalive_interval
+           keepalive_timeout].each do |option|
           assert_raises(NX::InvalidArgumentError) { NX::Session.connect('http://127.0.0.1:1', **{option => invalid}) }
         end
         assert_raises(NX::InvalidArgumentError) { NX::Cancel.new(deadline: invalid) }
       end
+      [0, -1, 1 << 32].each do |invalid|
+        %i[stream_window_bytes connection_window_bytes].each do |option|
+          error = assert_raises(NX::InvalidArgumentError) do
+            NX::Session.connect('http://127.0.0.1:1', **{option => invalid})
+          end
+          assert_match(/#{option}/, error.message)
+        end
+      end
+      narrow = assert_raises(NX::InvalidArgumentError) do
+        NX::Session.connect('http://127.0.0.1:1', connection_window_bytes: 65_534)
+      end
+      assert_match(/connection-window-bytes/, narrow.message)
       NX::Cancel.new(deadline: nil)
       assert_raises(NX::InvalidArgumentError) { NX::Session.connect('http://127.0.0.1:1', tls: -1) }
       assert_raises(NX::InvalidArgumentError) { NX::Session.connect('http://127.0.0.1:1', seeds: ['not a URL']) }

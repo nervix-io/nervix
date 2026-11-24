@@ -40,7 +40,12 @@ TLS connection needs that explicit authority. `REQUIRED` refuses a plaintext URI
 needs. Seeds let it reach the cluster when the initial address is unavailable. Connection, request,
 retry and backup-wait timeouts are seconds; the request and call timeouts count only time without
 the answer or a server progress report, which restarts them. Cancellation deadlines can bound an
-individual call.
+individual call. `keepaliveInterval` and `keepaliveTimeout`, also seconds (30 and 20 by default),
+make the session ping its node after that long without hearing from it while a call is open, and
+treat the connection as lost when the ping goes unanswered within the timeout; the session then
+reconnects and restores its subscriptions as after any other dropped connection. `streamWindowBytes`
+and `connectionWindowBytes` set how many bytes of one call, and of all calls on a connection
+together, the node may send before the session reads them (2 MiB and 5 MiB by default).
 
 ```java
 {{#include ../../tests/client_conformance/java/suite/cluster/ClusterTests.java:seeds}}

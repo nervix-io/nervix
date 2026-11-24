@@ -44,7 +44,7 @@ use thiserror::Error;
 
 #[cfg(test)]
 use super::VmExecutionContext;
-use super::{ObservedDomainTick, Runtime};
+use super::{ObservedDomainTick, Runtime, local_save::NodeSave};
 
 #[path = "domain_lifecycle.rs"]
 mod lifecycle;
@@ -272,6 +272,9 @@ impl DomainClockReadWatermark {
 #[derive(Debug)]
 struct DomainClockPublication {
     task_state: Option<DomainTaskState>,
+    /// Whether the node this clock runs on still serves, or saves what it holds to stop. A saving
+    /// node never serves again, so every replacement keeps a saving mark.
+    node: NodeSave,
     installation: DomainClockInstallation,
     /// Shared with a replacement only when that replacement keeps the same generation installed,
     /// so reads of that generation cannot decrease even when they race the replacement. Every
@@ -284,6 +287,7 @@ impl DomainClockPublication {
     fn new(installation: DomainClockInstallation) -> Self {
         Self {
             task_state: None,
+            node: NodeSave::Serving,
             installation,
             watermark: Arc::new(DomainClockReadWatermark::new()),
         }
@@ -304,13 +308,29 @@ impl DomainClockPublication {
         {
             return Some(Self {
                 task_state: task_state.clone(),
+                node: self.node,
                 installation: installation.clone(),
                 watermark: self.watermark.clone(),
             });
         }
         let mut successor = Self::new(installation.clone());
         successor.task_state = task_state.clone();
+        successor.node = self.node;
         Some(successor)
+    }
+
+    /// The publication that marks this one's node as saving what it holds, or `None` when this
+    /// publication already carries the mark. It keeps the installation, so it shares the watermark.
+    fn saving(&self) -> Option<Self> {
+        if self.node == NodeSave::Saving {
+            return None;
+        }
+        Some(Self {
+            task_state: self.task_state.clone(),
+            node: NodeSave::Saving,
+            installation: self.installation.clone(),
+            watermark: self.watermark.clone(),
+        })
     }
 }
 
@@ -429,6 +449,25 @@ impl DomainClockLifecycle {
 
     pub(in crate::runtime) fn mark_missing(&self) {
         self.replace_with_task_state(DomainClockInstallation::Missing, None);
+    }
+
+    /// Marks this clock as running on a node that saves what it holds to stop. From now on the
+    /// domain reads as stopping on this node, whatever its committed status, and no later
+    /// replacement withdraws the mark.
+    pub(in crate::runtime) fn mark_node_saving(&self) {
+        loop {
+            let current = self.inner.published.load();
+            let Some(successor) = current.saving() else {
+                return;
+            };
+            let previous = self
+                .inner
+                .published
+                .compare_and_swap(&*current, StdArc::new(successor));
+            if StdArc::ptr_eq(&*previous, &*current) {
+                return;
+            }
+        }
     }
 
     pub(in crate::runtime) fn bind(&self) -> DomainClockAccessResult<DomainClock> {

@@ -1104,11 +1104,15 @@ Feature: Kafka ingestion
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
+    # BATCH TIMEOUT bounds the wait for a partial batch from above only: a node that applies a newer
+    # runtime revision during the wait, as every node does after a failover, can end the read and
+    # hand over what it gathered.
+    And the runtime revision each node applied is recorded
     And Kafka message is published to topic "notifications_{{test_id}}"
       """
       {"user_id":61}
       """
-    Then the relay subscription receives a payload no sooner than "3s" after it was published
+    Then the relay subscription receives a payload no sooner than "3s" after it was published, unless a node applied a newer runtime revision
       """
       "user_id":61
       """

@@ -267,7 +267,7 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(handoff) => handoff,
-                Err(error) => return command_error(error.to_string()),
+                Err(error) => return command_error(format!("{error:#}")),
             }
         } else {
             None

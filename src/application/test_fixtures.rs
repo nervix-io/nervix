@@ -45,7 +45,9 @@ use rcgen::{
 };
 
 #[cfg(feature = "shuttle")]
-use super::shutdown::{ShutdownCoordinator, ShutdownPhaseOutcome, ShutdownRequest};
+use super::shutdown::{
+    ShutdownCoordinator, ShutdownMoveOutcome, ShutdownPhaseOutcome, ShutdownRequest,
+};
 use super::{
     Args,
     command_result::{CommandResponse, CommandResult},
@@ -959,11 +961,10 @@ pub(in crate::application) async fn shut_down_in_phase_order(
     shutdown: ShutdownCoordinator,
 ) -> ShutdownRequest {
     let request = shutdown.requested().await;
-    let deadline = request.deadline();
     shutdown.stop_admission();
-    shutdown.begin_drain_support(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
-    shutdown
-        .begin_terminal_teardown(ShutdownPhaseOutcome::Abandoned.unless_deadline_passed(deadline));
-    shutdown.finish(ShutdownPhaseOutcome::Completed.unless_deadline_passed(deadline));
+    shutdown.begin_save(ShutdownPhaseOutcome::Completed);
+    shutdown.begin_moves(ShutdownPhaseOutcome::Completed);
+    shutdown.begin_terminal_teardown(ShutdownMoveOutcome::NowhereToMove);
+    shutdown.finish(ShutdownPhaseOutcome::Completed);
     request
 }

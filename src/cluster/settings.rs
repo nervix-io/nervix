@@ -58,6 +58,24 @@ const FAILURE_DETECTOR_INITIAL_GOSSIP_INTERVALS: u32 = 10;
 )]
 const FAILURE_DETECTOR_MAX_GOSSIP_INTERVALS: u32 = 20;
 
+/// How many gossip intervals a stopping node keeps gossiping after it advertised that it is
+/// terminating, so that the advertisement reaches its peers before it leaves.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "a gossip round carries a node's newest state to its peers, and a second round \
+                  covers a round that began just before the advertisement"
+    )
+)]
+const TERMINATING_PROPAGATION_GOSSIP_INTERVALS: u32 = 2;
+
+const _: () = assert!(
+    TERMINATING_PROPAGATION_GOSSIP_INTERVALS <= FAILURE_DETECTOR_MAX_GOSSIP_INTERVALS,
+    "the gossip interval's validation keeps only the failure detector's largest count of \
+     intervals inside a duration"
+);
+
 const _: () = assert!(
     FAILURE_DETECTOR_INITIAL_GOSSIP_INTERVALS < FAILURE_DETECTOR_MAX_GOSSIP_INTERVALS,
     "the failure detector's initial interval must be one it can still accept as a sample"
@@ -308,6 +326,12 @@ impl MembershipSettings {
     /// a sample: twenty gossip intervals.
     pub fn failure_detector_max_interval(&self) -> Duration {
         self.gossip_intervals(FAILURE_DETECTOR_MAX_GOSSIP_INTERVALS)
+    }
+
+    /// How long a stopping node keeps gossiping after it advertised that it is terminating, so
+    /// that its peers hear it before it leaves: two gossip intervals.
+    pub fn terminating_propagation(&self) -> Duration {
+        self.gossip_intervals(TERMINATING_PROPAGATION_GOSSIP_INTERVALS)
     }
 
     /// The failure detector's configuration, with its intervals derived from the gossip cadence.

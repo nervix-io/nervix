@@ -220,22 +220,24 @@ The [web console](client-tools-web-console.md) is available at
 ## Shutdown And Grace Periods
 
 Deleting a pod, draining a Kubernetes node, or rolling the StatefulSet sends `SIGTERM`, which starts
-graceful shutdown. A Nervix node ends its own shutdown within its shutdown timeout, 50 seconds by
-default, which covers the 30-second default drain timeout and the services that stop after it. The
-operator sets `terminationGracePeriodSeconds: 60` so the kubelet waits longer than that, and a node
-that cannot finish exits on its own rather than being killed partway through its drain. If you raise
-`NERVIX_SHUTDOWN_TIMEOUT`, raise the grace period with it.
+graceful shutdown: the node saves what it holds, moves its units to the other nodes within its
+shutdown timeout, and tears down. The operator starts every node with `--shutdown-timeout 600s` and
+sets `terminationGracePeriodSeconds: 720`, the shutdown timeout and two more minutes for the save
+and the teardown, so the kubelet's `SIGKILL` does not cut a normal shutdown short. A node whose
+units did not all move within the shutdown timeout logs a cluster disruption and exits with status
+`1`; a node whose save never ends is killed when the grace period ends. If you change the shutdown
+timeout, change the grace period with it.
 
 Note that `/readyz` reports whether the node has finished initializing and currently knows a Raft
-leader; it does not turn negative when a node begins terminating. A draining node is therefore not
+leader; it does not turn negative when a node begins terminating. A stopping node is therefore not
 removed from Service endpoints by readiness alone. It stops accepting new client connections itself
-in the first shutdown phase, and it keeps serving already-admitted work until its drain finishes.
+in the first shutdown phase, and then takes part in nothing but saving and moving its own work.
 
-A terminating node moves its scheduled work to a live peer when one is available, and otherwise
-completes everything it has admitted in place. Rolling one pod at a time keeps a peer available to
-receive that work, so ownership moves instead of waiting for the pod to come back. See
-[Shutdown And Recovery](shutdown.md) for the phases, the drain guarantees, and what each ending
-preserves.
+A terminating node saves what it holds, then moves its units to a live peer when one is
+available; when none is, its units stay saved on its volume and its restarted pod restores them.
+Rolling one pod at a time keeps a peer available to receive that work, so ownership moves instead
+of waiting for the pod to come back. See [Shutdown And Recovery](shutdown.md) for the phases, what
+the save keeps and cuts, and what each ending preserves.
 
 ## Rolling Updates
 
