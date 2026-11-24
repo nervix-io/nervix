@@ -3,8 +3,9 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One listener per chosen address, all on one port drawn from the harness pool, the
-//!   connections each listener forwards to the dependency, how many connections each accepted, and
-//!   stopping one listener together with its connections.
+//!   connections each listener forwards to the dependency, how many connections each accepted,
+//!   stopping one listener together with its connections, and stalling them: the listener closes
+//!   while its connections stay open and carry nothing more.
 //! - **Depends on.** Tokio's TCP sockets and the harness port pool.
 //! - **Must not know.** DNS, Nervix, or the protocol the connections carry.
 //!
@@ -48,7 +49,11 @@ struct TcpForwarder {
     accepted: StdArc<AtomicU64>,
     /// Cancelled to close every connection the listener forwarded, when the forwarder stops.
     connections: CancellationToken,
-    listener: JoinHandle<()>,
+    /// Cancelled to stop carrying bytes on every connection the listener forwarded, while each
+    /// stays open until the forwarder stops.
+    stalled: CancellationToken,
+    /// The accepting task, until `close_listener` has ended it.
+    listener: Option<JoinHandle<()>>,
 }
 
 impl TcpForwarders {
@@ -86,10 +91,20 @@ impl TcpForwarders {
         let Some(mut forwarder) = self.forwarders.remove(&address) else {
             return Err(Self::unknown(address));
         };
-        forwarder.listener.abort();
-        (&mut forwarder.listener).await.discarded(
-            "an aborted listener ends with a cancellation, and its socket closes with it",
-        );
+        forwarder.close_listener().await;
+        Ok(())
+    }
+
+    /// Stall the forwarder at `address`: its listener has closed when this returns, so the address
+    /// refuses connections from then on, and every connection it accepted stays open but carries no
+    /// further byte in either direction. Each peer then sees a silent connection rather than a
+    /// closed one, until the forwarder stops or the scenario ends.
+    pub(crate) async fn stall(&mut self, address: IpAddr) -> io::Result<()> {
+        let Some(forwarder) = self.forwarders.get_mut(&address) else {
+            return Err(Self::unknown(address));
+        };
+        forwarder.close_listener().await;
+        forwarder.stalled.cancel();
         Ok(())
     }
 
@@ -131,24 +146,40 @@ impl TcpForwarder {
     fn start(listener: TcpListener, target: SocketAddr) -> Self {
         let accepted = StdArc::new(AtomicU64::new(0));
         let connections = CancellationToken::new();
+        let stalled = CancellationToken::new();
         let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
             target,
             accepted.clone(),
-            connections.clone(),
+            Lifetimes {
+                stopped: connections.clone(),
+                stalled: stalled.clone(),
+            },
         ));
         Self {
             accepted,
             connections,
-            listener,
+            stalled,
+            listener: Some(listener),
         }
+    }
+
+    /// End the accepting task once; its socket has closed when this returns.
+    async fn close_listener(&mut self) {
+        let Some(listener) = self.listener.take() else {
+            return;
+        };
+        listener.abort();
+        listener.await.discarded(
+            "an aborted listener ends with a cancellation, and its socket closes with it",
+        );
     }
 
     async fn accept(
         listener: TcpListener,
         target: SocketAddr,
         accepted: StdArc<AtomicU64>,
-        connections: CancellationToken,
+        lifetimes: Lifetimes,
     ) {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -156,25 +187,41 @@ impl TcpForwarder {
                 return;
             };
             accepted.fetch_add(1, Ordering::Relaxed);
-            nervix_primitives::task::spawn(Self::forward(downstream, target, connections.clone()));
+            nervix_primitives::task::spawn(Self::forward(downstream, target, lifetimes.clone()));
         }
     }
 
-    /// Carry one connection to `target` until either side closes it or the forwarder stops.
-    async fn forward(mut downstream: TcpStream, target: SocketAddr, stopped: CancellationToken) {
+    /// Carry one connection to `target` until either side closes it or the forwarder stops. Once
+    /// the forwarder stalls, the connection carries nothing more but both of its sockets stay open
+    /// until the forwarder stops.
+    async fn forward(mut downstream: TcpStream, target: SocketAddr, lifetimes: Lifetimes) {
         let Ok(mut upstream) = TcpStream::connect(target).await else {
             return;
         };
         nervix_primitives::select! {
-            _ = stopped.cancelled() => {}
-            _ = copy_bidirectional(&mut downstream, &mut upstream) => {}
+            _ = lifetimes.stopped.cancelled() => return,
+            _ = copy_bidirectional(&mut downstream, &mut upstream) => return,
+            _ = lifetimes.stalled.cancelled() => {}
         }
+        lifetimes.stopped.cancelled().await;
+        drop(downstream);
+        drop(upstream);
     }
+}
+
+/// What ends the forwarding of one connection: the forwarder stopping closes it, and the forwarder
+/// stalling stops its bytes while leaving it open.
+#[derive(Debug, Clone)]
+struct Lifetimes {
+    stopped: CancellationToken,
+    stalled: CancellationToken,
 }
 
 impl Drop for TcpForwarder {
     fn drop(&mut self) {
-        self.listener.abort();
+        if let Some(listener) = &self.listener {
+            listener.abort();
+        }
         self.connections.cancel();
     }
 }

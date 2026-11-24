@@ -42,12 +42,19 @@ options unmodified during the connect call and release them once it returns (B-4
 {{#include ../../tests/client_conformance/c/suite/contract.h:connect_options}}
 ```
 
-The four timeout selectors bound one connection, one request, the whole retrying call, and waiting
-for a backup archive. Their values are milliseconds, validated from 1 ms through 24 hours. The
-request and call timeouts count only time without the answer or a server progress report, which
-restarts them, so a long-running statement such as a waiting `STOP` is still answered. Add
-further session URLs with `nx_connect_options_add_seed`. The suite supplies its fixture credentials,
-certificate path and server URLs through environment variables.
+The first four timeout selectors bound one connection, one request, the whole retrying call, and
+waiting for a backup archive. The request and call timeouts count only time without the answer or a
+server progress report, which restarts them, so a long-running statement such as a waiting `STOP` is
+still answered. `NX_TIMEOUT_KEEPALIVE_INTERVAL` and `NX_TIMEOUT_KEEPALIVE_TIMEOUT` (30 and 20
+seconds by default) make the session ping its node after that long without hearing from it while a
+call is open, and treat the connection as lost when the ping goes unanswered within the timeout; the
+session then reconnects and restores its subscriptions as after any other dropped connection. Every
+timeout value is milliseconds, validated from 1 ms through 24 hours. `nx_connect_options_window`
+sets how many bytes of one call (`NX_WINDOW_STREAM`, 2 MiB by default, 1 byte through 2,147,483,647)
+and of all calls on a connection together (`NX_WINDOW_CONNECTION`, 5 MiB by default, 65,535 through
+2,147,483,647) the node may send before the session reads them. Add further session URLs with
+`nx_connect_options_add_seed`. The suite supplies its fixture credentials, certificate path and
+server URLs through environment variables.
 
 ```c
 {{#include ../../tests/client_conformance/c/suite/contract.h:connect}}

@@ -69,8 +69,9 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::FutureExt as _;
 pub use ingestor::{
     MqttClientIdError, MqttReadAheadHeadroom, MqttReadAheadSettings, MqttReadAheadSettingsError,
-    MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage, MqttTopicIngestorPlan,
-    MqttTopicIngestorPosition, MqttTopicIngestorSessions, MqttTopicIngestorSettings,
+    MqttSessionRetirement, MqttTopicIngestor, MqttTopicIngestorError, MqttTopicIngestorMessage,
+    MqttTopicIngestorPlan, MqttTopicIngestorPosition, MqttTopicIngestorSessions,
+    MqttTopicIngestorSettings,
 };
 use meticulous::OptionExt as _;
 #[cfg(test)]

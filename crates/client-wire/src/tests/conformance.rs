@@ -61,6 +61,30 @@ use crate::{
     producer::wire_refusal, restore::RestoreChunk, wire,
 };
 
+/// The corpus opening's pacing: values distinct from every default and from each other, and a
+/// retry validity the node may not know yet.
+fn pacing(command_retry_validity: Option<Duration>) -> crate::SessionPacing {
+    let web_console =
+        nervix_models::WebConsoleCapabilities::resolve(nervix_models::WebConsoleCapabilityValues {
+            request_timeout: Some(Duration::from_secs(45)),
+            connect_timeout: Some(Duration::from_secs(4)),
+            retry_backoff: Some(Duration::from_millis(300)),
+            retry_max_backoff: Some(Duration::from_secs(6)),
+            restoration_backoff: Some(Duration::from_secs(2)),
+            restore_frame_capacity: NonZeroU64::new(8),
+        })
+        .assured("the corpus waits are whole milliseconds within their bounds");
+    let command_retry_validity = command_retry_validity.map(|validity| {
+        nervix_models::Setting::new(validity, &()).assured("a corpus validity is valid")
+    });
+    crate::SessionPacing::new(
+        nervix_models::Setting::new(Duration::from_millis(750), &())
+            .assured("a corpus snapshot interval is valid"),
+        command_retry_validity,
+        web_console,
+    )
+}
+
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
 const REPORT: &str = "corpus.report";
 
@@ -951,10 +975,23 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("server_rows.nxsm", rows_frame(&limits()).into_bytes()),
         (
             "server_session_opened.nxsm",
-            crate::SessionOpened { limits: limits() }
-                .encode()
-                .assured("the current opening fits its fixed envelope")
-                .into_bytes(),
+            crate::SessionOpened {
+                limits: limits(),
+                pacing: pacing(Some(Duration::from_secs(600))),
+            }
+            .encode()
+            .assured("the current opening fits its fixed envelope")
+            .into_bytes(),
+        ),
+        (
+            "server_session_opened_before_parameters.nxsm",
+            crate::SessionOpened {
+                limits: limits(),
+                pacing: pacing(None),
+            }
+            .encode()
+            .assured("an opening without a retry validity fits its fixed envelope")
+            .into_bytes(),
         ),
         (
             "server_submission_completed.nxsm",
@@ -1653,13 +1690,31 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
         }
         ServerMessage::Event(ServerEvent::SessionOpened(opened)) => {
             let limits = opened.limits;
+            let pacing = opened.pacing;
+            let web_console = pacing.web_console();
+            let command_retry_validity = match pacing.command_retry_validity() {
+                Some(validity) => validity.as_nanos().to_string(),
+                None => "absent".to_string(),
+            };
             lines.push(format!(
-                "EVENT SESSION_OPENED frame={} transfer={} depth={} entries={} string={}",
+                "EVENT SESSION_OPENED frame={} transfer={} depth={} entries={} string={} \
+                 snapshot_interval_nanos={} command_retry_validity_nanos={} \
+                 web_console_request_timeout_nanos={} web_console_connect_timeout_nanos={} \
+                 web_console_retry_backoff_nanos={} web_console_retry_max_backoff_nanos={} \
+                 web_console_restoration_backoff_nanos={} web_console_restore_frame_capacity={}",
                 limits.frame_bytes(),
                 limits.transfer_bytes(),
                 limits.nesting_depth(),
                 limits.collection_entries(),
-                limits.string_bytes()
+                limits.string_bytes(),
+                pacing.snapshot_interval().as_nanos(),
+                command_retry_validity,
+                web_console.request_timeout().as_nanos(),
+                web_console.connect_timeout().as_nanos(),
+                web_console.retry_backoff().as_nanos(),
+                web_console.retry_max_backoff().as_nanos(),
+                web_console.restoration_backoff().as_nanos(),
+                web_console.restore_frame_capacity(),
             ));
         }
         ServerMessage::Event(ServerEvent::SubscriptionRows(rows)) => {

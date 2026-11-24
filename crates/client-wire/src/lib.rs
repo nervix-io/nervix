@@ -137,7 +137,7 @@ pub use row::{
     RowLocation, RowSchema,
 };
 pub use server::{Reply, ReplyBody, ReplyBodyKind, ReplyDelivery, ServerEvent, ServerMessage};
-pub use session_opened::{SessionOpened, SessionOpeningError};
+pub use session_opened::{SessionOpened, SessionOpeningError, SessionPacing};
 pub use subscription::{
     RowsSkippedCause, SubscriptionDeliveryLost, SubscriptionEndReason, SubscriptionEnded,
     SubscriptionHandle, SubscriptionRows, SubscriptionRowsEncoder, SubscriptionRowsSkipped,
