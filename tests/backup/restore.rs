@@ -195,7 +195,10 @@ fn restored_work_placements(world: &ScenarioWorld) -> BTreeSet<String> {
         .assured("cluster status is read before inspecting restored placements");
     let mut placements = BTreeSet::new();
     for placement in scheduled_placements_for_domain(status, &world.domain) {
-        let (owner, mut replicas) = scheduled_node_placement_from_status(
+        let ScheduledPlacement {
+            owner,
+            mut replicas,
+        } = ScheduledPlacement::from_status(
             status,
             &world.domain,
             &placement.kind,
@@ -203,6 +206,8 @@ fn restored_work_placements(world: &ScenarioWorld) -> BTreeSet<String> {
         )
         .assured("each scheduled entry has its public placement");
         replicas.sort_unstable();
+        // The fingerprint writes a unit no node owns the way the status does.
+        let owner = owner.unwrap_or("-");
         placements.insert(format!(
             "kind={} name={} owner={} replicas={}",
             placement.kind,

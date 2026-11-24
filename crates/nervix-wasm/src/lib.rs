@@ -3,9 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Engine configuration, instance lifetime, linear-memory and table limits, the guest
-//!   contract's one memory and one table, epoch deadlines, the host half of the C ABI, the guest
-//!   snapshot and state description calls, and the classification of every failed guest
-//!   operation, including a guest's verdict on the saved state it was asked to restore.
+//!   contract's one memory, one table and the WebAssembly features a guest may use, epoch
+//!   deadlines, the host half of the C ABI, the guest snapshot and state description calls, and
+//!   the classification of every failed guest operation, including a guest's verdict on the saved
+//!   state it was asked to restore.
 //! - **Depends on.** The vocabulary for processor limits and timestamps, `nervix-wasm-protocol`
 //!   for the envelopes it exchanges with a guest, and the node's bounded executor, whose bulk
 //!   workers compile a module.
@@ -20,6 +21,7 @@
     )
 )]
 
+mod guest_proposals;
 mod settings;
 use std::{
     convert::Infallible,
@@ -32,8 +34,10 @@ use arch_into::ArchInto as _;
 use bytes::Bytes;
 use error_stack::{Report, Result as StackResult, ResultExt as _};
 use flatbuffers::{Allocator, FlatBufferBuilder};
+use guest_proposals::{GUEST_WASM_FEATURES, RELAXED_SIMD_DETERMINISTIC};
+pub use guest_proposals::{RefusedWasmProposal, RefusedWasmProposals};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass};
+use nervix_execution::{Cancellation, CpuClass, Executor, MemoryClass};
 use nervix_models::{ParseAsType, Timestamp, WasmProcessorLimits};
 #[cfg(test)]
 use nervix_primitives::sync::Arc;
@@ -54,7 +58,7 @@ pub use settings::{
 use thiserror::Error;
 use wasmtime::{
     Caller, Config, Engine, Instance, InstancePre, Linker, Memory, Module, OptLevel,
-    ResourceLimiter, Store, Trap, TypedFunc,
+    ResourceLimiter, Store, Trap, TypedFunc, WasmFeatures,
 };
 
 const ENV_MODULE: &str = "env";
@@ -153,6 +157,26 @@ pub enum WasmProcessorError {
     TooManyMemories { defined: u32, limit: u32 },
     #[error("wasm module defines {defined} tables, but a guest defines at most {limit}")]
     TooManyTables { defined: u32, limit: u32 },
+    #[error("wasm module uses {proposals}, which a guest may not use")]
+    RefusedProposals { proposals: RefusedWasmProposals },
+}
+
+impl WasmProcessorError {
+    /// Classifies `wasm`, which Wasmtime refused to compile with `source`: a module refused for the
+    /// WebAssembly proposals outside the guest contract that it needs, above the compile failure
+    /// they caused, or the compile failure alone when no such proposal is why.
+    fn compile_failure(
+        wasm: &[u8],
+        source: wasmtime::Error,
+        cancellation: &Cancellation,
+    ) -> Report<Self> {
+        let failure = Report::new(Self::Compile(source));
+        match RefusedWasmProposals::needed_by(wasm, cancellation) {
+            Ok(Some(proposals)) => failure.change_context(Self::RefusedProposals { proposals }),
+            Ok(None) => failure,
+            Err(cancelled) => Report::new(cancelled).change_context(Self::CompileExecution),
+        }
+    }
 }
 
 /// One operation the host runs on a guest branch instance, in the order an instance meets them.
@@ -496,26 +520,23 @@ struct GuestTableLimitExceeded {
 }
 
 /// What one branch store's guest may allocate: `MAX MEMORY` bytes of linear memory and
-/// `MAX TABLE ELEMENTS` table slots, counted from the initial sizes Wasmtime asks for at
-/// instantiation through every later growth, in exactly one instance with at most one memory and
-/// one table.
+/// `MAX TABLE ELEMENTS` table slots, from the initial sizes Wasmtime asks for at instantiation
+/// through every later growth, in exactly one instance with at most one memory and one table.
 #[derive(Debug)]
 struct GuestResourceLimiter {
     max_memory_bytes: usize,
-    allocated_memory_bytes: usize,
-    pending_growth_bytes: usize,
     max_table_elements: u64,
 }
 
-// `table_growing` reads the size of the table being grown as every slot the guest holds.
+// `memory_growing` reads the size of the memory being grown as every byte of linear memory the
+// guest holds, and `table_growing` the size of the table being grown as every slot it holds.
+const _: () = assert!(GUEST_MEMORIES == 1);
 const _: () = assert!(GUEST_TABLES == 1);
 
 impl GuestResourceLimiter {
     fn new(limits: WasmProcessorLimits) -> Self {
         Self {
             max_memory_bytes: limits.max_memory_bytes.get().arch_into(),
-            allocated_memory_bytes: 0,
-            pending_growth_bytes: 0,
             max_table_elements: limits.max_table_elements,
         }
     }
@@ -528,40 +549,23 @@ impl ResourceLimiter for GuestResourceLimiter {
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        // Wasmtime calls `memory_grow_failed` synchronously after a permitted growth fails. If
-        // another growth begins, the preceding one therefore succeeded and needs no rollback.
-        self.pending_growth_bytes = 0;
-        let growth_bytes = desired
+        // A guest holds at most one linear memory, so the size Wasmtime reports for the memory
+        // being grown is every byte of linear memory the guest holds. Admission reads that size
+        // instead of keeping a running total: Wasmtime fails some growths without asking first,
+        // such as one a memory of one-byte pages cannot represent, and a total rolled back on
+        // failure could then subtract a growth that stood. A permitted growth that Wasmtime fails
+        // afterwards leaves the size unchanged, so nothing needs undoing.
+        let growth = desired
             .checked_sub(current)
             .assured("wasmtime only asks to grow a memory to a size at or above its current one");
-        // Admission is a remaining budget rather than a projected total, so a growth request is
-        // never sized against a sum that could leave `usize`.
-        let remaining = self
-            .max_memory_bytes
-            .checked_sub(self.allocated_memory_bytes)
-            .verified("every permitted growth left the allocated total at or below the limit");
-        if growth_bytes > remaining {
+        if desired > self.max_memory_bytes {
             return Err(wasmtime::Error::new(GuestMemoryLimitExceeded {
-                allocated: self.allocated_memory_bytes,
-                growth: growth_bytes,
+                allocated: current,
+                growth,
                 limit: self.max_memory_bytes,
             }));
         }
-        self.allocated_memory_bytes = self
-            .allocated_memory_bytes
-            .checked_add(growth_bytes)
-            .verified("the remaining-budget check above bounds this sum by the configured limit");
-        self.pending_growth_bytes = growth_bytes;
         Ok(true)
-    }
-
-    fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
-        self.allocated_memory_bytes = self
-            .allocated_memory_bytes
-            .checked_sub(self.pending_growth_bytes)
-            .verified("the growth being rolled back was added to this total when it was permitted");
-        self.pending_growth_bytes = 0;
-        Ok(())
     }
 
     fn table_growing(
@@ -692,6 +696,12 @@ pub struct WasmRuntime {
 impl WasmRuntime {
     pub fn new(config: WasmRuntimeConfig) -> StackResult<Self, WasmProcessorError> {
         let mut wasmtime_config = Config::new();
+        // The guest contract decides every WebAssembly feature, so none is left at the default of
+        // this Wasmtime version: everything is disabled, then exactly the contract's features are
+        // enabled, and an explicit setting overrides every default Wasmtime would apply.
+        wasmtime_config.wasm_features(WasmFeatures::all(), false);
+        wasmtime_config.wasm_features(GUEST_WASM_FEATURES, true);
+        wasmtime_config.relaxed_simd_deterministic(RELAXED_SIMD_DETERMINISTIC);
         wasmtime_config.consume_fuel(true);
         wasmtime_config.epoch_interruption(true);
         // Modules already compile independently on the node's bulk workers. Letting each
@@ -742,8 +752,16 @@ impl WasmRuntime {
                 cancellation
                     .check()
                     .change_context(WasmProcessorError::CompileExecution)?;
-                let module = Module::new(&engine, wasm)
-                    .map_err(|source| Report::new(WasmProcessorError::Compile(source)))?;
+                let module = match Module::new(&engine, &wasm) {
+                    Ok(module) => module,
+                    Err(source) => {
+                        return Err(WasmProcessorError::compile_failure(
+                            &wasm,
+                            source,
+                            cancellation,
+                        ));
+                    }
+                };
                 refuse_module_beyond_guest_contract(&module)?;
                 let mut linker = Linker::<BranchStore>::new(&engine);
                 define_host_functions(&mut linker)?;
@@ -6263,10 +6281,16 @@ mod tests {
     /// A guest that implements every export the host requires and defines `declarations` beside
     /// its exported memory.
     fn guest_defining(declarations: &str) -> String {
+        guest_with_memory(r#"(memory (export "memory") 1)"#, declarations)
+    }
+
+    /// A guest that implements every export the host requires, exports the linear memory `memory`
+    /// declares, and defines `declarations` beside it.
+    fn guest_with_memory(memory: &str, declarations: &str) -> String {
         format!(
             r#"
             (module
-                (memory (export "memory") 1)
+                {memory}
                 {declarations}
                 (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
                 (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
@@ -6336,6 +6360,293 @@ mod tests {
             refusal.current_context().to_string(),
             "wasm module defines 2 tables, but a guest defines at most 1"
         );
+    }
+
+    /// The proposals outside the guest contract a refused compilation named, or a panic naming the
+    /// refusal it got instead.
+    fn refused_proposals(refusal: &Report<WasmProcessorError>) -> Vec<RefusedWasmProposal> {
+        let WasmProcessorError::RefusedProposals { proposals } = refusal.current_context() else {
+            panic!("the refusal must name the proposals the module needs: {refusal:?}");
+        };
+        proposals.iter().collect()
+    }
+
+    /// Compiles `wasm`, which the guest contract must refuse.
+    async fn refusal_of(wasm: String) -> Report<WasmProcessorError> {
+        let Err(refusal) = runtime()
+            .compile_processor(&Executor::default(), wasm)
+            .await
+        else {
+            panic!("the module must be refused when it compiles");
+        };
+        refusal
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_with_a_shared_memory_is_refused_naming_the_threads_proposal() {
+        let refusal = refusal_of(guest_with_memory(
+            r#"(memory (export "memory") 1 1 shared)"#,
+            "",
+        ))
+        .await;
+
+        assert_eq!(refused_proposals(&refusal), [RefusedWasmProposal::Threads]);
+        assert_eq!(
+            refusal.current_context().to_string(),
+            "wasm module uses the threads proposal, which a guest may not use"
+        );
+        assert!(
+            refusal
+                .frames()
+                .filter_map(|frame| frame.downcast_ref::<WasmProcessorError>())
+                .any(|context| matches!(context, WasmProcessorError::Compile(_))),
+            "the compile failure the proposal caused stays beneath the refusal: {refusal:?}"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_with_one_byte_pages_is_refused_naming_the_custom_page_sizes_proposal() {
+        let refusal = refusal_of(guest_with_memory(
+            r#"(memory (export "memory") 65536 (pagesize 1))"#,
+            "",
+        ))
+        .await;
+
+        assert_eq!(
+            refused_proposals(&refusal),
+            [RefusedWasmProposal::CustomPageSizes]
+        );
+        assert_eq!(
+            refusal.current_context().to_string(),
+            "wasm module uses the custom page sizes proposal, which a guest may not use"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_needing_two_refused_proposals_is_refused_naming_both() {
+        let refusal = refusal_of(guest_with_memory(
+            r#"(memory (export "memory") 65536 65536 shared (pagesize 1))"#,
+            "",
+        ))
+        .await;
+
+        assert_eq!(
+            refused_proposals(&refusal),
+            [
+                RefusedWasmProposal::Threads,
+                RefusedWasmProposal::CustomPageSizes
+            ]
+        );
+        assert_eq!(
+            refusal.current_context().to_string(),
+            "wasm module uses the threads proposal and the custom page sizes proposal, which a \
+             guest may not use"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn every_refused_proposal_a_module_can_use_is_named_when_it_compiles() {
+        let refused = [
+            (
+                "atomic instructions",
+                guest_defining("(func (result i32) (i32.atomic.load (i32.const 0)))"),
+                RefusedWasmProposal::Threads,
+            ),
+            (
+                "throw",
+                guest_defining("(tag $failed) (func (throw $failed))"),
+                RefusedWasmProposal::ExceptionHandling,
+            ),
+            (
+                "an externref parameter",
+                guest_defining("(func (param externref))"),
+                RefusedWasmProposal::GarbageCollectedReferences,
+            ),
+            (
+                "a struct type",
+                guest_defining("(type (struct (field i32)))"),
+                RefusedWasmProposal::GarbageCollectedReferences,
+            ),
+            (
+                "a component",
+                "(component)".to_string(),
+                RefusedWasmProposal::ComponentModel,
+            ),
+        ];
+
+        for (construct, wasm, proposal) in refused {
+            let refusal = refusal_of(wasm).await;
+
+            assert_eq!(
+                refused_proposals(&refusal),
+                [proposal],
+                "a module using {construct} needs {proposal}"
+            );
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_module_invalid_whatever_the_engine_enables_names_no_proposal() {
+        for wasm in [
+            "not a module".to_string(),
+            guest_defining("(func (result i32) (i64.const 0))"),
+        ] {
+            let refusal = refusal_of(wasm).await;
+
+            assert!(
+                matches!(refusal.current_context(), WasmProcessorError::Compile(_)),
+                "a module no proposal makes valid is a compile failure: {refusal:?}"
+            );
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn every_feature_of_the_guest_contract_compiles() {
+        let features = [
+            (
+                "bulk memory operations",
+                guest_defining("(func (memory.copy (i32.const 0) (i32.const 16) (i32.const 8)))"),
+            ),
+            (
+                "reference types with funcref",
+                guest_defining(
+                    "(table 1 funcref) (elem declare func $target) (func $target) (func \
+                     (table.set (i32.const 0) (ref.func $target)))",
+                ),
+            ),
+            (
+                "sign-extension operators",
+                guest_defining("(func (param i32) (result i32) (i32.extend8_s (local.get 0)))"),
+            ),
+            (
+                "non-trapping float-to-integer conversions",
+                guest_defining(
+                    "(func (param f32) (result i32) (i32.trunc_sat_f32_s (local.get 0)))",
+                ),
+            ),
+            (
+                "multiple results",
+                guest_defining("(func (result i32 i64) (i32.const 1) (i64.const 2))"),
+            ),
+            (
+                "fixed-width SIMD",
+                guest_defining("(func (result v128) (v128.const i32x4 1 2 3 4))"),
+            ),
+            (
+                "mutable globals",
+                guest_defining(r#"(global (export "counter") (mut i32) (i32.const 0))"#),
+            ),
+            (
+                "tail calls",
+                guest_defining(
+                    "(func $target (result i32) (i32.const 1)) (func (result i32) (return_call \
+                     $target))",
+                ),
+            ),
+            (
+                "extended constant expressions",
+                guest_defining("(global i32 (i32.add (i32.const 1) (i32.const 2)))"),
+            ),
+            (
+                "typed function references",
+                guest_defining(
+                    "(type $answer (func (result i32))) (func $target (type $answer) (i32.const \
+                     1)) (elem declare func $target) (func (result i32) (call_ref $answer \
+                     (ref.func $target)))",
+                ),
+            ),
+            (
+                "the type system of the GC proposal",
+                guest_defining(
+                    "(rec (type $base (sub (func))) (type $derived (sub $base (func)))) (func \
+                     (type $derived))",
+                ),
+            ),
+            (
+                "relaxed SIMD",
+                guest_defining(
+                    "(func (param v128) (result v128) (i32x4.relaxed_trunc_f32x4_s (local.get 0)))",
+                ),
+            ),
+            (
+                "64-bit memories",
+                guest_with_memory(r#"(memory (export "memory") i64 1)"#, ""),
+            ),
+            (
+                "wide arithmetic",
+                guest_defining(
+                    "(func (param i64 i64 i64 i64) (result i64 i64) (i64.add128 (local.get 0) \
+                     (local.get 1) (local.get 2) (local.get 3)))",
+                ),
+            ),
+        ];
+
+        for (feature, wasm) in features {
+            if let Err(refusal) = runtime()
+                .compile_processor(&Executor::default(), wasm)
+                .await
+            {
+                panic!("a guest may use {feature}: {refusal:?}");
+            }
+        }
+    }
+
+    /// A guest whose memory of one-byte pages starts empty. `grow_past_failures` repeats, the
+    /// given number of times, a growth of 4 KiB the limiter is asked about and a growth to the end
+    /// of the 32-bit address space, which a memory of one-byte pages cannot reach, so Wasmtime
+    /// fails it without asking the limiter. It returns the memory's size in bytes.
+    const ONE_BYTE_PAGES_GROWING_WASM: &str = r#"
+        (module
+            (memory (export "memory") 0 (pagesize 1))
+            (func (export "grow_past_failures") (param $cycles i32) (result i32)
+                (local $cycle i32)
+                (loop $next
+                    (drop (memory.grow (i32.const 4096)))
+                    (drop (memory.grow (i32.const -1)))
+                    (local.set $cycle (i32.add (local.get $cycle) (i32.const 1)))
+                    (br_if $next (i32.lt_u (local.get $cycle) (local.get $cycles))))
+                memory.size))
+    "#;
+
+    #[test]
+    fn max_memory_holds_through_growths_wasmtime_fails_without_asking() {
+        // The guest contract refuses one-byte pages, and they are the only memories for which
+        // Wasmtime 49 fails a growth without asking the limiter, so this engine enables them to
+        // drive the limiter through that path.
+        let mut config = Config::new();
+        config.wasm_custom_page_sizes(true);
+        let engine = Engine::new(&config).expect("an engine with one-byte pages must start");
+        let module = Module::new(&engine, ONE_BYTE_PAGES_GROWING_WASM)
+            .expect("the growing guest must compile with one-byte pages enabled");
+        let mut store = Store::new(
+            &engine,
+            GuestResourceLimiter::new(WasmProcessorLimits {
+                max_memory_bytes: nonzero!(65_536u64),
+                ..limits()
+            }),
+        );
+        store.limiter(|limiter| limiter);
+        let instance =
+            Instance::new(&mut store, &module, &[]).expect("an empty memory instantiates");
+        let grow = instance
+            .get_typed_func::<i32, i32>(&mut store, "grow_past_failures")
+            .expect("the guest exports grow_past_failures");
+
+        let error = grow
+            .call(&mut store, 32)
+            .expect_err("32 growths of 4 KiB do not fit a MAX MEMORY of 64 KiB");
+
+        let exceeded = error
+            .downcast_ref::<GuestMemoryLimitExceeded>()
+            .unwrap_or_else(|| panic!("the limiter must refuse the growth: {error:?}"));
+        assert_eq!(
+            (exceeded.allocated, exceeded.growth, exceeded.limit),
+            (65_536, 4_096, 65_536)
+        );
+        let memory = instance
+            .get_memory(&mut store, "memory")
+            .expect("the guest exports its memory");
+        assert_eq!(memory.data_size(&store), 65_536);
     }
 
     #[nervix_primitives::test]

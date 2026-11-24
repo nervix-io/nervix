@@ -85,6 +85,29 @@ pub(crate) struct ConnectionArgs {
     /// Bytes of all calls on one connection the node may send before they are read.
     #[arg(long = client_caps::ClientConnectionWindowBytes::NAME, env = "NERVIX_CLI_CONNECTION_WINDOW_BYTES", global = true, default_value = client_caps::ClientConnectionWindowBytes::default_value(&()).to_string())]
     pub(crate) connection_window_bytes: NonZeroU32,
+    /// Calls that wait for a connection while it is opened before the next caller waits.
+    #[arg(long = client_caps::ClientCallQueueCapacity::NAME, env = "NERVIX_CLI_CALL_QUEUE_CAPACITY", global = true, default_value = client_caps::ClientCallQueueCapacity::default_value(&()).to_string())]
+    pub(crate) call_queue_capacity: NonZeroUsize,
+    /// Largest header list, headers or trailers, accepted from the node on one call, each field
+    /// counted as its name and value plus 32 bytes.
+    #[arg(long = client_caps::ClientHeaderListBytes::NAME, env = "NERVIX_CLI_HEADER_LIST_BYTES", global = true, default_value = client_caps::ClientHeaderListBytes::default_value(&()).to_string())]
+    pub(crate) header_list_bytes: NonZeroU32,
+    /// Request bytes one call queues for the connection before it waits for the node to read.
+    #[arg(long = client_caps::ClientSendBufferBytes::NAME, env = "NERVIX_CLI_SEND_BUFFER_BYTES", global = true, default_value = client_caps::ClientSendBufferBytes::default_value(&()).to_string())]
+    pub(crate) send_buffer_bytes: NonZeroU32,
+    /// Calls reset for the node's protocol errors before the connection is ended.
+    #[arg(long = client_caps::ClientMaxErrorResetStreams::NAME, env = "NERVIX_CLI_MAX_ERROR_RESET_STREAMS", global = true, default_value = client_caps::ClientMaxErrorResetStreams::default_value(&()).to_string())]
+    pub(crate) max_error_reset_streams: NonZeroU32,
+    /// Cancelled calls remembered at once, so that frames the node sent for them are ignored.
+    #[arg(long = client_caps::ClientRememberedResetStreams::NAME, env = "NERVIX_CLI_REMEMBERED_RESET_STREAMS", global = true, default_value = client_caps::ClientRememberedResetStreams::default_value(&()).to_string())]
+    pub(crate) remembered_reset_streams: NonZeroU32,
+    /// How long each cancelled call is remembered.
+    #[arg(long = client_caps::ClientResetStreamDuration::NAME, env = "NERVIX_CLI_RESET_STREAM_DURATION", global = true, default_value = humantime::format_duration(client_caps::ClientResetStreamDuration::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
+    pub(crate) reset_stream_duration: Duration,
+    /// How long a connection attempt to an address of one family runs before an address of the
+    /// other family is tried too.
+    #[arg(long = client_caps::ClientConnectionAttemptDelay::NAME, env = "NERVIX_CLI_CONNECTION_ATTEMPT_DELAY", global = true, default_value = humantime::format_duration(client_caps::ClientConnectionAttemptDelay::default_value(&())).to_string(), value_parser = nervix_models::parse_duration_text)]
+    pub(crate) connection_attempt_delay: Duration,
 }
 
 impl ConnectionArgs {
@@ -110,6 +133,13 @@ impl ConnectionArgs {
             keepalive_timeout: self.keepalive_timeout,
             stream_window_bytes: self.stream_window_bytes,
             connection_window_bytes: self.connection_window_bytes,
+            call_queue_capacity: self.call_queue_capacity,
+            header_list_bytes: self.header_list_bytes,
+            send_buffer_bytes: self.send_buffer_bytes,
+            max_error_reset_streams: self.max_error_reset_streams,
+            remembered_reset_streams: self.remembered_reset_streams,
+            reset_stream_duration: self.reset_stream_duration,
+            connection_attempt_delay: self.connection_attempt_delay,
             ..ConnectOptions::default()
         }
     }
@@ -198,6 +228,34 @@ impl ConnectionArgs {
                 client_caps::ClientConnectionWindowBytes::NAME,
                 self.connection_window_bytes.to_string(),
             ),
+            (
+                client_caps::ClientCallQueueCapacity::NAME,
+                self.call_queue_capacity.to_string(),
+            ),
+            (
+                client_caps::ClientHeaderListBytes::NAME,
+                self.header_list_bytes.to_string(),
+            ),
+            (
+                client_caps::ClientSendBufferBytes::NAME,
+                self.send_buffer_bytes.to_string(),
+            ),
+            (
+                client_caps::ClientMaxErrorResetStreams::NAME,
+                self.max_error_reset_streams.to_string(),
+            ),
+            (
+                client_caps::ClientRememberedResetStreams::NAME,
+                self.remembered_reset_streams.to_string(),
+            ),
+            (
+                client_caps::ClientResetStreamDuration::NAME,
+                humantime::format_duration(self.reset_stream_duration).to_string(),
+            ),
+            (
+                client_caps::ClientConnectionAttemptDelay::NAME,
+                humantime::format_duration(self.connection_attempt_delay).to_string(),
+            ),
         ] {
             arguments.push(format!("--{name}"));
             arguments.push(value);
@@ -238,6 +296,7 @@ mod tests {
         let restoration_max_backoff = duration().max(restoration_backoff);
         let keepalive_interval = duration();
         let keepalive_timeout = duration();
+        let reset_stream_duration = duration();
         let mut capacity = || {
             NonZeroUsize::new(
                 usize::try_from(entropy.boundary_biased(1..=128))
@@ -252,6 +311,7 @@ mod tests {
         let restore_frame_capacity = capacity();
         let request_frame_capacity = capacity();
         let notice_capacity = capacity();
+        let call_queue_capacity = capacity();
         // Every positive notice byte bound is valid, so the bound reaches the largest usize.
         let largest_bytes =
             u64::try_from(usize::MAX).assured("supported targets address at most 64 bits");
@@ -269,6 +329,24 @@ mod tests {
         };
         let stream_window_bytes = window(NonZeroU32::MIN.get());
         let connection_window_bytes = window(client_caps::INITIAL_CONNECTION_WINDOW_BYTES);
+        // Every positive 32-bit header list, send buffer and reset count is valid.
+        let mut http2_limit = || {
+            let value = entropy.boundary_biased(1..=u64::from(u32::MAX));
+            NonZeroU32::new(u32::try_from(value).assured("the bounded limit fits u32"))
+                .assured("every generated limit is positive")
+        };
+        let header_list_bytes = http2_limit();
+        let send_buffer_bytes = http2_limit();
+        let max_error_reset_streams = http2_limit();
+        let remembered_reset_streams = http2_limit();
+        // Every delay within RFC 8305's bounds is valid, to the nanosecond.
+        let shortest_delay =
+            u64::try_from(client_caps::SHORTEST_CONNECTION_ATTEMPT_DELAY.as_nanos())
+                .assured("ten milliseconds of nanoseconds fit u64");
+        let longest_delay = u64::try_from(client_caps::LONGEST_CONNECTION_ATTEMPT_DELAY.as_nanos())
+            .assured("two seconds of nanoseconds fit u64");
+        let connection_attempt_delay =
+            Duration::from_nanos(entropy.boundary_biased(shortest_delay..=longest_delay));
         ConnectionArgs {
             connect_timeout,
             request_timeout,
@@ -290,6 +368,13 @@ mod tests {
             keepalive_timeout,
             stream_window_bytes,
             connection_window_bytes,
+            call_queue_capacity,
+            header_list_bytes,
+            send_buffer_bytes,
+            max_error_reset_streams,
+            remembered_reset_streams,
+            reset_stream_duration,
+            connection_attempt_delay,
         }
     }
 
@@ -351,13 +436,32 @@ mod tests {
             actual.connection_window_bytes(),
             connection.connection_window_bytes
         );
+        assert_eq!(actual.call_queue_capacity(), connection.call_queue_capacity);
+        assert_eq!(actual.header_list_bytes(), connection.header_list_bytes);
+        assert_eq!(actual.send_buffer_bytes(), connection.send_buffer_bytes);
+        assert_eq!(
+            actual.max_error_reset_streams(),
+            connection.max_error_reset_streams
+        );
+        assert_eq!(
+            actual.remembered_reset_streams(),
+            connection.remembered_reset_streams
+        );
+        assert_eq!(
+            actual.reset_stream_duration(),
+            connection.reset_stream_duration
+        );
+        assert_eq!(
+            actual.connection_attempt_delay(),
+            connection.connection_attempt_delay
+        );
     }
 
     #[test]
     fn bolero_client_capabilities_survive_their_command_line() {
         bolero::check!()
             .with_iterations(128)
-            .with_max_len(128)
+            .with_max_len(192)
             .for_each(|bytes: &[u8]| round_trip(generated(bytes)));
     }
 
@@ -365,8 +469,8 @@ mod tests {
     fn fractional_deadlines_and_capacity_boundaries_survive_the_command_line() {
         for bytes in [
             &[][..],
-            &[0; 128][..],
-            &[255; 128][..],
+            &[0; 192][..],
+            &[255; 192][..],
             &[1, 127, 255, 0][..],
         ] {
             round_trip(generated(bytes));
@@ -403,6 +507,11 @@ mod tests {
             "--request-frame-capacity",
             "--notice-capacity",
             "--notice-bytes",
+            "--call-queue-capacity",
+            "--header-list-bytes",
+            "--send-buffer-bytes",
+            "--max-error-reset-streams",
+            "--remembered-reset-streams",
         ] {
             assert!(
                 Options::try_parse_from(["nervix-cli", capacity, "0"]).is_err(),
@@ -419,6 +528,30 @@ mod tests {
             .is_err(),
             "a connection window below the initial HTTP/2 window is refused before connecting"
         );
+        for (flag, value) in [
+            ("--connection-attempt-delay", "9ms"),
+            ("--connection-attempt-delay", "2001ms"),
+            ("--reset-stream-duration", "0s"),
+        ] {
+            let outside =
+                Options::try_parse_from(["nervix-cli", flag, value]).assured("the duration parses");
+            assert!(
+                nervix_client_core::ClientCapabilities::from_options(
+                    &outside.connection.connect_options()
+                )
+                .is_err(),
+                "{flag} {value} is refused before connecting"
+            );
+        }
+        for value in ["10ms", "2s"] {
+            let bound =
+                Options::try_parse_from(["nervix-cli", "--connection-attempt-delay", value])
+                    .assured("the duration parses");
+            nervix_client_core::ClientCapabilities::from_options(
+                &bound.connection.connect_options(),
+            )
+            .assured("RFC 8305's bounds are valid connection attempt delays");
+        }
     }
 
     /// Without flags the CLI takes the native client's keepalive and windows, so it pings a silent
@@ -437,6 +570,22 @@ mod tests {
             defaults.connection_window_bytes,
             native.connection_window_bytes
         );
+        assert_eq!(defaults.call_queue_capacity, native.call_queue_capacity);
+        assert_eq!(defaults.header_list_bytes, native.header_list_bytes);
+        assert_eq!(defaults.send_buffer_bytes, native.send_buffer_bytes);
+        assert_eq!(
+            defaults.max_error_reset_streams,
+            native.max_error_reset_streams
+        );
+        assert_eq!(
+            defaults.remembered_reset_streams,
+            native.remembered_reset_streams
+        );
+        assert_eq!(defaults.reset_stream_duration, native.reset_stream_duration);
+        assert_eq!(
+            defaults.connection_attempt_delay,
+            native.connection_attempt_delay
+        );
     }
 
     #[test]
@@ -450,5 +599,12 @@ mod tests {
         assert_eq!(options.request_frame_capacity.get(), 32);
         assert_eq!(options.notice_capacity.get(), 128);
         assert_eq!(options.notice_bytes.get(), 1024 * 1024);
+        assert_eq!(options.call_queue_capacity.get(), 1024);
+        assert_eq!(options.header_list_bytes.get(), 16 * 1024);
+        assert_eq!(options.send_buffer_bytes.get(), 1024 * 1024);
+        assert_eq!(options.max_error_reset_streams.get(), 1024);
+        assert_eq!(options.remembered_reset_streams.get(), 50);
+        assert_eq!(options.reset_stream_duration, Duration::from_secs(1));
+        assert_eq!(options.connection_attempt_delay, Duration::from_millis(300));
     }
 }
