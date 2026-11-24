@@ -712,8 +712,11 @@ pub type EmitterStartResult<T> = Result<T, Report<EmitterOpenError>>;
 
 /// Why a connector could not complete an emitter operation.
 ///
-/// Every variant but [`EmitterWriteError::Misconfigured`] describes a condition the host retries on
-/// its declared backoff.
+/// The host retries every variant on the emitter's declared retry policy, because none of them
+/// says anything is wrong with the records. [`EmitterWriteError::Misconfigured`] says the
+/// destination refused the write as the emitter is configured, which only an operator repairs, so
+/// the host shows it as a misconfiguration while it retries; under `GIVE UP AFTER` it ends like
+/// any other failure once the limit passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum EmitterWriteError {
     #[error("{connector} emitter is not initialized")]
@@ -930,6 +933,18 @@ pub trait EmitterLifecycle: Send {
     /// nothing to commit.
     async fn commit(&mut self) -> EmitterWriteResult<Option<EmitterCommitReport>> {
         Ok(None)
+    }
+
+    /// Drops everything this emitter staged and has not committed, because the host gave up on
+    /// committing it, and hands back the acknowledgements it retained for those rows.
+    ///
+    /// The host calls this only once the emitter's `GIVE UP AFTER` passed since the first failed
+    /// attempt to commit what is staged. It fails the acknowledgements it receives; the emitter
+    /// keeps nothing of the dropped rows and never commits them later. A commit that already
+    /// published part of what was staged keeps that part published. An emitter that writes each
+    /// batch as it arrives stages nothing and hands nothing back.
+    async fn abandon_staged(&mut self) -> Option<EmitterRecordAcknowledgements> {
+        None
     }
 }
 

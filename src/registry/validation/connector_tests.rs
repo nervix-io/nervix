@@ -45,6 +45,14 @@ use crate::registry::{
     },
 };
 
+/// An emitter retry policy paced by `pacing` that never gives up, as most fixtures declare.
+fn without_limit(pacing: nervix_models::RetryPolicy) -> nervix_models::EmitterRetryPolicy {
+    nervix_models::EmitterRetryPolicy {
+        pacing,
+        give_up_after: None,
+    }
+}
+
 #[test]
 fn transport_policy_errors_keep_the_node_and_duration_reader_cause() {
     let domain: DomainName = named("validation");
@@ -243,10 +251,10 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     let models = ModelIndex::new();
 
     *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::NoAck {
-        retry_policy: RetryPolicy {
+        retry_policy: without_limit(RetryPolicy {
             backoff: "0s".to_string(),
             max_backoff: "1s".to_string(),
-        },
+        }),
     };
     let error = validate_emitter_publishing_contract(
         &domain,
@@ -260,10 +268,10 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::Ack {
         window: AckWindow::Sequential,
         ack_timeout: "0s".to_string(),
-        retry_policy: RetryPolicy {
+        retry_policy: without_limit(RetryPolicy {
             backoff: "10ms".to_string(),
             max_backoff: "1s".to_string(),
-        },
+        }),
     };
     let error = validate_emitter_publishing_contract(
         &domain,
@@ -276,10 +284,10 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
 
     *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         mode: nervix_models::SqsQueuePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("sqs_main"),
         send: nervix_models::SqsSend::Single,
@@ -289,10 +297,10 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
         ))),
     }));
     *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Ack {
-        retry_policy: RetryPolicy {
+        retry_policy: without_limit(RetryPolicy {
             backoff: "1s".to_string(),
             max_backoff: "100ms".to_string(),
-        },
+        }),
     };
     let error = validate_emitter_publishing_contract(
         &domain,
@@ -304,7 +312,7 @@ fn emitter_publishing_contract_rejects_model_level_bypasses() {
     assert!(format!("{error:#}").contains("must be at least BACKOFF"));
 
     let nervix_models::SqsQueuePublishingMode::Ack { retry_policy } = sqs_publication(&mut emitter);
-    retry_policy.max_backoff = "1s".to_string();
+    retry_policy.pacing.max_backoff = "1s".to_string();
     let error = validate_emitter_publishing_contract(
         &domain,
         &ModelName::from(&emitter.name),
@@ -325,10 +333,10 @@ fn a_publishing_mode_needs_the_option_choices_its_entity_declares_beside_it() {
     *emitter.connector = EmitterEntity::Mqtt(nervix_models::MqttEmitter::Topic(
         nervix_models::MqttTopicEmitter {
             mode: nervix_models::MqttTopicPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
+                retry_policy: without_limit(RetryPolicy {
                     backoff: "250ms".to_string(),
                     max_backoff: "30s".to_string(),
-                },
+                }),
             },
             client: named("mqtt_main"),
             topic,
@@ -381,10 +389,10 @@ fn publishing_contract_checks_the_batch_clause_against_its_emitter() {
 
     *emitter.connector = EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
         mode: nervix_models::PostgresTablePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("postgres_main"),
         table: named("events"),
@@ -405,10 +413,10 @@ fn publishing_contract_checks_the_batch_clause_against_its_emitter() {
 
     *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         mode: nervix_models::SqsQueuePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("sqs_main"),
         send: nervix_models::SqsSend::Single,
@@ -419,10 +427,10 @@ fn publishing_contract_checks_the_batch_clause_against_its_emitter() {
         codec: named("event_codec"),
     };
     *sqs_publication(&mut emitter) = nervix_models::SqsQueuePublishingMode::Ack {
-        retry_policy: RetryPolicy {
+        retry_policy: without_limit(RetryPolicy {
             backoff: "10ms".to_string(),
             max_backoff: "1s".to_string(),
-        },
+        }),
     };
     let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
         .expect_err("an SQS batch larger than one SQS message must be rejected");
@@ -463,10 +471,10 @@ fn batching_emitters_require_a_codec_container_their_emitter_can_publish() {
     *emitter.connector = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
         platform: None,
         mode: nervix_models::SentryEventPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("sentry_main"),
     }));
@@ -523,10 +531,10 @@ fn direct_values_sensitivity_reports_the_typed_external_target() {
     };
     *emitter.connector = EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
         mode: nervix_models::PostgresTablePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("database"),
         table: named("events"),
@@ -584,10 +592,10 @@ fn direct_values_type_failure_keeps_the_vm_compile_cause() {
     };
     *emitter.connector = EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
         mode: nervix_models::PostgresTablePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("database"),
         table: named("events"),
@@ -651,10 +659,10 @@ fn http_request_type_failure_keeps_the_vm_compile_cause() {
     emitter.body = nervix_models::EmitterBody::WithoutBody;
     *emitter.connector = EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
         mode: nervix_models::HttpRequestPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("api"),
         method: nervix_plexus::parse_expression("input.value")
@@ -698,10 +706,10 @@ fn otel_literal_domains_are_admitted_by_the_registry_with_typed_refusals() {
     for value in [-1, 0, 24, 25] {
         let connector = OtelEmitter::Logs(OtelLogsEmitter {
             mode: nervix_models::OtelLogsPublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
+                retry_policy: without_limit(nervix_models::RetryPolicy {
                     backoff: "250ms".into(),
                     max_backoff: "1s".into(),
-                },
+                }),
             },
             client: named("destination"),
             mappings: OtelMappings {
@@ -758,10 +766,10 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
 
     *emitter.connector = EmitterEntity::from(OtelLogsEmitter {
         mode: nervix_models::OtelLogsPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("otel_main"),
         mappings: OtelMappings {
@@ -801,10 +809,10 @@ fn otel_mapping_contract_validates_signal_keys_before_runtime() {
 
     *emitter.connector = EmitterEntity::from(OtelMetricsEmitter {
         mode: nervix_models::OtelMetricsPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("otel_main"),
         metric: OtelMetric {
@@ -895,10 +903,10 @@ fn sqs_fifo_group_is_validated_at_emitter_creation() {
     };
     *valid.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         mode: nervix_models::SqsQueuePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("sqs_main"),
         send: nervix_models::SqsSend::Single,
@@ -952,10 +960,10 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
         connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
+                    retry_policy: without_limit(RetryPolicy {
                         backoff: "250ms".to_string(),
                         max_backoff: "30s".to_string(),
-                    },
+                    }),
                 },
                 client: named("zeromq_main"),
             },
@@ -987,10 +995,10 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
 
     *emitter.connector = EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
         mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("syslog_main"),
     }));
@@ -1007,10 +1015,10 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
 
     *emitter.connector = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
         mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("kafka_main"),
         topic: named("events_out"),
@@ -1056,10 +1064,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
         connector: Box::new(EmitterEntity::Pulsar(PulsarEmitter::Topic(
             PulsarTopicEmitter {
                 mode: nervix_models::PulsarTopicPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
+                    retry_policy: without_limit(RetryPolicy {
                         backoff: "250ms".to_string(),
                         max_backoff: "30s".to_string(),
-                    },
+                    }),
                 },
                 client: named("pulsar_main"),
                 topic: named("events_out"),
@@ -1121,10 +1129,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
 
     *emitter.connector = EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
         mode: nervix_models::SqsQueuePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("sqs_main"),
         send: nervix_models::SqsSend::Single,
@@ -1139,10 +1147,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
 
     *emitter.connector = EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
         mode: nervix_models::RabbitMqQueuePublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("rabbitmq_main"),
         queue: named("events_out"),
@@ -1156,10 +1164,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     // HTTP records field names in lowercase, so two spellings of one name are one name.
     *emitter.connector = EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
         mode: nervix_models::HttpRequestPublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("api"),
         method: Expression::Literal(nervix_models::Literal::String("POST".to_string())),
@@ -1179,10 +1187,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     // Names that differ in letter case are two names where an emitter keeps them exactly.
     *emitter.connector = EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
         mode: nervix_models::PulsarTopicPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("pulsar_main"),
         topic: named("events_out"),
@@ -1196,10 +1204,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     .expect("valid construction");
     *emitter.connector = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
         mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("kafka_main"),
         topic: named("events_out"),
@@ -1207,10 +1215,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     validate(&emitter).expect("a Kafka record keeps both headers");
     *emitter.connector = EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
         mode: nervix_models::NatsSubjectPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("nats_main"),
         subject: named("events_out"),
@@ -1224,10 +1232,10 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
     .expect("valid construction");
     *emitter.connector = EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
         mode: nervix_models::PulsarTopicPublishingMode::NoAck {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("pulsar_main"),
         topic: named("events_out"),
@@ -1512,8 +1520,9 @@ fn an_emitter_publishing_contract_says_why_a_duration_names_no_duration() {
             },
         ];
         for (retry_policy, clause) in retry_policies.into_iter().zip(["BACKOFF", "MAX"]) {
-            *kafka_publication(&mut emitter) =
-                nervix_models::KafkaTopicPublishingMode::NoAck { retry_policy };
+            *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::NoAck {
+                retry_policy: without_limit(retry_policy),
+            };
             let error = validate_emitter_publishing_contract(
                 &domain,
                 &ModelName::from(&emitter.name),
@@ -1530,10 +1539,10 @@ fn an_emitter_publishing_contract_says_why_a_duration_names_no_duration() {
         *kafka_publication(&mut emitter) = nervix_models::KafkaTopicPublishingMode::Ack {
             window: AckWindow::Sequential,
             ack_timeout: value.to_string(),
-            retry_policy: RetryPolicy {
+            retry_policy: without_limit(RetryPolicy {
                 backoff: "10ms".to_string(),
                 max_backoff: "1s".to_string(),
-            },
+            }),
         };
         let error = validate_emitter_publishing_contract(
             &domain,
@@ -2256,10 +2265,10 @@ fn sentry_emitter_rejects_http_client() {
         SentryEventEmitter {
             platform: None,
             mode: nervix_models::SentryEventPublishingMode::Ack {
-                retry_policy: nervix_models::RetryPolicy {
+                retry_policy: without_limit(nervix_models::RetryPolicy {
                     backoff: "250ms".to_string(),
                     max_backoff: "30s".to_string(),
-                },
+                }),
             },
             client: named("sentry_main"),
         },
@@ -2447,10 +2456,10 @@ fn an_iceberg_emitter_rejects_a_catalog_client_of_another_connector() {
     iceberg_emitter.construction = nervix_models::RouteConstruction::default();
     iceberg_emitter.connector = Box::new(EmitterEntity::from(IcebergTableEmitter {
         mode: nervix_models::IcebergTablePublishingMode::Ack {
-            retry_policy: nervix_models::RetryPolicy {
+            retry_policy: without_limit(nervix_models::RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
         client: named("lake"),
         table: named("events"),
@@ -2626,10 +2635,10 @@ fn literal_nats_reply_subjects_are_validated_before_execution() {
         client: named("nats_main"),
         subject: named("requests"),
         mode: nervix_models::NatsSubjectPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
+            retry_policy: without_limit(RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
     }));
     let check = |emitter: &CreateEmitter| {
@@ -2777,10 +2786,10 @@ fn sqs_emitter(queue: &str) -> CreateEmitter {
         fifo_group,
         send: nervix_models::SqsSend::Single,
         mode: nervix_models::SqsQueuePublishingMode::Ack {
-            retry_policy: RetryPolicy {
+            retry_policy: without_limit(RetryPolicy {
                 backoff: "250ms".to_string(),
                 max_backoff: "30s".to_string(),
-            },
+            }),
         },
     }));
     emitter
@@ -2934,10 +2943,10 @@ fn a_routing_key_is_an_exact_non_null_non_sensitive_string() {
         emitter.connector = Box::new(EmitterEntity::RabbitMq(
             nervix_models::RabbitMqEmitter::Exchange(nervix_models::RabbitMqExchangeEmitter {
                 mode: nervix_models::RabbitMqExchangePublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
+                    retry_policy: without_limit(RetryPolicy {
                         backoff: "1s".to_string(),
                         max_backoff: "30s".to_string(),
-                    },
+                    }),
                 },
                 client: named("rabbit_main"),
                 exchange: nervix_models::RabbitMqExchangeName::parse("events")

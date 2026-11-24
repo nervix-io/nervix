@@ -2875,6 +2875,9 @@ enum OtlpAnswer {
     Reject,
     /// HTTP `503`, or gRPC `UNAVAILABLE`: the receiver asks the client to try again.
     Unavailable,
+    /// HTTP `403`, or gRPC `PERMISSION_DENIED`: the receiver refuses this client as it is
+    /// configured, which no retry of the same request changes until the receiver is repaired.
+    Forbidden,
     /// The receiver reads the whole request, then closes the connection without answering.
     LoseResponse,
     /// The receiver reads the whole request, then answers nothing until the client gives up.
@@ -2889,11 +2892,12 @@ impl FromStr for OtlpAnswer {
             "accept" => Ok(Self::Accept),
             "reject" => Ok(Self::Reject),
             "unavailable" => Ok(Self::Unavailable),
+            "forbidden" => Ok(Self::Forbidden),
             "lose response" => Ok(Self::LoseResponse),
             "hold response" => Ok(Self::HoldResponse),
             other => Err(format!(
                 "unknown OTLP receiver answer '{other}'; expected accept, reject, unavailable, \
-                 lose response, or hold response"
+                 forbidden, lose response, or hold response"
             )),
         }
     }
@@ -2906,6 +2910,7 @@ impl OtlpAnswer {
             Self::Accept => "respond 200",
             Self::Reject => "respond 400",
             Self::Unavailable => "respond 503",
+            Self::Forbidden => "respond 403",
             Self::LoseResponse => "lose response",
             Self::HoldResponse => "hold response",
         };
@@ -2920,6 +2925,7 @@ impl OtlpAnswer {
             Self::Accept => GrpcAnswer::Accept,
             Self::Reject => GrpcAnswer::Status(tonic::Code::InvalidArgument),
             Self::Unavailable => GrpcAnswer::Status(tonic::Code::Unavailable),
+            Self::Forbidden => GrpcAnswer::Status(tonic::Code::PermissionDenied),
             Self::LoseResponse => GrpcAnswer::LoseResponse,
             Self::HoldResponse => GrpcAnswer::HoldResponse,
         }
@@ -3088,7 +3094,8 @@ async fn given_otlp_receiver_is_running(world: &mut ScenarioWorld, name: String,
 }
 
 /// Each line is one answer, taken by the next Export request in order: `accept`, `reject`,
-/// `unavailable`, `lose response`, or `hold response`. Requests beyond the script are accepted.
+/// `unavailable`, `forbidden`, `lose response`, or `hold response`. Requests beyond the script are
+/// accepted.
 #[given(expr = "OTLP receiver {string} answers with")]
 async fn given_otlp_receiver_answers_with(
     world: &mut ScenarioWorld,

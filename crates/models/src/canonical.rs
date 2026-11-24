@@ -44,8 +44,8 @@ use crate::{
     CreateRelay, CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
     CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DescribeBackup,
     DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
-    EmitterEntity, EmitterEnvelope, EmitterPublishing, EnvelopeClause, ExistingUserPolicy,
-    Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
+    EmitterEntity, EmitterEnvelope, EmitterPublishing, EmitterRetryPolicy, EnvelopeClause,
+    ExistingUserPolicy, Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy,
     InferencerStateBinding, InferencerStateInitial, InferencerTensorDeclaration,
     InferencerTensorDimension, InferencerTensorMapping, InferencerTensorSchema,
     IngestTimestampSource, IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat,
@@ -3513,6 +3513,16 @@ fn retry_policy_to_plexus(policy: &RetryPolicy) -> String {
     format!("BACKOFF {} MAX {}", policy.backoff, policy.max_backoff)
 }
 
+/// An emitter's policy after its `RETRY POLICY` keywords: the shared pacing, then `GIVE UP AFTER`
+/// when the emitter stops retrying a unit at all.
+fn emitter_retry_policy_to_plexus(policy: &EmitterRetryPolicy) -> String {
+    let pacing = retry_policy_to_plexus(&policy.pacing);
+    match &policy.give_up_after {
+        Some(give_up_after) => format!("{pacing} GIVE UP AFTER {give_up_after}"),
+        None => pacing,
+    }
+}
+
 fn ack_window_to_plexus(window: &AckWindow) -> String {
     match window {
         AckWindow::Sequential => "SEQUENTIAL".to_string(),
@@ -3522,10 +3532,11 @@ fn ack_window_to_plexus(window: &AckWindow) -> String {
 
 impl EmitterPublishing<'_> {
     pub fn to_canonical_plexus(&self) -> String {
-        let retry =
-            |policy: &RetryPolicy| format!("RETRY POLICY {}", retry_policy_to_plexus(policy));
+        let retry = |policy: &EmitterRetryPolicy| {
+            format!("RETRY POLICY {}", emitter_retry_policy_to_plexus(policy))
+        };
         let confirmed =
-            |prefix: &str, window: &AckWindow, ack_timeout: &str, policy: &RetryPolicy| {
+            |prefix: &str, window: &AckWindow, ack_timeout: &str, policy: &EmitterRetryPolicy| {
                 format!(
                     "{prefix} {} ACK TIMEOUT {ack_timeout} {}",
                     ack_window_to_plexus(window),
@@ -5012,9 +5023,12 @@ mod tests {
             (
                 EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
                     mode: crate::KafkaTopicPublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("kafka_main"),
@@ -5025,9 +5039,12 @@ mod tests {
             (
                 EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
                     mode: crate::PulsarTopicPublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("pulsar_main"),
@@ -5038,9 +5055,12 @@ mod tests {
             (
                 EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
                     mode: crate::RabbitMqQueuePublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("rmq_main"),
@@ -5051,9 +5071,12 @@ mod tests {
             (
                 EmitterEntity::RabbitMq(RabbitMqEmitter::Exchange(RabbitMqExchangeEmitter {
                     mode: crate::RabbitMqExchangePublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("rmq_main"),
@@ -5065,9 +5088,12 @@ mod tests {
             (
                 EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
                     mode: crate::RedisPubSubPublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("redis_main"),
@@ -5078,9 +5104,12 @@ mod tests {
             (
                 EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
                     mode: crate::MqttTopicPublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("mqtt_main"),
@@ -5092,9 +5121,12 @@ mod tests {
             (
                 EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
                     mode: crate::NatsSubjectPublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("nats_main"),
@@ -5105,9 +5137,12 @@ mod tests {
             (
                 EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
                     mode: crate::ZeroMqPushPublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("zmq_main"),
@@ -5117,9 +5152,12 @@ mod tests {
             (
                 EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                     mode: crate::SqsQueuePublishingMode::Ack {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("sqs_main"),
@@ -5132,9 +5170,12 @@ mod tests {
             (
                 EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
                     mode: crate::SentryEventPublishingMode::Ack {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("sentry_main"),
@@ -5145,9 +5186,12 @@ mod tests {
             (
                 EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
                     mode: crate::SyslogCollectorPublishingMode::NoAck {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("syslog_main"),
@@ -5230,9 +5274,12 @@ mod tests {
         let sqs = |fifo_group| {
             EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                 mode: crate::SqsQueuePublishingMode::Ack {
-                    retry_policy: crate::RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: crate::EmitterRetryPolicy {
+                        pacing: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("sqs_main"),
@@ -5251,9 +5298,12 @@ mod tests {
 
         let otel = EmitterEntity::from(crate::OtelMetricsEmitter {
             mode: crate::OtelMetricsPublishingMode::Ack {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("otel_main"),
@@ -5316,9 +5366,12 @@ mod tests {
             connector: Box::new(EmitterEntity::Postgres(PostgresEmitter::Table(
                 PostgresTableEmitter {
                     mode: crate::PostgresTablePublishingMode::Ack {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("postgres_main"),
@@ -5376,9 +5429,12 @@ mod tests {
             connector: Box::new(EmitterEntity::MySql(MySqlEmitter::Table(
                 MySqlTableEmitter {
                     mode: crate::MySqlTablePublishingMode::Ack {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("mysql_main"),
@@ -5434,9 +5490,12 @@ mod tests {
             connector: Box::new(EmitterEntity::MongoDb(MongoDbEmitter::Collection(
                 MongoDbCollectionEmitter {
                     mode: crate::MongoDbCollectionPublishingMode::Ack {
-                        retry_policy: crate::RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: crate::RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                            give_up_after: None,
                         },
                     },
                     client: named("mongodb_main"),

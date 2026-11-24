@@ -866,9 +866,12 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
         connector: Box::new(EmitterEntity::Kafka(KafkaEmitter::Topic(
             KafkaTopicEmitter {
                 mode: nervix_models::KafkaTopicPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: nervix_models::EmitterRetryPolicy {
+                        pacing: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("kafka_main"),
@@ -919,9 +922,12 @@ async fn emitter_invocations_run_after_set_for_selected_rows_and_append_headers(
     *unsupported_emitter.connector =
         EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
             mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("zeromq_main"),

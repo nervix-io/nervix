@@ -2722,6 +2722,15 @@ represent, so the backoff alone decides that wait. Every emitter retains its ins
 transient failures; lifecycle recovery never discards staged work, a persistent session or the
 transient failure its pending work is still waiting out.
 
+Every `EmitterWriteError` is retried on the emitter's declared retry policy, `Misconfigured`
+included: a destination that refuses the write as the emitter is configured says nothing about the
+records, so the host keeps them, shows the refusal as the emitter's misconfiguration and counts the
+attempt as `misconfigured`. Only the emitter's declared `GIVE UP AFTER` ends a retry, and the host
+alone applies it: it starts each buffered unit's clock at the unit's first failed attempt, decides
+between attempts, and fails the rows a unit still holds once its limit passed, with every unit that
+shares one of its retained payloads. A connector never measures the limit and never fails a record
+for it; the [give-up contract](./emitters.md#giving-up) states what the user observes.
+
 ### Finishing an emitter
 
 The host calls `close` only after it has received the terminal finish outcome, or after an ending
@@ -3320,7 +3329,13 @@ includes the deadline in the emitter wake and commits once it is reached or the 
 size boundary. A retry and a drain force the commit without reading the domain clock, which a
 stopped domain no longer has. The host keeps retained ACKs alive during commit and retry, and
 reports sent metrics only after the commit reports publication. A failed commit retries on the
-emitter's declared backoff until it succeeds or the stop deadline ends the attempt. See
+emitter's declared backoff until it succeeds, the stop deadline ends the attempt, or the emitter's
+`GIVE UP AFTER`, counted from the first failed commit attempt, passes. Then the host calls
+`EmitterLifecycle::abandon_staged`, which drops what the emitter staged, with its staging state, and
+returns the staged rows' acknowledgements; the host reports them through the emitter's general error
+policy with the class `unavailable`. Giving up undoes nothing the destination applied, such as a
+commit it applied without its answer reaching the emitter. A connector that stages nothing keeps the
+default, which returns nothing. See
 [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery) for the
 user-visible delivery consequences.
 

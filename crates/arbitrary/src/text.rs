@@ -47,7 +47,7 @@ const DELIMITER_NAMES: [&str; 12] = [
 /// Every keyword Plexus reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-plexus` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
-pub const KEYWORDS: [&str; 462] = [
+pub const KEYWORDS: [&str; 464] = [
     "headers",
     "secret",
     "create",
@@ -510,6 +510,8 @@ pub const KEYWORDS: [&str; 462] = [
     "remote_ack_sweep_interval",
     "remote_relay_instantiation_wait",
     "remote_relay_total_timeout",
+    "give",
+    "up",
 ];
 
 /// The words Plexus reserves wherever it reads a relay, so a relay is never named by one.

@@ -246,8 +246,11 @@ fn a_cross_clause_constraint_is_reported_where_it_was_broken() {
          250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG",
     )
     .expect_err("an encoded emitter needs a codec");
+    let rendered = format!("{error:?}");
+    // The retry policy may still end with GIVE UP AFTER there, so the codec is one expectation
+    // among those of the position where the statement broke.
     assert!(
-        format!("{error:?}").contains("expected ENCODE USING"),
+        rendered.contains("ENCODE USING, found FLUSH"),
         "the codec is required by the emitter, so the grammar should ask for it: {error:?}"
     );
 }

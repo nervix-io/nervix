@@ -63,6 +63,7 @@ fn emitter_outcomes_register_every_child_at_zero_with_only_bounded_dimensions() 
         RETRIED,
         RETRIES,
         RETRY_WAIT,
+        GIVE_UPS,
         OPENS,
         POOL_WAITS,
         POOL_SECONDS,
@@ -102,10 +103,30 @@ fn emitter_outcomes_register_every_child_at_zero_with_only_bounded_dimensions() 
             assert_eq!(value, 0.0);
         }
     }
-    assert_eq!(families, 12);
+    assert_eq!(families, 13);
     // The rejection family holds one child for each of the five classes of the REJECTED group.
-    assert_eq!(samples, 22);
-    assert_eq!(handle.describe_lines().len(), 37);
+    assert_eq!(samples, 23);
+    assert_eq!(handle.describe_lines().len(), 38);
+}
+
+/// Each unit of work the host gives up counts once, and an empty give-up counts nothing.
+#[test]
+fn emitter_give_ups_count_every_unit_given_up() {
+    let (metrics, handle) = fixture();
+
+    handle.record_give_ups(0);
+    assert_eq!(sample(&metrics, GIVE_UPS, &[]), 0.0);
+    handle.record_give_ups(2);
+    handle.record_give_ups(1);
+
+    assert_eq!(sample(&metrics, GIVE_UPS, &[]), 3.0);
+    assert!(
+        handle
+            .describe_lines()
+            .iter()
+            .any(|line| line.starts_with(GIVE_UPS) && line.ends_with("total=3")),
+        "DESCRIBE reports the give-up family with its total"
+    );
 }
 
 #[test]

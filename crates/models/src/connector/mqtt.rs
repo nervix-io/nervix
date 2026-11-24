@@ -890,8 +890,8 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum MqttTopicPublishingMode {
-        NoAck { retry_policy: crate::RetryPolicy } => NoAck requires UNANSWERED_PUBLISH,
-        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck requires ANSWERED_PUBLISH,
+        NoAck { retry_policy: crate::EmitterRetryPolicy } => NoAck requires UNANSWERED_PUBLISH,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::EmitterRetryPolicy } => BrokerAck requires ANSWERED_PUBLISH,
     }
 }
 

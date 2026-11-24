@@ -37,9 +37,12 @@ fn emitter_alter_applies_operations_in_order_and_is_atomic() {
         connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: crate::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: crate::EmitterRetryPolicy {
+                        pacing: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("emitter_a"),
@@ -131,7 +134,10 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         connector: Box::new(EmitterEntity::Http(HttpEmitter::Request(
             HttpRequestEmitter {
                 mode: crate::HttpRequestPublishingMode::Ack {
-                    retry_policy: retry_policy.clone(),
+                    retry_policy: crate::EmitterRetryPolicy {
+                        pacing: retry_policy.clone(),
+                        give_up_after: None,
+                    },
                 },
                 client: named("api"),
                 method: Expression::Literal(Literal::String("DELETE".to_string())),
@@ -151,7 +157,12 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         operations: vec![AlterEmitterOperation::SetTo {
             destination: Box::new(EmitterEntity::Http(HttpEmitter::Request(
                 HttpRequestEmitter {
-                    mode: crate::HttpRequestPublishingMode::Ack { retry_policy },
+                    mode: crate::HttpRequestPublishingMode::Ack {
+                        retry_policy: crate::EmitterRetryPolicy {
+                            pacing: retry_policy,
+                            give_up_after: None,
+                        },
+                    },
                     client: named("other_api"),
                     method: Expression::Literal(Literal::String("HEAD".to_string())),
                     path: Expression::Literal(Literal::String("/health".to_string())),
@@ -258,9 +269,12 @@ fn batching_emitter(
 fn postgres_emitter() -> EmitterEntity {
     EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
         mode: crate::PostgresTablePublishingMode::Ack {
-            retry_policy: crate::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("db"),
@@ -275,9 +289,12 @@ fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
     let mut emitter = batching_emitter(
         EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
             mode: crate::ZeroMqPushPublishingMode::NoAck {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("emitter"),
@@ -381,9 +398,12 @@ fn batch_size_is_bounded_by_the_largest_sqs_message() {
     let sqs = || {
         EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
             mode: crate::SqsQueuePublishingMode::Ack {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("queue_client"),
@@ -407,9 +427,12 @@ fn batch_size_is_bounded_by_the_largest_sqs_message() {
     );
     let kafka = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
         mode: crate::KafkaTopicPublishingMode::NoAck {
-            retry_policy: crate::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("broker"),
@@ -426,9 +449,12 @@ fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
     let database_emitters = [
         EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
             mode: crate::ClickHouseTablePublishingMode::Ack {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("db"),
@@ -438,9 +464,12 @@ fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
         postgres_emitter(),
         EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
             mode: crate::MySqlTablePublishingMode::Ack {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("db"),
@@ -450,9 +479,12 @@ fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
         })),
         EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
             mode: crate::MongoDbCollectionPublishingMode::Ack {
-                retry_policy: crate::RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: crate::EmitterRetryPolicy {
+                    pacing: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("db"),
@@ -474,9 +506,12 @@ fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
     }
     let sentry = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
         mode: crate::SentryEventPublishingMode::Ack {
-            retry_policy: crate::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("sentry"),
@@ -499,9 +534,12 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
         connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: crate::ZeroMqPushPublishingMode::NoAck {
-                    retry_policy: RetryPolicy {
-                        backoff: "250ms".to_string(),
-                        max_backoff: "30s".to_string(),
+                    retry_policy: crate::EmitterRetryPolicy {
+                        pacing: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                        give_up_after: None,
                     },
                 },
                 client: named("emitter"),
@@ -631,9 +669,12 @@ fn emitter_alter_checks_the_header_and_complete_destination_kind_atomically() {
         client: named("broker"),
         topic: named("Orders"),
         mode: crate::KafkaTopicPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "1s".to_string(),
-                max_backoff: "2s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: RetryPolicy {
+                    backoff: "1s".to_string(),
+                    max_backoff: "2s".to_string(),
+                },
+                give_up_after: None,
             },
         },
     }));
@@ -672,9 +713,12 @@ fn emitter_alter_checks_the_header_and_complete_destination_kind_atomically() {
 fn mqtt_topic_emitter() -> EmitterEntity {
     EmitterEntity::Mqtt(crate::MqttEmitter::Topic(crate::MqttTopicEmitter {
         mode: crate::MqttTopicPublishingMode::NoAck {
-            retry_policy: crate::RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+            retry_policy: crate::EmitterRetryPolicy {
+                pacing: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+                give_up_after: None,
             },
         },
         client: named("broker"),

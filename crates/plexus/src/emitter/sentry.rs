@@ -119,7 +119,7 @@ mod tests {
         assert_offers_exactly(&format!("{reference}PLATFORM 'python' "), &["MODE"]);
         assert_offers_exactly(
             &format!("{reference}PLATFORM 'python' MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s "),
-            &["ENCODE USING"],
+            &["GIVE UP AFTER", "ENCODE USING"],
         );
     }
 }

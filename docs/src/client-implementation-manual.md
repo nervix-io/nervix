@@ -777,7 +777,9 @@ remain the schema the ingestor declares; a payload field cannot replace the auth
   server retains that bounded result.
 - **E-5.** A retry or timeout can deliver the same stable identity and IPC bytes with a new
   reference, possibly to a different worker. The client MUST design its application side effects
-  for this duplicate window. There is no durable consumer cursor. An owner or session loss ends
+  for this duplicate window. Under the emitter's `GIVE UP AFTER`, the server offers a delivery no
+  more once the limit has passed since its first retry, timeout or lost attempt, and fails its rows
+  on the server without a frame to any client. There is no durable consumer cursor. An owner or session loss ends
   the attachment. A client retaining a desired consumer MAY reopen it on the current or a new
   exchange only after the `START` generation, endpoint contract, fields, window, timeouts, grant
   and batch limits

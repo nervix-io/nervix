@@ -350,9 +350,12 @@ fn an_entity_that_runs_once_refuses_instances_with_its_declared_reason() {
     *mqtt.connector = EmitterEntity::Mqtt(nervix_models::MqttEmitter::Topic(
         nervix_models::MqttTopicEmitter {
             mode: nervix_models::MqttTopicPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
+                retry_policy: nervix_models::EmitterRetryPolicy {
+                    pacing: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                    give_up_after: None,
                 },
             },
             client: named("broker"),

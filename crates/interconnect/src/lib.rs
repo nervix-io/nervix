@@ -796,8 +796,14 @@ pub struct DataflowNodeStatusEnvelope {
     pub status: String,
     pub detail: Option<String>,
     pub transient_error: Option<String>,
+    /// Whether the failure is a destination refusing writes as it is configured, which the node
+    /// retries until an operator repairs it, rather than a transient error.
+    pub misconfigured: bool,
     pub reconnect_backoff: Option<String>,
     pub reconnect_wait_millis: Option<u64>,
+    /// How long until the emitter gives up the oldest unit it retries, absent while no unit's
+    /// `GIVE UP AFTER` clock runs.
+    pub give_up_wait_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -1665,6 +1671,8 @@ mod answer_admission_tests;
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod dataflow_node_status_properties;
 #[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
 mod runtime_error_event_properties;
 

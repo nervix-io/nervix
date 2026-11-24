@@ -15,13 +15,13 @@ use super::*;
 pub(super) struct AcknowledgedPolicy {
     pub window: AckWindow,
     pub ack_timeout: String,
-    pub retry_policy: RetryPolicy,
+    pub retry_policy: EmitterRetryPolicy,
 }
 
 pub(super) fn unconfirmed_policy<'src>()
--> impl Parser<'src, &'src [Token], RetryPolicy, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], EmitterRetryPolicy, extra::Err<ParseError<'src>>> + Clone {
     kw_phrase2(Identifier::No, Identifier::Ack)
-        .ignore_then(retry_policy())
+        .ignore_then(emitter_retry_policy())
         .boxed()
 }
 
@@ -36,7 +36,7 @@ pub(super) fn acknowledged_policy_body<'src>()
 -> impl Parser<'src, &'src [Token], AcknowledgedPolicy, extra::Err<ParseError<'src>>> + Clone {
     ack_window()
         .then(ack_timeout())
-        .then(retry_policy())
+        .then(emitter_retry_policy())
         .map(|((window, ack_timeout), retry_policy)| AcknowledgedPolicy {
             window,
             ack_timeout,
@@ -46,6 +46,8 @@ pub(super) fn acknowledged_policy_body<'src>()
 }
 
 pub(super) fn request_policy<'src>()
--> impl Parser<'src, &'src [Token], RetryPolicy, extra::Err<ParseError<'src>>> + Clone {
-    kw(Identifier::Ack).ignore_then(retry_policy()).boxed()
+-> impl Parser<'src, &'src [Token], EmitterRetryPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Ack)
+        .ignore_then(emitter_retry_policy())
+        .boxed()
 }

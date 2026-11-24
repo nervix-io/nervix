@@ -43,6 +43,14 @@ pub type PhysicalDeadlineResult<T> = Result<T, Report<PhysicalDeadlineError>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PhysicalDeadline(Instant);
 
+impl PhysicalDeadline {
+    /// How long remains until this deadline, zero once it is reached. Inspection reports it; no
+    /// policy decides from it, since a policy compares deadlines through the capability.
+    pub fn remaining(self) -> Duration {
+        self.0.saturating_duration_since(Instant::now())
+    }
+}
+
 /// The capability used by operational timeout, retry and cancellation policy.
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalDeadlineCapability {
