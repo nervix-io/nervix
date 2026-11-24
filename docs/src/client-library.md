@@ -435,14 +435,17 @@ the client. The wait starts at `restoration_backoff` on each new session and dou
 unanswered past `request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
 next event reopens a closed session when a followed clock waits for it, including a call already
 waiting when the unanswered attach ends its session; a failure to open one is returned while the
-clock keeps waiting, and the next call tries again. A detach, or an end, stops following the
-domain, and `domain_clock` returns `None` for it afterwards. A detach while a clock waits to be
-restored reaches the current session: a closed session is opened again first, which attaches the
-clock before the detach releases it, and an open session that has not restored the clock answers
-`NotAttached`, after which the client no longer follows it either. The client never attaches the
-clock again behind the detach: an attach it already decided to send to restore the clock is sent
-first, and the detach releases what it attached, while a restoration that would attach the clock
-during the detach waits for it to end and attaches the clock only if the client still follows it.
+clock keeps waiting, and the next call tries again. A read reopens a session only when it finds no
+event unread, so a lost session's `Interrupted` is returned first, even when the session ends while
+that read is deciding what to do and no server can be reached. A detach, or an end, stops
+following the domain, and `domain_clock` returns `None` for it afterwards. A detach while a clock
+waits to be restored reaches the current session: a closed session is opened again first, which
+attaches the clock before the detach releases it, and an open session that has not restored the
+clock answers `NotAttached`, after which the client no longer follows it either. The client never
+attaches the clock again behind the detach: an attach it already decided to send to restore the
+clock is sent first, and the detach releases what it attached, while a restoration that would
+attach the clock during the detach waits for it to end and attaches the clock only if the client
+still follows it.
 
 C and C++ clock accessors and ownership are described in the
 [C and C++ Client Library](client-library-c.md#follow-a-domain-clock).
