@@ -32,20 +32,16 @@ async fn withdrawal_ends_shared_dial_slots_and_preserves_a_recreated_pool() {
     let fixture = crate::tests::bound_transports_with_options(TransportOptions::default()).await;
     let state = &fixture.transport_a.inner;
     let endpoint = NodeEndpoint::new("localhost", 7443);
-    let selected = state
-        .install_outbound_target(
-            fixture.node_b.clone(),
-            endpoint.clone(),
-            OutboundDial::Advertised,
-        )
-        .expect("a peer target installs");
-    let updated = state
-        .install_outbound_target(
-            fixture.node_b.clone(),
-            endpoint.clone(),
-            OutboundDial::Authenticated("127.0.0.1:7443".parse().expect("literal address")),
-        )
-        .expect("the dial policy changes without replacing slots");
+    let selected = state.install_outbound_target(
+        fixture.node_b.clone(),
+        endpoint.clone(),
+        OutboundDial::Advertised,
+    );
+    let updated = state.install_outbound_target(
+        fixture.node_b.clone(),
+        endpoint.clone(),
+        OutboundDial::Authenticated("127.0.0.1:7443".parse().expect("literal address")),
+    );
     assert!(!Arc::ptr_eq(&selected, &updated));
     for class in PoolClass::ALL {
         for (a, b) in selected.slots(class).iter().zip(updated.slots(class)) {
@@ -57,9 +53,8 @@ async fn withdrawal_ends_shared_dial_slots_and_preserves_a_recreated_pool() {
     state.withdraw_target(&fixture.node_b, &selected);
     assert!(state.targets.load().get(&fixture.node_b).is_none());
 
-    let recreated = state
-        .install_outbound_target(fixture.node_b.clone(), endpoint, OutboundDial::Advertised)
-        .expect("the peer registers a new pool lifetime");
+    let recreated =
+        state.install_outbound_target(fixture.node_b.clone(), endpoint, OutboundDial::Advertised);
     state.withdraw_target(&fixture.node_b, &selected);
     assert!(Arc::ptr_eq(
         state

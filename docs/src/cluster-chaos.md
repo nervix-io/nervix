@@ -2556,7 +2556,11 @@ just chaos run domain-time --image nervix:debian --nodes 1 --fault cluster-resta
   and closed.
 - One independent observer per node, a container of the image under test, follows the domain's
   clock through that node's session route with the packaged CLI's `domain-clock`. It stamps every
-  line with the host's clock and attaches again when its follow ends.
+  line with the host's clock and attaches again when its follow ends. Its client keepalive interval
+  is one day, the longest client deadline. The verdict attributes every tick to the node the
+  observer follows, and with the default 30 s interval and 20 s timeout a pause longer than about
+  50 s would end the session, after which the client attaches the clock again through another node
+  it knows.
 
 **The faults.** `--fault` selects the fault, and a voter fault runs one round per voter in node
 order:

@@ -13,7 +13,7 @@
 use error_stack::{Report, ResultExt as _};
 #[cfg(test)]
 use nervix_models::EmitterPublishing;
-use nervix_models::{AckWindow, EmitterPublishingModeKind, RetryPolicy};
+use nervix_models::{AckWindow, EmitterPublishingModeKind, EmitterRetryPolicy, RetryPolicy};
 
 use super::emitter_draft::{EmitterDraftError, required};
 
@@ -48,13 +48,23 @@ pub(super) struct PublicationDraft {
     pub(super) ack_timeout: String,
     pub(super) retry_backoff: String,
     pub(super) retry_max: String,
+    /// The `GIVE UP AFTER` duration, empty while the emitter retries without a limit.
+    pub(super) give_up_after: String,
 }
 
 impl PublicationDraft {
-    fn retry(&self) -> error_stack::Result<RetryPolicy, EmitterDraftError> {
-        Ok(RetryPolicy {
+    fn retry(&self) -> error_stack::Result<EmitterRetryPolicy, EmitterDraftError> {
+        let pacing = RetryPolicy {
             backoff: required(&self.retry_backoff, "retry backoff")?,
             max_backoff: required(&self.retry_max, "maximum retry backoff")?,
+        };
+        let give_up_after = match self.give_up_after.trim() {
+            "" => None,
+            limit => Some(limit.to_string()),
+        };
+        Ok(EmitterRetryPolicy {
+            pacing,
+            give_up_after,
         })
     }
 
@@ -75,8 +85,9 @@ impl PublicationDraft {
             kind: Some(publication.kind()),
             window,
             ack_timeout: publication.ack_timeout().unwrap_or_default().to_string(),
-            retry_backoff: retry.backoff.clone(),
-            retry_max: retry.max_backoff.clone(),
+            retry_backoff: retry.pacing.backoff.clone(),
+            retry_max: retry.pacing.max_backoff.clone(),
+            give_up_after: retry.give_up_after.clone().unwrap_or_default(),
         }
     }
 }

@@ -369,11 +369,14 @@ impl EmitterFlushBenchmark {
     /// Buffer, encode and publish one batch through the same owner that flushes a running emitter.
     /// The returned delivered-row count is the benchmark's complete publication oracle.
     pub fn flush(&mut self) -> u64 {
+        // The benchmarked emitter declares no GIVE UP AFTER, as the running emitter it measures.
+        let mut give_up = super::emitter_retry::EmitterGiveUp::new(None);
         let mut control = super::emitter_publishing::EmitterPublishControl {
             fault_injection: &self.faults,
             shutdown_rx: &mut self.shutdown_rx,
             stop_rx: &mut self.stop_rx,
             backoff: &mut self.backoff,
+            give_up: &mut give_up,
         };
         let result = self.work.runtime.block_on(self.connector.publish_batch(
             &self.work.context,

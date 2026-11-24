@@ -823,8 +823,11 @@ pub(super) mod tests {
         }
     }
 
+    /// A body whose unfolding finds the extension workers full waits for a place while its request
+    /// lasts and is accepted once a worker frees: a full class is no reason to refuse it, and no
+    /// unfolding refusal is counted.
     #[nervix_primitives::test]
-    async fn endpoint_rejects_a_body_whose_unfolding_the_node_cannot_take_now() {
+    async fn endpoint_holds_a_body_whose_unfolding_finds_the_extension_workers_full() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_ingestor");
         let executor = single_worker_executor();
@@ -841,25 +844,27 @@ pub(super) mod tests {
             .into_route()
             .assured("the fixture installs its endpoint route");
 
-        // Nothing judged the body, so its sender is told to send it again, without a delay the
-        // node could not promise.
         let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
-        let refused = route
-            .dispatch(
-                &runtime,
-                br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(
-                    &NoIngestHeaders,
-                    &nervix_connector::NoIngestMetadata(0),
-                ),
-                &CancellationToken::new(),
-            )
-            .await;
+        let cancellation = CancellationToken::new();
+        let mut held = std::pin::pin!(route.dispatch(
+            &runtime,
+            br#"{"user_id":7}"#,
+            IngestMetadataRow::headers(&NoIngestHeaders, &nervix_connector::NoIngestMetadata(0)),
+            &cancellation,
+        ));
+        assert!(
+            nervix_primitives::time::timeout(std::time::Duration::from_millis(200), held.as_mut())
+                .await
+                .is_err(),
+            "a full extension class holds the body back instead of refusing it"
+        );
+        filled.release().await;
+        let accepted = held.await;
         assert_eq!(
-            refused,
+            accepted,
             EndpointDispatchOutcome::NoAck(EndpointAdmission {
-                accepted: 0,
-                rejected: 1,
+                accepted: 1,
+                rejected: 0,
                 retry_after: None,
                 pause_buffer_full: false,
             })
@@ -868,7 +873,7 @@ pub(super) mod tests {
         assert_eq!(
             Counted::of(&requests),
             Counted {
-                not_admitted: 1,
+                accepted: 1,
                 ..Counted::default()
             }
         );
@@ -886,37 +891,8 @@ pub(super) mod tests {
                     ),
                 )
                 .get(),
-            1
-        );
-
-        filled.release().await;
-        let accepted = route
-            .dispatch(
-                &runtime,
-                br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(
-                    &NoIngestHeaders,
-                    &nervix_connector::NoIngestMetadata(0),
-                ),
-                &CancellationToken::new(),
-            )
-            .await;
-        assert_eq!(
-            accepted,
-            EndpointDispatchOutcome::NoAck(EndpointAdmission {
-                accepted: 1,
-                rejected: 0,
-                retry_after: None,
-                pause_buffer_full: false,
-            })
-        );
-        assert_eq!(
-            Counted::of(&requests),
-            Counted {
-                accepted: 1,
-                not_admitted: 1,
-                ..Counted::default()
-            }
+            0,
+            "a body that waited for a place was never refused"
         );
         runtime.shutdown().await;
     }
@@ -1168,14 +1144,6 @@ pub(super) mod tests {
             .into_route()
             .assured("the fixture installs its endpoint route");
         let requests = endpoint_requests(&runtime, &domain, &ingestor);
-        let unfolding_refused = runtime.inner.metrics.ingestor_unfolding_refused(
-            &domain,
-            &ingestor,
-            Unit::SINGLE,
-            None,
-            nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint),
-        );
-
         {
             let lease = route.bindings()[0].intake();
             let binding = lease
@@ -1224,28 +1192,6 @@ pub(super) mod tests {
                 ..Counted::default()
             }
         );
-
-        let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
-        let unfolding = route
-            .dispatch(
-                &runtime,
-                br#"{"user_id":7}"#,
-                IngestMetadataRow::headers(
-                    &NoIngestHeaders,
-                    &nervix_connector::NoIngestMetadata(br#"{"user_id":7}"#.len()),
-                ),
-                &CancellationToken::new(),
-            )
-            .await;
-        filled.release().await;
-        let Some(unfolding) = unfolding.acknowledgement() else {
-            panic!("an acknowledged ingestor answers the request with its outcome");
-        };
-        assert_eq!(
-            unfolding.outcome,
-            EndpointRequestOutcome::NotAdmitted(EndpointAdmissionRefusal::UnfoldingRefused)
-        );
-        assert_eq!(unfolding_refused.get(), 1);
 
         let undecodable = route
             .dispatch(
@@ -1304,7 +1250,6 @@ pub(super) mod tests {
             Counted {
                 busy: 2,
                 refused: 2,
-                not_admitted: 1,
                 decode_rejected: 1,
                 ..Counted::default()
             }
@@ -1448,7 +1393,7 @@ pub(super) mod tests {
         nervix_primitives::time::timeout(Duration::from_secs(10), async {
             loop {
                 let snapshot = executor.snapshot();
-                if snapshot.extension_cpu.refused > 0 || snapshot.relay_memory.reserved_bytes > 0 {
+                if snapshot.relay_memory.reserved_bytes > 0 {
                     return;
                 }
                 nervix_primitives::task::yield_now().await;

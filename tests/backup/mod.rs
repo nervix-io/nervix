@@ -452,7 +452,7 @@ async fn then_background_backup_remains_pending(world: &mut ScenarioWorld, durat
             .as_ref()
             .expect("a backup is running")
             .is_finished(),
-        "the backup completed before the domain mutation lease was released"
+        "the backup completed within {duration:?} while the scenario held it back"
     );
 }
 

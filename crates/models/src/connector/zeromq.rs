@@ -314,6 +314,6 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum ZeroMqPushPublishingMode {
-        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        NoAck { retry_policy: crate::EmitterRetryPolicy } => NoAck,
     }
 }

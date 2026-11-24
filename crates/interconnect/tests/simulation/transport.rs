@@ -359,12 +359,10 @@ async fn wait_for_count(signal: &mut watch::Receiver<usize>, expected: usize) {
 /// Register `name` at its advertised endpoint, so every connection attempt resolves the simulated
 /// host name again, as production resolves a peer's advertised host.
 async fn register_peer(transport: &Transport, name: &str) {
-    transport
-        .register_outbound_target(
-            ClusterNodeName::parse(name).assured("fixture node name is valid"),
-            NodeEndpoint::new(name, PORT),
-        )
-        .assured("fixture target registration succeeds");
+    transport.register_outbound_target(
+        ClusterNodeName::parse(name).assured("fixture node name is valid"),
+        NodeEndpoint::new(name, PORT),
+    );
 }
 
 fn state_frame_placement(generation: u64) -> StatePlacementEnvelope {

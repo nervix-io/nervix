@@ -2049,13 +2049,10 @@ The harness keeps these boundaries explicit.
 - **Worker class saturation.** `<class> execution is saturated on every node`, and its form for
   one node, hold every worker and every wait-queue place of one CPU class (`control`,
   `credentials`, `data`, `extension`, `bulk`) or storage class (`consensus storage`,
-  `filesystem storage`, `connector storage`), so the next request job of that class is refused and
-  accepted work waits for a place. Filling one node's class has a 60-second harness bound: it
-  waits only for the jobs already running there to leave their workers. Once the class is full,
-  the step records the node's public refusal count for it.
-  `no node refused a <class> job while it was saturated` compares each saturated node's count
-  with that record, and `a <class> job waits for a place on node …` (or `on some node`) reads the
-  public waiting gauge, `nervix_execution_jobs_waiting`. A node's own maintenance can already wait
+  `filesystem storage`, `connector storage`), so the next job of that class waits for a place.
+  Filling one node's class has a 60-second harness bound: it waits only for the jobs already
+  running there to leave their workers. `a <class> job waits for a place on node …` (or
+  `on some node`) reads the public waiting gauge, `nervix_execution_jobs_waiting`. A node's own maintenance can already wait
   in a full class, as the restore staging sweep does in the filesystem class, so
   `another <class> job waits for a place on node …` waits for one more job than the node's last
   waiting step saw. A release names its class and keeps the node's holds of other classes.
@@ -2456,6 +2453,16 @@ one- and three-node examples. Production retry policies continue to use their de
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
+
+`SHOW CLUSTER STATUS` and `DESCRIBE` write `-` where a unit's owner would be when no node owns the
+unit, for example after its owner stopped and before failover places it again.
+`tests/common/unit_placement.rs` reads one scheduled unit's owner and replicas for the steps that
+wait for, compare or save them, and reads that `-` as no owner, never as a node name. A step that
+waits for a unit to move off a saved node, `… eventually reports scheduled … owner different from
+placeholder …` or its deduplicator form, therefore keeps waiting while no node owns the unit and
+returns only once another node does, so the steps after it read the node that took over. A step
+that saves an owner as a placeholder fails on a unit no node owns, and a wait for a placement away
+from a node, or for the owner a scenario then talks to, waits for a node to own the unit.
 
 The harness session client keeps domain-clock replies and frames in arrival order. When a detach
 reply ends an attachment, it retires that domain's unread frames from the pending observation
@@ -4855,6 +4862,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | --- | --- |
 | A status request ends at its deadline in the operation that stalled, and every probe outcome keeps its cause | `status_request_ends_at_its_deadline_while_the_connection_is_pending`, `status_request_ends_at_its_deadline_while_session_establishment_is_pending`, `status_request_ends_at_its_deadline_while_the_response_is_pending`, `status_request_ends_at_its_deadline_while_unrelated_responses_remain_ready`, `readiness_and_status_outcomes_retain_their_typed_cause` |
 | A wait ends at its original deadline | `status_wait_ends_at_its_original_deadline_when_the_final_request_never_replies`, `nested_deadline_never_outlives_its_phase`, `startup_readiness_failure_reports_the_timed_out_status_operation` |
+| A unit's owner written as `-` names no node, so a wait for a unit to move off a node returns only once another node owns it | `a_status_reports_no_owner_for_a_unit_no_node_owns`, `a_status_reports_the_node_that_owns_a_unit_and_its_replicas`, `a_unit_no_node_owns_has_not_moved_to_another_node`, `a_unit_another_node_owns_has_moved_to_that_node`, `a_status_lists_no_placement_for_a_unit_it_does_not_schedule`, `a_describe_output_of_a_unit_no_node_owns_names_no_owner`, `a_describe_output_names_the_owner_and_replicas_of_its_unit` |
 | Node task outcomes are distinct, the task is joined once, and its owner never aborts it | `running_task_reports_the_last_failed_probe_at_the_deadline`, `clean_application_exit_before_readiness_is_terminal`, `application_error_before_readiness_is_retained`, `panic_and_cancellation_have_distinct_terminal_outcomes`, `stop_and_keeper_paths_use_the_task_inspected_for_diagnostics`, `a_wait_past_its_deadline_leaves_the_task_running_with_its_owner` |
 | One startup budget with classified retries | `repeated_readiness_failure_spends_one_budget_across_every_attempt`, `a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over`, `exhaustion_reports_every_attempt_with_its_typed_cause`, `ports_that_cannot_be_reallocated_end_the_startup`, `a_bound_address_is_retried_until_a_launch_becomes_ready`, `a_last_attempt_still_becomes_ready_with_what_the_budget_left`, `an_application_error_ends_the_startup_without_another_launch`, `a_panicking_node_ends_the_startup_without_another_launch`, `a_launch_failure_ends_the_startup_before_anything_is_cleaned_up`, `sequential_cluster_construction_stays_inside_its_derived_budget` |
 | Failed-attempt cleanup spends the remaining startup budget and its joined result determines retry and listener selection | `a_failed_attempt_finishes_its_owned_cleanup_before_retrying_with_the_remaining_budget`, `an_initialization_failure_observed_during_cleanup_keeps_its_terminal_cause`, `a_bind_failure_observed_during_cleanup_moves_only_its_own_listeners` |

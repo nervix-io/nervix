@@ -24,6 +24,7 @@ pub(super) fn check(bytes: &[u8]) -> BTreeSet<wire::ServerBody> {
     let mut covered = BTreeSet::new();
     let announced = SessionOpened {
         limits: SessionLimits::from(&values.arbitrary.entropy().session_bounds()),
+        pacing: values.session_pacing(),
     };
     let opening = announced
         .encode()

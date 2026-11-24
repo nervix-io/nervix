@@ -133,16 +133,12 @@ impl EmptyRelayHandoffFixture {
             .expect("handoff test schedule should build on the destination");
     }
 
-    async fn prepare(
-        &self,
-        runtime: &Runtime,
-        coordination: CoordinationIdentity,
-        source_incarnation: ClusterNodeIncarnation,
-        destination_incarnation: ClusterNodeIncarnation,
-    ) {
+    /// Engages the moved relay's ownership-handoff gate for `coordination` and waits until it is
+    /// drained, as the coordinator does on every participant before it prepares the move.
+    async fn engage_gate(&self, runtime: &Runtime, coordination: &CoordinationIdentity) {
         runtime
             .engage_entity_gate_operation(
-                &coordination,
+                coordination,
                 &self.domain,
                 &[],
                 &nervix_models::EntityGateTargets::Entities(
@@ -159,7 +155,7 @@ impl EmptyRelayHandoffFixture {
         assert!(
             runtime
                 .entity_gate_operation_drain_status(
-                    &coordination,
+                    coordination,
                     &self.domain,
                     &[],
                     &nervix_models::EntityGateTargets::Entities(
@@ -170,6 +166,16 @@ impl EmptyRelayHandoffFixture {
                 .expect("the empty relay should publish its capture freeze after draining")
                 .is_drained()
         );
+    }
+
+    async fn prepare(
+        &self,
+        runtime: &Runtime,
+        coordination: CoordinationIdentity,
+        source_incarnation: ClusterNodeIncarnation,
+        destination_incarnation: ClusterNodeIncarnation,
+    ) {
+        self.engage_gate(runtime, &coordination).await;
         runtime
             .prepare_ownership_handoff_state(PrepareOwnershipHandoffStateRequest {
                 coordination,
@@ -188,22 +194,6 @@ impl EmptyRelayHandoffFixture {
             .await
             .expect("ownership handoff preparation should persist");
     }
-}
-
-#[test]
-fn recovered_handoff_retries_schedule_rebuild_until_activation() {
-    let mut recovered = OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest;
-
-    assert!(recovered.authorize());
-    assert!(recovered.is_authorized());
-    assert!(
-        recovered.authorize(),
-        "a failed or cancelled recovered schedule rebuild must remain retriable"
-    );
-
-    let mut ordinary = OwnershipHandoffActivationAuthorization::AuthorizedByPreparation;
-    assert!(!ordinary.authorize());
-    assert!(ordinary.is_authorized());
 }
 
 #[nervix_primitives::test]
@@ -419,25 +409,20 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
         &DomainNodeUnitRef::single(fixture.entity.in_domain(&fixture.domain))
     ));
     runtime
-        .activate_persisted_ownership_handoff(
-            &fixture.destination,
-            &ActivateOwnershipHandoffStateRequest {
-                coordination: coordination.clone(),
-                operation_id: fixture.operation_id.clone(),
-                source: fixture.source.clone(),
-                destination: fixture.destination.clone(),
-                source_incarnation,
-                destination_incarnation: prepared_destination_incarnation,
-                domain: fixture.domain.clone(),
-                unit: nervix_models::Unit::SINGLE,
-                entity: fixture.entity.clone(),
-                base_schedule_fingerprint: fixture.base_schedule_fingerprint,
-                target_schedule_fingerprint: fixture.target_schedule_fingerprint,
-                activation_budget: Duration::from_secs(1),
-            },
-            ExecutionRevision::from_schedule(&fixture.target_schedule)
-                .assured("the committed handoff schedule has a complete execution revision"),
-        )
+        .wait_for_ownership_handoff_activation(&ActivateOwnershipHandoffStateRequest {
+            coordination: coordination.clone(),
+            operation_id: fixture.operation_id.clone(),
+            source: fixture.source.clone(),
+            destination: fixture.destination.clone(),
+            source_incarnation,
+            destination_incarnation: prepared_destination_incarnation,
+            domain: fixture.domain.clone(),
+            unit: nervix_models::Unit::SINGLE,
+            entity: fixture.entity.clone(),
+            base_schedule_fingerprint: fixture.base_schedule_fingerprint,
+            target_schedule_fingerprint: fixture.target_schedule_fingerprint,
+            activation_budget: Duration::from_secs(1),
+        })
         .await
         .expect("duplicate activation should be idempotent");
     assert_eq!(
@@ -472,6 +457,9 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
         .expect("activation should be durable");
     assert_eq!(persisted.destination, fixture.destination);
 }
+
+#[path = "handoff_activation_tests.rs"]
+mod handoff_activation_tests;
 
 #[nervix_primitives::test]
 async fn a_restarted_destination_keeps_a_preparation_its_leader_may_still_commit() {
@@ -1856,26 +1844,14 @@ async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
         .expect("the first lifetime should publish");
 
     let resumed = state
-        .restore_state(
-            &plan,
-            &input_schema,
-            7,
-            &Executor::default(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-        )
+        .restore_state(&plan, &input_schema, 7, &Executor::default())
         .await
         .expect("the matching lifetime should restore");
     assert_eq!(resumed.incarnation, 7);
     assert!(!state.generations.is_live_dirty());
 
     let recreated = state
-        .restore_state(
-            &plan,
-            &input_schema,
-            8,
-            &Executor::default(),
-            nervix_execution::QueueAdmission::RefuseWhenFull,
-        )
+        .restore_state(&plan, &input_schema, 8, &Executor::default())
         .await
         .expect("a new lifetime should start empty");
     assert_eq!(recreated.incarnation, 8);

@@ -21,18 +21,18 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::StreamExt as _;
 use h2::{Reason, RecvStream, SendStream, server};
-use http::{Response, StatusCode, Version};
+use http::{Request, Response, StatusCode, Version};
 use meticulous::OptionExt as _;
 use nervix_execution::{ChargedBytes, Executor};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::time::{Instant, timeout};
 
 use super::{
-    BODY_CHUNK_BYTES, RawRequest, STREAM_PATH, StreamLease, TransportState, read_body,
-    send_decode_refusal, send_static_error,
+    BODY_CHUNK_BYTES, RawRequest, STREAM_PATH, StreamLease, TransportState, declared_length,
+    read_body_to_decode, send_decode_refusal, send_static_error, until_reset,
 };
 use crate::{
-    PoolClass, RequestError, RequestSubquota, TransportError,
+    PoolClass, RequestError, TransportError,
     observation::TransferDirection,
     request::{
         RequestAdmission, StreamOpeningFailure, StreamPreconditionDeadline, StreamRequestEnvelope,
@@ -70,11 +70,13 @@ pub struct IncomingByteStream {
 
 pub(crate) struct OutboundByteStreamRequest {
     pub(crate) class: PoolClass,
-    pub(crate) subquota: RequestSubquota,
     pub(crate) name: &'static str,
     pub(crate) body: ChargedBytes,
-    pub(crate) timeout: Duration,
+    /// When the request stops waiting for its stream's answer to begin.
+    pub(crate) deadline: Instant,
     pub(crate) admission: RequestAdmission,
+    /// The stream the request leased before it encoded its payload.
+    pub(crate) lease: StreamLease,
 }
 
 impl IncomingByteStream {
@@ -226,33 +228,51 @@ impl TransportState {
         peer_advertised_host: String,
         peer_process_epoch: u64,
         class: PoolClass,
-        body: RecvStream,
+        request: Request<RecvStream>,
         mut respond: server::SendResponse<Bytes>,
     ) -> Result<(), Report<TransportError>> {
-        let bytes = read_body(
+        let declared =
+            declared_length(request.headers(), class.control_body_limit(&self.executor))?;
+        let reading = read_body_to_decode(
             &self.executor,
             class.memory_class(),
-            class.control_body_limit(&self.executor),
+            declared,
             self.options.progress_timeout,
-            body,
-        )
-        .await?;
-        let decoded = wire::decode_rkyv::<StreamRequestEnvelope>(
-            &self.executor,
-            class.memory_class(),
-            class.cpu_class(),
-            bytes,
-        )
-        .await;
-        let decoded = match decoded {
-            Ok(decoded) => decoded,
+            request.into_body(),
+        );
+        let received = match until_reset(&mut respond, reading).await {
+            Ok(Some(received)) => received,
+            Ok(None) => return Ok(()),
             Err(error) => {
                 send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
                     .await?;
                 return Ok(());
             }
         };
-        let (request, _reservation) = decoded.into_parts();
+        let decoded = until_reset(
+            &mut respond,
+            wire::decode_rkyv_within::<StreamRequestEnvelope>(
+                &self.executor,
+                class.cpu_class(),
+                received.bytes,
+                received.decoding,
+            ),
+        )
+        .await;
+        let decoded = match decoded {
+            Ok(Some(decoded)) => decoded,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                send_decode_refusal(&mut respond, class, error, self.options.progress_timeout)
+                    .await?;
+                return Ok(());
+            }
+        };
+        // The handler owns the request from here, and its own work takes charges of this class, so
+        // the request's charge is given back before it runs: no handler waits for room behind the
+        // request it serves. The connection's stream places bound the request meanwhile.
+        let (request, reservation) = decoded.into_parts();
+        drop(reservation);
         let receive = match self.targets.load().get(&peer_node_id) {
             Some(target) => match target.pool.capabilities.receive_bounds() {
                 Some(committed) => committed.intersection(request.receive),
@@ -319,18 +339,12 @@ impl TransportState {
     ) -> Result<IncomingByteStream, Report<TransportError>> {
         let OutboundByteStreamRequest {
             class,
-            subquota,
             name,
             body,
-            timeout: timeout_duration,
+            deadline,
             admission,
+            lease,
         } = request;
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })?;
-        let lease = self.lease(node_id, class, subquota, deadline).await?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let (body, content_length) = lease
             .connection

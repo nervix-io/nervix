@@ -120,7 +120,10 @@ fn preserves_the_whole_command_and_issue_order(violation: Violation) {
         });
         let first = requests.issue(first);
         let first_order = first.order;
-        let previous = requests.command_retries.wait(first_order).delay;
+        let previous = requests
+            .command_retries
+            .wait(first_order, ConsolePacing::default().retry())
+            .delay;
         requests.command_retries.ready(first_order);
         let second = requests.issue(repl_command("CREATE SCHEMA second ( value I64 );"));
         let first = sent(requests.accept(first));
@@ -143,7 +146,10 @@ fn preserves_the_whole_command_and_issue_order(violation: Violation) {
         let resent = requests.release_held();
         assert_eq!(sent_commands(&resent), sent_commands(&[first, second]));
         assert_eq!(
-            requests.command_retries.wait(first_order).delay,
+            requests
+                .command_retries
+                .wait(first_order, ConsolePacing::default().retry())
+                .delay,
             previous
                 .checked_mul(2)
                 .assured("two bounded delays fit Duration")

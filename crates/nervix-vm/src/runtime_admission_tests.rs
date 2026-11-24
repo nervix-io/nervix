@@ -271,8 +271,10 @@ async fn an_extension_call_runs_on_the_extension_workers_whatever_the_batch_size
     assert_eq!(snapshot.relay_memory.reserved_bytes, 0);
 }
 
+/// A class holding its whole wait queue is backpressure: a further execution waits for a place,
+/// calls none of its functions while it waits, and runs once one frees.
 #[nervix_primitives::test]
-async fn a_full_class_refuses_the_execution_as_not_admitted() {
+async fn a_full_class_holds_the_execution_until_a_place_frees() {
     let executor = single_worker_executor();
     let program = two_header_program();
     let (held_context, mut held) = scripted_injector(FunctionExecutionPolicy::Extension);
@@ -302,22 +304,25 @@ async fn a_full_class_refuses_the_execution_as_not_admitted() {
     });
     until(|| executor.snapshot().extension_cpu.pending == 1).await;
 
-    let (refused_context, refused_control) = scripted_injector(FunctionExecutionPolicy::Extension);
-    let refused = execute_program_with_selection_in_context(
+    let (later_context, later_control) = scripted_injector(FunctionExecutionPolicy::Extension);
+    drop(later_control.release);
+    let later_batch = header_batch(&program, 1);
+    let mut later = Box::pin(execute_program_with_selection_in_context(
         &executor,
         &program,
-        &header_batch(&program, 1),
-        &refused_context,
-    )
-    .await
-    .expect_err("a class holding its whole wait queue refuses the execution");
-
-    assert!(matches!(
-        refused.current_context(),
-        RuntimeError::ExecutionNotAdmitted
+        &later_batch,
+        &later_context,
     ));
-    assert_eq!(refused_control.calls.load(Ordering::Acquire), 0);
-    assert_eq!(executor.snapshot().extension_cpu.refused, 1);
+    let first_poll = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(std::future::Future::poll(later.as_mut(), context))
+    })
+    .await;
+    assert!(
+        first_poll.is_pending(),
+        "a class holding its whole wait queue holds the execution instead of refusing it"
+    );
+    assert_eq!(later_control.calls.load(Ordering::Acquire), 0);
+    assert_eq!(executor.snapshot().extension_cpu.pending, 1);
     drop(held.release);
     holding
         .await
@@ -327,6 +332,10 @@ async fn a_full_class_refuses_the_execution_as_not_admitted() {
         .await
         .expect("the queued execution completes")
         .expect("the queued program executes");
+    later
+        .await
+        .expect("the execution that found the class full runs once a place frees");
+    assert_eq!(later_control.calls.load(Ordering::Acquire), 2);
     assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
 }
 

@@ -677,8 +677,8 @@ impl MappedValuesProjection {
         let result = ack_timing
             .keep_alive_while_pending(
                 batch,
-                execute_accepted_program_with_selection_in_context(
-                    executor.accepted_work(),
+                execute_program_with_selection_in_context(
+                    executor,
                     &self.program.program,
                     &input,
                     &VmExecutionContext {
@@ -946,7 +946,6 @@ mod tests {
             .downcast_ref::<arrow_array::Int64Array>()
             .assured("the mapped column keeps its exact type");
         assert_eq!(doubled.value(1024), 2048);
-        assert_eq!(executor.snapshot().data_cpu.refused, 0);
     }
 
     /// A column keeps the nullability its expression infers, while the mapped batch makes every

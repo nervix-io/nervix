@@ -869,10 +869,12 @@ wasmtime = { version = "49.0.0", default-features = false, features = [
   "async",
   "cranelift",
   "parallel-compilation",
+  "reexport-wasmparser",
   "runtime",
   "std",
   "wat",
 ] }
+wat = "1.263"
 web-sys = "0.3"
 webpki-roots = "1"
 x509-parser = "0.18"
@@ -881,7 +883,7 @@ zeromq = "0.4"
 
 [patch.crates-io]
 # Keep native gRPC accept/channel machinery while supplying explicit TLS configuration.
-tonic = { git = "https://github.com/nervix-io/grpc-rust.git", rev = "86e4a338006f63f9fdef9f397326155cc5238cc7" }
+tonic = { git = "https://github.com/nervix-io/grpc-rust.git", rev = "dba49c9fc39bfbecf6ed42e9a42e797527150b68" }
 # Capture a live immutable algorithm policy once per connection, including SDK reconnects.
 rustls = { git = "https://github.com/nervix-io/rustls.git", rev = "3a454c70e431a25b88cd117e8f7458fb74f7e0b3" }
 # The alpha.33 heartbeat worker stopped waiting after one heartbeat interval, discarding follower

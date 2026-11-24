@@ -156,10 +156,7 @@ impl RoutedCase {
         let batch_ipc = self
             .batch
             .batch
-            .encode_arrow_ipc(
-                runtime.executor(),
-                nervix_execution::QueueAdmission::RefuseWhenFull,
-            )
+            .encode_arrow_ipc(runtime.executor())
             .await
             .assured("a bounded batch encodes");
         routed_payload(RoutedDelivery {

@@ -191,15 +191,17 @@ through evaluation and dispatch. Neither active nor retained source views occupy
 capacity that their evaluation, IPC encoding and remote acknowledgement storage need to finish.
 Retention adds no wait, worker pool or execution-mode backend.
 
-A snapshot decoder already holds its encoded input under bulk admission. Its additional scratch
-request therefore refuses immediately when no room is available, releasing the input so another
-read can progress. Metadata and Arrow sections follow the same rule; framing reads release their
-charges before reading the next frame.
+A snapshot decoder already holds its encoded input under bulk admission, so it never queues for its
+scratch behind that input. It draws the scratch from its owner's share of the class: within a share
+a charge never waits, and one the share has no room for fails at once with the share the owner
+needs, so the owner gives everything back, the input included, and reads again within that share,
+waited for while it holds nothing. Metadata and Arrow sections follow the same rule; framing reads
+release their charges before reading the next frame.
 
-Stream request envelopes, snapshot staging writes and captured checkpoint conversion admit
-additional allocations without queueing while their input remains charged.
-They refuse the additional allocation with its typed admission cause and release their retained
-work on failure. Consensus storage takes separate Commands and Bulk turns before charging a
+Stream request envelopes, snapshot staging writes and captured checkpoint conversion take additional
+allocations from their operation's share while their input remains charged, in the same way: an
+allocation the share has no room for fails at once with the share the operation needs, and the
+operation releases its retained work and runs again within it. Consensus storage takes separate Commands and Bulk turns before charging a
 working set, and returns the bytes before the turn, so storage waiters do not reserve the room
 the class's other operations need to complete.
 
@@ -438,6 +440,42 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 The boundary check rejects either item in a file no permission lists it for, and a listed item its
 file no longer names.
 
+## Executor Memory Admission
+
+A memory class is backpressure too: every charge waits for room, requests included, and a charge
+fails only when it is larger than its whole class, which no wait could hold. `try_reserve` serves an
+optional extra that proceeds without its charge, such as a read cache that retains a snapshot only
+when room is free, and its refusal is not counted as one.
+
+Nothing waits for room while it holds part of the same class. A queued charge takes every byte its
+class frees until it is satisfied, so a charge waiting behind room its own operation holds would
+wait forever. Three tools keep every wait to a moment when the operation holds nothing of the class:
+
+- An operation that knows its working set takes it as one charge and splits it
+  (`Reservation::split`).
+- An operation of several steps, each charging on its own, runs within an allowance
+  (`Executor::within_allowance`): it waits once, while it holds nothing, for a share of the class,
+  and draws every charge of that class from the share through the executor the allowance returns.
+  Nothing waits within the share: a charge it has no room for fails at once with the `Shortfall`
+  the whole operation needs, the most it held at once included, and the operation gives
+  everything back and runs again within a share that large, and at least twice its last share up
+  to the class, so an operation that grows one step at a time runs a few times rather than once per
+  step. A charge drawn from an allowance keeps the share held for as long as it lives, and so does
+  an executor drawn through it, such as one a mapped view or a reader keeps for its later reads.
+- A synchronous job, which cannot wait at all, grows its charge without waiting
+  (`BudgetedBuffer`, `Reservation::grow_to`). When its class has no room, it gives everything back
+  and reports the charge it needs (`BudgetedBuffer::shortfall`, or the `Shortfall` attached to the
+  growth refusal), and its owner runs it again under that charge, at least twice the last one
+  (`Executor::run_cpu_growing`). Within an allowance the same refusal carries the share the
+  operation needs. An owner that counts an operation's own growth apart from its charge uses
+  `GrowingCharge`, so a retry under a larger charge does not count the same bytes twice.
+
+A job whose only allocations are input that carries its own charge takes `Executor::charge_nothing`,
+a charge of no bytes that is granted at once. An operation that holds several classes takes them in
+one order: state-read and restore metadata before bulk. Work an operation waits for on another
+task, such as a processor's checkpoint a backup cut asks for, runs before the operation takes its
+shares, so the operation never holds a share while that task waits for room of its own.
+
 ## Executor Admission And Draining
 
 `Executor::bulk_read_batch_bytes` derives a read batch from the immutable bulk quantum and pool
@@ -459,44 +497,36 @@ class-local mutex fence. Each acquisition performs one insert, keyed removal or 
 callbacks, destruction, result delivery and semaphore release happen outside it. A submitter either
 finds an active worker that will observe its job or claims a worker itself, so submission racing the
 last worker's exit cannot strand an admitted job. No idle worker retains a blocking-pool thread.
-The queue semaphore still bounds pending work, refuses `RefuseWhenFull` with typed `QueueFull`, and
-hands a freed place to an existing `WaitForPlace` waiter before a later requester.
+The queue semaphore bounds pending work and hands a freed place to the job that asked for one
+first. A full queue is backpressure, never a refusal: every job waits for a place, requests
+included. Client batch decoding, statement constants, subscription predicates, state inspection, an
+HTTP endpoint body and the frames of a request one node sends another wait exactly as the unfolding
+of a payload an ingestor handed over, relay and subscription carriage, the answer of an interconnect
+request whose handler already ran, checkpoints and state captures, compilation for a committed
+change, lifecycle steps and the consensus storage worker's jobs, which `submit_storage` admits in
+order. The caller's own limit bounds the wait (a statement's deadline, a request's lifetime, a
+source's quiesce, shutdown), and dropping the future gives the place up. A wait ends in a refusal
+only once the executor admits no more work. VM execution still owns its class and charge decisions.
 
-`Executor::accepted_work` binds that waiting policy to an operation that holds already accepted
-data. `AcceptedWork` is a borrowed capability: ordinary admission adds no allocation, thread,
-lock or reference count. VM execution still owns its class and charge decisions. Branch input
-preparation, retained inference setup and runs, and relay carriage use the same waiting FIFO.
-Request work, whose caller still holds its input and waits on the answer, keeps its immediate
-refusal through the refusing `run_cpu` and `run_storage`, including client batch decoding,
-statement constants, subscription predicates, a state inspection read on its owner, an HTTP endpoint
-body and the request frames one node sends another: a typed request, a stream opening, a connection
-hello, and a relay query or grant request. Every other job states `QueueAdmission::WaitForPlace` and
-waits: the unfolding of every payload an ingestor handed over, acknowledged or not, relay and
-subscription carriage, every answer frame one node sends another once its handler ran (a typed
-response, a duplex answer, a byte stream's answer such as a state inspection page, a connection
-answer, a relay status or grant answer, and an ack resolution), every frame a duplex stream carries
-after its opening, checkpoints and state captures, compilation for a committed change, lifecycle
-steps, and the consensus storage worker's jobs, which `submit_storage` admits in order. A wait ends
-in a refusal only once the executor admits no more work. [Traffic And Resource
-Isolation](./interconnect.md#traffic-and-resource-isolation) decides each protocol's frames and what
-ends their waits.
+[Traffic And Resource Isolation](./interconnect.md#traffic-and-resource-isolation) says, for each
+interconnect protocol, which charges its frames take and what ends their waits.
 
 An owner that must keep serving others while its own work waits submits that work through
-`Executor::reporting_waits_to`, a handle on the same classes and budgets that admits, queues and
-refuses exactly as the node's handle does and also tells the owner's `CapacityWaits` while a
-submission waits for capacity: a `WaitForPlace` job that finds its class's wait queue full, which
-the class also counts among its waiting jobs, or a memory charge its class cannot grant yet. The
-wait ends when the submission takes its place or room, or when its future is dropped. A job admitted
-at once, a job refused when full and a job that has its place and waits for a worker never count,
-because every job passes through that last wait however idle the node is. A processor task restores
-its branches this way: it runs the restore alone while the restore makes progress, and answers its
-commands as unrestored beside it only while `CapacityWaits` reports a wait, so a command never
-overtakes an ordinary restore. The count is a watch value: an owner subscribes before it reads, so a
-wait that begins or ends in between still wakes it, and Shuttle checks that the owner sees its job
-begin and end waiting for a place whichever of its watch and the job's wait comes first.
+`Executor::reporting_waits_to`, a handle on the same classes, budgets and allowances that admits and
+queues exactly as the node's handle does and also tells the owner's `CapacityWaits` while a
+submission waits for capacity: a job that finds its class's wait queue full, which the class also
+counts among its waiting jobs, or a memory charge its class cannot grant yet. The wait ends when the
+submission takes its place or room, or when its future is dropped. A job admitted at once and a job
+that has its place and waits for a worker never count, because every job passes through that last
+wait however idle the node is. A processor task restores its branches this way: it runs the restore
+alone while the restore makes progress, and answers its commands as unrestored beside it only while
+`CapacityWaits` reports a wait, so a command never overtakes an ordinary restore. The count is a
+watch value: an owner subscribes before it reads, so a wait that begins or ends in between still
+wakes it, and Shuttle checks that the owner sees its job begin and end waiting for a place whichever
+of its watch and the job's wait comes first.
 
-An accepted owner can acquire a charged CPU queue place before transferring mutable state into a
-job. Every inferencer does this before moving its branch's native session into the job that runs
+An owner can acquire a charged CPU queue place before transferring mutable state into a job
+(`Executor::prepare_cpu`). Every inferencer does this before moving its branch's native session into the job that runs
 its model on the extension workers; the job hands the session back with its outcome. Dropping the
 full-queue wait leaves that session installed and returns the charge. After submission,
 cancellation follows the same queued and running job rules as every other admitted run.
@@ -511,11 +541,11 @@ callback exits and observes the caller's cancellation between bounded units. A d
 submission returns only after its job has been selected. Each callback catches its own panic,
 returns `JobPanicked` to its caller, records its completed service and leaves successors runnable.
 The worker publishes its next selection or its idle transition before delivering the completed
-result. Existing per-class admission, refusal, completion, queue-time and work-time counters retain
-their meanings; work time measures callbacks, excluding dispatch and queue waits. A class also
-reports how many `WaitForPlace` jobs wait for a place in its full queue: a job takes a free place
-exactly as a refusing job does, counts as waiting only once it finds the queue full, and stops
-counting when it takes a place, the pool closes or its caller drops the wait.
+result. Per-class admission, completion, queue-time and work-time counters retain their meanings;
+work time measures callbacks, excluding dispatch and queue waits. A class also reports how many
+jobs wait for a place in its full queue: a job takes a free place at once, counts as waiting only
+once it finds the queue full, and stops counting when it takes a place, the pool closes or its
+caller drops the wait.
 
 Worker state distinguishes a selected callback, a callback executing and an idle worker. Runtime
 teardown that drops a worker between callbacks, or before its blocking task starts, returns its

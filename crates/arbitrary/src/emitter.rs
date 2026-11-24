@@ -15,6 +15,20 @@ use crate::{Arbitrary, Domain, route::RouteShape};
 const ITEMS: usize = 3;
 
 impl Arbitrary<'_> {
+    /// An emitter's retry policy: the shared pacing, and a `GIVE UP AFTER` limit or none.
+    pub fn emitter_retry_policy(&mut self) -> EmitterRetryPolicy {
+        let pacing = self.retry_policy();
+        let give_up_after = if self.entropy.flag() {
+            Some(self.duration())
+        } else {
+            None
+        };
+        EmitterRetryPolicy {
+            pacing,
+            give_up_after,
+        }
+    }
+
     /// A case-preserving catalog namespace, including multiple levels and the length boundary.
     pub fn iceberg_namespace(&mut self) -> IcebergNamespace {
         let text = self.entropy.pick([
@@ -639,26 +653,26 @@ macro_rules! publication_generators {
     };
 }
 publication_generators! {
-    client_consumer_publication(arbitrary) -> ClientConsumerPublishingMode = [ClientConsumerPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    http_request_publication(arbitrary) -> HttpRequestPublishingMode = [HttpRequestPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    kafka_topic_publication(arbitrary) -> KafkaTopicPublishingMode = [KafkaTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, KafkaTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    pulsar_topic_publication(arbitrary) -> PulsarTopicPublishingMode = [PulsarTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, PulsarTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    rabbitmq_queue_publication(arbitrary) -> RabbitMqQueuePublishingMode = [RabbitMqQueuePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqQueuePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    rabbitmq_exchange_publication(arbitrary) -> RabbitMqExchangePublishingMode = [RabbitMqExchangePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqExchangePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    redis_pubsub_publication(arbitrary) -> RedisPubSubPublishingMode = [RedisPubSubPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
-    mqtt_topic_publication(arbitrary) -> MqttTopicPublishingMode = [MqttTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
-    nats_stream_publication(arbitrary) -> NatsStreamPublishingMode = [NatsStreamPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
-    zeromq_push_publication(arbitrary) -> ZeroMqPushPublishingMode = [ZeroMqPushPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
-    sqs_queue_publication(arbitrary) -> SqsQueuePublishingMode = [SqsQueuePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    sentry_event_publication(arbitrary) -> SentryEventPublishingMode = [SentryEventPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    syslog_collector_publication(arbitrary) -> SyslogCollectorPublishingMode = [SyslogCollectorPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
-    otel_logs_publication(arbitrary) -> OtelLogsPublishingMode = [OtelLogsPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    otel_traces_publication(arbitrary) -> OtelTracesPublishingMode = [OtelTracesPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    otel_metrics_publication(arbitrary) -> OtelMetricsPublishingMode = [OtelMetricsPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    clickhouse_table_publication(arbitrary) -> ClickHouseTablePublishingMode = [ClickHouseTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    postgres_table_publication(arbitrary) -> PostgresTablePublishingMode = [PostgresTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    mysql_table_publication(arbitrary) -> MySqlTablePublishingMode = [MySqlTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    mongodb_collection_publication(arbitrary) -> MongoDbCollectionPublishingMode = [MongoDbCollectionPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
-    iceberg_table_publication(arbitrary) -> IcebergTablePublishingMode = [IcebergTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    client_consumer_publication(arbitrary) -> ClientConsumerPublishingMode = [ClientConsumerPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.emitter_retry_policy() }];
+    http_request_publication(arbitrary) -> HttpRequestPublishingMode = [HttpRequestPublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    kafka_topic_publication(arbitrary) -> KafkaTopicPublishingMode = [KafkaTopicPublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }, KafkaTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.emitter_retry_policy() }];
+    pulsar_topic_publication(arbitrary) -> PulsarTopicPublishingMode = [PulsarTopicPublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }, PulsarTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.emitter_retry_policy() }];
+    rabbitmq_queue_publication(arbitrary) -> RabbitMqQueuePublishingMode = [RabbitMqQueuePublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }, RabbitMqQueuePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.emitter_retry_policy() }];
+    rabbitmq_exchange_publication(arbitrary) -> RabbitMqExchangePublishingMode = [RabbitMqExchangePublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }, RabbitMqExchangePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.emitter_retry_policy() }];
+    redis_pubsub_publication(arbitrary) -> RedisPubSubPublishingMode = [RedisPubSubPublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }];
+    mqtt_topic_publication(arbitrary) -> MqttTopicPublishingMode = [MqttTopicPublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }, MqttTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.emitter_retry_policy() }];
+    nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }];
+    nats_stream_publication(arbitrary) -> NatsStreamPublishingMode = [NatsStreamPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.emitter_retry_policy() }];
+    zeromq_push_publication(arbitrary) -> ZeroMqPushPublishingMode = [ZeroMqPushPublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }];
+    sqs_queue_publication(arbitrary) -> SqsQueuePublishingMode = [SqsQueuePublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    sentry_event_publication(arbitrary) -> SentryEventPublishingMode = [SentryEventPublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    syslog_collector_publication(arbitrary) -> SyslogCollectorPublishingMode = [SyslogCollectorPublishingMode::NoAck { retry_policy: arbitrary.emitter_retry_policy() }];
+    otel_logs_publication(arbitrary) -> OtelLogsPublishingMode = [OtelLogsPublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    otel_traces_publication(arbitrary) -> OtelTracesPublishingMode = [OtelTracesPublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    otel_metrics_publication(arbitrary) -> OtelMetricsPublishingMode = [OtelMetricsPublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    clickhouse_table_publication(arbitrary) -> ClickHouseTablePublishingMode = [ClickHouseTablePublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    postgres_table_publication(arbitrary) -> PostgresTablePublishingMode = [PostgresTablePublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    mysql_table_publication(arbitrary) -> MySqlTablePublishingMode = [MySqlTablePublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    mongodb_collection_publication(arbitrary) -> MongoDbCollectionPublishingMode = [MongoDbCollectionPublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
+    iceberg_table_publication(arbitrary) -> IcebergTablePublishingMode = [IcebergTablePublishingMode::Ack { retry_policy: arbitrary.emitter_retry_policy() }];
 }

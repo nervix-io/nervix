@@ -55,9 +55,12 @@ fn address(address: &str) -> ConsoleAddress {
 
 /// A record in the shape the page's recorder reads it out.
 fn record(mut connections: Vec<Value>, losses: &[u64]) -> ConsoleConnectionRecord {
-    let opening = SessionOpened { limits: LIMITS }
-        .encode()
-        .assured("the fixed session opening fits its frame");
+    let opening = SessionOpened {
+        limits: LIMITS,
+        pacing: nervix_client_wire::SessionPacing::default(),
+    }
+    .encode()
+    .assured("the fixed session opening fits its frame");
     let opening = Vec::from(ServerWebSocketCodec::new(LIMITS).encode(opening));
     for connection in &mut connections {
         let Some(path) = connection["path"].as_str() else {

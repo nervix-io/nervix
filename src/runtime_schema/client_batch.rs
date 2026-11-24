@@ -52,7 +52,7 @@ pub struct ClientBatchLimits {
 /// Why a submitted body did not become one batch of its ingestor's schema.
 #[derive(Debug, Clone, Error)]
 pub enum ClientBatchError {
-    #[error("the node has no capacity to validate the batch now")]
+    #[error("the node is stopping and did not validate the batch")]
     Busy,
     #[error("a batch of {size} bytes exceeds the {limit} byte limit")]
     TooLarge { size: u64, limit: u64 },
@@ -257,9 +257,9 @@ impl CompiledSchema {
     /// batch of this schema within `limits`; anything else is refused with the defect it has,
     /// checked before the columns it describes are allocated wherever the framing allows.
     ///
-    /// The decode runs on the executor's data workers under a relay charge taken without
-    /// waiting, so a node without the capacity refuses the batch as busy rather than stalling its
-    /// ingestor's admission behind it.
+    /// The decode runs on the executor's data workers under a relay charge. A full relay class
+    /// holds the batch back until it has room: the producer's link takes nothing further meanwhile,
+    /// which is the backpressure its client sees.
     pub async fn decode_client_batch(
         &self,
         executor: &Executor,
@@ -281,7 +281,8 @@ impl CompiledSchema {
             .assured("a batch within its producer's byte grant is far below half of u64::MAX")
             .min(decoded_limit);
         let reservation = executor
-            .try_reserve(MemoryClass::Relay, charge)
+            .reserve(MemoryClass::Relay, charge)
+            .await
             .change_context(ClientBatchError::Busy)?;
         let expected = StdArc::clone(&self.arrow_schema);
         let decoded = executor
@@ -301,9 +302,7 @@ impl CompiledSchema {
             Ok(batch) => batch,
             Err(error) => {
                 let failure = match error.current_context() {
-                    ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
-                        ClientBatchError::Busy
-                    }
+                    ExecutionError::PoolClosed { .. } => ClientBatchError::Busy,
                     // Arrow decoding panics only on input it failed to reject, so the batch is
                     // what is wrong, and retrying it would panic again.
                     ExecutionError::JobPanicked { .. } => ClientBatchError::Malformed {

@@ -47,6 +47,7 @@ async fn an_admitted_partition_inspection_preserves_a_named_missing_topic() {
         "metadata-missing-topic".to_string(),
         plan.executor,
     )
+    .await
     .assured("the inspector accepts the test broker configuration");
 
     let report = inspector
@@ -239,8 +240,11 @@ async fn domain_ingestor(
         .assured("the ingestor accepts the test broker's configuration")
 }
 
+/// A full command budget holds the metadata job back rather than refusing it: the client's own
+/// control deadline bounds the wait and ends it as a timeout, no memory refusal is beneath it,
+/// and no connector job ran meanwhile.
 #[nervix_primitives::test]
-async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
+async fn a_full_command_budget_holds_the_control_job_back_until_its_deadline() {
     let broker = cluster();
     let executor = Executor::default();
     let mut ingestor = domain_ingestor(&broker, executor.clone()).await;
@@ -255,18 +259,18 @@ async fn a_control_memory_refusal_preserves_its_typed_admission_cause() {
     let report = ingestor
         .resume()
         .await
-        .expect_err("a full command budget refuses the metadata job");
-    assert!(matches!(
-        report.downcast_ref::<KafkaTopicIngestorError>(),
-        Some(KafkaTopicIngestorError::ControlAdmission)
-    ));
-    assert!(matches!(
-        report.downcast_ref::<AdmissionError>(),
-        Some(AdmissionError::BudgetExhausted {
-            class: "commands",
-            ..
-        })
-    ));
+        .expect_err("the control deadline ends the metadata job's wait for room");
+    assert!(
+        matches!(
+            report.downcast_ref::<KafkaTopicIngestorError>(),
+            Some(KafkaTopicIngestorError::ControlTimeout { .. })
+        ),
+        "{report:?}"
+    );
+    assert!(
+        report.downcast_ref::<AdmissionError>().is_none(),
+        "a full class held the job back without refusing it: {report:?}"
+    );
     assert_eq!(executor.snapshot().connector_storage.admitted, 0);
 }
 
@@ -282,7 +286,6 @@ async fn control_admission_waits_for_a_place_and_spends_the_client_deadline_on_i
     let opened = executor.snapshot().commands_memory.reserved_bytes;
 
     let full = FullConnectorQueue::fill(&executor).await;
-    let before = executor.snapshot().connector_storage;
     let mut waiting = Box::pin(ingestor.control.run(&ingestor.consumer, |_, _| Ok(())));
     let first_poll = poll_fn(|context| Poll::Ready(waiting.as_mut().poll(context))).await;
     assert!(
@@ -293,11 +296,6 @@ async fn control_admission_waits_for_a_place_and_spends_the_client_deadline_on_i
     waiting
         .await
         .assured("the control job runs once a place frees, within the client deadline");
-    assert_eq!(
-        executor.snapshot().connector_storage.refused,
-        before.refused,
-        "a full connector queue refuses no control job"
-    );
 
     // The queue has room, but the only worker stays held. This wait must spend the effective
     // client deadline on admission without starting the native operation afterwards.

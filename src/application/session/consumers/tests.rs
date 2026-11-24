@@ -35,9 +35,12 @@ impl Default for EndpointFixture {
                         mode: nervix_models::ClientConsumerPublishingMode::Ack {
                             window: AckWindow::Sequential,
                             ack_timeout: "1s".to_string(),
-                            retry_policy: RetryPolicy {
-                                backoff: "1s".to_string(),
-                                max_backoff: "30s".to_string(),
+                            retry_policy: nervix_models::EmitterRetryPolicy {
+                                pacing: RetryPolicy {
+                                    backoff: "1s".to_string(),
+                                    max_backoff: "30s".to_string(),
+                                },
+                                give_up_after: None,
                             },
                         },
                         schema: named("output_schema"),

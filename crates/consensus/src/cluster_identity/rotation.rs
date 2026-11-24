@@ -294,10 +294,11 @@ impl Proposer {
             .change_context(ConsensusError::ClusterIdentity)?;
         let executor = self.inner.store.inner.executor.clone();
         let reservation = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Management,
                 executor.limits().management_event_bytes.as_u64(),
             )
+            .await
             .change_context(ClusterIdentityError::Admission)
             .change_context(ConsensusError::ClusterIdentity)?;
         let expected = basis.clone();

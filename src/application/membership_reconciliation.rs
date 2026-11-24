@@ -2,8 +2,8 @@
 //!
 //! Layer: control plane.
 //! - **Owns.** The membership task's cadence, bootstrap, identity/parameter seeds and verdict publication.
-//! - **Depends on.** Consensus administration, published licensing, cluster and shutdown handles.
-//! - **Must not know.** Graph execution, quota arithmetic, cryptographic encoding or Plexus.
+//! - **Depends on.** Consensus administration, cluster and shutdown handles.
+//! - **Must not know.** Graph execution, licensing, cryptographic encoding or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -15,17 +15,14 @@ use std::time::Duration;
 use nervix_consensus::{Administrator, Proposer};
 use nervix_models::ClusterParameterValues;
 use nervix_primitives::{
-    sync::{Arc, CancellationToken, watch},
+    sync::{Arc, CancellationToken},
     task::{self, JoinHandle},
     time::sleep,
 };
 use tracing::warn;
 
-use super::{
-    cluster_identity, join_supervision,
-    shutdown::{ShutdownCoordinator, ShutdownRequestOutcome},
-};
-use crate::{ConfiguredFaultInjection, cluster::ClusterHandle, licensing::PolicyHandle};
+use super::cluster_identity;
+use crate::{ConfiguredFaultInjection, cluster::ClusterHandle};
 
 pub(super) struct MembershipReconciliation {
     pub cluster: Arc<ClusterHandle>,
@@ -36,9 +33,6 @@ pub(super) struct MembershipReconciliation {
     pub startup_delay: Duration,
     pub membership_interval: Duration,
     pub parameter_seeds: ClusterParameterValues,
-    pub licensing: PolicyHandle,
-    pub refusals: watch::Sender<Option<join_supervision::JoinRefusedError>>,
-    pub coordinator: ShutdownCoordinator,
     pub fault: ConfiguredFaultInjection,
 }
 
@@ -52,9 +46,6 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
         startup_delay,
         membership_interval,
         parameter_seeds,
-        licensing: membership_licensing,
-        refusals: bootstrap_refusal_sender,
-        coordinator: bootstrap_refusal_coordinator,
         fault: _fault_for_identity_seeding,
     } = arguments;
     task::spawn(async move {
@@ -73,37 +64,13 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
             }
             if allow_bootstrap && !initialized {
                 match administrator_for_membership_reconcile
-                    .maybe_initialize(|usage| {
-                        membership_licensing
-                            .admit_snapshot(
-                                proposer_for_parameter_seeding
-                                    .observer()
-                                    .licensing_snapshot(),
-                                crate::licensing::QuotaName::ClusterNodes,
-                                usage,
-                                1,
-                                false,
-                            )
-                            .map(|_| ())
-                    })
+                    .maybe_initialize()
                     .await
                 {
                     Ok(did_initialize) => {
                         initialized = did_initialize;
                     }
                     Err(error) => {
-                        if let Some(refusal) =
-                            error.downcast_ref::<crate::licensing::LicensingRefusal>()
-                        {
-                            bootstrap_refusal_sender.send_replace(Some(
-                                join_supervision::JoinRefusedError::Licensing(*refusal),
-                            ));
-                            match bootstrap_refusal_coordinator.request_stop() {
-                                ShutdownRequestOutcome::Accepted(_)
-                                | ShutdownRequestOutcome::AlreadyRequested(_) => {}
-                            }
-                            break;
-                        }
                         warn!(target: "nervix_server::application", error = %format_args!("{error:#}"), "raft bootstrap attempt failed");
                     }
                 }
@@ -142,20 +109,7 @@ pub(super) fn spawn(arguments: MembershipReconciliation) -> JoinHandle<()> {
                     .await;
             }
             if let Err(error) = administrator_for_membership_reconcile
-                .reconcile_nodes(
-                    cluster_for_membership_reconcile.gossip_state(),
-                    |node, usage| {
-                        membership_licensing
-                            .admit_node_snapshot(
-                                proposer_for_parameter_seeding
-                                    .observer()
-                                    .licensing_snapshot(),
-                                node,
-                                usage,
-                            )
-                            .map(|_| ())
-                    },
-                )
+                .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
                 .await
             {
                 warn!(target: "nervix_server::application", error = %format_args!("{error:#}"), "raft membership reconciliation failed");

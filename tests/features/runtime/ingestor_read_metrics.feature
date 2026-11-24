@@ -156,7 +156,7 @@ Feature: Ingestor read interactions
       | 1            |
       | 3            |
 
-  Scenario Outline: Endpoint unfolding refusals count only the request refused on <cluster_size> nodes
+  Scenario Outline: An endpoint request held for the extension workers counts no unfolding refusal on <cluster_size> nodes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -176,27 +176,18 @@ Feature: Ingestor read interactions
       START;
       """
     When extension execution is saturated on every node
-    And endpoint request "refused" is posted on node "node-1" host "refusal-{{test_id}}.example.com" path "/events"
+    And endpoint request "held" is posted on node "node-1" host "refusal-{{test_id}}.example.com" path "/events"
       """
       {"user_id":42}
       """
-    Then node "node-1" observability metric "nervix_ingestor_unfolding_refused_total" with labels eventually equals 1
-      """
-      domain="{{domain}}"
-      ingestor="measured"
-      connector="HTTP"
-      entity="ENDPOINT"
-      """
+    Then endpoint request "held" has not answered within "2s"
     When extension execution is released on every node
-    And endpoint request "accepted" is posted on node "node-1" host "refusal-{{test_id}}.example.com" path "/events"
-      """
-      {"user_id":42}
-      """
-    Then within "30s" the relay subscription receives a payload
+    Then endpoint request "held" answers HTTP 202
+    And within "30s" the relay subscription receives a payload
       """
       "user_id":42
       """
-    And node "node-1" observability metric "nervix_ingestor_unfolding_refused_total" with labels eventually equals 1
+    And node "node-1" observability metric "nervix_ingestor_unfolding_refused_total" with labels eventually equals 0
       """
       ingestor="measured"
       connector="HTTP"

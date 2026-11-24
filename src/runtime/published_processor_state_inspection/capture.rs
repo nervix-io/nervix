@@ -10,7 +10,7 @@ use super::*;
 impl ReadPlan {
     fn prepare(
         operation: &RelayProcessorOperationTemplate,
-        memory: &mut Reservation,
+        memory: &mut GrowingCharge,
         cancellation: &Cancellation,
     ) -> ReadResult<Self> {
         let plan = match operation {
@@ -103,7 +103,7 @@ struct CaptureSelection {
 struct CapturedPage {
     branches: Vec<CapturedBranch>,
     plan: ReadPlan,
-    memory: Reservation,
+    memory: GrowingCharge,
     partition_catalog: nervix_models::StateInspectionKeyCatalog,
 }
 
@@ -111,7 +111,7 @@ impl CapturedPage {
     fn new(
         mut branches: Vec<CapturedBranch>,
         plan: ReadPlan,
-        mut memory: Reservation,
+        mut memory: GrowingCharge,
         excluded: Option<&BTreeSet<nervix_models::BranchKeyFingerprint>>,
         cancellation: &Cancellation,
     ) -> ReadResult<Self> {
@@ -164,15 +164,22 @@ impl CaptureSelection {
 }
 
 impl Runtime {
+    /// Read one page of a deduplicator's or window processor's published state, taking every
+    /// charge through `executor`. The page holds what it captured while it opens window layouts
+    /// and builds its rows, so its caller runs it within allowances of the classes it draws from.
     pub(crate) async fn local_published_processor_state_page(
         &self,
-        domain: &DomainName,
-        processor: &NodeRef,
-        unit: Unit,
-        selection: ProcessorStateSelection,
-        after: Option<(Option<nervix_models::BranchKeyFingerprint>, u64)>,
-        bounds: ProcessorStatePageBounds,
+        executor: &Executor,
+        read: ProcessorStatePageRead<'_>,
     ) -> ReadResult<ProcessorStatePage> {
+        let ProcessorStatePageRead {
+            domain,
+            processor,
+            unit,
+            selection,
+            after,
+            bounds,
+        } = read;
         let routing = self
             .domain_routing(domain)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Unavailable))?
@@ -198,9 +205,10 @@ impl Runtime {
             .snapshot()
             .change_context(ProcessorStatePageError::Unavailable)?
             .now();
-        let executor = self.inner.executor.clone();
+        let executor = executor.clone();
         let memory = executor
-            .try_reserve(MemoryClass::Bulk, 1)
+            .reserve(MemoryClass::Bulk, 1)
+            .await
             .change_context(ProcessorStatePageError::Admission)?;
         let runtime = self.clone();
         let processor = processor.clone();
@@ -209,7 +217,8 @@ impl Runtime {
             selection,
         };
         let captured = executor
-            .run_cpu(CpuClass::Bulk, memory, move |mut memory, cancellation| {
+            .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
+                let mut memory = GrowingCharge::new(memory);
                 let installed = routing
                     .processor_plans
                     .get(&NodeUnitRef::new(processor.clone(), unit))
@@ -312,7 +321,6 @@ impl Runtime {
                         let mut decoded = decode_window_processor_layout(
                             payload,
                             &executor,
-                            nervix_execution::QueueAdmission::RefuseWhenFull,
                             WindowSnapshotSchemas { input, arguments },
                             admitted.layout,
                         )
@@ -333,12 +341,23 @@ impl Runtime {
             });
         }
         executor
-            .run_cpu(CpuClass::Bulk, memory, move |memory, cancellation| {
-                let mut page =
-                    PublishedPage::build(opened, plan, now, after, bounds, memory, cancellation)?;
-                page.partition_catalog = partition_catalog;
-                Ok::<_, Report<ProcessorStatePageError>>(page)
-            })
+            .run_cpu(
+                CpuClass::Bulk,
+                executor.charge_nothing(MemoryClass::Bulk),
+                move |_charge, cancellation| {
+                    let mut page = PublishedPage::build(
+                        opened,
+                        plan,
+                        now,
+                        after,
+                        bounds,
+                        memory,
+                        cancellation,
+                    )?;
+                    page.partition_catalog = partition_catalog;
+                    Ok::<_, Report<ProcessorStatePageError>>(page)
+                },
+            )
             .await
             .change_context(ProcessorStatePageError::Admission)?
     }
@@ -412,7 +431,7 @@ mod tests {
                         ))],
                         max_time: std::time::Duration::from_secs(3600),
                     },
-                    memory,
+                    GrowingCharge::new(memory),
                     Some(&excluded),
                     cancellation,
                 )

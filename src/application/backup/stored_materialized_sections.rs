@@ -20,7 +20,7 @@ use nervix_backup::{
     MaterializedIdentitiesRecord, MaterializedRecordIdentity, MaterializedRelayDescriptor,
     SectionContent, SectionPath, StateField,
 };
-use nervix_execution::{ChargedBytes, CpuClass, MemoryClass};
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_interconnect::{RemoteOperationFailure, RuntimeState};
 use nervix_models::{DomainName, DomainSchedule, NodeRef};
 
@@ -36,12 +36,12 @@ use crate::{
 impl SessionServiceImpl {
     pub(super) async fn stage_stored_materialized_sections(
         &self,
+        executor: &Executor,
         captured: Vec<CapturedStoredMaterializedRelay>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
     ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let mut staged = Vec::new();
-        let executor = self.inner.runtime.executor();
         for captured in captured {
             nervix_primitives::task::consume_budget().await;
             let placement = captured.placement;
@@ -91,7 +91,9 @@ impl SessionServiceImpl {
             let bytes = descriptor.encode().change_context_lazy(|| {
                 failure_context(&request.domain, "backup state section operation failed")
             })?;
-            let artifact = self.stage_captured_section(bytes, &request.domain).await?;
+            let artifact = self
+                .stage_captured_section(executor, bytes, &request.domain)
+                .await?;
             staged.push(CapturedSection {
                 key: key(SectionPath::materialized_descriptor(
                     &request.domain,
@@ -114,7 +116,8 @@ impl SessionServiceImpl {
                 })?
             {
                 let charge = executor
-                    .try_reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
+                    .reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
+                    .await
                     .change_context_lazy(|| {
                         failure_context(&request.domain, "backup state section operation failed")
                     })?;

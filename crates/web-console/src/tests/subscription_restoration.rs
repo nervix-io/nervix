@@ -265,7 +265,7 @@ fn reconnect_retries_a_waiting_contract_immediately_and_resets_its_delay() {
             let SubscriptionTabState::RetryWaiting { wait, .. } = &tabs[0].state else {
                 panic!("an unanswered replacement still keeps its retry policy");
             };
-            assert_eq!(wait.delay, SUBSCRIPTION_RETRY_DELAY);
+            assert_eq!(wait.delay, ConsolePacing::default().restoration().first());
         });
     });
 }

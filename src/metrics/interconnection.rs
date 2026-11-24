@@ -434,12 +434,6 @@ const SERIES: &[SeriesSpec] = &[
         labels: CLASS,
     },
     SeriesSpec {
-        name: "nervix_execution_job_rejections_total",
-        help: "Jobs refused because one execution class already held its whole wait queue.",
-        kind: SeriesKind::Counter,
-        labels: CLASS,
-    },
-    SeriesSpec {
         name: "nervix_execution_job_queue_seconds_total",
         help: "Time admitted jobs spent waiting for a worker of one execution class.",
         kind: SeriesKind::Counter,
@@ -1003,13 +997,6 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
         completed.sample(
             &[("class", entry.class)],
             entry.workers.completed.approx_into(),
-        );
-    }
-    let mut refused = families.open("nervix_execution_job_rejections_total");
-    for entry in &workers {
-        refused.sample(
-            &[("class", entry.class)],
-            entry.workers.refused.approx_into(),
         );
     }
     let mut queued = families.open("nervix_execution_job_queue_seconds_total");

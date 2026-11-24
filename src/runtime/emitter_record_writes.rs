@@ -565,9 +565,40 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
         }
     }
 
-    /// Rebinds private storage positions after whole source branches leave the buffer. Every
-    /// production payload contains one source branch, so all its carriers retire together.
-    /// Contents and execution time move unchanged; no request is prepared or encoded here.
+    /// Extends `taken`, one flag for each buffered batch, to every batch a retained payload carries
+    /// rows of, whenever the payload carries rows of a batch already taken: a payload is written
+    /// again with exactly the members it was first written with, so it leaves the buffer whole.
+    /// Answers whether it took any further batch.
+    pub(super) fn spread_over_members(&self, taken: &mut [bool]) -> bool {
+        let mut spread = false;
+        for payload in self.retained.values() {
+            let mut carries_taken = false;
+            for member in &payload.members {
+                let member_taken = taken
+                    .get(member.batch_index)
+                    .verified("retained members name batches in the buffer they were packed from");
+                carries_taken |= *member_taken;
+            }
+            if !carries_taken {
+                continue;
+            }
+            for member in &payload.members {
+                let member_taken = taken
+                    .get_mut(member.batch_index)
+                    .verified("retained members name batches in the buffer they were packed from");
+                if !*member_taken {
+                    *member_taken = true;
+                    spread = true;
+                }
+            }
+        }
+        spread
+    }
+
+    /// Rebinds private storage positions after carriers leave the buffer. Every carrier of a
+    /// payload leaves with it: branch retirement removes a whole source branch, which every
+    /// production payload stays inside, and a give-up removes every carrier of a payload it gives
+    /// up. Contents and execution time move unchanged; no request is prepared or encoded here.
     pub(super) async fn remap_batches(&mut self, positions: &[Option<usize>]) {
         // The iterator owns the payloads still being moved. Its observation leaves with it if
         // this future is cancelled; the store separately owns the survivors already inserted.
@@ -586,15 +617,13 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
                     .get(member.batch_index)
                     .verified("retained members name batches in the buffer being compacted");
                 if keep {
-                    member.batch_index = position.verified(
-                        "one prepared payload contains one source branch, whose carriers retire \
-                         together",
-                    );
+                    member.batch_index = position
+                        .verified("every carrier of a payload leaves the buffer together with it");
                 } else {
-                    position.is_none().then_some(()).verified(
-                        "one prepared payload contains one source branch, whose carriers retire \
-                         together",
-                    );
+                    position
+                        .is_none()
+                        .then_some(())
+                        .verified("every carrier of a payload leaves the buffer together with it");
                 }
             }
             if let Some(work) = &mut moving_work {
@@ -709,6 +738,37 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
             rejected,
             unresolved: checked.unresolved,
         })
+    }
+
+    /// Gives up every batch whose rows the payload written as `record` carries, because the
+    /// destination's own delivery owner gave that payload up after measuring the emitter's
+    /// `GIVE UP AFTER` itself. The payload stays retained until the emitter gives its batches up.
+    pub(super) fn give_up_written(
+        &self,
+        batches: &mut [EmitterPublishBatch],
+        payloads: &WrittenPayloads,
+        record: EmitterRecordId,
+    ) -> EmitterRuntimeResult<()> {
+        let first_member = payloads.first_members.get(record.index()).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::UnknownEmitterRecord {
+                record: record.index(),
+                records: payloads.first_members.len(),
+            })
+        })?;
+        let payload = self.retained.get(first_member).verified(
+            "the write was built from the retained payloads, and a payload its destination gave \
+             up stays retained until the emitter gives its batches up",
+        );
+        for member in &payload.members {
+            let batch = batches.get_mut(member.batch_index).ok_or_else(|| {
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "a given-up payload references missing emitter batch {}",
+                    member.batch_index
+                ))
+            })?;
+            batch.give_up_now();
+        }
+        Ok(())
     }
 
     /// Takes the payload `record` carried out of the retained ones, now that the emitter answered for

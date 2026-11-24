@@ -188,11 +188,8 @@ async fn waiting_branch_task_for_test(
         let charge = executor
             .try_reserve(nervix_execution::MemoryClass::Relay, 1)
             .assured("the test's accepted job has one byte of working memory");
-        let mut run = Box::pin(executor.accepted_work().run_cpu(
-            nervix_execution::CpuClass::Data,
-            charge,
-            |_, _| (),
-        ));
+        let mut run =
+            Box::pin(executor.run_cpu(nervix_execution::CpuClass::Data, charge, |_, _| ()));
         assert!(futures_util::poll!(run.as_mut()).is_pending());
         ready
             .send(())
@@ -256,7 +253,6 @@ async fn accepted_work_stop_bounds_a_full_command_queue_while_the_branch_waits()
         "the existing shutdown grace must include waiting to send STOP"
     );
     assert_eq!(executor.snapshot().data_cpu.pending, 0);
-    assert_eq!(executor.snapshot().data_cpu.refused, 0);
 }
 
 #[cfg(feature = "shuttle")]
@@ -343,7 +339,6 @@ mod accepted_work_shuttle {
                     assert!((3..=4).contains(&snapshot.data_cpu.completed));
                     assert!(snapshot.data_cpu.completed <= snapshot.data_cpu.admitted);
                     assert!(snapshot.data_cpu.admitted - snapshot.data_cpu.completed <= 1);
-                    assert_eq!(snapshot.data_cpu.refused, 0);
                 }
             });
         });
@@ -371,7 +366,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
             sensitive: false,
         }],
     }));
-    let template = BranchInstanceTemplate {
+    let template = Arc::new(BranchInstanceTemplate {
         revision: ProcessorPlanRevision::new(),
         owner: NodeUnitRef::new(
             NodeRef::new(ModelKind::Deduplicator, named::<ModelName>("dedup_users")),
@@ -429,7 +424,7 @@ async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         .collect(),
         wasm_state_reset: None,
         partition_transition: None,
-    };
+    });
     let mut instances = ProcessorBranches::new();
     let domain_clock = runtime
         .bind_domain_clock(&domain)
@@ -522,7 +517,10 @@ async fn processor_dispatch_hands_dequeued_work_into_branch_mailbox() {
     install_unpaced_test_domain(&runtime, &domain);
     let processor = named::<ModelName>("route_orders");
     let input_relay = named::<RelayName>("orders");
-    let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+    let template = Arc::new(junction_branch_template(
+        processor.as_str(),
+        input_relay.as_str(),
+    ));
     let counters =
         runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
     let (input_tx, mut input_rx) = mpsc::channel(1);
@@ -588,7 +586,10 @@ async fn accepted_processor_input_records_branch_activity_at_its_own_domain_time
     install_unpaced_test_domain(&runtime, &domain);
     let processor = named::<ModelName>("route_orders");
     let input_relay = named::<RelayName>("orders");
-    let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+    let template = Arc::new(junction_branch_template(
+        processor.as_str(),
+        input_relay.as_str(),
+    ));
     let counters =
         runtime.node_quiesce_counters(&domain, NodeRef::new(ModelKind::Junction, &processor));
     let (input_tx, mut input_rx) = mpsc::channel(1);
@@ -722,7 +723,7 @@ async fn detached_branch_publishes_buffered_route_output_before_it_stops() {
             &domain,
             None,
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .expect("the junction fixture instantiates")
@@ -853,7 +854,7 @@ async fn junction_branch_holding(
             domain,
             None,
             1,
-            &RetainedStateOpening::RefusedWhenFull,
+            &RetainedStateOpening::OnNodeExecutor,
         )
         .await
         .expect("the junction fixture instantiates")

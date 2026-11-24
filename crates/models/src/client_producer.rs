@@ -380,8 +380,9 @@ pub enum ClientSubmissionRefusal {
     /// Admission is suspended by a quiesce or memory pressure. The producer retries the same batch
     /// on its declared backoff once admission reopens.
     Suspended,
-    /// The node executing the ingestor had no capacity to validate the batch right now. The
-    /// producer retries the same batch on its declared backoff.
+    /// The node executing the ingestor did not admit the batch for a reason of its own, not the
+    /// batch's: it is stopping, for one. A full memory class or worker queue holds a batch back
+    /// rather than refusing it. The producer retries the same batch on its declared backoff.
     Busy,
     /// The ingestor's execution is stopping or moving to another node. The producer's attachment
     /// ends; a new producer can be opened once the ingestor runs again.

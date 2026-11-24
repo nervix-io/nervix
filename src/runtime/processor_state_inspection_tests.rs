@@ -459,12 +459,15 @@ async fn a_unit_still_restoring_its_branches_refuses_its_page_without_reading_a_
     let page = timeout(
         ANSWERS_WITHIN,
         runtime.local_processor_state_page(
-            &domain,
-            &processor,
-            Unit::SINGLE,
-            StateInspectionBranchSelection::All.into(),
-            None,
-            bounds(),
+            runtime.inspection_executor(),
+            crate::runtime::ProcessorStatePageRead {
+                domain: &domain,
+                processor: &processor,
+                unit: Unit::SINGLE,
+                selection: StateInspectionBranchSelection::All.into(),
+                after: None,
+                bounds: bounds(),
+            },
         ),
     )
     .await
@@ -531,12 +534,15 @@ async fn a_unit_still_restoring_its_branches_refuses_its_page_without_reading_a_
     let page = timeout(
         ANSWERS_WITHIN,
         runtime.local_processor_state_page(
-            &domain,
-            &processor,
-            Unit::SINGLE,
-            StateInspectionBranchSelection::All.into(),
-            None,
-            bounds(),
+            runtime.inspection_executor(),
+            crate::runtime::ProcessorStatePageRead {
+                domain: &domain,
+                processor: &processor,
+                unit: Unit::SINGLE,
+                selection: StateInspectionBranchSelection::All.into(),
+                after: None,
+                bounds: bounds(),
+            },
         ),
     )
     .await

@@ -160,11 +160,13 @@ async fn emitter_outcomes_retry_only_unresolved_members_and_leave_a_fresh_publis
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     assert!(
         connector
@@ -249,11 +251,13 @@ async fn emitter_outcomes_count_the_first_drain_attempt_of_an_already_pending_re
     let mut backoff = RuntimeReconnectBackoff::default();
     let (_shutdown, mut shutdown_rx) = watch::channel(false);
     let (_stop, mut stop_rx) = watch::channel(None);
+    let mut give_up = EmitterGiveUp::new(None);
     let mut control = EmitterPublishControl {
         fault_injection: &faults,
         shutdown_rx: &mut shutdown_rx,
         stop_rx: &mut stop_rx,
         backoff: &mut backoff,
+        give_up: &mut give_up,
     };
     let failure = connector
         .flush_buffer(
@@ -275,6 +279,8 @@ async fn emitter_outcomes_count_the_first_drain_attempt_of_an_already_pending_re
             acks: EmitterAcknowledgements::default(),
             waiting_for_stall_clear: false,
             reason: Some("destination refused the first attempt"),
+            kind: EmitterRetryKind::Infrastructure,
+            give_up_at: None,
         },
     );
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -422,6 +428,8 @@ fn emitter_outcomes_record_only_successfully_scheduled_retry_delays() {
                 acks: EmitterAcknowledgements::default(),
                 waiting_for_stall_clear: false,
                 reason: Some("retry"),
+                kind: EmitterRetryKind::Infrastructure,
+                give_up_at: None,
             },
         );
     }
@@ -433,6 +441,8 @@ fn emitter_outcomes_record_only_successfully_scheduled_retry_delays() {
             acks: EmitterAcknowledgements::default(),
             waiting_for_stall_clear: false,
             reason: Some("outside the monotonic range"),
+            kind: EmitterRetryKind::Infrastructure,
+            give_up_at: None,
         },
     );
     let metrics = DestinationProbe { context: &context };

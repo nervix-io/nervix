@@ -154,18 +154,19 @@ To keep work on chosen cluster nodes, read [Node Rules](../../../docs/src/placem
 `PREFER NODES WHERE` or `ANY NODE`. Preview the selector with `SHOW NODES WHERE` first. A running
 domain refuses a rule an executing unit would break, and a stopped domain's `START` waits while a
 unit has no admitted node, so tell the user which node must carry the tag.
+For what licensing grants, what a cluster without a license may do and how to obtain a license,
+read [Licensing](../../../docs/src/licensing.md); licensing never limits nodes or domains.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
-effective policy, capabilities, credential handling and quota usage, read
+effective policy, capabilities and credential handling, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
-For grace, replacement allowances and over-limit outcomes, also read
+For grace periods, also read
 [Licensing Transition Warnings](../../../docs/src/errors-and-diagnostics.md#licensing-transition-warnings).
-Distinguish the target quota from a temporary recovery allowance when advising growth or replacement.
 For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
 Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
 Plexus supplies no service-address or trust-anchor override. The same section owns ephemeral
-expiry and the stop gate: an expired ephemeral cluster refuses `START` and new usage until a new
+expiry and the stop gate: an expired ephemeral cluster refuses `START` until a new
 `ACTIVATE LICENSE`, and the domains licensing stopped still need an explicit `START` afterwards.
 For source UUID inspection and restore behavior, read
 [Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).
@@ -744,6 +745,12 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   `ENCODE USING`. Include every required variable: all modes declare `RETRY POLICY BACKOFF <d> MAX
   <d>`; asynchronous confirming modes also declare `ACK SEQUENTIAL` or `ACK PARALLEL MAX <n>` and
   `ACK TIMEOUT <d>`. Do not invent a default mode, window, timeout, or retry cadence.
+- An emitter retries an outage without limit unless its `RETRY POLICY` ends with `GIVE UP AFTER
+  <d>`; then rows still unsent that long after their first failed attempt fail as `unavailable` /
+  `publish` through `ON MESSAGE ERROR`, and `GIVE UP AFTER 0s` never retries. Suggest it only when
+  the user would rather handle the rows than wait. Never write it on an ingestor's retry policy,
+  where it is a parse error. A destination refusing writes as configured is retried too, shown as
+  `misconfigured:` in `DESCRIBE EMITTER`. Read [Giving up](../../../docs/src/emitters.md#giving-up).
 - When an application receives constructed graph output, use `CREATE CLIENT CONSUMER EMITTER <name> FROM <relays> TO SCHEMA <output_schema>
   MODE ACK SEQUENTIAL|ACK PARALLEL MAX <n> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
   Follow route construction with required `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` and an
@@ -979,9 +986,10 @@ literal HTTP polling headers, at model creation and when a later cap is lowered.
   intake reject with HTTP 503, while withdrawn routes return 404. A node that has not installed a
   revision since it started answers 503 for every unpublished route, never 404. Another domain
   sharing the host and path retains its own intake when a domain is stopped.
-- Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
-  MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
-  branch guest's Wasmtime linear memory.
+- Declare all three required WASM limits immediately after `FILE`, in order: `MAX FUEL
+  <positive_u64> MAX MEMORY <positive_byte_size> MAX TABLE ELEMENTS <u64>`. Fuel is reset per
+  logical guest operation; memory caps each branch guest's Wasmtime linear memory, and table
+  elements cap its table's slots.
 - Write the optional `ON REJECTED STATE PRESERVE|RESET` between the last `TO` clause and
   `ON GLOBAL ERROR`. It answers only a guest's own verdict on the snapshot it was handed, and it
   defaults to `PRESERVE`. Offer `RESET` only when the user accepts losing that branch's computation

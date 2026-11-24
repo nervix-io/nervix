@@ -144,7 +144,7 @@ passing the turn; cancellation while waiting retains neither a turn nor a memory
 
 Vote and committed-marker reads and writes, the check for stored Raft state and the store's idle
 barrier are management work. Each reserves four management events from the Management class,
-256 KiB with the fixed 64 KiB event, and takes no turn. A durable write charges at most half of that
+272 KiB with the fixed 68 KiB event, and takes no turn. A durable write charges at most half of that
 reservation, two events, to the records and keys it writes, which holds a record as large as a whole
 management event while its encoding buffer doubles; the votes and log positions it writes are far
 smaller. The other half is retained for Fjall's journal encoding and moving batch descriptors, as in
@@ -367,7 +367,9 @@ window is four decoded batches per live stream. Reaching the window stops frame 
 batch is decoded, closes the HTTP/2 flow-control window, and makes the leader wait.
 
 The default 24 MiB Commands budget is validated to hold the complete resident window beside one
-maximum-size 2 MiB batch being encoded. Other command and replication work shares that aggregate
+command state storage working set, the room the durable append of those entries waits for, and
+beside one maximum-size 2 MiB batch being encoded. A follower whose window is full therefore never
+waits for room only its own window can release: its append waits only for room other work frees. Other command and replication work shares that aggregate
 budget, so concurrent or superseded streams cannot grow memory without admission. Ending a stream
 releases its queued batches and reservations; batches from a generation the leader abandoned do not
 remain uncharged in the Raft core.
@@ -385,11 +387,8 @@ other candidate outside the membership and logs why once while the reason holds:
 the candidate has published no record the leader can read, and at `warn` with the voter and the
 mismatch when it cannot run beside a voter. It refuses the run of a voter that cannot run beside an
 older voter's run the same way, without changing the membership. A run outside the membership that
-the leader refused stays outside, with the verdict it received, for as long as gossip shows it: a
-run that cannot run beside a voter even once no live voter would refuse it, and a run refused for
-the cluster's node quota even once the quota would admit a newcomer;
-[Licensing Admission Refusals](errors-and-diagnostics.md#licensing-admission-refusals) describes
-the quota refusal.
+the leader refused stays outside, with the verdict it received, for as long as gossip shows it,
+even once no live voter would refuse it. Licensing never refuses a run: it limits no base feature.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
 catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
@@ -568,10 +567,10 @@ Transaction commit plans and step effects hold no lifecycle step.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_np_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
@@ -606,9 +605,9 @@ construction where it stands, including the typed `payload` expression scope and
 the transaction, as the step effect and commit plan step keep it too. The database also stores
 committed node records under record-family tag `C`, each with the revision that committed it, its
 incarnation-bound capacity claim, including transport, DNS, database (each database's open-file limit included), consensus, engine, connector
-host, membership, runtime, shutdown, operational (trace export included) and listener capacities, its detected properties and its tags. The boxed node record
+host, membership, runtime, shutdown, operational (trace export and web console pacing included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 55. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 60. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
@@ -768,7 +767,7 @@ validation and derivations, and the rest are fixed by the encoded operation and 
 | Follower decoded resident window | 4 batches per live append stream | `--execution-resident-replication-batches` |
 | Commands memory budget | 1/32 of the node's memory, at least 24 MiB | `--execution-commands-memory-bytes` |
 | Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation | fixed |
-| Vote or metadata storage | 256 KiB working reservation from the Management class | fixed: four 64 KiB management events, which `--execution-management-memory-bytes` must hold |
+| Vote or metadata storage | 272 KiB working reservation from the Management class | fixed: four 68 KiB management events, which `--execution-management-memory-bytes` must hold |
 | Storage working sets held at once | 1 per class, as many as each Commands or Bulk budget holds with room beside them | fixed |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds | half of `--interconnect-request-timeout` / `--raft-append-idle-bound` |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB | fixed |
@@ -897,18 +896,14 @@ so replay after a later activation cannot release that newer binding. The former
 offline deadline no longer gates admission under the free policy. The current consensus namespaces identify
 these complete shapes; another stored shape requires recreation.
 
-An observer captures public identity, licensing record, applied revision and `UsageSnapshot` from
-one committed state. Node usage is the number of committed voters and learners, and domain usage
-is the number of committed domain records. These facts require no per-node usage report. A node's
-single policy publisher derives an immutable value from that observation and publishes it through
-the execution-primitive publication boundary. Consumers read that one value without acquiring a
-policy lock or recomputing permissions.
+An observer captures public identity, licensing record and applied revision from one committed
+state. A node's single policy publisher derives an immutable value from that observation and
+publishes it through the execution-primitive publication boundary. Consumers read that one value
+without acquiring a policy lock or recomputing permissions.
 
-Domain creation includes the captured quota constraint in its durable effect and authoritative
-write. Apply checks the actual committed domain count before inserting a new record; restore's
-domain insertion does the same. Existing records do not spend another slot. Membership admission
-checks the node quota under its existing serialization before adding a member. The shipped free
-policy leaves both quotas unlimited.
+Licensing limits no base feature, so domain creation, restore's domain insertion and membership
+changes capture no quota and are never refused by licensing. The catalog declares no cluster quota,
+so the cluster measures no usage that impact assessment could protect.
 
 ## Cluster Parameter Publication
 

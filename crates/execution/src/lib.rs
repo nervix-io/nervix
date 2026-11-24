@@ -23,12 +23,23 @@
 //! Admission is always in one order: reserve the memory an operation will allocate, then take a
 //! job slot, then submit. A submission that is dropped before it reaches a worker releases its
 //! reservation with it; a submission already running keeps its reservation until the work actually
-//! exits, because the memory is still allocated until then. A class whose wait queue is full refuses
-//! a job that answers a request, whose sender can present it again, and holds a job the node already
-//! accepted and keeps until a place frees, ahead of any job asking afterwards: the caller states
-//! which with a [`QueueAdmission`]. An owner that must keep serving others while its own work
-//! waits submits through a handle that tells it, with [`CapacityWaits`], while that work waits for
-//! a place or for memory room.
+//! exits, because the memory is still allocated until then.
+//!
+//! A full class is backpressure, never a refusal. A memory charge waits for room in its class, and
+//! a job whose class's wait queue is full waits for a place, ahead of any job asking afterwards.
+//! The caller bounds either wait by dropping the future, which gives up its place in line and
+//! returns what it holds. Admission fails only for an operation larger than its whole class, which
+//! could never fit, and once the executor admits no more work.
+//!
+//! Nothing waits for room while it holds part of the same class: a queued charge takes every byte
+//! its class frees until it is satisfied, so it could stall behind the very bytes it holds. An
+//! owner takes the whole charge an operation needs at once, and a synchronous job, which cannot
+//! wait at all, that outgrows its charge gives everything back and reports the charge it needs: its
+//! owner waits for that charge while holding nothing and runs the job again under it
+//! ([`Executor::run_cpu_growing`]).
+//!
+//! An owner that must keep serving others while its own work waits submits through a handle that
+//! tells it, with [`CapacityWaits`], while that work waits for a place or for memory room.
 //!
 //! A class bounds admission, not threads. Jobs run on the process-wide Tokio blocking pool, and a
 //! class's worker count is the number of its jobs that may be on that pool at once — taken before
@@ -58,12 +69,13 @@
     )
 )]
 
-mod accepted_work;
 mod cancellation;
 mod capacity_waits;
 mod executor;
+mod growing;
 mod limits;
 mod memory;
+mod prepared_cpu;
 mod runtime_capacity;
 mod settings;
 mod workers;
@@ -85,19 +97,20 @@ pub use settings::{
 };
 
 pub use crate::{
-    accepted_work::{AcceptedCpu, AcceptedWork},
     cancellation::{Cancellation, Cancelled},
     capacity_waits::CapacityWaits,
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
+    growing::Attempt,
     limits::{
         ConnectorStorageWorkers, CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets,
         MemoryClass, OperationLimits, StorageClass, WorkerClassName, WorkerCounts,
     },
     memory::{
         AdmissionError, BudgetedBuffer, BufferGrowthError, BufferLimitExceeded, ChargedBytes,
-        MemoryBudgetSnapshot, Reservation,
+        GrowingCharge, MemoryBudgetSnapshot, Reservation, Shortfall,
     },
-    workers::{ExecutionError, QueueAdmission, WorkerClassSnapshot},
+    prepared_cpu::PreparedCpu,
+    workers::{ExecutionError, WorkerClassSnapshot},
 };
 
 // The ordinary tests build executors whose atomics would be Loom's in a Loom build, outside any

@@ -37,31 +37,25 @@ pub(in crate::runtime) struct PreparedRuntimeStateHandoff {
     pub(in crate::runtime) checkpoints: Vec<(RuntimeStatePlacement, PersistedRuntimeStateEntry)>,
 }
 
+/// What lets the node's application of a schedule activate a prepared handoff state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::runtime) enum OwnershipHandoffActivationAuthorization {
+    /// This run of the node prepared the state for the coordinator that holds the move, so the
+    /// schedule the move targets activates it.
     AuthorizedByPreparation,
-    RecoveredAwaitingRequest,
-    RecoveredAuthorized,
+    /// The node reloaded the preparation from its state store at startup. It names an earlier run
+    /// of this node, and this run refuses every activation request that names an earlier run, so
+    /// only its exact committed transition activates it.
+    AuthorizedByCommittedTransition,
 }
 
 impl OwnershipHandoffActivationAuthorization {
-    pub(super) fn is_authorized(self) -> bool {
-        self != Self::RecoveredAwaitingRequest
-    }
-
-    /// Authorizes activation and reports whether the recovered schedule must be rebuilt.
-    ///
-    /// A recovered preparation continues to request a rebuild until activation removes it. This
-    /// keeps a failed or cancelled rebuild retriable without making an ordinary handoff race its
-    /// normal schedule reconciliation with a second rebuild.
-    pub(super) fn authorize(&mut self) -> bool {
+    /// Whether applying a schedule that carries the preparation's target fingerprint activates the
+    /// preparation, given whether that schedule commits its exact transition.
+    pub(super) fn activates(self, committed_transition: bool) -> bool {
         match self {
-            Self::AuthorizedByPreparation => false,
-            Self::RecoveredAwaitingRequest => {
-                *self = Self::RecoveredAuthorized;
-                true
-            }
-            Self::RecoveredAuthorized => true,
+            Self::AuthorizedByPreparation => true,
+            Self::AuthorizedByCommittedTransition => committed_transition,
         }
     }
 }

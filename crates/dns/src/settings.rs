@@ -1,8 +1,9 @@
-//! Local resolver policy and peer-relative admission declarations.
+//! Local resolver policy and lookup admission declarations.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Resolver cache, TTL, address selection, negative-answer trust and hook budgets.
-//! - **Depends on.** Vocabulary setting classes and positive peer capacity.
+//! - **Owns.** Resolver cache, TTL, address selection, negative-answer trust, hook budgets and
+//!   the bound on concurrent lookups.
+//! - **Depends on.** Vocabulary setting classes.
 //! - **Must not know.** Peers, connectors, graph policy or command-line parsing.
 #![cfg_attr(nervix_lint, nervix::layer(engine, reason = "owns resolver policy"))]
 use std::time::Duration;
@@ -143,19 +144,20 @@ impl SettingDefinition for TrustNegativeAnswers {
     }
 }
 
-/// Concurrent DNS lookups: one for every declared peer.
+/// The DNS lookups in flight at once. The interconnect's peers and every connector share the
+/// resolver, so a lookup beyond the bound waits for a slot within its caller's budget.
 pub struct ConcurrentLookups;
 impl SettingDefinition for ConcurrentLookups {
     type Class = NodeCapabilities;
     type Value = usize;
-    type Context = usize;
+    type Context = ();
     type Error = DnsSettingsError;
     const NAME: &'static str = "dns-concurrent-lookups";
-    const DERIVATION: Option<&'static str> = Some("interconnect-max-peers");
-    fn default_value(peers: &usize) -> usize {
-        *peers
+    const DERIVATION: Option<&'static str> = None;
+    fn default_value(_: &()) -> usize {
+        64
     }
-    fn validate(value: &usize, _: &usize) -> Result<(), Report<Self::Error>> {
+    fn validate(value: &usize, _: &()) -> Result<(), Report<Self::Error>> {
         if *value == 0 || *value > nervix_primitives::sync::Semaphore::MAX_PERMITS {
             return Err(Report::new(DnsSettingsError {
                 setting: Self::NAME,
@@ -173,6 +175,7 @@ pub struct DnsSettingValues {
     pub hook_lookup_budget: Option<Duration>,
     pub address_family_policy: Option<AddressFamilies>,
     pub trust_negative_answers: Option<bool>,
+    pub concurrent_lookups: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,10 +204,7 @@ impl DnsSettings {
             .assured("DNS admission validation requires a positive count"),
         }
     }
-    pub fn resolve(
-        values: DnsSettingValues,
-        peers: usize,
-    ) -> Result<Self, Report<DnsSettingsError>> {
+    pub fn resolve(values: DnsSettingValues) -> Result<Self, Report<DnsSettingsError>> {
         Ok(Self {
             cache_entries: Setting::resolve(values.cache_entries, &())?,
             positive_max_ttl: Setting::resolve(values.positive_max_ttl, &())?,
@@ -212,17 +212,14 @@ impl DnsSettings {
             hook_lookup_budget: Setting::resolve(values.hook_lookup_budget, &())?,
             address_family_policy: Setting::resolve(values.address_family_policy, &())?,
             trust_negative_answers: Setting::resolve(values.trust_negative_answers, &())?,
-            concurrent_lookups: Setting::resolve(None, &peers)?,
+            concurrent_lookups: Setting::resolve(values.concurrent_lookups, &())?,
         })
     }
 }
 impl Default for DnsSettings {
     fn default() -> Self {
-        Self::resolve(
-            DnsSettingValues::default(),
-            nervix_models::MaxPeers::default_value(&()),
-        )
-        .assured("the declared resolver defaults are positive and bounded")
+        Self::resolve(DnsSettingValues::default())
+            .assured("the declared resolver defaults are positive and bounded")
     }
 }
 
@@ -230,30 +227,31 @@ impl Default for DnsSettings {
 mod tests {
     use super::*;
     #[test]
-    fn dns_admission_tracks_peers_and_rejects_an_unusable_hook_or_cache() {
-        let settings = DnsSettings::resolve(DnsSettingValues::default(), 10)
-            .assured("ten peers fit lookup admission");
-        assert_eq!(*settings.concurrent_lookups.value(), 10);
-        assert!(
-            DnsSettings::resolve(
-                DnsSettingValues {
-                    cache_entries: Some(0),
-                    ..Default::default()
-                },
-                10
-            )
-            .is_err()
-        );
-        assert!(
-            DnsSettings::resolve(
-                DnsSettingValues {
-                    hook_lookup_budget: Some(Duration::ZERO),
-                    ..Default::default()
-                },
-                10
-            )
-            .is_err()
-        );
-        assert!(DnsSettings::resolve(DnsSettingValues::default(), 0).is_err());
+    fn dns_admission_takes_its_own_bound_and_rejects_an_unusable_hook_cache_or_bound() {
+        let settings = DnsSettings::resolve(DnsSettingValues::default())
+            .assured("the declared defaults resolve");
+        assert_eq!(*settings.concurrent_lookups.value(), 64);
+        let explicit = DnsSettings::resolve(DnsSettingValues {
+            concurrent_lookups: Some(10),
+            ..Default::default()
+        })
+        .assured("ten concurrent lookups fit lookup admission");
+        assert_eq!(*explicit.concurrent_lookups.value(), 10);
+        for values in [
+            DnsSettingValues {
+                cache_entries: Some(0),
+                ..Default::default()
+            },
+            DnsSettingValues {
+                hook_lookup_budget: Some(Duration::ZERO),
+                ..Default::default()
+            },
+            DnsSettingValues {
+                concurrent_lookups: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(DnsSettings::resolve(values).is_err(), "{values:?}");
+        }
     }
 }

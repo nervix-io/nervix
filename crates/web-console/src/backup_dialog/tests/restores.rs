@@ -3,7 +3,7 @@
 //! leader, streams again while the outcome is unknown, reports what it could not learn, and keeps
 //! a restore an earlier attempt may have run unknown when a later attempt ends without its outcome.
 
-use std::cell::Cell;
+use std::{cell::Cell, time::Duration};
 
 use error_stack::Report;
 use futures_util::FutureExt as _;
@@ -11,44 +11,71 @@ use leptos::prelude::{GetUntracked as _, Owner};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     CommandDisposition, LeaderRedirect, NodeEndpoints, OutcomeOrigin, RestoreDisposition,
-    RestoreMessage, RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
+    RestoreMessage, RestoreReply, RestoreUploadFailure, SessionPacing, UnknownOutcomeCause,
     websocket::{ServerRestoreWebSocketCodec, WebSocketData},
 };
 use nervix_models::{
     ArchiveDigest, ClusterNodeName, CommandExecutionReference, RestoreArchive, RestoreMode,
-    RestoreStepOutcome,
+    RestoreStepOutcome, Setting, WebConsoleCapabilities,
 };
 
 use super::{dialog_signals, outcome, reference, restore_report};
 use crate::{
     SESSION_LIMITS,
     backup_dialog::{
-        RETRY_DELAY, RestoreProgress,
+        RestoreProgress,
         browser::{
             Received,
             in_memory::{InMemoryBrowser, MemoryFile, Reply, Script},
         },
         restore_stream::{
-            DRAIN_POLL, MAX_BUFFERED_BYTES, MAX_DRAIN_POLLS, MAX_RESTORE_ATTEMPTS,
-            MEASURE_SLICE_BYTES, RESTORE_CHUNK_BYTES, RestoreEnd, RestoreStreamError,
-            RestoreUpload, measure_archive,
+            DRAIN_POLL, MEASURE_SLICE_BYTES, RestoreEnd, RestoreStreamError, RestoreUpload,
+            drain_polls, measure_archive, queued_bytes_limit, restore_chunk_bytes,
         },
     },
+    pacing::ConsolePacing,
 };
 
 const CONSOLE: &str = "http://127.0.0.1:47420";
 const LEADER_CONSOLE: &str = "http://127.0.0.1:47421";
 const STATEMENT: &str = "RESTORE DOMAIN tenant AS tenant_copy FROM 'tenant.nvxb' DRY RUN;";
 
-/// An archive that streams as three chunks, the last one short.
-const ARCHIVE_LENGTH: usize = 2 * RESTORE_CHUNK_BYTES + 1000;
+/// The pause before a restore is streamed again, at the declared restoration backoff.
+fn retry_pause() -> Duration {
+    ConsolePacing::default().web_console().restoration_backoff()
+}
 
-/// A reading of queued bytes above the most a restore lets the browser hold.
-const OVER_THE_CAP: u32 = MAX_BUFFERED_BYTES + 1;
+/// The declared request timeout, within which a connection must take each chunk.
+fn request_timeout() -> Duration {
+    ConsolePacing::default().web_console().request_timeout()
+}
 
-/// The bytes of an archive file of `ARCHIVE_LENGTH` bytes.
+/// The length of an archive that streams as three chunks, the last one short.
+fn archive_length() -> usize {
+    let two_chunks = restore_chunk_bytes(&SESSION_LIMITS)
+        .checked_mul(2)
+        .assured("two chunks of a quarter mebibyte fit usize");
+    two_chunks
+        .checked_add(1000)
+        .assured("a short third chunk after two fits usize")
+}
+
+/// A reading of queued bytes above the most a restore lets the browser hold: the declared restore
+/// frame capacity in chunks of the default session frame.
+fn over_the_cap() -> u32 {
+    let capacity = ConsolePacing::default()
+        .web_console()
+        .restore_frame_capacity();
+    let limit = queued_bytes_limit(capacity, &SESSION_LIMITS);
+    let limit = u32::try_from(limit).assured("the declared queue fits the browser's count");
+    limit
+        .checked_add(1)
+        .assured("one byte more than a mebibyte fits u32")
+}
+
+/// The bytes of an archive file of [`archive_length`] bytes.
 fn archive_bytes() -> Vec<u8> {
-    (0..ARCHIVE_LENGTH)
+    (0..archive_length())
         .map(|index| u8::try_from(index % 251).assured("a remainder of 251 fits a byte"))
         .collect()
 }
@@ -69,6 +96,7 @@ fn upload(bytes: Vec<u8>) -> RestoreUpload<MemoryFile> {
         file: MemoryFile::readable(bytes),
         base_url: Some(CONSOLE.to_string()),
         auth_token: "token".to_string(),
+        pacing: ConsolePacing::default(),
     }
 }
 
@@ -260,19 +288,20 @@ fn a_restore_the_leader_answers_early_sends_nothing_more() {
 #[test]
 fn a_restore_waits_for_its_connection_to_drain_and_stalls_when_it_never_does() {
     let mut draining = answering_at_the_end(completed());
-    draining.buffered = [OVER_THE_CAP, OVER_THE_CAP].into();
+    draining.buffered = [over_the_cap(), over_the_cap()].into();
     let browser = InMemoryBrowser::with_scripts([draining]);
     let ended = run(upload(archive_bytes()), &browser);
     assert!(matches!(ended.result, Ok(RestoreEnd::Outcome(_))));
     assert_eq!(browser.observed().waits, vec![DRAIN_POLL, DRAIN_POLL]);
 
     // One more reading than the polls a stalled connection is given.
-    let polls = usize::try_from(MAX_DRAIN_POLLS).assured("the drain polls fit usize");
+    let polls =
+        usize::try_from(drain_polls(request_timeout())).assured("the drain polls fit usize");
     let readings = polls
         .checked_add(1)
         .assured("one more reading than the polls fits usize");
     let mut full = answering_at_the_end(completed());
-    full.buffered = std::iter::repeat_n(OVER_THE_CAP, readings).collect();
+    full.buffered = std::iter::repeat_n(over_the_cap(), readings).collect();
     let browser = InMemoryBrowser::with_scripts([full, answering_at_the_end(completed())]);
     let ended = run(upload(archive_bytes()), &browser);
     assert!(
@@ -282,7 +311,7 @@ fn a_restore_waits_for_its_connection_to_drain_and_stalls_when_it_never_does() {
     );
     let observed = browser.observed();
     assert_eq!(observed.opened.len(), 2);
-    assert_eq!(observed.waits.last(), Some(&RETRY_DELAY));
+    assert_eq!(observed.waits.last(), Some(&retry_pause()));
 }
 
 #[test]
@@ -314,7 +343,43 @@ fn a_restore_follows_the_leader_and_streams_again_while_its_outcome_is_unknown()
             leader,
         ]
     );
-    assert_eq!(observed.waits, vec![RETRY_DELAY, RETRY_DELAY]);
+    assert_eq!(observed.waits, vec![retry_pause(), retry_pause()]);
+}
+
+#[test]
+fn a_restore_whose_outcome_stays_unknown_streams_again_until_its_announced_retry_validity_ends() {
+    let validity = Duration::from_secs(5);
+    let pacing = SessionPacing::new(
+        Setting::resolve(None, &()).assured("the default snapshot interval is valid"),
+        Some(Setting::new(validity, &()).assured("five seconds is a valid retry validity")),
+        WebConsoleCapabilities::default(),
+    );
+    // The reference was issued as the browser's clock started, and the clock moves only while the
+    // restore pauses between attempts, so the attempts fill the validity the opening announced and
+    // one more starts as it ends. A further attempt would find no connection to open.
+    let pauses = validity
+        .as_nanos()
+        .checked_div(retry_pause().as_nanos())
+        .assured("the pause is positive");
+    let pauses = usize::try_from(pauses).assured("the pauses of a short validity fit usize");
+    let attempts = pauses.checked_add(1).assured("one more attempt fits usize");
+    let mut scripts = Vec::with_capacity(attempts);
+    for _ in 0..attempts {
+        scripts.push(answering_at_the_end(answered(
+            CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying),
+        )));
+    }
+    let browser = InMemoryBrowser::with_scripts(scripts).announcing(pacing);
+    let ended = run(upload(archive_bytes()), &browser);
+    assert_eq!(*ended.failure(), RestoreStreamError::Exhausted);
+    assert!(ended.failure().leaves_outcome_unknown());
+    let observed = browser.observed();
+    assert_eq!(observed.opened.len(), attempts);
+    assert_eq!(observed.waits, vec![retry_pause(); pauses]);
+    assert_eq!(
+        attempts_of_one_restore(&observed.sent, &archive_bytes()),
+        attempts
+    );
 }
 
 #[test]
@@ -323,7 +388,16 @@ fn a_restore_that_cannot_learn_its_outcome_says_so() {
     let ended = run(upload(archive_bytes()), &browser);
     assert_eq!(*ended.failure(), RestoreStreamError::Transport);
     assert!(ended.failure().leaves_outcome_unknown());
-    assert_eq!(browser.observed().opened.len(), MAX_RESTORE_ATTEMPTS);
+    // The reference was issued as the browser's clock started, and every attempt pauses once, so
+    // the attempts last exactly the declared retry validity, and one more starts as it ends.
+    let validity = ConsolePacing::default().command_retry_validity();
+    let pauses = validity
+        .as_nanos()
+        .checked_div(retry_pause().as_nanos())
+        .assured("the pause is positive");
+    let pauses = usize::try_from(pauses).assured("the pauses of the declared validity fit usize");
+    let attempts = pauses.checked_add(1).assured("one more attempt fits usize");
+    assert_eq!(browser.observed().opened.len(), attempts);
 
     let silent = Script::default();
     let browser = InMemoryBrowser::with_scripts([silent]);

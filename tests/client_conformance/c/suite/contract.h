@@ -116,6 +116,17 @@ static nx_connect_options *suite_options(void) {
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_REQUEST, 120000));
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_RETRY, 120000));
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_BACKUP_WAIT, 300000));
+    suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_KEEPALIVE_INTERVAL, 30000));
+    suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_KEEPALIVE_TIMEOUT, 20000));
+    suite_check(nx_connect_options_window(options, NX_WINDOW_STREAM, 2097152));
+    suite_check(nx_connect_options_window(options, NX_WINDOW_CONNECTION, 5242880));
+    suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_RESET_STREAM_DURATION, 1000));
+    suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_CONNECTION_ATTEMPT_DELAY, 300));
+    suite_check(nx_connect_options_limit(options, NX_LIMIT_CALL_QUEUE_CAPACITY, 1024));
+    suite_check(nx_connect_options_limit(options, NX_LIMIT_HEADER_LIST_BYTES, 16384));
+    suite_check(nx_connect_options_limit(options, NX_LIMIT_SEND_BUFFER_BYTES, 1048576));
+    suite_check(nx_connect_options_limit(options, NX_LIMIT_MAX_ERROR_RESET_STREAMS, 1024));
+    suite_check(nx_connect_options_limit(options, NX_LIMIT_REMEMBERED_RESET_STREAMS, 50));
     memset(certificate, 0, length); /* B-4: the setter copied the caller's bytes. */
     return options;
 }
@@ -673,9 +684,33 @@ static void test_boundary_fields_and_arguments(void) {
     suite_kind(nx_connect_options_basic_auth(options, invalid_utf8, 1, NULL, 0),
                 NX_ERROR_INVALID_ARGUMENT);
     suite_kind(nx_connect_options_tls_requirement(options, 999), NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_window(options, 999, 70000), NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_window(options, NX_WINDOW_STREAM, 0), NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_limit(options, 999, 1), NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_limit(options, NX_LIMIT_CALL_QUEUE_CAPACITY, 0),
+               NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_limit(options, NX_LIMIT_HEADER_LIST_BYTES, (uint64_t)UINT32_MAX + 1),
+               NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_limit(options, NX_LIMIT_REMEMBERED_RESET_STREAMS, 0),
+               NX_ERROR_INVALID_ARGUMENT);
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_CONNECT, 0));
     nx_session *session = NULL;
     suite_kind(nx_session_connect(suite_bytes("http://127.0.0.1:1"), 18, NULL, 0, options,
+                                  NULL, &session), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(session == NULL);
+    /* A window HTTP/2 does not allow is kept by the setter and refused at connect. */
+    nx_connect_options *narrow = nx_connect_options_new();
+    HOLD(nx_connect_options, narrow);
+    suite_check(nx_connect_options_window(narrow, NX_WINDOW_CONNECTION, 65534));
+    suite_kind(nx_session_connect(suite_bytes("http://127.0.0.1:1"), 18, NULL, 0, narrow,
+                                  NULL, &session), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(session == NULL);
+    /* A connection attempt delay below RFC 8305's 10 ms is kept by the setter and refused at
+       connect. */
+    nx_connect_options *hasty = nx_connect_options_new();
+    HOLD(nx_connect_options, hasty);
+    suite_check(nx_connect_options_timeout(hasty, NX_TIMEOUT_CONNECTION_ATTEMPT_DELAY, 5));
+    suite_kind(nx_session_connect(suite_bytes("http://127.0.0.1:1"), 18, NULL, 0, hasty,
                                   NULL, &session), NX_ERROR_INVALID_ARGUMENT);
     REQUIRE(session == NULL);
     suite_kind(nx_cancel_with_deadline(UINT64_MAX, NULL), NX_ERROR_INVALID_ARGUMENT);
@@ -694,7 +729,12 @@ static void test_boundary_fields_and_arguments(void) {
 
 static void test_boundary_public_enumeration_domains(void) {
     DOMAIN(nx_tls_requirement, NX_TLS_PREFERRED, NX_TLS_REQUIRED);
-    DOMAIN(nx_timeout_kind, NX_TIMEOUT_CONNECT, NX_TIMEOUT_REQUEST, NX_TIMEOUT_RETRY, NX_TIMEOUT_BACKUP_WAIT);
+    DOMAIN(nx_timeout_kind, NX_TIMEOUT_CONNECT, NX_TIMEOUT_REQUEST, NX_TIMEOUT_RETRY, NX_TIMEOUT_BACKUP_WAIT,
+        NX_TIMEOUT_KEEPALIVE_INTERVAL, NX_TIMEOUT_KEEPALIVE_TIMEOUT, NX_TIMEOUT_RESET_STREAM_DURATION,
+        NX_TIMEOUT_CONNECTION_ATTEMPT_DELAY);
+    DOMAIN(nx_window_kind, NX_WINDOW_STREAM, NX_WINDOW_CONNECTION);
+    DOMAIN(nx_limit_kind, NX_LIMIT_CALL_QUEUE_CAPACITY, NX_LIMIT_HEADER_LIST_BYTES,
+        NX_LIMIT_SEND_BUFFER_BYTES, NX_LIMIT_MAX_ERROR_RESET_STREAMS, NX_LIMIT_REMEMBERED_RESET_STREAMS);
     DOMAIN(nx_error_kind, NX_ERROR_INVALID_ARGUMENT, NX_ERROR_CONNECT, NX_ERROR_TRANSPORT,
         NX_ERROR_UNCERTAIN, NX_ERROR_REJECTED, NX_ERROR_DEADLINE, NX_ERROR_CANCELLED,
         NX_ERROR_OVERFLOW, NX_ERROR_PROTOCOL, NX_ERROR_TYPE, NX_ERROR_CLOSED,
@@ -1284,7 +1324,7 @@ static void test_inspection_retains_typed_state_after_its_outcome_is_released(vo
         suite_drop(license_outcome);
         uint64_t license_branches = 0, license_rows = 0, license_bytes = 0;
         REQUIRE(nx_inspection_counts(license_inspection, &license_branches, &license_rows, &license_bytes));
-        REQUIRE(license_branches == 0 && license_rows == 4 && license_bytes > 0);
+        REQUIRE(license_branches == 0 && license_rows == 2 && license_bytes > 0);
         const uint8_t *license_json = NULL;
         size_t license_json_len = 0;
         nx_inspection_json(license_inspection, &license_json, &license_json_len);

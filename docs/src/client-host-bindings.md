@@ -108,8 +108,10 @@ inspections and drafts. An independently obtained schema or inspection outlives 
 was read from. A borrowed error message ends with its error; a borrowed frame, IPC stream or
 value ends with its owning reference. Freeing a session leaves its endpoint-held runtime alive.
 
-An `nx_connect_options` draft carries copied credentials, TLS requirement, CA PEM, seeds and
-connection/request/retry/backup waits. Connect reads its snapshot; keep the draft unmodified
+An `nx_connect_options` draft carries copied credentials, TLS requirement, CA PEM, seeds,
+connection/request/retry/backup waits, the HTTP/2 keepalive interval and timeout, the stream and
+connection receive windows, the call queue, header list, send buffer and reset-stream limits, and
+the connection attempt delay. Connect reads its snapshot; keep the draft unmodified
 during that call and free it afterwards. An HTTPS start requires HTTPS on every seed and
 redirect. [Manual B-1 through B-17](client-implementation-manual.md#using-the-c-abi) specify the
 application's recovery, cancellation, ownership and settlement duties.

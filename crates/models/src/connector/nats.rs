@@ -818,13 +818,13 @@ connector_emitters! {
 
 super::publishing::emitter_modes! {
     pub enum NatsSubjectPublishingMode {
-        NoAck { retry_policy: crate::RetryPolicy } => NoAck,
+        NoAck { retry_policy: crate::EmitterRetryPolicy } => NoAck,
     }
 }
 
 super::publishing::emitter_modes! {
     pub enum NatsStreamPublishingMode {
-        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::EmitterRetryPolicy } => BrokerAck,
     }
 }
 

@@ -397,16 +397,17 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     validate_emitter_envelope_declaration(domain, identifier, emitter)?;
 
     let retry = emitter.connector.publishing().retry_policy();
-    let backoff = parse_duration_text(&retry.backoff).map_err(|error| {
+    let pacing = &retry.pacing;
+    let backoff = parse_duration_text(&pacing.backoff).map_err(|error| {
         invalid(format!(
             "invalid MODE RETRY POLICY BACKOFF '{}': {error}",
-            retry.backoff
+            pacing.backoff
         ))
     })?;
-    let max_backoff = parse_duration_text(&retry.max_backoff).map_err(|error| {
+    let max_backoff = parse_duration_text(&pacing.max_backoff).map_err(|error| {
         invalid(format!(
             "invalid MODE RETRY POLICY MAX '{}': {error}",
-            retry.max_backoff
+            pacing.max_backoff
         ))
     })?;
     if backoff.is_zero() {
@@ -417,8 +418,16 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
     if max_backoff < backoff {
         return Err(invalid(format!(
             "MODE RETRY POLICY MAX '{}' must be at least BACKOFF '{}'",
-            retry.max_backoff, retry.backoff
+            pacing.max_backoff, pacing.backoff
         )));
+    }
+    // `GIVE UP AFTER 0s` is a limit too: the emitter never retries.
+    if let Some(give_up_after) = &retry.give_up_after {
+        parse_duration_text(give_up_after).map_err(|error| {
+            invalid(format!(
+                "invalid MODE RETRY POLICY GIVE UP AFTER '{give_up_after}': {error}"
+            ))
+        })?;
     }
 
     if let Some(timeout) = emitter.connector.publishing().ack_timeout() {

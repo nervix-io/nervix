@@ -42,7 +42,14 @@ module RubySuite
       candidate = cluster.connect(server: unreachable.to_s,
                                   seeds: ENV.fetch('NERVIX_SUITE_SEEDS').split(','),
                                   connect_timeout: 5, request_timeout: 120,
-                                  retry_timeout: 120, backup_wait_timeout: 120)
+                                  retry_timeout: 120, backup_wait_timeout: 120,
+                                  keepalive_interval: 15, keepalive_timeout: 10,
+                                  stream_window_bytes: 1024 * 1024,
+                                  connection_window_bytes: 4 * 1024 * 1024,
+                                  call_queue_capacity: 512, header_list_bytes: 32 * 1024,
+                                  send_buffer_bytes: 512 * 1024, max_error_reset_streams: 512,
+                                  remembered_reset_streams: 100, reset_stream_duration: 2,
+                                  connection_attempt_delay: 0.25)
       begin
         completed('LIST DOMAINS;', candidate)
       ensure

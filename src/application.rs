@@ -69,7 +69,7 @@ use error_stack::{Report, ResultExt};
 use futures_util::{
     StreamExt,
     future::join_all,
-    stream::{self},
+    stream::{self, FuturesUnordered},
 };
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
@@ -175,7 +175,6 @@ mod join_supervision;
 mod leader_redirect;
 mod license_description;
 pub mod licensing;
-mod licensing_admission;
 mod membership_reconciliation;
 mod model_mutation;
 mod model_validation;
@@ -851,11 +850,7 @@ impl Application {
             consensus.verified("startup assigns this handle before it reaches this point");
         let interconnect =
             interconnect.verified("startup assigns this handle before it reaches this point");
-        let licensing = crate::licensing::PolicyHandle::new(
-            &consensus.observer(),
-            &runtime.metrics(),
-            fault_injection.clone(),
-        );
+        let licensing = crate::licensing::PolicyHandle::new(&consensus.observer());
         crate::licensing::metrics::register(
             &runtime.metrics(),
             licensing.clone(),
@@ -958,8 +953,6 @@ impl Application {
             .await;
         }));
         let (join_refusal_sender, join_refusal) = watch::channel(None);
-        let bootstrap_refusal_sender = join_refusal_sender.clone();
-        let bootstrap_refusal_coordinator = shutdown_coordinator.clone();
         if has_bootstrap_candidates {
             let supervision = JoinSupervision {
                 transport: interconnect.clone(),
@@ -1004,9 +997,6 @@ impl Application {
                 startup_delay,
                 membership_interval,
                 parameter_seeds,
-                licensing: licensing.clone(),
-                refusals: bootstrap_refusal_sender,
-                coordinator: bootstrap_refusal_coordinator,
                 fault: fault_injection.clone(),
             },
         ));
@@ -1774,7 +1764,9 @@ impl Application {
                     interconnect_for_health.replace_outbound_targets(&outbound_targets);
                 }
 
-                let probe_results = stream::iter(scheduled_probes.into_iter().map(|target| {
+                // One round probes every peer together: each peer's management connection
+                // reserves streams of its own for health probes.
+                let probe_results = scheduled_probes.into_iter().map(|target| {
                     let interconnect = interconnect_for_health.clone();
                     async move {
                         let outcome = match interconnect
@@ -1810,8 +1802,8 @@ impl Application {
                             nervix_primitives::time::Instant::now(),
                         )
                     }
-                }))
-                .buffer_unordered(settings.interconnect.health_probes());
+                })
+                .collect::<FuturesUnordered<_>>();
                 tokio::pin!(probe_results);
                 // Let each bounded probe finish even when gossip publishes another update.
                 // Cancelling the round on every update can indefinitely hide an unreachable
@@ -2221,7 +2213,7 @@ impl Application {
                     let result = match service.handle_lookup_request(request).await {
                         Ok(Some(record)) => {
                             let mapping_input = record
-                                .encode_arrow_ipc(service.inner.runtime.executor(), nervix_execution::QueueAdmission::RefuseWhenFull)
+                                .encode_arrow_ipc(service.inner.runtime.executor())
                                 .await
                                 .map(|body| Some(body.to_vec()));
                             match mapping_input {
@@ -2823,6 +2815,11 @@ impl Application {
         // the commits, commands and coordination its services still run end here, and recovery
         // completes what they left undone.
         service.inner.service_tasks.stop();
+        // Each of them ends at its next await. Waiting for that before the save means none of them
+        // sees a later step of the stop, such as the end of drain support at terminal teardown, so
+        // none records an outcome of its own about the node stopping: the leader that follows, or
+        // this node after its restart, continues each command as it continues any in progress.
+        service.inner.service_tasks.wait_stopped().await;
         shutdown_coordinator.begin_save(listeners.outcome);
 
         // The save has no limit of its own: it waits only for work in motion, which ends on its
@@ -2849,11 +2846,14 @@ impl Application {
         for task_outcome in background_task_outcomes {
             terminal_teardown_outcome = terminal_teardown_outcome.combine(task_outcome);
         }
+        // A service task spawned since the node turned off ends before it starts; this reaps any
+        // still tracked, so none outlives the runtime.
         service.inner.service_tasks.wait_stopped().await;
-        // An installation of the committed state that one of those tasks, or a request handler,
-        // began still runs in a task of the runtime admission, which holds the installation turn
-        // until the installation ends. Taking the turn waits for the last one, and keeping it means
-        // none begins afterwards, so the runtime never stops in the middle of an installation.
+        // An installation of the committed state that a background or service task, or a request
+        // handler, began still runs in a task of the runtime admission, which holds the
+        // installation turn until the installation ends. Taking the turn waits for the last one,
+        // and keeping it means none begins afterwards, so the runtime never stops in the middle of
+        // an installation.
         runtime_admission.finish_installations().await;
         // The services below own this node's remaining tasks, connections, and storage, and
         // stopping them is what releases those, so each stop runs to completion rather than being

@@ -37,20 +37,31 @@ struct MappedArtifactData {
 }
 
 impl StagedArtifact {
-    /// Admit the complete addressable view, then remove the file's name before mapping it.
-    /// No writer or path survives this conversion, so another owner cannot change its bytes.
+    /// [`Self::into_mapped_with`], charging the staging's own executor.
+    #[cfg(test)]
     pub(in crate::runtime) async fn into_mapped(
         self,
     ) -> error_stack::Result<MappedArtifact, SnapshotStagingError> {
         let executor = self.executor.clone();
+        self.into_mapped_with(&executor).await
+    }
+
+    /// Admit the complete addressable view, then remove the file's name before mapping it. No
+    /// writer or path survives this conversion, so another owner cannot change its bytes. The view
+    /// and every section later copied out of it are charged through `executor`, which may draw
+    /// from its caller's allowances.
+    pub(in crate::runtime) async fn into_mapped_with(
+        self,
+        executor: &nervix_execution::Executor,
+    ) -> error_stack::Result<MappedArtifact, SnapshotStagingError> {
         let memory = executor
-            .try_reserve(MemoryClass::RestoreMetadata, self.length.max(1))
+            .reserve(MemoryClass::RestoreMetadata, self.length.max(1))
+            .await
             .change_context(SnapshotStagingError::Admission)?;
         let mapped_executor = executor.clone();
         executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 memory,
                 move |memory, cancellation| {
                     cancellation
@@ -104,12 +115,9 @@ impl MappedArtifact {
         let view = self.clone();
         self.inner
             .executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                working,
-                move |working, cancellation| inspect(&view.inner.bytes, working, cancellation),
-            )
+            .run_cpu(CpuClass::Bulk, working, move |working, cancellation| {
+                inspect(&view.inner.bytes, working, cancellation)
+            })
             .await
             .change_context(SnapshotStagingError::Execution)
     }
@@ -134,23 +142,19 @@ impl MappedArtifact {
         let working = self
             .inner
             .executor
-            .try_reserve(MemoryClass::Bulk, length.max(1))
+            .reserve(MemoryClass::Bulk, length.max(1))
+            .await
             .change_context(SnapshotStagingError::Admission)?;
         let view = self.clone();
         self.inner
             .executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                working,
-                move |working, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(SnapshotStagingError::Cancelled)?;
-                    let bytes = view.inner.bytes[range].to_vec();
-                    Ok::<_, Report<SnapshotStagingError>>(ChargedBytes::from_owned(bytes, working))
-                },
-            )
+            .run_cpu(CpuClass::Bulk, working, move |working, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(SnapshotStagingError::Cancelled)?;
+                let bytes = view.inner.bytes[range].to_vec();
+                Ok::<_, Report<SnapshotStagingError>>(ChargedBytes::from_owned(bytes, working))
+            })
             .await
             .change_context(SnapshotStagingError::Execution)?
     }
@@ -274,7 +278,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn a_section_copy_checks_its_bounds_and_admission_before_allocating() {
+    async fn a_section_copy_checks_its_bounds_and_waits_for_room_before_allocating() {
         let directory = tempfile::tempdir().assured("staging directory opens");
         let executor = Executor::default();
         let staging = SnapshotStaging::new(
@@ -297,20 +301,30 @@ mod tests {
             assert!(view.copy_section(range, limit).await.is_err());
             assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
         }
+        // A full class holds the copy back until room frees, and the copy allocates nothing while
+        // it waits.
         let budget = executor.snapshot().bulk_memory.capacity_bytes;
         let occupied = executor
             .try_reserve(MemoryClass::Bulk, budget)
             .assured("the test occupies copying admission");
-        let refused = view
-            .copy_section(7..12, 5)
-            .await
-            .expect_err("an occupied bulk budget refuses copying");
-        assert!(matches!(
-            refused.current_context(),
-            SnapshotStagingError::Admission
-        ));
-        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, budget);
-        drop(occupied);
+        {
+            let mut copying = std::pin::pin!(view.copy_section(7..12, 5));
+            assert!(
+                nervix_primitives::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    copying.as_mut()
+                )
+                .await
+                .is_err(),
+                "an occupied bulk budget holds the copy back instead of refusing it"
+            );
+            assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, budget);
+            drop(occupied);
+            let group = copying
+                .await
+                .assured("the copy completes once its class has room");
+            assert_eq!(&*group, b"group");
+        }
         drop(view);
         assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
         assert_eq!(

@@ -17,13 +17,13 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
     CommandExecutionReference, DomainClockObservation, DomainClockObservedState, DomainClockState,
-    DomainTimeRate, PacedDomainClock, Timestamp,
+    DomainTimeRate, PacedDomainClock, Setting, Timestamp,
 };
 
 use super::fixtures::reference;
 use crate::{
-    Diagnostic, LeaderRedirect, NodeEndpoints, RequestId, RowBranch, RowSchema, SourceSpan,
-    SubscriptionHandle,
+    Diagnostic, LeaderRedirect, NodeEndpoints, RequestId, RowBranch, RowSchema, SessionPacing,
+    SourceSpan, SubscriptionHandle,
 };
 
 mod events;
@@ -49,6 +49,30 @@ impl<'a> WireValues<'a> {
 
     pub(super) fn request_id(&mut self) -> RequestId {
         RequestId::new(self.arbitrary.positive_u64())
+    }
+
+    /// A session's pacing: a snapshot interval, a command retry validity the node may not know
+    /// yet, and the web console's waits and restore queue, each at the bounds of its definition.
+    pub(super) fn session_pacing(&mut self) -> SessionPacing {
+        let entropy = self.arbitrary.entropy();
+        let snapshot_seconds = entropy.boundary_biased(0..=u64::from(u32::MAX - 1));
+        let snapshot_interval = Duration::new(
+            snapshot_seconds,
+            u32::try_from(entropy.boundary_biased(1..=999_999_999))
+                .assured("a generated subsecond count fits u32"),
+        );
+        let snapshot_interval = Setting::new(snapshot_interval, &())
+            .assured("a positive interval below u32::MAX seconds is a snapshot interval");
+        let command_retry_validity = if entropy.flag() {
+            let validity = Duration::from_secs(entropy.boundary_biased(1..=u64::from(u32::MAX)));
+            let validity = Setting::new(validity, &())
+                .assured("whole seconds through u32::MAX are a retry validity");
+            Some(validity)
+        } else {
+            None
+        };
+        let web_console = entropy.web_console_capabilities();
+        SessionPacing::new(snapshot_interval, command_retry_validity, web_console)
     }
 
     pub(super) fn reference(&mut self) -> CommandExecutionReference {

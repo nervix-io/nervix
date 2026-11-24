@@ -17,11 +17,11 @@ Feature: Licensing change notifications
       ROTATE LICENSE CLUSTER KEY;
       """
     Then the licensing rotation request has reached the service
-    When the licensing service changes the domain quota to 12
+    When the licensing service changes the plan to enable licensing.dummy
     Then the background command request succeeds
     And node "node-1" eventually describes this license without a selected domain
       """
-      quota cluster.domains: 1 of 12
+      capability licensing.dummy: enabled
       verification: verified
       """
     And the licensing service holds exactly one authenticated notification stream
@@ -58,7 +58,7 @@ Feature: Licensing change notifications
       ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-TESTABCD-fixture-secret';
       """
     Then the licensing service holds exactly one authenticated notification stream
-    When the licensing service changes the domain quota to 12
+    When the licensing service changes the plan to enable licensing.dummy
     Then the notification commits one verified refresh before the polling deadline
 
     Examples:
@@ -81,10 +81,10 @@ Feature: Licensing change notifications
       REFRESH LICENSE;
       """
     Then the foreground license refresh has reached its retryable refusal
-    When the licensing service resumes with a domain quota of 12
+    When the licensing service resumes with a plan that enables licensing.dummy
     Then node "node-1" eventually describes this license without a selected domain
       """
-      quota cluster.domains: 1 of 12
+      capability licensing.dummy: enabled
       verification: verified
       """
     And the background command request succeeds
@@ -105,7 +105,7 @@ Feature: Licensing change notifications
       """
     Then the licensing service holds exactly one authenticated notification stream
     And the committed license decision is saved as placeholder "before_notification_gap"
-    When the licensing service changes the domain quota to 12
+    When the licensing service changes the plan to enable licensing.dummy
     And the licensing notification stream is disconnected
     Then the licensing notification reconnect uses a fresh ticket and its last event identifier
     And the notification commits one verified refresh before the polling deadline
@@ -183,7 +183,7 @@ Feature: Licensing change notifications
     Then the committed license decision is saved as placeholder "before_stale_sync"
     And the licensing service holds exactly one authenticated notification stream
     And the committed license decision matches placeholder "before_stale_sync"
-    When the licensing service changes the domain quota to 12
+    When the licensing service changes the plan to enable licensing.dummy
     Then the notification commits one verified refresh before the polling deadline
 
     Examples:
@@ -207,5 +207,5 @@ Feature: Licensing change notifications
       """
       """
     And the licensing service holds exactly one authenticated notification stream
-    When the licensing service changes the domain quota to 12
+    When the licensing service changes the plan to enable licensing.dummy
     Then the notification commits one verified refresh before the polling deadline
