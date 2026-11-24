@@ -105,7 +105,7 @@ impl LaneRelays {
                 &self.domain,
                 key.clone(),
                 1,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .expect("the junction template instantiates on the test domain")

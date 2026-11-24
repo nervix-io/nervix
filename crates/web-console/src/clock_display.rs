@@ -31,8 +31,9 @@ use nervix_models::{
 )]
 pub(super) const CLOCK_REFRESH: Duration = Duration::from_millis(250);
 
-/// The browser's actual UTC is an external observation used only to display the attached paced
-/// mapping. It never enters the server's domain-time read watermark or data plane.
+/// The browser's actual UTC is an external observation. It displays the attached paced mapping,
+/// and tells a backup download or a restore when the retention its execution reference started on
+/// this clock has ended. It never enters the server's domain-time read watermark or data plane.
 pub(super) fn browser_utc_now() -> Timestamp {
     Timestamp::now()
 }

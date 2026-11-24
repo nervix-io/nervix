@@ -121,10 +121,11 @@ impl SessionServiceImpl {
         let received_at = clock::observe(self.inner.runtime.fault_injection());
         let executor = self.inner.runtime.executor();
         let reservation = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Management,
                 executor.limits().management_event_bytes.as_u64(),
             )
+            .await
             .change_context(LicensingOperationError::Admission)?;
         let kind = activate.kind;
         let prepared = executor
@@ -234,15 +235,15 @@ impl SessionServiceImpl {
         let received_at = clock::observe(self.inner.runtime.fault_injection());
         let executor = self.inner.runtime.executor();
         let reservation = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Management,
                 executor.limits().management_event_bytes.as_u64(),
             )
+            .await
             .change_context(LicensingOperationError::Admission)?;
         let received = executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Control,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation, cancellation| -> Result<ReceivedLicenseDecision, Report<LicensingOperationError>> {
                     cancellation

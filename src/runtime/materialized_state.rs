@@ -87,6 +87,13 @@ impl MaterializedBranchRecord {
     }
 }
 
+/// A generation captured for an inspection, and what its row views were counted in the
+/// inspection's charge, which the inspection releases once the generation is gone.
+pub(super) struct InspectionCapture {
+    pub(super) generation: MaterializedGeneration,
+    pub(super) counted: u64,
+}
+
 #[derive(Debug)]
 pub(super) struct ReplicatedMaterializedRelayState {
     inspection_instance: u64,
@@ -392,10 +399,14 @@ impl MaterializedRelayStateRead {
             reason = "operator inspection captures admitted shared row views"
         )
     )]
+    ///
+    /// The row views are counted in the inspection's `memory` before they are captured. A class
+    /// without room for them now fails with the [`nervix_execution::Shortfall`] the inspection
+    /// needs.
     pub(super) fn capture_for_inspection(
         &self,
-        executor: &Executor,
-    ) -> Result<(MaterializedGeneration, Reservation), Report<MaterializedSnapshotError>> {
+        memory: &mut nervix_execution::GrowingCharge,
+    ) -> Result<InspectionCapture, Report<MaterializedSnapshotError>> {
         self.state.assignment.serialize_with(|binding| {
             let records = self.state.entries.load().len();
             let bytes = records
@@ -406,11 +417,24 @@ impl MaterializedRelayStateRead {
             let bytes = u64::try_from(bytes).map_err(|_| {
                 Report::new(MaterializedSnapshotError::MetadataAddressability { records })
             })?;
-            let charge = executor
-                .try_reserve(MemoryClass::Bulk, bytes.max(1))
+            memory
+                .grow_by(bytes)
                 .change_context(MaterializedSnapshotError::Admission)?;
-            Ok((self.capture_generation(binding.fence()), charge))
+            Ok(InspectionCapture {
+                generation: self.capture_generation(binding.fence()),
+                counted: bytes,
+            })
         })
+    }
+
+    /// What [`Self::capture_for_backup`] would charge now: the row-view and grouping arrays of
+    /// the current entries, or `None` when they are beyond counting.
+    pub(super) fn backup_capture_bytes(&self) -> Option<u64> {
+        let bytes = self.state.entries.load().len().checked_mul(
+            std::mem::size_of::<MaterializedGenerationRecord>()
+                + std::mem::size_of::<std::ops::Range<usize>>(),
+        )?;
+        u64::try_from(bytes).ok()
     }
 
     /// Admit the row-view and grouping arrays before capturing a backup cut. Carrier columns and

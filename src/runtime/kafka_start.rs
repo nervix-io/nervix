@@ -379,8 +379,27 @@ impl Runtime {
                             .change_context(StateReplicationError::Capture {
                                 placement: state.placement().clone(),
                             })?;
+                    // The candidate and its decoding are one share of restore metadata, which the
+                    // coordinator waits for while holding nothing of the class, so the decoding
+                    // never waits for room while the fetched candidate holds part of it.
+                    let metadata = self
+                        .inner
+                        .executor
+                        .reserve_allowance(
+                            MemoryClass::RestoreMetadata,
+                            start_checkpoint_share(snapshot.length).change_context_lazy(|| {
+                                StateReplicationError::Capture {
+                                    placement: offered_placement.clone(),
+                                }
+                            })?,
+                        )
+                        .await
+                        .change_context_lazy(|| StateReplicationError::Capture {
+                            placement: offered_placement.clone(),
+                        })?;
                     let (candidate, charge) = self
                         .fetch_state_checkpoint_charged(
+                            &metadata,
                             request.source.node_id(),
                             &offered_placement,
                             snapshot,
@@ -389,11 +408,13 @@ impl Runtime {
                         .await?;
                     let positions = self
                         .decode_kafka_start_positions(
+                            &metadata,
                             &offered_placement,
                             candidate,
                             request.generation,
                         )
                         .await?;
+                    drop(metadata);
                     self.kafka_start_still_admitted(&request, &admission)?;
                     self.reset_domain_kafka_offsets(
                         state,
@@ -486,37 +507,35 @@ impl Runtime {
             .change_context_lazy(failure)?;
         self.inner
             .executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(RuntimePersistenceError::Cancelled)?;
-                    match seed {
-                        Some((generation, selection)) => {
-                            captured.start_seed(generation, selection, || {
-                                cancellation
-                                    .check()
-                                    .change_context(RuntimePersistenceError::Cancelled)
-                            })
-                        }
-                        None => captured.snapshot(|| {
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(RuntimePersistenceError::Cancelled)?;
+                match seed {
+                    Some((generation, selection)) => {
+                        captured.start_seed(generation, selection, || {
                             cancellation
                                 .check()
                                 .change_context(RuntimePersistenceError::Cancelled)
-                        }),
+                        })
                     }
-                },
-            )
+                    None => captured.snapshot(|| {
+                        cancellation
+                            .check()
+                            .change_context(RuntimePersistenceError::Cancelled)
+                    }),
+                }
+            })
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)
     }
 
+    /// Decode a start checkpoint's positions, charging the decoding through `executor`, which
+    /// draws from the share its caller took for the checkpoint and its decoding.
     async fn decode_kafka_start_positions(
         &self,
+        executor: &nervix_execution::Executor,
         placement: &RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
         generation: u64,
@@ -526,25 +545,15 @@ impl Runtime {
         let failure = || StateReplicationError::Capture {
             placement: placement.clone(),
         };
-        let capacity = length
-            .checked_mul(3)
-            .ok_or_else(|| Report::new(KafkaStartError::Bounds).change_context(failure()))?;
-        let reservation = self
-            .inner
-            .executor
-            .reserve(MemoryClass::RestoreMetadata, capacity.max(1))
+        let capacity = start_decode_bytes(length).change_context_lazy(failure)?;
+        let reservation = executor
+            .reserve(MemoryClass::RestoreMetadata, capacity)
             .await
             .change_context_lazy(failure)?;
-        self.inner
-            .executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| {
-                    decode_start_positions(&snapshot.payload, generation, cancellation)
-                },
-            )
+        executor
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                decode_start_positions(&snapshot.payload, generation, cancellation)
+            })
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)
@@ -657,8 +666,27 @@ impl Runtime {
                 unit: state.placement().unit,
                 count,
             };
+            // The seed and its decoding are one share of restore metadata, which the unit waits
+            // for while holding nothing of the class, so the decoding never waits for room while
+            // the fetched seed holds part of it.
+            let metadata = self
+                .inner
+                .executor
+                .reserve_allowance(
+                    MemoryClass::RestoreMetadata,
+                    start_checkpoint_share(snapshot.length).change_context_lazy(|| {
+                        StateReplicationError::Capture {
+                            placement: root.clone(),
+                        }
+                    })?,
+                )
+                .await
+                .change_context_lazy(|| StateReplicationError::Capture {
+                    placement: root.clone(),
+                })?;
             let (seed, charge) = self
                 .fetch_state_checkpoint_charged(
+                    &metadata,
                     &exchange.coordinator,
                     &root,
                     &snapshot,
@@ -669,8 +697,9 @@ impl Runtime {
                 )
                 .await?;
             let positions = self
-                .decode_kafka_start_positions(&root, seed, start_generation)
+                .decode_kafka_start_positions(&metadata, &root, seed, start_generation)
                 .await?;
+            drop(metadata);
             let has_seeds = !positions.is_empty();
             let needs_positions = state.read().applied_start_generation() != Some(start_generation)
                 || positions.iter().any(|position| {
@@ -759,17 +788,12 @@ impl Runtime {
         let payload = self
             .inner
             .executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .change_context(RuntimePersistenceError::Cancelled)?;
-                    encode_start_candidate(generation, positions)
-                },
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                cancellation
+                    .check()
+                    .change_context(RuntimePersistenceError::Cancelled)?;
+                encode_start_candidate(generation, positions)
+            })
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)?;
@@ -787,13 +811,16 @@ impl Runtime {
             descriptor: snapshot.clone(),
             bytes: ChargedBytes::from_owned(described.snapshot.payload, described.reservation),
         })));
-        let _lease = KafkaStartOfferLease {
+        let lease = KafkaStartOfferLease {
             state: state.read().clone(),
             id,
         };
         let exchange = self
             .exchange_kafka_start(state, generation, KafkaStartAction::Propose { snapshot })
             .await?;
+        // The coordinator fetched the offer before it answered, so the offer and its charge end
+        // here: the proposer does not hold them while it waits for room to adopt its own seed.
+        drop(lease);
         if matches!(exchange.response, KafkaStartResponse::Unresolved) {
             return Err(Report::new(KafkaStartError::Reply).change_context(failure()));
         }
@@ -1050,4 +1077,22 @@ mod shuttle_checks {
         check_random(start_racing_capture, 500);
         check_pct(start_racing_capture, 500, 3);
     }
+}
+
+/// What decoding a start checkpoint of `length` bytes takes of restore metadata: its positions
+/// and the scratch their decoding builds them in, about three times the checkpoint.
+fn start_decode_bytes(length: u64) -> Result<u64, Report<KafkaStartError>> {
+    Ok(length
+        .checked_mul(3)
+        .ok_or_else(|| Report::new(KafkaStartError::Bounds))?
+        .max(1))
+}
+
+/// The share of restore metadata a start checkpoint of `length` bytes takes from its fetch through
+/// its decoding: the fetched checkpoint, charged at least one byte, and its decoding.
+fn start_checkpoint_share(length: u64) -> Result<u64, Report<KafkaStartError>> {
+    length
+        .max(1)
+        .checked_add(start_decode_bytes(length)?)
+        .ok_or_else(|| Report::new(KafkaStartError::Bounds))
 }

@@ -89,16 +89,13 @@ Feature: Deduplicator and window state in backup archives
       """
     Then the current leader node is saved as placeholder "leader"
     # Leave 4 MiB plus 128 KiB, enough for the writer alone but short of the writer and the
-    # checkpoint's three 64 KiB segments and framing.
+    # checkpoint's three 64 KiB segments and framing: the capture waits for its share.
     When bulk memory on every node keeps only "4325376" bytes free
-    And the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "refused.nvxb" reporting JSON
-    Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
-    And the CLI backup failure mentions "reading the state of 'unique_payment_filter' could not be admitted"
-    And backup archive "refused.nvxb" does not exist
-    And within "30s" every node reserves only the bulk memory the scenario holds
+    And the CLI begins backing up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "accepted.nvxb" in the background
+    Then the background CLI backup remains pending for "3s"
     When bulk memory on every node is released
-    And the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "accepted.nvxb" reporting JSON
-    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Then the background CLI backup finishes
+    And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When the CLI describes backup archive "accepted.nvxb" as json
     Then the described backup has exactly 2 "deduplicator" state sections
 

@@ -54,9 +54,8 @@ impl RuntimeStateStore {
         // Publishing a staged checkpoint answers no waiting caller, so a full queue holds it back
         // rather than losing the checkpoint.
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| {
                     let file = std::fs::File::open(artifact.path())

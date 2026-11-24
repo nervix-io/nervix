@@ -517,7 +517,19 @@ pub(crate) enum ProcessorStatePageError {
     Columns,
 }
 
+/// One owner-side read of a processor unit's state page: the unit, what it selects, where it
+/// resumes and the bounds of what it returns.
+pub(crate) struct ProcessorStatePageRead<'a> {
+    pub(crate) domain: &'a DomainName,
+    pub(crate) processor: &'a NodeRef,
+    pub(crate) unit: Unit,
+    pub(crate) selection: ProcessorStateSelection,
+    pub(crate) after: Option<(Option<BranchKeyFingerprint>, u64)>,
+    pub(crate) bounds: ProcessorStatePageBounds,
+}
+
 /// Effective owner-side bounds after the coordinator and local capability checks.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ProcessorStatePageBounds {
     pub(crate) rows: usize,
     pub(crate) bytes: u64,
@@ -613,28 +625,29 @@ impl Runtime {
     /// between two of its batches, after skipping the rows earlier pages returned, within the rows
     /// and bytes still left. Every selected branch is asked even once the page is full, because the
     /// counts are complete and the page names the exact state of every branch. The caller bounds the
-    /// whole read with the inspection deadline.
+    /// whole read with the inspection deadline, and runs it within the allowances its charges
+    /// draw from through `executor`.
     pub(crate) async fn local_processor_state_page(
         &self,
-        domain: &DomainName,
-        processor: &NodeRef,
-        unit: Unit,
-        selection: ProcessorStateSelection,
-        after: Option<(Option<BranchKeyFingerprint>, u64)>,
-        bounds: ProcessorStatePageBounds,
+        executor: &Executor,
+        read: ProcessorStatePageRead<'_>,
     ) -> error_stack::Result<ProcessorStatePage, ProcessorStatePageError> {
-        if let ModelKind::Inferencer = processor.kind {
+        if let ModelKind::Inferencer = read.processor.kind {
+            return self.local_inferencer_state_page(executor, read).await;
+        }
+        if let ModelKind::Deduplicator | ModelKind::WindowProcessor = read.processor.kind {
             return self
-                .local_inferencer_state_page(domain, processor, unit, selection, after, bounds)
+                .local_published_processor_state_page(executor, read)
                 .await;
         }
-        if let ModelKind::Deduplicator | ModelKind::WindowProcessor = processor.kind {
-            return self
-                .local_published_processor_state_page(
-                    domain, processor, unit, selection, after, bounds,
-                )
-                .await;
-        }
+        let ProcessorStatePageRead {
+            domain,
+            processor,
+            unit,
+            selection,
+            after,
+            bounds,
+        } = read;
         if selection.partition_exclusions.is_some() {
             return Err(Report::new(ProcessorStatePageError::Columns));
         }
@@ -754,7 +767,7 @@ impl Runtime {
             .checked_add(returned)
             .ok_or_else(|| Report::new(ProcessorStatePageError::Position))?;
         let gathered = self
-            .processor_state_sections(processor.kind, copies)
+            .processor_state_sections(executor, processor.kind, copies)
             .await?;
         Ok(ProcessorStatePage {
             partition_catalog: nervix_models::StateInspectionKeyCatalog::Unrequested,
@@ -774,6 +787,7 @@ impl Runtime {
     /// any column is built.
     async fn processor_state_sections(
         &self,
+        executor: &Executor,
         kind: ModelKind,
         copies: Vec<CopiedBranch>,
     ) -> error_stack::Result<GatheredSections, ProcessorStatePageError> {
@@ -783,9 +797,9 @@ impl Runtime {
                 .checked_add(copy.held.copied_bytes)
                 .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
         }
-        let executor = self.inner.executor.clone();
         let admission = executor
-            .try_reserve(MemoryClass::Bulk, copied_bytes.max(1))
+            .reserve(MemoryClass::Bulk, copied_bytes.max(1))
+            .await
             .change_context(ProcessorStatePageError::Admission)?;
         executor
             .run_cpu(CpuClass::Bulk, admission, move |_charge, cancellation| {

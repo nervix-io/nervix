@@ -1,11 +1,11 @@
-//! Pure impact arithmetic for current catalog quotas.
+//! Pure impact arithmetic for the cluster quotas the catalog declares.
 //!
 //! Layer: engines and infrastructure.
 //! - **Owns.** Reduction detection, deterministic transition identity and checked grace deadlines.
 //! - **Depends on.** Effective usage supplied by the caller, the catalog and signed operating values.
 //! - **Must not know.** Runtime admission, clocks, graphs, consensus mutation or networking.
 
-use std::num::NonZeroUsize;
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use error_stack::{Report, ResultExt as _};
@@ -16,17 +16,20 @@ use uuid::Uuid;
 
 use crate::{
     conditions::{
-        CAPABILITY_GRACE, CLUSTER_DOMAINS, CLUSTER_NODES, ConditionDuration, OperatingConditions,
-        QUOTA_GRACE, Quota, UsageConditions,
+        CAPABILITY_GRACE, ConditionDuration, OperatingConditions, QUOTA_GRACE, Quota,
+        UsageConditions,
     },
     document::encode_json,
     documents::{AffectedQuota, Transition, TransitionReason, TransitionTrigger},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The committed usage of each cluster quota the catalog declares, keyed by condition name and
+/// measured by that quota's owner. Licensing never limits base features, and the current catalog
+/// declares no cluster quota, so a cluster measures none yet; a capability's own limit brings its
+/// owner's measure.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UsageSnapshot {
-    pub cluster_nodes: u64,
-    pub cluster_domains: u64,
+    pub quotas: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,7 +161,7 @@ pub enum ImpactError {
 pub fn assess_impact(
     current: EffectiveUsage<'_>,
     target: ImpactTarget<'_>,
-    usage: UsageSnapshot,
+    usage: &UsageSnapshot,
     policy: TransitionPolicy,
     context: ImpactContext,
     limit: NonZeroUsize,
@@ -172,10 +175,7 @@ pub fn assess_impact(
         return Ok(Vec::new());
     }
     let mut affected = Vec::new();
-    for (condition, usage) in [
-        (CLUSTER_NODES, usage.cluster_nodes),
-        (CLUSTER_DOMAINS, usage.cluster_domains),
-    ] {
+    for (condition, &usage) in &usage.quotas {
         let effective = current.quota(condition, context.started_at)?;
         let previous = current
             .conditions
@@ -189,7 +189,7 @@ pub fn assess_impact(
             && !target.admits(usage)
         {
             let entry = AffectedQuota {
-                condition: condition.to_owned(),
+                condition: condition.clone(),
                 previous,
                 target,
                 usage,

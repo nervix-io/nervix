@@ -128,15 +128,15 @@ impl<'a> LicensingClient<'a> {
         let entries = service.inner.licensing_test_support.tls_entries();
         let policy = service.inner.runtime.outward_tls().clone();
         let reservation = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::Management,
                 executor.limits().management_event_bytes.as_u64(),
             )
+            .await
             .change_context(LicensingRequestError::Admission)?;
         let client = executor
-            .run_storage_with(
+            .run_storage(
                 nervix_execution::StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation,
                       cancellation|
@@ -277,14 +277,17 @@ impl<'a> LicensingClient<'a> {
                     let request = self
                         .request(cluster, &operation, request_id, challenge, now)
                         .await?;
+                    // Finding the signer takes and returns a management charge of its own, so it
+                    // comes first: nothing waits for room while holding part of the class.
+                    let signer = operation.signer(self, request_id).await?;
                     let executor = self.service.inner.runtime.executor();
                     let reservation = executor
-                        .try_reserve(
+                        .reserve(
                             MemoryClass::Management,
                             executor.limits().management_event_bytes.as_u64(),
                         )
+                        .await
                         .change_context(LicensingRequestError::Admission)?;
-                    let signer = operation.signer(self, request_id).await?;
                     let prepared = SignedRequest {
                         body: Zeroizing::new(
                             signer
@@ -479,10 +482,30 @@ impl<'a> LicensingClient<'a> {
         cluster: &ClusterLicensingState,
         last_event: Option<u64>,
     ) -> Result<reqwest::Response, Report<LicensingRequestError>> {
+        let LicensingMode::Activated(activation) = &cluster.record.mode else {
+            return Err(Report::new(LicensingRequestError::Leadership));
+        };
+        // The signer and the ticket's charge are the node's own to wait for, so the waits stay
+        // outside the licensing service's budget. Finding the signer takes and returns a
+        // management charge of its own, so it comes before the ticket's: nothing waits for room
+        // while holding part of the class.
+        let signer = self
+            .service
+            .inner
+            .consensus
+            .cluster_signer()
+            .await
+            .change_context(LicensingRequestError::Signing)?
+            .verified("an activated cluster has its signing identity");
+        let executor = self.service.inner.runtime.executor();
+        let reservation = executor
+            .reserve(
+                MemoryClass::Management,
+                executor.limits().management_event_bytes.as_u64(),
+            )
+            .await
+            .change_context(LicensingRequestError::Admission)?;
         timeout(self.budget, async {
-            let LicensingMode::Activated(activation) = &cluster.record.mode else {
-                return Err(Report::new(LicensingRequestError::Leadership));
-            };
             let challenge = self.challenge(cluster).await?;
             let now = clock::observe(self.service.inner.runtime.fault_injection());
             let request_id = clock::request_id(self.service.inner.runtime.fault_injection());
@@ -495,21 +518,6 @@ impl<'a> LicensingClient<'a> {
                     licensing_time: cluster.record.licensing_time.into_datetime(),
                 },
             };
-            let executor = self.service.inner.runtime.executor();
-            let reservation = executor
-                .try_reserve(
-                    MemoryClass::Management,
-                    executor.limits().management_event_bytes.as_u64(),
-                )
-                .change_context(LicensingRequestError::Admission)?;
-            let signer = self
-                .service
-                .inner
-                .consensus
-                .cluster_signer()
-                .await
-                .change_context(LicensingRequestError::Signing)?
-                .verified("an activated cluster has its signing identity");
             let ticket = Zeroizing::new(
                 signer
                     .sign(ticket, self.environment.limits(), reservation)

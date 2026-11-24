@@ -1168,10 +1168,10 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/prerequisites__bolero_admission_verdicts_round_trip_through_their_gossip_text/corpus"
-domain_version = 25
+domain_version = 26
 features = []
 id = "models-admission-verdicts"
-invariant = "The verdicts a leader publishes keep their term and every run's accepted, prerequisite-refused or quota-refused outcome with its complete typed cause through gossip text."
+invariant = "The verdicts a leader publishes keep their term and every run's accepted or prerequisite-refused outcome with its complete typed cause through gossip text."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-models"
@@ -1933,10 +1933,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__events__bolero_events_keep_complete_values_and_owned_views/corpus"
-domain_version = 27
+domain_version = 28
 features = ["grpc"]
 id = "client-events"
-invariant = "Every unsolicited event preserves complete values, including every notice's typed error class and node, all five checked opening bounds through fixed frames, gRPC metadata and pre-admission offer refusals; borrowed graph views retain exact bytes after their original frame is dropped."
+invariant = "Every unsolicited event preserves complete values, including every notice's typed error class and node, all five checked opening bounds and the complete pacing, with and without a retry validity, through fixed frames, gRPC metadata and pre-admission offer refusals; borrowed graph views retain exact bytes after their original frame is dropped."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-client-wire"
@@ -2683,10 +2683,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/licensing/__fuzz__/licensing__tests__bolero_licensing_record_preserves_time_mode_and_complete_trust_documents/corpus"
-domain_version = 12
+domain_version = 13
 features = []
 id = "licensing-record-rkyv"
-invariant = "Current licensing records preserve complete time, Free, Activated and Released modes, bindings, pending and acknowledged keyed transitions with original offline bounds and protected member identities, signed decisions and referenced transition revisions, pending release signing material, exact requests, confirmation, grants and complete trust documents through production rkyv and JSON round trips; the bounded transition encoder decodes to the complete semantic values."
+invariant = "Current licensing records preserve complete time, Free, Activated and Released modes, bindings, pending and acknowledged keyed transitions with original offline bounds, signed decisions and referenced transition revisions, pending release signing material, exact requests, confirmation, grants and complete trust documents through production rkyv and JSON round trips; the bounded transition encoder decodes to the complete semantic values."
 manifest = "Cargo.toml"
 max_input_bytes = 512
 package = "nervix-consensus"
@@ -2698,7 +2698,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
-domain_version = 99
+domain_version = 101
 features = []
 id = "consensus-state-records"
 invariant = "A generated replicated state holding records of every family, including unit-keyed schedules with their branch partition epochs, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
@@ -2713,7 +2713,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
-domain_version = 99
+domain_version = 101
 features = []
 id = "consensus-state-corruption"
 invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records free every decoding allocation and either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
@@ -2728,7 +2728,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
-domain_version = 99
+domain_version = 101
 features = []
 id = "consensus-raft-records"
 invariant = "Votes, log positions, log entries of every consensus command, current state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
@@ -2743,7 +2743,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
-domain_version = 81
+domain_version = 83
 features = []
 id = "consensus-raft-records-malformed"
 invariant = "Arbitrary bytes read as any Raft record, log key or section key free every decoding allocation and fail with the typed storage failure or name a value that stores back to the same record."
@@ -3193,10 +3193,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__admission_properties__bolero_receive_admission_outcomes_preserve_every_field/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "receive-admission-outcomes-wire"
-invariant = "Typed decoder admission reports and changed producer preconditions project to the exact refusal variant, traffic class, byte/queue fields and stream status, then preserve the complete response envelope through the production encoder and decoder; dropping it returns every charge."
+invariant = "Typed decoder admission reports and changed producer preconditions project to the exact refusal variant, traffic class, byte fields and stream status, then preserve the complete response envelope through the production encoder and decoder; dropping it returns every charge."
 manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-interconnect"
@@ -4393,7 +4393,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/cli/__fuzz__/application__cli__properties__bolero_node_settings_survive_their_command_line/corpus"
-domain_version = 27
+domain_version = 28
 features = []
 id = "node-settings-command-line"
 invariant = "Current node settings, complete positive listener bounds and optional capability requests of every group, with scalar validation, Raft timings ordered in whole milliseconds and explicit watermarks paired and ordered, render as the server's options and read back unchanged without losing omission; detected-capacity relationships are checked by their owners after detection. Generated node tags render as `--node-tags` and read back as the same tags. Every duration and byte quantity help prints reads back as the same value."
@@ -5055,7 +5055,7 @@ test_target = "test:metrics_report_properties"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/licensing-protocol/src/__fuzz__/representation_properties__bolero_protocol_json_roundtrip/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "licensing-protocol-json-roundtrip"
 invariant = "Every current notification, signed decision status, operation, stream ticket, trust document, proof of life, decision and trust-bundle response, key, condition and problem detail preserves the complete typed value and canonical payload bytes, including Unicode, optional fields and unknown external values."
@@ -5070,7 +5070,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/licensing-protocol/src/__fuzz__/policy_properties__bolero_conditions_resolution/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "licensing-conditions-resolution"
 invariant = "Complete valid plans and partial overrides resolve to the independent complete expected conditions, preserve every field, and have insertion-order-independent SHA-256 digests."
@@ -5115,7 +5115,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/licensing-protocol/src/__fuzz__/policy_properties__bolero_impact_assessment/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "licensing-impact-assessment"
 invariant = "Decision changes and same-revision Tick/Release reductions grant exactly the newly affected amount with a deterministic identity and deadline, preserves complete transition records, and removes the allowance exactly at that deadline."
@@ -5145,7 +5145,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/consensus/src/__fuzz__/node_records__tests__bolero_node_records_preserve_every_committed_value/corpus"
-domain_version = 21
+domain_version = 22
 features = []
 id = "node-records"
 invariant = "Every bounded current committed node record, its incarnation-bound capacity claim with unknown host measurements, the measured database volume and complete transport, DNS, database, consensus, engine, connector host, membership, runtime, shutdown, receive and listener bounds, every detected and undetected property outcome, and tags at their key, value and count bounds, preserves every value through the production canonical storage codec, as do its announcement requests and every publication outcome."
@@ -5295,10 +5295,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nervix-cli/src/__fuzz__/connection_args__tests__bolero_client_capabilities_survive_their_command_line/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "client-capabilities-command-line"
-invariant = "Every native client deadline, retry and restoration backoff bound, subscription and notice retention bound, and request, upload or restore frame capacity survives CLI rendering, parsing and validated capability projection without loss, including fractional durations."
+invariant = "Every native client deadline, retry and restoration backoff bound, subscription and notice retention bound, request, upload or restore frame capacity, keepalive interval and timeout and HTTP/2 receive window survives CLI rendering, parsing and validated capability projection without loss, including fractional durations and the window bounds."
 manifest = "Cargo.toml"
 max_input_bytes = 128
 package = "nervix-cli"

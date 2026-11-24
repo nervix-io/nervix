@@ -165,7 +165,7 @@ impl BranchInstanceTemplate {
                 domain,
                 key.clone(),
                 1,
-                &RetainedStateOpening::RefusedWhenFull,
+                &RetainedStateOpening::OnNodeExecutor,
             )
             .await
             .change_context_lazy(fresh)?

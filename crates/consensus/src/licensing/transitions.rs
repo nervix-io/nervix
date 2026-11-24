@@ -5,7 +5,7 @@
 //! - **Depends on.** Verified decisions, replicated usage and shared impact arithmetic.
 //! - **Must not know.** Physical clocks, HTTP, admission owners or graph execution.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
@@ -38,7 +38,6 @@ pub struct CommittedTransition {
     pub transition: Transition,
     /// A pending bound is captured from the introducing decision and cannot renew on refresh.
     pub(super) authorization: TransitionAuthorization,
-    pub replacement_nodes: Option<BTreeSet<nervix_models::ClusterNodeName>>,
 }
 
 impl CommittedTransition {
@@ -85,7 +84,6 @@ impl CommittedLicenseTransitions {
             .or_insert(CommittedTransition {
                 transition,
                 authorization: TransitionAuthorization::Pending { valid_until },
-                replacement_nodes: None,
             });
     }
     pub fn values(&self) -> impl Iterator<Item = &CommittedTransition> {
@@ -139,16 +137,11 @@ impl CommittedLicenseTransitions {
     ) -> error_stack::Result<Self, LicenseDecisionError> {
         let mut committed = held.unwrap_or_default();
         for transition in signed {
-            let replacement_nodes = committed
-                .0
-                .get(&transition.transition_id)
-                .and_then(|entry| entry.replacement_nodes.clone());
             committed.0.insert(
                 transition.transition_id,
                 CommittedTransition {
                     transition: transition.clone(),
                     authorization: TransitionAuthorization::Acknowledged,
-                    replacement_nodes,
                 },
             );
         }
@@ -158,14 +151,12 @@ impl CommittedLicenseTransitions {
     fn improve(
         &mut self,
         target: &UsageConditions,
-        usage: UsageSnapshot,
+        usage: &UsageSnapshot,
     ) -> error_stack::Result<(), LicenseDecisionError> {
         for entry in self.0.values_mut() {
             entry.transition.affected.retain(|affected| {
-                let count = match affected.condition.as_str() {
-                    nervix_licensing_protocol::conditions::CLUSTER_NODES => usage.cluster_nodes,
-                    nervix_licensing_protocol::conditions::CLUSTER_DOMAINS => usage.cluster_domains,
-                    _ => return true,
+                let Some(&count) = usage.quotas.get(&affected.condition) else {
+                    return true;
                 };
                 !target.quota(&affected.condition).is_ok_and(|quota| {
                     quota != affected.target
@@ -177,14 +168,6 @@ impl CommittedLicenseTransitions {
         self.0
             .retain(|_, entry| !entry.transition.affected.is_empty());
         Ok(())
-    }
-
-    pub(super) fn protect_nodes(&mut self, nodes: &BTreeSet<nervix_models::ClusterNodeName>) {
-        for entry in self.0.values_mut() {
-            if entry.replacement_nodes.is_none() {
-                entry.replacement_nodes = Some(nodes.clone());
-            }
-        }
     }
 
     pub(super) fn validate(&self) -> bool {
@@ -254,7 +237,7 @@ impl LicensingRecord {
             } else {
                 ImpactTarget::Usage(&target)
             },
-            usage,
+            &usage,
             TransitionPolicy::from_operating(&decision.conditions.operating)
                 .change_context(LicenseDecisionError::Metadata)?,
             ImpactContext {
@@ -275,7 +258,7 @@ impl LicensingRecord {
         if decision.status == DecisionStatus::Expired {
             activation.transitions = CommittedLicenseTransitions::default();
         } else {
-            activation.transitions.improve(&target, usage)?;
+            activation.transitions.improve(&target, &usage)?;
         }
         let valid_until = decision
             .timing
@@ -323,7 +306,7 @@ impl LicensingRecord {
                 transitions: &held,
             },
             ImpactTarget::Usage(&target),
-            usage,
+            &usage,
             TransitionPolicy::from_operating(&decision.conditions.operating)
                 .change_context(LicenseDecisionError::Metadata)?,
             ImpactContext {
@@ -338,7 +321,7 @@ impl LicensingRecord {
             environment.limits().bytes,
         )
         .change_context(LicenseDecisionError::Metadata)?;
-        activation.transitions.improve(&target, usage)?;
+        activation.transitions.improve(&target, &usage)?;
         let valid_until = decision
             .timing
             .valid_until

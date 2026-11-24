@@ -8,11 +8,13 @@
 //! saved under the name the operator asked for.
 //!
 //! A download that fails in transport, stalls or ends early starts again from the first byte, for
-//! as long as the server retains the archive. Each frame must arrive within its own timeout; the
-//! download as a whole is not bounded, because an archive may be far larger than any reply. A
-//! frame that arrives as its timeout ends still counts.
+//! as long as the server retains the archive: until the instant the backup's summary names, which
+//! the browser's clock measures because the console issued the backup's execution reference on it.
+//! Each frame must arrive within the request timeout of the node the attempt reached; the download
+//! as a whole is not bounded, because an archive may be far larger than any reply. A frame that
+//! arrives as its timeout ends still counts.
 
-use std::{num::NonZeroU64, pin::pin};
+use std::{num::NonZeroU64, pin::pin, time::Duration};
 
 use error_stack::Report;
 use futures_util::future::{Either, select};
@@ -26,22 +28,10 @@ use nervix_models::{ArchiveDigest, BackupArchiveSummary, CommandExecutionReferen
 use thiserror::Error;
 
 use super::{
-    FRAME_TIMEOUT, RETRY_DELAY,
     browser::{Browser, CallSocket as _, DownloadedArchive, Received},
+    redirect_chain::{NextAttempt, RedirectChain},
 };
-use crate::web_console_websocket_url_from_base;
-
-/// How many times one download starts again or follows a redirect before it gives up.
-#[cfg_attr(
-    nervix_lint,
-    expect(
-        nervix::hidden_tunable,
-        reason = "how many attempts a download needs depends on the network and the cluster, and \
-                  the console has no settings carrier yet; it stays fixed until its repair task \
-                  bounds the download by a served time budget https://app.clickup.com/t/86bd5vvdq"
-    )
-)]
-pub(crate) const MAX_DOWNLOAD_ATTEMPTS: usize = 8;
+use crate::{pacing::ConsolePacing, web_console_websocket_url_from_base};
 
 /// Why a backup's archive was not downloaded. The backup itself completed either way.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -53,15 +43,15 @@ pub(crate) enum DownloadError {
     },
     #[error("the download's connection failed")]
     Transport,
-    #[error("no frame of the download arrived within {} seconds", FRAME_TIMEOUT.as_secs())]
-    Stalled,
+    #[error("no frame of the download arrived within {}", nervix_models::timing_text(*.timeout))]
+    Stalled { timeout: Duration },
     #[error("the download ended before its archive completed")]
     Interrupted,
     #[error("the node does not retain the archive, and no leader console is known to ask instead")]
     NoLeader,
     #[error("the node that retains the archive advertises no console to download it from")]
     HolderUnreachable,
-    #[error("the download was sent elsewhere more times than the console follows")]
+    #[error("the download was still being sent elsewhere when the archive's retention ended")]
     RedirectLoop,
     #[error("the server sent download frames out of order")]
     OutOfOrder,
@@ -81,7 +71,7 @@ impl DownloadError {
     pub(crate) fn is_retryable(&self) -> bool {
         match self {
             Self::Refused { failure, .. } => *failure == BackupDownloadFailure::ReadFailed,
-            Self::Transport | Self::Stalled | Self::Interrupted => true,
+            Self::Transport | Self::Stalled { .. } | Self::Interrupted => true,
             Self::NoLeader
             | Self::HolderUnreachable
             | Self::RedirectLoop
@@ -231,6 +221,9 @@ pub(crate) struct ArchiveDownload {
     pub(crate) auth_token: String,
     /// The name the browser saves the archive under.
     pub(crate) file_name: String,
+    /// The pacing the download follows: the session's when it starts, and then that of the node
+    /// each attempt's opening reached.
+    pub(crate) pacing: ConsolePacing,
 }
 
 /// How one attempt ended, when it did not fail.
@@ -245,44 +238,52 @@ enum AttemptEnd<A> {
 
 impl ArchiveDownload {
     /// Downloads the archive in `browser` and saves it there, starting again from the first byte
-    /// after every failure a retry may overcome. `progress` is told every byte count received.
+    /// after every failure a retry may overcome, until the archive is retained no longer. `progress`
+    /// is told every byte count received.
     pub(crate) async fn run<B: Browser>(
         mut self,
         browser: &B,
         progress: impl Fn(u64) + Copy,
     ) -> Result<(), Report<DownloadError>> {
-        let mut last_failure = Report::new(DownloadError::RedirectLoop);
+        // Every attempt that does not end the download names why, before the retention is checked.
+        let mut last_failure: Report<DownloadError>;
         // The console the download started from, which a download that fails at the archive's
         // holder asks again: that node names the holder again, or answers why it cannot.
         let reporting_console = self.base_url.clone();
         let mut at_holder = false;
-        for _ in 0..MAX_DOWNLOAD_ATTEMPTS {
+        let mut consoles = RedirectChain::starting_at(self.base_url.as_deref());
+        loop {
             progress(0);
             let ended = self.attempt(browser, progress).await;
-            match ended {
+            let next = match ended {
                 Ok(AttemptEnd::Complete(archive)) => return self.save(archive),
                 Ok(AttemptEnd::Redirect(redirect)) => match redirect_console(&redirect) {
                     Some(leader) => {
+                        let next = consoles.follow(&leader);
                         self.base_url = Some(leader);
                         at_holder = false;
                         last_failure = Report::new(DownloadError::RedirectLoop);
+                        next
                     }
                     // No leader is known yet: wait for an election, then ask again.
                     None => {
                         last_failure = Report::new(DownloadError::NoLeader);
-                        browser.wait(RETRY_DELAY).await;
+                        NextAttempt::AfterPause
                     }
                 },
                 Ok(AttemptEnd::Holder(holder)) => match holder.web_console_uri {
                     Some(console) => {
-                        self.base_url = Some(console.to_string());
+                        let console = console.to_string();
+                        let next = consoles.follow(&console);
+                        self.base_url = Some(console);
                         at_holder = true;
                         last_failure = Report::new(DownloadError::RedirectLoop);
+                        next
                     }
                     // The holder advertises no console yet: wait for discovery, then ask again.
                     None => {
                         last_failure = Report::new(DownloadError::HolderUnreachable);
-                        browser.wait(RETRY_DELAY).await;
+                        NextAttempt::AfterPause
                     }
                 },
                 Err(failure) => {
@@ -294,16 +295,25 @@ impl ArchiveDownload {
                         at_holder = false;
                     }
                     last_failure = failure;
-                    browser.wait(RETRY_DELAY).await;
+                    NextAttempt::AfterPause
                 }
+            };
+            // The server retains the archive no longer, so no later attempt can download it.
+            if browser.now() >= self.summary.retained_until {
+                return Err(last_failure);
+            }
+            if let NextAttempt::AfterPause = next {
+                consoles.paused_at(self.base_url.as_deref());
+                browser
+                    .wait(self.pacing.web_console().restoration_backoff())
+                    .await;
             }
         }
-        Err(last_failure)
     }
 
     /// Downloads the archive once, from the console the download is addressed to.
     async fn attempt<B: Browser>(
-        &self,
+        &mut self,
         browser: &B,
         progress: impl Fn(u64),
     ) -> Result<AttemptEnd<B::Archive>, Report<DownloadError>> {
@@ -313,18 +323,25 @@ impl ArchiveDownload {
         let Some(mut socket) = browser.open(&url) else {
             return Err(Report::new(DownloadError::Transport));
         };
-        let opening = super::browser::read_opening(browser, &mut socket, FRAME_TIMEOUT).await;
-        let limits = match opening {
-            Ok(limits) => limits,
+        let opening_timeout = self.pacing.web_console().request_timeout();
+        let opening = super::browser::read_opening(browser, &mut socket, opening_timeout).await;
+        let opened = match opening {
+            Ok(opened) => opened,
             Err(report) => {
                 let context = match report.current_context() {
                     super::browser::CallOpeningError::Transport => DownloadError::Transport,
-                    super::browser::CallOpeningError::TimedOut => DownloadError::Stalled,
+                    super::browser::CallOpeningError::TimedOut => DownloadError::Stalled {
+                        timeout: opening_timeout,
+                    },
                     super::browser::CallOpeningError::Invalid => DownloadError::InvalidFrame,
                 };
                 return Err(report.change_context(context));
             }
         };
+        // This attempt and the pauses after it follow the node its opening reached.
+        self.pacing.adopt(opened.pacing);
+        let limits = opened.limits;
+        let frame_timeout = self.pacing.web_console().request_timeout();
         let codec = ClientBackupDownloadWebSocketCodec::new(limits);
         let request = BackupDownloadRequest {
             execution_reference: self.reference.clone(),
@@ -338,7 +355,7 @@ impl ArchiveDownload {
         let mut receipt = ArchiveReceipt::new(&self.summary);
         let mut archive = browser.new_archive();
         loop {
-            let message = next_frame(browser, &mut socket, &codec).await?;
+            let message = next_frame(browser, &mut socket, &codec, frame_timeout).await?;
             match stage.accept(&message, &mut receipt)? {
                 FrameStep::Continue => {}
                 FrameStep::Complete => return Ok(AttemptEnd::Complete(archive)),
@@ -372,17 +389,19 @@ impl ArchiveDownload {
     }
 }
 
-/// The next frame of a download, which must arrive within the frame timeout.
+/// The next frame of a download, which must arrive within `timeout`, the request timeout of the
+/// node the attempt reached.
 async fn next_frame<B: Browser>(
     browser: &B,
     socket: &mut B::Socket,
     codec: &ClientBackupDownloadWebSocketCodec,
+    timeout: Duration,
 ) -> Result<BackupDownloadMessage, Report<DownloadError>> {
     let received = pin!(socket.receive());
-    let timeout = pin!(browser.wait(FRAME_TIMEOUT));
-    let received = match select(received, timeout).await {
+    let waited = pin!(browser.wait(timeout));
+    let received = match select(received, waited).await {
         Either::Left((received, _)) => received,
-        Either::Right(((), _)) => return Err(Report::new(DownloadError::Stalled)),
+        Either::Right(((), _)) => return Err(Report::new(DownloadError::Stalled { timeout })),
     };
     let data = match received {
         Received::Binary(payload) => WebSocketData::Binary(payload.into()),

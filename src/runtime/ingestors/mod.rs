@@ -115,9 +115,36 @@ pub(crate) enum DeliverySetting {
     RetryMaxBackoff,
 }
 
+impl RetiringIngestorInput {
+    /// The MQTT topic input the replacement reads, absent when it reads none.
+    fn mqtt_replacement(&self) -> Option<&MqttTopicIngestorStartPlan> {
+        let IngestorInputPlan::Transport(input) = &self.replacement.as_deref()?.input else {
+            return None;
+        };
+        let IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) = &input.source
+        else {
+            return None;
+        };
+        Some(source)
+    }
+
+    /// The Pulsar topic input the replacement reads, absent when it reads none.
+    fn pulsar_replacement(&self) -> Option<&PulsarTopicIngestorStartPlan> {
+        let IngestorInputPlan::Transport(input) = &self.replacement.as_deref()?.input else {
+            return None;
+        };
+        let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) = &input.source
+        else {
+            return None;
+        };
+        Some(source)
+    }
+}
+
 impl Runtime {
-    /// Applies external retirement after the previous execution stopped. Cleanup is best-effort;
-    /// a replacement prepares its own changed sessions before its new input can become ready.
+    /// Applies external retirement after the previous execution stopped, in one step where
+    /// nothing puts the previous input back, as a domain rebuild. Cleanup is best-effort; a
+    /// replacement prepares its own changed sessions before its new input can become ready.
     pub(super) async fn retire_ingestor_input(
         &self,
         retirement: RetiringIngestorInput,
@@ -127,66 +154,22 @@ impl Runtime {
         };
         match &input.source {
             IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) => {
-                let replacement = match retirement.replacement.as_deref() {
-                    Some(IngestorStartPlan {
-                        input: IngestorInputPlan::Transport(input),
-                        ..
-                    }) => {
-                        if let IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) =
-                            &input.source
-                        {
-                            Some(source)
-                        } else {
-                            None
-                        }
-                    }
-                    Some(_) | None => None,
-                };
                 source
                     .retire_before(
                         self,
                         &retirement.previous.ingestor,
                         &retirement.units,
-                        replacement,
+                        retirement.mqtt_replacement(),
                     )
                     .await
             }
             IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) => {
-                let replacement = match retirement.replacement.as_deref() {
-                    Some(IngestorStartPlan {
-                        input: IngestorInputPlan::Transport(input),
-                        ..
-                    }) => {
-                        if let IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(
-                            source,
-                        )) = &input.source
-                        {
-                            Some(source)
-                        } else {
-                            None
-                        }
-                    }
-                    Some(_) | None => None,
-                };
-                if let Err(error) = source
-                    .retire_before(
-                        self,
-                        &retirement.previous.ingestor,
-                        &retirement.units,
-                        replacement,
-                    )
-                    .await
-                {
-                    self.events().report_error(format!("{error:#}"));
-                }
+                self.retire_pulsar_input(source, &retirement).await;
                 Ok(())
             }
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
             | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_)) => {
-                let ingestor = &retirement.previous.ingestor;
-                for unit in retirement.units {
-                    self.remove_ingestor_quiescence(&ingestor.domain, &ingestor.name, unit);
-                }
+                self.retire_endpoint_input(&retirement);
                 Ok(())
             }
             IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
@@ -200,6 +183,134 @@ impl Runtime {
             | IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(_))
             | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(_))
             | IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(_)) => Ok(()),
+        }
+    }
+
+    /// Prepares the replacement of a retiring input while the swap that replaces it can still be
+    /// undone. It touches nothing the previous input keeps at its broker, so a failed swap starts
+    /// the previous ingestor again on everything it left there: only an MQTT replacement's changed
+    /// sessions at a broker session the previous input never connects start clean. The first
+    /// failure fails the swap.
+    pub(super) async fn prepare_ingestor_replacement(
+        &self,
+        retirement: &RetiringIngestorInput,
+    ) -> error_stack::Result<(), RuntimeError> {
+        let IngestorInputPlan::Transport(input) = &retirement.previous.input else {
+            return Ok(());
+        };
+        let IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) = &input.source
+        else {
+            return Ok(());
+        };
+        source
+            .prepare_replacement(
+                self,
+                &retirement.previous.ingestor,
+                &retirement.units,
+                retirement.mqtt_replacement(),
+            )
+            .await
+    }
+
+    /// Retires what a replaced input kept at its broker once the swap that replaced it can no
+    /// longer be undone, before its replacement starts. Nothing puts the previous input back any
+    /// more, so every failure is reported. An MQTT replacement's instances whose sessions this
+    /// cleaned owe them no retirement before they first connect.
+    pub(super) async fn retire_replaced_ingestor_input(&self, retirement: RetiringIngestorInput) {
+        let IngestorInputPlan::Transport(input) = &retirement.previous.input else {
+            return;
+        };
+        match &input.source {
+            IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) => {
+                let ingestor = &retirement.previous.ingestor;
+                let clean = source
+                    .retire_after_swap(
+                        self,
+                        ingestor,
+                        &retirement.units,
+                        retirement.mqtt_replacement(),
+                    )
+                    .await;
+                self.complete_mqtt_session_retirements(&ingestor.domain, &ingestor.name, &clean);
+            }
+            IngestorConnectorPlan::Pulsar(PulsarIngestorStartPlan::Topic(source)) => {
+                self.retire_pulsar_input(source, &retirement).await;
+            }
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Endpoint(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Endpoint(_)) => {
+                self.retire_endpoint_input(&retirement);
+            }
+            IngestorConnectorPlan::Http(HttpIngestorStartPlan::Request(_))
+            | IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(_))
+            | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Subject(_))
+            | IngestorConnectorPlan::Nats(NatsIngestorStartPlan::Stream(_))
+            | IngestorConnectorPlan::RabbitMq(RabbitMqIngestorStartPlan::Queue(_))
+            | IngestorConnectorPlan::Redis(RedisIngestorStartPlan::PubSub(_))
+            | IngestorConnectorPlan::Prometheus(PrometheusIngestorStartPlan::Query(_))
+            | IngestorConnectorPlan::ZeroMq(ZeroMqIngestorStartPlan::Pull(_))
+            | IngestorConnectorPlan::Sqs(SqsIngestorStartPlan::Queue(_))
+            | IngestorConnectorPlan::Websockets(WebsocketsIngestorStartPlan::Connection(_))
+            | IngestorConnectorPlan::Syslog(SyslogIngestorStartPlan::Listener(_)) => {}
+        }
+    }
+
+    /// Retires, once the swap of `domain` from `previous` to `desired` can no longer be undone and
+    /// before that revision publishes and its ingestors start, what each ingestor among `entities`
+    /// that `retiring` holds kept at its broker. It first records the retirements the MQTT
+    /// ingestors starting on this node owe sessions a preceding input left with another
+    /// subscription, and last forgets those `desired` leaves to no instance on this node, a
+    /// reassigned ingestor's included.
+    pub(super) async fn retire_swapped_ingestor_inputs(
+        &self,
+        domain: &DomainName,
+        previous: Option<&ExecutionRevision>,
+        desired: &ExecutionRevision,
+        entities: &[NodeRef],
+        local_node_id: Option<&ClusterNodeName>,
+        retiring: &mut BTreeMap<IngestorName, RetiringIngestorInput>,
+    ) {
+        for entity in entities {
+            nervix_primitives::task::consume_budget().await;
+            if entity.kind != ModelKind::Ingestor {
+                continue;
+            }
+            let name = IngestorName::from(&entity.identifier);
+            if let Some(previous) = previous {
+                self.owe_mqtt_session_retirements(domain, &name, previous, desired, local_node_id);
+            }
+            let Some(retirement) = retiring.remove(&name) else {
+                continue;
+            };
+            Box::pin(self.retire_replaced_ingestor_input(retirement)).await;
+        }
+        self.keep_mqtt_session_retirements_for(domain, desired, local_node_id);
+    }
+
+    /// Removes an owned Pulsar subscription the replacement does not read, best-effort, reporting
+    /// a failure.
+    async fn retire_pulsar_input(
+        &self,
+        source: &PulsarTopicIngestorStartPlan,
+        retirement: &RetiringIngestorInput,
+    ) {
+        if let Err(error) = source
+            .retire_before(
+                self,
+                &retirement.previous.ingestor,
+                &retirement.units,
+                retirement.pulsar_replacement(),
+            )
+            .await
+        {
+            self.events().report_error(format!("{error:#}"));
+        }
+    }
+
+    /// Ends the quiescence an endpoint input's ending units kept.
+    fn retire_endpoint_input(&self, retirement: &RetiringIngestorInput) {
+        let ingestor = &retirement.previous.ingestor;
+        for unit in &retirement.units {
+            self.remove_ingestor_quiescence(&ingestor.domain, &ingestor.name, *unit);
         }
     }
 
@@ -342,6 +453,12 @@ mod tests {
         entity: IngestorEntity,
         client_model: Model,
     ) -> EntrypointPlans {
+        planned_entrypoints_for_test(domain, transport_ingestor_models(entity, client_model))
+    }
+
+    /// The models of a domain whose ingestor `orders_ingestor` reads `entity` through
+    /// `client_model` with a JSON codec into the relay `events`.
+    fn transport_ingestor_models(entity: IngestorEntity, client_model: Model) -> Vec<Model> {
         let ingestor = CreateIngestor {
             labels: Default::default(),
             name: named("orders_ingestor"),
@@ -358,50 +475,263 @@ mod tests {
             general_error_policy: GeneralErrorPolicy::Log,
             filter_where: None,
         };
-        planned_entrypoints_for_test(
-            domain,
-            vec![
-                Model::Schema(nervix_models::CreateSchema {
-                    labels: Default::default(),
-                    name: named("payload"),
-                    fields: vec![nervix_models::SchemaField {
-                        name: named("value"),
-                        ty: ParseAsType::String,
-                        optional: false,
-                        sensitive: false,
-                    }],
-                }),
-                Model::WireJsonSchema(nervix_models::CreateJsonWireSchema {
-                    labels: Default::default(),
-                    name: named("payload_wire"),
-                    strictness: Default::default(),
-                    fields: vec![nervix_models::WireSchemaField {
-                        name: named("value"),
-                        ty: nervix_models::JsonType::String,
-                        optional: false,
-                    }],
-                }),
-                Model::Codec(nervix_models::CreateCodec {
-                    labels: Default::default(),
-                    name: named("json"),
-                    wire_format: nervix_models::CodecWireFormat::Json {
-                        wire_schema: named("payload_wire"),
-                    },
-                    schema: named("payload"),
-                    encoding_rules: Vec::new(),
-                }),
-                Model::Relay(CreateRelay {
-                    labels: Default::default(),
-                    name: named("events"),
-                    schema: named("payload"),
-                    buffer: nonzero_ext::nonzero!(2usize),
-                    branching: nervix_models::RelayBranching::unbranched(),
-                    materialized_state: None,
-                }),
-                client_model,
-                Model::Ingestor(ingestor),
-            ],
-        )
+        vec![
+            Model::Schema(nervix_models::CreateSchema {
+                labels: Default::default(),
+                name: named("payload"),
+                fields: vec![nervix_models::SchemaField {
+                    name: named("value"),
+                    ty: ParseAsType::String,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }),
+            Model::WireJsonSchema(nervix_models::CreateJsonWireSchema {
+                labels: Default::default(),
+                name: named("payload_wire"),
+                strictness: Default::default(),
+                fields: vec![nervix_models::WireSchemaField {
+                    name: named("value"),
+                    ty: nervix_models::JsonType::String,
+                    optional: false,
+                }],
+            }),
+            Model::Codec(nervix_models::CreateCodec {
+                labels: Default::default(),
+                name: named("json"),
+                wire_format: nervix_models::CodecWireFormat::Json {
+                    wire_schema: named("payload_wire"),
+                },
+                schema: named("payload"),
+                encoding_rules: Vec::new(),
+            }),
+            Model::Relay(CreateRelay {
+                labels: Default::default(),
+                name: named("events"),
+                schema: named("payload"),
+                buffer: nonzero_ext::nonzero!(2usize),
+                branching: nervix_models::RelayBranching::unbranched(),
+                materialized_state: None,
+            }),
+            client_model,
+            Model::Ingestor(ingestor),
+        ]
+    }
+
+    /// The MQTT topic input of an ingestor reading `topic` through `session` at `qos`.
+    fn planned_mqtt_input(
+        topic: &str,
+        session: MqttSession,
+        qos: MqttQos,
+    ) -> MqttTopicIngestorStartPlan {
+        let client_name: ClientName = named("broker");
+        let plans = planned_transport_ingestor(
+            &named("sessions"),
+            IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
+                client: client_name.clone(),
+                topic: nervix_models::MqttTopicFilter::parse(topic).expect("valid topic filter"),
+                instances: nervix_models::IngestorInstances::ONE,
+                session,
+                qos,
+                mode: MqttIngestMode::NoAck,
+                rate_limits: nervix_models::RateLimits::NONE,
+                quiesce: IngestQuiesceMode::Drop,
+            })),
+            Model::ClientMqtt(CreateClientMqtt {
+                labels: Default::default(),
+                name: client_name,
+                mount: None,
+                config: Vec::new(),
+            }),
+        );
+        let plan = plans
+            .ingestor(&named("orders_ingestor"), Unit::FIRST_INSTANCE)
+            .assured("the fixture plans its one ingestor instance");
+        let IngestorInputPlan::Transport(transport) = &plan.input else {
+            panic!("the fixture ingestor reads a transport");
+        };
+        let IngestorConnectorPlan::Mqtt(MqttIngestorStartPlan::Topic(source)) = &transport.source
+        else {
+            panic!("the fixture ingestor reads an MQTT topic");
+        };
+        source.clone()
+    }
+
+    #[nervix_primitives::test]
+    async fn a_replacement_retires_a_shared_session_first_only_where_it_may_hold_another_subscription()
+     {
+        let previous = planned_mqtt_input("events", MqttSession::Persistent, MqttQos::Qos1);
+        let retopiced = planned_mqtt_input("orders", MqttSession::Persistent, MqttQos::Qos1);
+        let requalified = planned_mqtt_input("events", MqttSession::Persistent, MqttQos::Qos2);
+        let clean = planned_mqtt_input("orders", MqttSession::Clean, MqttQos::Qos1);
+        let clean_previous = planned_mqtt_input("events", MqttSession::Clean, MqttQos::Qos1);
+
+        // A persistent session the preceding input subscribed under another topic or QoS may still
+        // hold that subscription.
+        assert!(retopiced.may_find_subscription_of(&previous));
+        assert!(requalified.may_find_subscription_of(&previous));
+        // The same subscription keeps its session, a clean replacement discards any session as it
+        // connects, and a clean preceding input leaves none behind.
+        assert!(!previous.may_find_subscription_of(&previous));
+        assert!(!clean.may_find_subscription_of(&previous));
+        assert!(!retopiced.may_find_subscription_of(&clean_previous));
+    }
+
+    /// The revision of `domain` whose ingestor `orders_ingestor` reads `topic` through a persistent
+    /// session at QoS 1 with two instances, each executing on the node `owners` names for it, or a
+    /// revision without that ingestor when there is no topic.
+    fn mqtt_revision(
+        domain: &DomainName,
+        topic: Option<&str>,
+        owners: [&str; 2],
+    ) -> Arc<ExecutionRevision> {
+        let client_name: ClientName = named("broker");
+        let client = Model::ClientMqtt(CreateClientMqtt {
+            labels: Default::default(),
+            name: client_name.clone(),
+            mount: None,
+            config: Vec::new(),
+        });
+        let entity = IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
+            client: client_name,
+            topic: nervix_models::MqttTopicFilter::parse(topic.unwrap_or("unread"))
+                .expect("valid topic filter"),
+            instances: nervix_models::IngestorInstances::Count(nonzero_ext::nonzero!(2u64)),
+            session: MqttSession::Persistent,
+            qos: MqttQos::Qos1,
+            mode: MqttIngestMode::NoAck,
+            rate_limits: nervix_models::RateLimits::NONE,
+            quiesce: IngestQuiesceMode::Drop,
+        }));
+        let mut nodes = Vec::new();
+        for model in transport_ingestor_models(entity, client) {
+            let mut node = scheduled_model(model);
+            if node.identity().kind == ModelKind::Ingestor {
+                if topic.is_none() {
+                    continue;
+                }
+                for (index, owner) in (0_u64..).zip(owners) {
+                    let unit = Unit::try_instance(index)
+                        .assured("the fixture index fits the execution-unit range");
+                    let scheduled = node
+                        .units
+                        .get_mut(&unit)
+                        .expect("the fixture schedules both instances");
+                    scheduled.primary_node = Some(named(owner));
+                    scheduled.assigned_nodes = vec![named(owner)];
+                }
+            }
+            nodes.push(node);
+        }
+        test_execution_revision(domain, nodes)
+    }
+
+    #[nervix_primitives::test]
+    async fn a_changed_topic_owes_a_retirement_only_for_the_instances_this_node_runs() {
+        let runtime = Runtime::with_executor(Executor::default());
+        let domain = named("sessions");
+        let name = named("orders_ingestor");
+        let here: ClusterNodeName = named("node-1");
+        let previous = mqtt_revision(&domain, Some("events"), ["node-1", "node-2"]);
+        let desired = mqtt_revision(&domain, Some("orders"), ["node-1", "node-2"]);
+
+        // The same subscription leaves the sessions nothing to retire.
+        runtime.owe_mqtt_session_retirements(&domain, &name, &previous, &previous, Some(&here));
+        assert!(
+            runtime
+                .outstanding_mqtt_session_retirement(&domain, &name, 0)
+                .is_none()
+        );
+
+        // Instance 0 runs here and owes its session a retirement; instance 1 owes one on node-2.
+        runtime.owe_mqtt_session_retirements(&domain, &name, &previous, &desired, Some(&here));
+        let retirement = runtime
+            .outstanding_mqtt_session_retirement(&domain, &name, 0)
+            .expect("instance 0 owes its session a retirement here");
+        assert!(
+            runtime
+                .outstanding_mqtt_session_retirement(&domain, &name, 1)
+                .is_none()
+        );
+
+        // The instance completes the retirement it was handed, so the next one owes nothing.
+        retirement.complete();
+        assert!(
+            runtime
+                .outstanding_mqtt_session_retirement(&domain, &name, 0)
+                .is_none()
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn an_owed_retirement_is_forgotten_once_no_instance_on_this_node_can_owe_it() {
+        let runtime = Runtime::with_executor(Executor::default());
+        let domain = named("sessions");
+        let name = named("orders_ingestor");
+        let here: ClusterNodeName = named("node-1");
+        let previous = mqtt_revision(&domain, Some("events"), ["node-1", "node-1"]);
+        let desired = mqtt_revision(&domain, Some("orders"), ["node-1", "node-1"]);
+        runtime.owe_mqtt_session_retirements(&domain, &name, &previous, &desired, Some(&here));
+
+        // A revision that keeps both instances here keeps both retirements.
+        runtime.keep_mqtt_session_retirements_for(&domain, &desired, Some(&here));
+        for instance in [0, 1] {
+            assert!(
+                runtime
+                    .outstanding_mqtt_session_retirement(&domain, &name, instance)
+                    .is_some()
+            );
+        }
+
+        // Instance 1 now runs on node-2: its session was retired before it went, or node-2 owes it.
+        let moved = mqtt_revision(&domain, Some("orders"), ["node-1", "node-2"]);
+        runtime.keep_mqtt_session_retirements_for(&domain, &moved, Some(&here));
+        assert!(
+            runtime
+                .outstanding_mqtt_session_retirement(&domain, &name, 1)
+                .is_none()
+        );
+
+        // A completed retirement goes, and with it the ingestor's last one here.
+        runtime
+            .outstanding_mqtt_session_retirement(&domain, &name, 0)
+            .expect("instance 0 still owes its session a retirement here")
+            .complete();
+        runtime.keep_mqtt_session_retirements_for(&domain, &moved, Some(&here));
+        assert!(runtime.inner.mqtt_session_retirements.is_empty());
+
+        // A revision that no longer declares the ingestor forgets what it owed.
+        runtime.owe_mqtt_session_retirements(&domain, &name, &previous, &desired, Some(&here));
+        let removed = mqtt_revision(&domain, None, ["node-1", "node-1"]);
+        runtime.keep_mqtt_session_retirements_for(&domain, &removed, Some(&here));
+        assert!(runtime.inner.mqtt_session_retirements.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_removed_domain_forgets_only_its_own_owed_retirements() {
+        let runtime = Runtime::with_executor(Executor::default());
+        let name = named("orders_ingestor");
+        let here: ClusterNodeName = named("node-1");
+        let removed = named("removed");
+        let kept = named("kept");
+        for domain in [&removed, &kept] {
+            let previous = mqtt_revision(domain, Some("events"), ["node-1", "node-1"]);
+            let desired = mqtt_revision(domain, Some("orders"), ["node-1", "node-1"]);
+            runtime.owe_mqtt_session_retirements(domain, &name, &previous, &desired, Some(&here));
+        }
+
+        runtime.clear_mqtt_session_retirements(&removed);
+
+        assert!(
+            runtime
+                .outstanding_mqtt_session_retirement(&removed, &name, 0)
+                .is_none()
+        );
+        assert!(
+            runtime
+                .outstanding_mqtt_session_retirement(&kept, &name, 0)
+                .is_some()
+        );
     }
 
     #[nervix_primitives::test]

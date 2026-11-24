@@ -24,10 +24,12 @@ use std::collections::BTreeSet;
 use arrow_array::builder::{Float32Builder, ListBuilder, StringBuilder, UInt64Builder};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, CpuClass, MemoryClass, Reservation};
+use nervix_execution::{
+    Attempt, Cancellation, CpuClass, Executor, GrowingCharge, MemoryClass, Reservation,
+};
 use nervix_models::{
-    BranchKeyFingerprint, ClusterNodeName, DomainName, ModelKind, NodeRef, NodeUnitRef,
-    ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts, Unit,
+    BranchKeyFingerprint, ClusterNodeName, ModelKind, NodeRef, NodeUnitRef, ProcessorStateSection,
+    StateInspectionBranchSelection, StateInspectionCounts, Unit,
 };
 use nervix_primitives::sync::StdArc;
 
@@ -36,8 +38,8 @@ use super::{
     inferencer_state::{InferencerGeneration, ReplicatedInferencerState},
     processor_state_inspection::{
         ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
-        ProcessorStatePageMemory, ProcessorStateRun, ProcessorStateSectionColumns,
-        ProcessorStateSelection, extend_runs,
+        ProcessorStatePageMemory, ProcessorStatePageRead, ProcessorStateRun,
+        ProcessorStateSectionColumns, ProcessorStateSelection, extend_runs,
     },
     published_generation::Generation,
 };
@@ -89,13 +91,11 @@ impl CapturedBranch {
     }
 }
 
-fn reserve(memory: &mut Reservation, bytes: u64) -> ReadResult<()> {
-    let total = memory
-        .bytes()
-        .checked_add(bytes)
-        .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+/// Count `bytes` more of a page and grow its charge to cover them. A class without room for
+/// them now fails with the [`nervix_execution::Shortfall`] the page needs.
+fn reserve(memory: &mut GrowingCharge, bytes: u64) -> ReadResult<()> {
     memory
-        .grow_to(total)
+        .grow_by(bytes)
         .change_context(ProcessorStatePageError::Admission)
 }
 

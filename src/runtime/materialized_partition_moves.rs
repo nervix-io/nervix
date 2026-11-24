@@ -679,10 +679,7 @@ impl Runtime {
     ) -> error_stack::Result<ReleasedRow, ReleasedRowError> {
         let section = row
             .one_row_batch()
-            .encode_arrow_snapshot_section(
-                &self.inner.executor,
-                nervix_execution::QueueAdmission::WaitForPlace,
-            )
+            .encode_arrow_snapshot_section(&self.inner.executor)
             .await
             .change_context(ReleasedRowError::Encode)?;
         Ok(ReleasedRow {
@@ -702,14 +699,9 @@ impl Runtime {
             .charge_owned(MemoryClass::Bulk, released.batch)
             .await
             .change_context(ReleasedRowError::Admission)?;
-        let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
-            executor,
-            nervix_execution::QueueAdmission::WaitForPlace,
-            schema,
-            section,
-        )
-        .await
-        .change_context(ReleasedRowError::Decode)?;
+        let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(executor, schema, section)
+            .await
+            .change_context(ReleasedRowError::Decode)?;
         if batch.batch().num_rows() != 1 {
             return Err(Report::new(ReleasedRowError::Decode));
         }

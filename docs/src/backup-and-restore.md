@@ -517,14 +517,16 @@ as misframed, and one that declares a field type Nervix does not carry, a dictio
 compression, or a record batch at odds with its own schema, as undecodable, when planning reads it,
 a dry run included. Nothing is allocated from a length the section only declares.
 
-A conversion the node refuses only for room does not fail the restore. A memory class with no room
-left, a worker queue that is full and a staging quota that cannot hold another piece judged nothing
-of the archive, so the deduplicator or window conversion is tried again every 50 ms for up to 30
-seconds after the node first refused it. A refusal that outlasts that wait ends the conversion and
-is reported as the node having had no room for it, since what the restore itself holds can be what
-fills the budget. A request larger than a whole budget, and archived content that does not fit the
-restored shapes, end it at once. A materialized relay's conversion is not tried again: a refusal
-ends it.
+A full memory class or worker queue never fails a restore: it holds the conversion back until it
+has room. Each deduplicator, window or materialized relay conversion takes its memory as shares of
+the classes it uses, which it waits for while it holds nothing of them, so it never waits behind its
+own charges. A conversion that needs more than its share gives everything back and converts again
+from its first group within a share at least twice as large. A staging quota that cannot hold
+another piece judged nothing of the archive either, so the deduplicator or window conversion is
+tried again every 50 ms for up to 30 seconds after the quota first refused it; a refusal that
+outlasts that wait ends the conversion and is reported as the staging quota having had no room for
+it, since what the restore itself stages can be what fills the quota. A request larger than a whole
+memory class, and archived content that does not fit the restored shapes, end it at once.
 
 ### Restore Checkpoint Storage Quota And Metrics
 
@@ -786,9 +788,10 @@ describes the dialog itself.
   reported the backup and following it to the console of the node that retains the archive when
   that is another node. It hands the archive to the browser as a download only once its size and BLAKE3
   digest match the backup's summary, under the last component of the file the statement names.
-  A download that fails in transport starts again from the first byte after a one-second pause,
-  for up to eight attempts and redirects in all, while the archive is retained. A download the
-  server refuses ends with its reason, and the backup itself completed.
+  A download that fails in transport starts again from the first byte after a pause of the node's
+  `--web-console-restoration-backoff`, one second by default, for as long as the archive is
+  retained: until the instant the backup's summary names. A download the server refuses ends with
+  its reason, and the backup itself completed.
 - **A reload resumes a backup.** The browser tab records the backup's execution reference, query
   text, and domain until its archive is downloaded. A reloaded page sends the backup again under
   that reference, which returns the recorded outcome instead of running the backup twice, and
@@ -803,8 +806,11 @@ describes the dialog itself.
   for the state the restore skipped.
 - **Retries.** Every attempt of a restore sends the same execution reference, statement, and
   archive. A redirect streams it again to the leader, and a lost connection or an unknown outcome
-  streams it again from its first byte, for about ten minutes; after that the console reports the
-  outcome as unknown and names the reference. An attempt that sent the whole archive without
+  streams it again from its first byte, until the reference's retry validity ends: the committed
+  `COMMAND_RETRY_VALIDITY`, 15 minutes by default, after the console issued the reference. After
+  that the console reports the outcome as unknown and names the reference. The node's
+  [web console pacing](node-settings.md#web-console-pacing) sets the pause between attempts and
+  how long each frame and reply may take. An attempt that sent the whole archive without
   learning the outcome, or an answer that the outcome is not known yet, may have had the restore
   admitted. The console then also reports the outcome as unknown under the reference, never as
   refused, when the restore ends without it: when the browser can no longer read the archive file,
@@ -950,7 +956,7 @@ that compare restored and re-exported state.
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore's outcome is recorded, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched, or for at most 600 seconds; a Kafka offset or branch lifecycle section reserves the 64 MiB record limit while it is written |
-| One owner's capture inventory | One management reply of at most 64 KiB per owner and domain |
+| One owner's capture inventory | One management reply of at most 68 KiB per owner and domain |
 | Inferencer tensors | One branch at a time, bounded by the declared snapshot-section footprint: live publications retain immutable native tensors; stored checkpoints decode under twice that bound, retain one bound and reuse that charge while staging. Capture reserves twice the footprint plus two 64 KiB blocks for projection and the staged writer's output buffer, one resolved bulk chunk of at least 64 KiB: 192 KiB beside the footprint at the default. Restore streams the raw archive slice through a 64 KiB reader, wrapping identical bits in the native frame under twice the footprint plus that reader and the same output buffer: 128 KiB beside the footprint at the default. |
 | WASM guest save capture | One selected save at a time: `restore_metadata` reserves three times its stored checkpoint size for the inline Fjall value and decoded reader; two 64 KiB bulk buffers cover segmented reads and transfer, and the staged writer's output buffer, one resolved bulk chunk (64 KiB at the default), covers staging. A save up to the 64 MiB guest limit can exceed the 32 MiB default bulk budget. |
 | Kafka offset or branch lifecycle section capture | One checkpoint at a time per owner: `restore_metadata` holds twice the stored checkpoint plus 64 KiB for the whole section, beside serializer scratch of one resolver per entry; the staged writer's output buffer, one resolved bulk chunk charged to `bulk`, streams the record |
@@ -965,7 +971,7 @@ that compare restored and re-exported state.
 | Stored window structure conversion | `restore_metadata` admits a conservative eight times the native length plus 256 KiB for typed removals, descriptor projection and header scratch, independently of the mapping and bounded column buffers. A checkpoint that cannot fit these reservations is refused with its entity named. |
 | One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
 | Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
-| Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
+| Restore conversion staging wait | 30 seconds after the staging quota first refuses a deduplicator or window conversion for room. The conversion is tried again every 50 ms. A full memory class or worker queue holds a conversion back without limit and never ends it |
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the independent state-read memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | The smaller of 128 GiB and the size of the volume that holds the node database by default; configurable with `--restore-staging-max-bytes`, up to that size |

@@ -230,7 +230,6 @@ pub struct FaultInjection {
 
 #[derive(Debug)]
 struct FaultInjectionState {
-    licensing_quotas: watch::Sender<[Option<u64>; 2]>,
     licensing_clock_offset: watch::Sender<std::time::Duration>,
     orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses,
     /// One bounded command-reply script per scenario domain, absent from ordinary builds.
@@ -593,7 +592,6 @@ impl Default for FaultInjection {
         let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
-                licensing_quotas: watch::channel([None; 2]).0,
                 licensing_clock_offset: watch::channel(std::time::Duration::ZERO).0,
                 orphaned_domain_pauses: orphaned_domain_pause::OrphanedDomainPauses::default(),
                 command_reply_scripts: DashMap::default(),
@@ -833,6 +831,9 @@ impl FaultInjection {
         self.inner.command_pauses.remove(&point);
     }
 
+    /// After how many entries the armed interruption stops the next stream of `entity`'s native
+    /// metadata section in a backup of `domain`. It stays armed until a stream spends it
+    /// ([`Self::native_metadata_capture_streamed`]).
     pub(crate) fn native_metadata_capture_interruption(
         &self,
         domain: &DomainName,
@@ -842,8 +843,19 @@ impl FaultInjection {
             domain: domain.clone(),
             entity: entity.clone(),
         };
-        let (_, entries) = self.inner.native_metadata_interruptions.remove(&owner)?;
-        Some(entries)
+        let entries = self.inner.native_metadata_interruptions.get(&owner)?;
+        Some(*entries.value())
+    }
+
+    /// A stream of `entity`'s native metadata section fired its armed interruption or wrote the
+    /// whole section, which spends the interruption. A stream whose capture attempt ended before
+    /// either, because the attempt ran short and runs again, leaves it armed for the next stream.
+    pub(crate) fn native_metadata_capture_streamed(&self, domain: &DomainName, entity: &ModelName) {
+        let owner = CapturedStateOwner {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        };
+        self.inner.native_metadata_interruptions.remove(&owner);
     }
 
     pub(crate) fn guest_save_capture_interruption(

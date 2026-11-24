@@ -193,13 +193,29 @@ ordinary response body is decoded:
 | `nervix-session-string-bytes` | String bytes |
 
 Each console session, backup-download and restore WebSocket starts with a `SessionOpened`
-`NXSM` frame carrying the same five values. Its
-opening frame fits within the protocol's 1 KiB announcement bound. The client validates the
-complete announcement before sending requests or decoding ordinary session frames. Missing,
-duplicated or invalid native metadata, or an invalid WebSocket announcement, ends that opening.
-Every reconnect reads a new announcement from the node it reaches. The selected limits belong
-to that exchange: an earlier exchange's reader, queued work or transfer cannot change a later
-exchange's bounds.
+`NXSM` frame carrying the same five values, followed by how the node paces the session and the
+web console it serves:
+
+| Field | Value |
+| --- | --- |
+| `snapshot_interval_nanos` | The node's `--session-snapshot-interval`: how often it sends the selected domain's snapshot |
+| `command_retry_validity_nanos` | The committed `COMMAND_RETRY_VALIDITY`: how long the cluster recognizes an execution reference from the time it was issued. Absent while the node has not applied the cluster's committed parameters |
+| `web_console_request_timeout_nanos`, `web_console_connect_timeout_nanos`, `web_console_retry_backoff_nanos`, `web_console_retry_max_backoff_nanos`, `web_console_restoration_backoff_nanos` | The node's [web console pacing](node-settings.md#web-console-pacing) waits |
+| `web_console_restore_frame_capacity` | The restore frames the web console keeps queued on its connection |
+
+Every duration is a count of nanoseconds. Its opening frame fits within the protocol's 1 KiB
+announcement bound. The client validates the complete announcement before sending requests or
+decoding ordinary session frames, each value through the definition that owns it: a positive
+snapshot interval and retry validity within their bounds, web console waits of whole
+milliseconds from 1ms through 24 hours, a longest backoff at least each first wait, and a restore
+queue the browser can count. Missing, duplicated or invalid native metadata, or an invalid
+WebSocket announcement, ends that opening. Every reconnect reads a new announcement from the node
+it reaches. The selected limits belong to that exchange: an earlier exchange's reader, queued work
+or transfer cannot change a later exchange's bounds. The browser console follows the pacing of the
+last opening it read, keeps it across reconnects and uses each value's declared default before its
+first opening; an opening without a retry validity leaves the one it learned before.
+[Web Console](client-tools-web-console.md) describes what each value paces. Native sessions carry
+no pacing: a native client's waits are its own local options.
 
 Native upload and restore requests offer all five bounds in request metadata. The client captures
 the last announced values with its channel and can stream immediately under that complete offer.
@@ -238,9 +254,10 @@ truncated, and it can never mix two reads of the server's state. Parts of one re
 but other replies and unsolicited frames may arrive between them, which is why a client keeps one
 reassembly per request identity. A reply above the transfer limit is not sent at all: the request
 receives the typed rejection `ReplyTooLarge` instead. A reply that carries an impact report is
-encoded on the bulk workers under the bulk memory class; when neither memory nor a worker is
-available for it, the request receives `ServerBusy`, which is safe to repeat because such a reply
-belongs to a request that changes nothing.
+encoded on the bulk workers under the bulk memory class. A full class or worker queue holds the
+reply back until it frees; the request receives `ServerBusy` only when the bulk workers do not run
+the encoding, because the node is stopping or the job failed, which is safe to repeat because such a
+reply belongs to a request that changes nothing.
 
 ### One Current Form
 
@@ -695,7 +712,7 @@ when there is one, and a message for display. The session keeps serving after an
 | `DuplicateRequestId` | The request identity is already in flight in this session. |
 | `TooManyRequestsInFlight` | The session already has 64 requests in flight. Nothing was admitted. |
 | `ReplyTooLarge` | The complete reply cannot be encoded within the session limits, above all because it exceeds the transfer limit. |
-| `ServerBusy` | The server had no memory or worker left to prepare the reply of an inspection. |
+| `ServerBusy` | The server's workers did not prepare the reply of an inspection: the node is stopping, or the job failed. A full memory class or worker queue holds a reply back instead. |
 
 The first five refuse a request before anything about it runs. `ReplyTooLarge` and `ServerBusy`
 replace a reply that could not be prepared. For a read, repeating the request reads again. For a
@@ -2851,5 +2868,10 @@ allow loses its connection with `ENHANCE_YOUR_CALM`. A console session's WebSock
 the declared write buffer before writing, and holds at most one more frame for a client that stops
 reading.
 A streaming response already established is not given a whole-session request deadline. A peer
-that stops acknowledging server pings is closed, releasing session-owned resources. These transport
-bounds introduce no session wire message and do not change command admission or recovery identity.
+that stops acknowledging server pings is closed, releasing session-owned resources. The Rust
+client pings in the other direction: while a call such as the session exchange is open, it sends an
+HTTP/2 ping once its `keepalive_interval` passes without call data or a ping answer arriving, and
+ends the connection as a transport failure when no answer arrives within its `keepalive_timeout` (30
+and 20 seconds by default), so a session that is only waiting for subscription or consumer data also
+notices a node that fell silent without closing the connection. These transport bounds introduce no
+session wire message and do not change command admission or recovery identity.

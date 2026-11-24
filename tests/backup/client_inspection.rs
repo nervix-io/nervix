@@ -10,7 +10,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_execution::{Executor, MemoryClass, QueueAdmission, StorageClass};
+use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_primitives::sync::{blocking::mpsc, oneshot};
 
 use super::*;
@@ -48,9 +48,8 @@ impl FilesystemHold {
                             .try_reserve(MemoryClass::Management, 0)
                             .assured("zero charge");
                         worker
-                            .run_storage_with(
+                            .run_storage(
                                 StorageClass::Filesystem,
-                                QueueAdmission::WaitForPlace,
                                 charge,
                                 move |_charge, _cancel| {
                                     started.send(()).discarded(
@@ -77,12 +76,7 @@ impl FilesystemHold {
                             .try_reserve(MemoryClass::Management, 0)
                             .assured("zero charge");
                         waiter
-                            .run_storage_with(
-                                StorageClass::Filesystem,
-                                QueueAdmission::WaitForPlace,
-                                charge,
-                                |_charge, _cancel| (),
-                            )
+                            .run_storage(StorageClass::Filesystem, charge, |_charge, _cancel| ())
                             .await
                             .assured("a released queue holder runs");
                     },

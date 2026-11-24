@@ -32,7 +32,10 @@ async fn report_of_dispatched_input(
 ) -> (String, AckOutcome) {
     let processor = named::<ModelName>("route_orders");
     let input_relay = named::<RelayName>("orders");
-    let template = junction_branch_template(processor.as_str(), input_relay.as_str());
+    let template = Arc::new(junction_branch_template(
+        processor.as_str(),
+        input_relay.as_str(),
+    ));
     let counters =
         runtime.node_quiesce_counters(domain, NodeRef::new(ModelKind::Junction, &processor));
     let mut events = runtime.subscribe_events();

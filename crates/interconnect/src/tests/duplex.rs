@@ -55,8 +55,10 @@ impl InterconnectDuplexRequest for BulkOpening {
         crate::DuplexSetupDeadline::Request(crate::RequestDeadline::Setup);
 }
 
+/// A duplex opening its responder's class has no room for now waits for that room instead of being
+/// refused, and the stream opens once room frees.
 #[nervix_primitives::test]
-async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
+async fn a_duplex_opening_a_full_class_cannot_decode_now_waits_and_opens_once_room_frees() {
     let ConnectedTransports {
         transport_a,
         transport_b,
@@ -71,17 +73,25 @@ async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
         .assured("the fresh transport registers one bulk opening handler");
     let capacity = executor_b.memory(MemoryClass::Bulk).capacity_bytes;
     let held = executor_b
-        .try_reserve(MemoryClass::Bulk, capacity - 4096)
-        .assured("the fixture leaves the opening reader's initial allocation");
-    let refused = transport_a.open_duplex_stream(&node_b, BulkOpening).await;
+        .try_reserve(MemoryClass::Bulk, capacity)
+        .assured("the fixture holds the whole untouched bulk class");
+    let opener = transport_a.clone();
+    let opening = nervix_primitives::task::spawn(async move {
+        opener.open_duplex_stream(&node_b, BulkOpening).await
+    });
+    nervix_primitives::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !opening.is_finished(),
+        "a full class holds the opening's decoding back instead of refusing it"
+    );
     drop(held);
-    let recovered = transport_a.open_duplex_stream(&node_b, BulkOpening).await;
-    if let Ok((_sender, mut receiver)) = recovered {
+    let opened = opening.await.assured("the opening task is joined");
+    if let Ok((_sender, mut receiver)) = opened {
         assert!(
             receiver
                 .next()
                 .await
-                .assured("the recovered stream completes")
+                .assured("the opened stream completes")
                 .is_none()
         );
     } else {
@@ -89,16 +99,6 @@ async fn a_duplex_opening_reports_decode_capacity_and_recovers_after_release() {
     }
     transport_a.shutdown().await;
     transport_b.shutdown().await;
-    match refused {
-        Err(error) => assert!(
-            matches!(
-                error.downcast_ref::<TransportError>(),
-                Some(TransportError::RemoteRejected { status: 503, .. })
-            ),
-            "opening decode pressure must be a service-unavailable response: {error:#}"
-        ),
-        Ok(_) => panic!("the opening reader leaves no room for its decoder"),
-    }
     assert_eq!(executor_b.memory(MemoryClass::Bulk).reserved_bytes, 0);
 }
 
@@ -637,7 +637,6 @@ async fn an_answer_waits_for_a_place_on_its_responders_full_class_and_arrives_on
     let (_sender, mut receiver) = decoded_gated_frame(&transport_a, &node_b, &mut gate).await;
 
     let held = HeldCpuClass::hold(&executor_b, CpuClass::Control).await;
-    let refused = executor_b.snapshot().cpu_class(CpuClass::Control).refused;
     let reserved = executor_b.memory(MemoryClass::Commands).reserved_bytes;
     gate.answer
         .send(())
@@ -646,17 +645,9 @@ async fn an_answer_waits_for_a_place_on_its_responders_full_class_and_arrives_on
     eventually(
         &executor_b,
         "the answer waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-                || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
-    assert_eq!(
-        executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-        refused,
-        "a full class refuses no answer"
-    );
 
     held.release().await;
     let answer = timeout(Duration::from_secs(10), receiver.next())
@@ -686,7 +677,6 @@ async fn an_initiators_reset_ends_an_answers_wait_for_a_place_on_its_responders_
     let (sender, receiver) = decoded_gated_frame(&transport_a, &node_b, &mut gate).await;
 
     let held = HeldCpuClass::hold(&executor_b, CpuClass::Control).await;
-    let refused = executor_b.snapshot().cpu_class(CpuClass::Control).refused;
     let reserved = executor_b.memory(MemoryClass::Commands).reserved_bytes;
     gate.answer
         .send(())
@@ -695,26 +685,23 @@ async fn an_initiators_reset_ends_an_answers_wait_for_a_place_on_its_responders_
     eventually(
         &executor_b,
         "the answer waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-                || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
 
     drop(sender);
     drop(receiver);
+    // The responder's frame reader handed its frames over with their bytes, so the reset returns
+    // the class to what it held before the answer, and no job waits for a place any more.
     eventually(
         &executor_b,
         "the reset ending the answer's wait and returning its charge",
-        |executor| executor.memory(MemoryClass::Commands).reserved_bytes < reserved,
+        |executor| {
+            executor.memory(MemoryClass::Commands).reserved_bytes <= reserved
+                && executor.snapshot().cpu_class(CpuClass::Control).waiting == 0
+        },
     )
     .await;
-    assert_eq!(
-        executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-        refused,
-        "a full class refuses no answer"
-    );
 
     held.release().await;
     transport_a.shutdown().await;
@@ -737,7 +724,6 @@ async fn an_answer_waits_for_a_place_on_its_initiators_full_class() {
         let mut gate = register_gated_handler(&transport_b);
         let (sender, mut receiver) = decoded_gated_frame(&transport_a, &node_b, &mut gate).await;
         let held = HeldCpuClass::hold(&executor_a, CpuClass::Control).await;
-        let refused = executor_a.snapshot().cpu_class(CpuClass::Control).refused;
         let reserved = executor_a.memory(MemoryClass::Commands).reserved_bytes;
         let receiving = nervix_primitives::task::spawn(async move {
             let answer = receiver.next().await;
@@ -747,27 +733,24 @@ async fn an_answer_waits_for_a_place_on_its_initiators_full_class() {
             .send(())
             .await
             .expect("the handler waits for its gate");
+        // The frame reader hands the answer over with its bytes, so the decoding waits for a place
+        // holding only its own charge.
         eventually(
             &executor_a,
-            "the answer's decoding waiting with its charge",
-            |executor| {
-                executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-                    || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-            },
+            "the answer's decoding waiting for a place",
+            |executor| executor.snapshot().cpu_class(CpuClass::Control).waiting > 0,
         )
         .await;
-        assert_eq!(
-            executor_a.snapshot().cpu_class(CpuClass::Control).refused,
-            refused,
-            "a full class refuses no answer"
-        );
         if abandon {
             receiving.abort();
             drop(sender);
             eventually(
                 &executor_a,
                 "the dropped receiver returning its decoding's charge",
-                |executor| executor.memory(MemoryClass::Commands).reserved_bytes <= reserved,
+                |executor| {
+                    executor.memory(MemoryClass::Commands).reserved_bytes <= reserved
+                        && executor.snapshot().cpu_class(CpuClass::Control).waiting == 0
+                },
             )
             .await;
             held.release().await;
@@ -807,7 +790,6 @@ async fn a_submitted_frame_waits_for_a_place_on_its_responders_full_class() {
         .expect("the counting stream opens");
 
     let held = HeldCpuClass::hold(&executor_b, CpuClass::Control).await;
-    let refused = executor_b.snapshot().cpu_class(CpuClass::Control).refused;
     let reserved = executor_b.memory(MemoryClass::Commands).reserved_bytes;
     sender
         .send(CountingItem { value: 5 })
@@ -816,17 +798,9 @@ async fn a_submitted_frame_waits_for_a_place_on_its_responders_full_class() {
     eventually(
         &executor_b,
         "the frame's decoding waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-                || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
-    assert_eq!(
-        executor_b.snapshot().cpu_class(CpuClass::Control).refused,
-        refused,
-        "a full class refuses no submitted frame"
-    );
 
     held.release().await;
     let answer = timeout(Duration::from_secs(10), receiver.next())
@@ -858,7 +832,6 @@ async fn a_submitted_frame_waits_for_a_place_on_its_initiators_full_class() {
         .expect("the counting stream opens");
 
     let held = HeldCpuClass::hold(&executor_a, CpuClass::Control).await;
-    let refused = executor_a.snapshot().cpu_class(CpuClass::Control).refused;
     let reserved = executor_a.memory(MemoryClass::Commands).reserved_bytes;
     let sending = nervix_primitives::task::spawn(async move {
         let sent = sender.send(CountingItem { value: 6 }).await;
@@ -867,17 +840,9 @@ async fn a_submitted_frame_waits_for_a_place_on_its_initiators_full_class() {
     eventually(
         &executor_a,
         "the frame's encoding waiting with its charge",
-        |executor| {
-            executor.memory(MemoryClass::Commands).reserved_bytes > reserved
-                || executor.snapshot().cpu_class(CpuClass::Control).refused > refused
-        },
+        |executor| executor.memory(MemoryClass::Commands).reserved_bytes > reserved,
     )
     .await;
-    assert_eq!(
-        executor_a.snapshot().cpu_class(CpuClass::Control).refused,
-        refused,
-        "a full class refuses no submitted frame"
-    );
 
     held.release().await;
     let (sent, _sender) = timeout(Duration::from_secs(10), sending)

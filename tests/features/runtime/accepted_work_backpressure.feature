@@ -172,8 +172,10 @@ Feature: Accepted work waits for internal worker room
       | 1            |
       | 3            |
 
-  @accepted_worker_request_refusal
-  Scenario Outline: An acknowledged HTTP request still receives immediate admission refusal
+  # A request the node has not accepted yet waits for an extension worker while its sender keeps it
+  # open, as accepted work does: a full worker class is no reason to refuse it.
+  @accepted_worker_request_wait
+  Scenario Outline: An acknowledged HTTP request waits for a full extension class and is answered once it frees
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -189,14 +191,22 @@ Feature: Accepted work waits for internal worker room
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO accepted INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION output TO accepted;
       START;
       """
+    Then within "30s" node "node-1" eventually reports describe ingestor "source" as "ready: true"
     When accepted-work CPU class "extension" is full on every node
-    Then within "10s" HTTP admission on node "node-1" host "request-{{test_id}}.example.com" path "/events" refuses with retry-after
+    And endpoint request "held" is posted on node "node-1" host "request-{{test_id}}.example.com" path "/events"
       """
-      {"id":"retry","value":41}
+      {"id":"held","value":41}
       """
+    Then endpoint request "held" has not answered within "2s"
     When accepted-work CPU classes are released on every node
+    Then endpoint request "held" answers HTTP 200
+    And within "30s" the relay subscription receives a payload
+      """
+      "id":"held"
+      """
 
     Examples:
       | cluster_size |

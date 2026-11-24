@@ -186,7 +186,6 @@ impl SessionServiceImpl {
         existed_at_admission: bool,
         state: DomainState,
         mutation: Option<&DomainMutationLease>,
-        domain_quota: crate::licensing::Quota,
     ) -> CommandResult {
         if existed_at_admission {
             if !if_not_exists {
@@ -223,7 +222,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self
                     .inner
                     .consensus
-                    .put_domain(state.clone(), mutation, domain_quota)
+                    .put_domain(state.clone(), mutation)
                     .await
                 {
                     return self
@@ -832,10 +831,6 @@ impl SessionServiceImpl {
             return command_error(format!("domain '{}' already exists", create.id.as_str()));
         }
         let create = create.body;
-        let domain_quota = match self.admit_domain_creation(&create.id, false) {
-            Ok(quota) => quota,
-            Err(error) => return command_error(format!("{error:#}")),
-        };
         let state = DomainState {
             id: create.id.clone(),
             config: create.config,
@@ -846,12 +841,7 @@ impl SessionServiceImpl {
             clock: None,
             stop: None,
         };
-        match self
-            .inner
-            .consensus
-            .put_domain(state, None, domain_quota)
-            .await
-        {
+        match self.inner.consensus.put_domain(state, None).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(
@@ -1243,17 +1233,11 @@ mod tests {
         };
 
         let first = service
-            .apply_persistent_domain_creation(
-                false,
-                false,
-                state.clone(),
-                None,
-                service.domain_quota(),
-            )
+            .apply_persistent_domain_creation(false, false, state.clone(), None)
             .await;
         assert!(first.succeeded(), "{first:?}");
         let resumed = service
-            .apply_persistent_domain_creation(false, false, state, None, service.domain_quota())
+            .apply_persistent_domain_creation(false, false, state, None)
             .await;
         assert_eq!(resumed, first);
 

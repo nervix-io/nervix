@@ -18,11 +18,13 @@
 )]
 
 use error_stack::{Report, ResultExt as _};
-use nervix_execution::{CpuClass, MemoryClass, Reservation};
+use meticulous::OptionExt as _;
+use nervix_execution::{CpuClass, GrowingCharge, MemoryClass, Reservation};
 use nervix_models::{
     BranchKeyFingerprint, DomainName, ModelKind, RelayName, StateInspectionBranchSelection,
     StateInspectionCounts, StateInspectionStage, Unit,
 };
+use nervix_primitives::sync::StdArc;
 
 use super::{
     MaterializedGeneration, MaterializedGenerationRecord, RestoredMaterializedSnapshot, Runtime,
@@ -79,11 +81,36 @@ pub(crate) struct MaterializedInspectionPage {
     _stored: Option<RestoredMaterializedSnapshot>,
 }
 
+/// One captured page and the key catalog captured with it, whose charge the page holds.
 pub(crate) struct MaterializedStateCapture {
     pub(crate) page: MaterializedInspectionPage,
     pub(crate) catalog: nervix_models::StateInspectionKeyCatalog,
-    // Keeps the catalog admitted for the lifetime of this capture.
-    _catalog_charge: Option<Reservation>,
+}
+
+/// The live generation of a unit, as the first step of a page captures it.
+struct LiveGeneration {
+    generation: MaterializedGeneration,
+    sources: [u8; 32],
+    /// What the step counted for the generation's row views.
+    views: u64,
+}
+
+/// What the first step of a page hands on: the unit's live generation, when it has one, and the
+/// page's charge.
+struct LiveCapture {
+    live: Option<LiveGeneration>,
+    memory: GrowingCharge,
+}
+
+/// The generation a page selects from, with everything that keeps it charged.
+struct SelectedSource {
+    generation: MaterializedGeneration,
+    /// What the page's charge counted for the generation's row views.
+    views: u64,
+    memory: GrowingCharge,
+    stored: Option<RestoredMaterializedSnapshot>,
+    stage: StateInspectionStage,
+    sources: [u8; 32],
 }
 
 impl Runtime {
@@ -95,24 +122,23 @@ impl Runtime {
         self.inner.inspection_settings
     }
 
+    /// Capture one page of a materialized relay's state for an inspection, taking every charge
+    /// through `executor`.
+    ///
+    /// The page holds what it captured while it captures more, so its caller runs it within
+    /// allowances of the state-read and bulk classes (`Executor::within_allowance`): every charge
+    /// is then drawn from a share the caller waited for while holding nothing, and a page that
+    /// runs short is captured again within the shares it needed.
     pub(crate) async fn capture_materialized_state_page(
         &self,
+        executor: &nervix_execution::Executor,
         domain: &DomainName,
         relay: &RelayName,
         query: MaterializedPageQuery,
     ) -> Result<MaterializedStateCapture, Report<StatePageReadError>> {
-        let MaterializedPageQuery {
-            unit,
-            selection,
-            after,
-            bounds,
-            catalog_requested,
-            filter,
-        } = query;
-        let MaterializedPageBounds {
-            rows: max_rows,
-            bytes: max_bytes,
-        } = bounds;
+        let query = StdArc::new(query);
+        let query = &query;
+        let unit = query.unit;
         let placement = self
             .state_placement_for_unit(
                 domain,
@@ -133,42 +159,59 @@ impl Runtime {
             .ok_or_else(|| Report::new(StatePageReadError::NotReady))?
             .schema
             .clone();
-        let executor = self.inner.executor.clone();
+        let executor = executor.clone();
+        let memory = executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(StatePageReadError::Admission)?;
         let captured_routing = routing.clone();
         let captured_relay = relay.clone();
         let captured_schema = schema.clone();
-        let captured_executor = executor.clone();
-        let admission = executor
-            .try_reserve(MemoryClass::Bulk, 1)
-            .change_context(StatePageReadError::Admission)?;
-        let captured = executor
+        let live = executor
             .run_cpu(
                 CpuClass::Bulk,
-                admission,
-                move |mut charge, cancellation| {
-                    let reads = captured_routing
+                executor.charge_nothing(MemoryClass::Bulk),
+                move |_charge,
+                      cancellation|
+                      -> Result<LiveCapture, Report<StatePageReadError>> {
+                    // The first step of a page: the unit's live generation, with its row views
+                    // counted in `memory`.
+                    let routing = &captured_routing;
+                    let relay = &captured_relay;
+                    let schema = captured_schema;
+                    let mut memory = GrowingCharge::new(memory);
+                    let reads = routing
                         .materialized_stream_reads
-                        .get(&captured_relay)
+                        .get(relay)
                         .ok_or_else(|| Report::new(StatePageReadError::NotReady))?;
                     let mut records = Vec::new();
-                    #[cfg_attr(nervix_lint, expect(nervix::branch_inversion, reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"))]
+                    let mut views = 0_u64;
+                    #[cfg_attr(
+                        nervix_lint,
+                        expect(
+                            nervix::branch_inversion,
+                            reason = "materialized or emitter state groups its data by branch; move it to the branch in https://app.clickup.com/t/86bd1z3bd"
+                        )
+                    )]
                     let mut sources = Vec::new();
-                    let mut source_charge = captured_executor
-                        .try_reserve(MemoryClass::Bulk, 1)
-                        .change_context(StatePageReadError::Admission)?;
+                    let mut source_views = 0_u64;
                     reads.visit_unit_states(unit, |branch, state| {
                         cancellation
                             .check()
                             .change_context(StatePageReadError::Admission)?;
-                        // Keep the generation and its admission in one owner: tuple fields drop
-                        // in order, so row-view metadata is freed before its charge is released.
                         let captured = state
-                            .capture_for_inspection(&captured_executor)
+                            .capture_for_inspection(&mut memory)
                             .change_context(StatePageReadError::Admission)?;
-                        let generation = &captured.0;
-                        reserve_views(&mut records, generation.records().len(), &mut charge)?;
+                        let generation = &captured.generation;
+                        let grown = reserve_views(&mut records, generation.records().len(), &mut memory)?;
+                        views = views
+                            .checked_add(grown)
+                            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
                         records.extend_from_slice(generation.records());
-                        reserve_views(&mut sources, 1, &mut source_charge)?;
+                        let grown = reserve_views(&mut sources, 1, &mut memory)?;
+                        source_views = source_views
+                            .checked_add(grown)
+                            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
                         sources.push((
                             branch.map(|branch| branch.fingerprint()),
                             state.inspection_instance(),
@@ -176,14 +219,16 @@ impl Runtime {
                             generation.fence(),
                             generation.branch_generation(),
                         ));
+                        // The captured generation's row views go with it, and so does what they were counted.
+                        let counted = captured.counted;
+                        drop(captured);
+                        memory.release(counted);
                         Ok::<_, Report<StatePageReadError>>(())
                     })?;
                     if sources.is_empty() {
-                        return Ok(None);
+                        return Ok(LiveCapture { live: None, memory });
                     }
-                    records.sort_unstable_by(|a, b| {
-                        super::BranchKey::canonical_order(&a.branch, &b.branch)
-                    });
+                    records.sort_unstable_by(|a, b| super::BranchKey::canonical_order(&a.branch, &b.branch));
                     sources.sort_unstable();
                     let mut digest = nervix_crypto::digest::Sha256::new();
                     digest.update(b"nervix/state-inspection/unit-generations");
@@ -206,33 +251,33 @@ impl Runtime {
                         fence = fence.max(source_fence);
                         generation = generation.max(membership);
                     }
-                    Ok::<_, Report<StatePageReadError>>(Some((
-                        MaterializedGeneration::new(
-                            revision,
-                            fence,
-                            generation,
-                            captured_schema,
-                            records,
-                        ),
-                        charge,
-                        digest.finish(),
-                    )))
+                    memory.release(source_views);
+                    Ok(LiveCapture {
+                        live: Some(LiveGeneration {
+                            generation: MaterializedGeneration::new(revision, fence, generation, schema, records),
+                            sources: digest.finish(),
+                            views,
+                        }),
+                        memory,
+                    })
                 },
             )
             .await
             .change_context(StatePageReadError::Admission)??;
-        let (generation, metadata, stored, stage, sources) =
-            if let Some((generation, metadata, sources)) = captured {
-                (
-                    generation,
-                    metadata,
-                    None,
-                    StateInspectionStage::Live,
-                    sources,
-                )
-            } else {
+        let source = match live.live {
+            Some(live_generation) => SelectedSource {
+                generation: live_generation.generation,
+                views: live_generation.views,
+                memory: live.memory,
+                stored: None,
+                stage: StateInspectionStage::Live,
+                sources: live_generation.sources,
+            },
+            None => {
+                // The stored generation draws its own working charge from the page's shares.
+                drop(live.memory);
                 let stored = self
-                    .open_stored_materialized_snapshot(None, &placement)
+                    .open_stored_materialized_snapshot(&executor, None, &placement)
                     .await
                     .change_context(StatePageReadError::Stored)?;
                 let count = match &stored {
@@ -242,13 +287,15 @@ impl Runtime {
                 let bytes = count
                     .checked_mul(std::mem::size_of::<MaterializedGenerationRecord>())
                     .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-                let charge = executor
-                    .try_reserve(
-                        MemoryClass::Bulk,
-                        u64::try_from(bytes)
-                            .map_err(|_| Report::new(StatePageReadError::Admission))?
-                            .max(1),
-                    )
+                let views =
+                    u64::try_from(bytes).map_err(|_| Report::new(StatePageReadError::Admission))?;
+                let memory = executor
+                    .reserve(MemoryClass::Bulk, views)
+                    .await
+                    .change_context(StatePageReadError::Admission)?;
+                let mut memory = GrowingCharge::new(memory);
+                memory
+                    .grow_by(views)
                     .change_context(StatePageReadError::Admission)?;
                 let (revision, fence, branch_generation, records) = match &stored {
                     Some(stored) => (
@@ -266,214 +313,38 @@ impl Runtime {
                     ),
                     None => (0, 0, 0, Vec::new()),
                 };
-                (
-                    MaterializedGeneration::new(
+                SelectedSource {
+                    generation: MaterializedGeneration::new(
                         revision,
                         fence,
                         branch_generation,
                         schema.clone(),
                         records,
                     ),
-                    charge,
+                    views,
+                    memory,
                     stored,
-                    StateInspectionStage::Stored,
-                    [0; 32],
-                )
-            };
-        // The captured metadata charge also backs the smaller selected vector. Move that charge
-        // through the worker and the returned page; no row-view allocation outlives admission.
+                    stage: StateInspectionStage::Stored,
+                    sources: [0; 32],
+                }
+            }
+        };
         let runtime = self.clone();
-        let scan_executor = executor.clone();
+        let query = StdArc::clone(query);
         executor
             .run_cpu(
                 CpuClass::Bulk,
-                metadata,
-                move |_captured_metadata, cancellation| {
-                    let mut catalog = if catalog_requested {
-                        nervix_models::StateInspectionKeyCatalog::requested()
-                    } else {
-                        nervix_models::StateInspectionKeyCatalog::Unrequested
-                    };
-                    let catalog_charge = if catalog_requested {
-                        let bytes = generation
-                            .records()
-                            .len()
-                            .checked_mul(
-                                64 * (std::mem::size_of::<BranchKeyFingerprint>()
-                                    + std::mem::size_of::<
-                                        Option<nervix_models::InheritedPartitionOrigin>,
-                                    >()),
-                            )
-                            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-                        let bytes = u64::try_from(bytes)
-                            .map_err(|_| Report::new(StatePageReadError::Admission))?;
-                        if bytes > max_bytes {
-                            return Err(Report::new(StatePageReadError::RowTooLarge));
-                        }
-                        Some(
-                            scan_executor
-                                .try_reserve(MemoryClass::Bulk, bytes.max(1))
-                                .change_context(StatePageReadError::Admission)?,
-                        )
-                    } else {
-                        None
-                    };
-                    let capacity = max_rows.min(generation.records().len());
-                    let metadata_bytes = capacity
-                        .checked_mul(
-                            std::mem::size_of::<MaterializedGenerationRecord>()
-                                + std::mem::size_of::<std::ops::Range<usize>>(),
-                        )
-                        .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-                    let metadata = scan_executor
-                        .try_reserve(
-                            MemoryClass::Bulk,
-                            u64::try_from(metadata_bytes)
-                                .map_err(|_| Report::new(StatePageReadError::Admission))?
-                                .max(1),
-                        )
-                        .change_context(StatePageReadError::Admission)?;
-                    let mut fingerprint = nervix_crypto::digest::Sha256::new();
-                    fingerprint.update(b"nervix/state-inspection/materialized-metadata");
-                    fingerprint.update(&sources);
-                    if let super::RuntimeState::MaterializedRelay { schema } = &placement.state {
-                        fingerprint.update(schema.as_digest());
-                    }
-
-                    let mut counts = StateInspectionCounts::default();
-                    let mut selected = Vec::with_capacity(capacity);
-                    let start = match after {
-                        Some((_, offset)) => offset,
-                        None => 0,
-                    };
-                    let mut previous_branch = None;
-                    let mut next = start;
-                    let mut selected_bytes = 0_u64;
-                    let mut full = false;
-                    for record in generation.records() {
-                        cancellation
-                            .check()
-                            .change_context(StatePageReadError::Admission)?;
-                        if !runtime.materialized_stream_key_is_visible(
-                            Some(&routing),
-                            &placement,
-                            &record.branch,
-                        ) {
-                            continue;
-                        }
-                        let branch = record.branch.as_ref().map(|branch| branch.fingerprint());
-                        if !match selection {
-                            StateInspectionBranchSelection::All => true,
-                            StateInspectionBranchSelection::Unbranched => branch.is_none(),
-                            StateInspectionBranchSelection::Branch(wanted) => {
-                                branch == Some(wanted)
-                            }
-                        } {
-                            continue;
-                        }
-                        if catalog_requested && let Some(key) = &record.branch {
-                            catalog.insert(key.fingerprint(), key.inherited_origin());
-                        }
-                        if filter.as_ref().is_some_and(|filter| {
-                            branch.is_some_and(|branch| filter.excluded.contains(&branch))
-                        }) {
-                            continue;
-                        }
-                        match branch {
-                            Some(branch) => {
-                                fingerprint.update(&[1]);
-                                fingerprint.update(branch.fingerprint());
-                            }
-                            None => fingerprint.update(&[0]),
-                        }
-                        fingerprint.update(
-                            &record
-                                .row
-                                .metadata()
-                                .ingested_at_low_watermark()
-                                .unix_nanos()
-                                .to_be_bytes(),
-                        );
-                        fingerprint.update(
-                            &record
-                                .row
-                                .metadata()
-                                .ingested_at_high_watermark()
-                                .unix_nanos()
-                                .to_be_bytes(),
-                        );
-                        let index = counts.rows;
-                        let bytes = batch_payload_bytes(
-                            &record.row.batch().batch().slice(record.row.row_index(), 1),
-                        );
-                        counts.rows = counts
-                            .rows
-                            .checked_add(1)
-                            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-                        counts.branches += u64::from(branch.is_some());
-                        counts.bytes = counts
-                            .bytes
-                            .checked_add(bytes)
-                            .ok_or_else(|| Report::new(StatePageReadError::RowTooLarge))?;
-                        if index < start {
-                            previous_branch = branch;
-                            continue;
-                        }
-                        if index == start
-                            && after.is_some_and(|(expected, _)| expected != previous_branch)
-                        {
-                            return Err(Report::new(StatePageReadError::Position));
-                        }
-                        if full || selected.len() == max_rows {
-                            full = true;
-                            continue;
-                        }
-                        let Some(total) = selected_bytes.checked_add(bytes) else {
-                            return Err(Report::new(StatePageReadError::RowTooLarge));
-                        };
-                        if total > max_bytes {
-                            full = true;
-                            continue;
-                        }
-                        selected.push(record.clone());
-                        selected_bytes = total;
-                        previous_branch = branch;
-                        next += 1;
-                    }
-                    if start > counts.rows
-                        || (start == counts.rows
-                            && after.is_some_and(|(expected, _)| expected != previous_branch))
-                    {
-                        return Err(Report::new(StatePageReadError::Position));
-                    }
-                    let selected = MaterializedGeneration::new(
-                        generation.revision(),
-                        generation.fence(),
-                        generation.branch_generation(),
+                executor.charge_nothing(MemoryClass::Bulk),
+                move |_charge, cancellation| {
+                    select_page(
+                        &runtime,
+                        &routing,
+                        &placement,
                         schema,
-                        selected,
-                    );
-                    if filter
-                        .as_ref()
-                        .is_some_and(|filter| filter.catalog != catalog)
-                    {
-                        return Err(Report::new(StatePageReadError::CatalogChanged));
-                    }
-                    Ok(MaterializedStateCapture {
-                        page: MaterializedInspectionPage {
-                            fingerprint: fingerprint.finish(),
-                            counts,
-                            generation: selected,
-                            offset: next,
-                            last_branch: previous_branch,
-                            more: next < counts.rows,
-                            stage,
-                            _metadata: metadata,
-                            _stored: stored,
-                        },
-                        catalog,
-                        _catalog_charge: catalog_charge,
-                    })
+                        &query,
+                        source,
+                        cancellation,
+                    )
                 },
             )
             .await
@@ -481,30 +352,269 @@ impl Runtime {
     }
 }
 
-/// Geometric metadata growth is admitted before allocation. The finite Bulk memory class bounds
-/// captures across branch-local states independently of the selected page length.
+/// Charge `memory` for a page's key catalog, when it is requested, and for the metadata of the most
+/// rows the page selects from `records`, and return that most.
+fn charge_page_metadata(
+    memory: &mut GrowingCharge,
+    records: usize,
+    catalog_requested: bool,
+    max_rows: usize,
+    max_bytes: u64,
+) -> Result<usize, Report<StatePageReadError>> {
+    if catalog_requested {
+        let bytes = records
+            .checked_mul(
+                64 * (std::mem::size_of::<BranchKeyFingerprint>()
+                    + std::mem::size_of::<Option<nervix_models::InheritedPartitionOrigin>>()),
+            )
+            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+        let bytes = u64::try_from(bytes).map_err(|_| Report::new(StatePageReadError::Admission))?;
+        if bytes > max_bytes {
+            return Err(Report::new(StatePageReadError::RowTooLarge));
+        }
+        memory
+            .grow_by(bytes)
+            .change_context(StatePageReadError::Admission)?;
+    }
+    let capacity = max_rows.min(records);
+    let metadata_bytes = capacity
+        .checked_mul(
+            std::mem::size_of::<MaterializedGenerationRecord>()
+                + std::mem::size_of::<std::ops::Range<usize>>(),
+        )
+        .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+    let metadata_bytes =
+        u64::try_from(metadata_bytes).map_err(|_| Report::new(StatePageReadError::Admission))?;
+    memory
+        .grow_by(metadata_bytes)
+        .change_context(StatePageReadError::Admission)?;
+    Ok(capacity)
+}
+
+/// Whether a row of `branch` belongs to the page's branch `selection`.
+fn in_selection(
+    selection: StateInspectionBranchSelection,
+    branch: Option<BranchKeyFingerprint>,
+) -> bool {
+    match selection {
+        StateInspectionBranchSelection::All => true,
+        StateInspectionBranchSelection::Unbranched => branch.is_none(),
+        StateInspectionBranchSelection::Branch(wanted) => branch == Some(wanted),
+    }
+}
+
+/// Add one selected row's branch and ingestion watermarks to the page's metadata fingerprint.
+fn fingerprint_row(
+    fingerprint: &mut nervix_crypto::digest::Sha256,
+    branch: Option<BranchKeyFingerprint>,
+    record: &MaterializedGenerationRecord,
+) {
+    match branch {
+        Some(branch) => {
+            fingerprint.update(&[1]);
+            fingerprint.update(branch.fingerprint());
+        }
+        None => fingerprint.update(&[0]),
+    }
+    fingerprint.update(
+        &record
+            .row
+            .metadata()
+            .ingested_at_low_watermark()
+            .unix_nanos()
+            .to_be_bytes(),
+    );
+    fingerprint.update(
+        &record
+            .row
+            .metadata()
+            .ingested_at_high_watermark()
+            .unix_nanos()
+            .to_be_bytes(),
+    );
+}
+
+/// The last step of a page: select the page's rows from `source`, under its charge.
+fn select_page(
+    runtime: &Runtime,
+    routing: &super::DomainRoutingSnapshot,
+    placement: &super::RuntimeStatePlacement,
+    schema: StdArc<arrow_schema::Schema>,
+    query: &MaterializedPageQuery,
+    source: SelectedSource,
+    cancellation: &nervix_execution::Cancellation,
+) -> Result<MaterializedStateCapture, Report<StatePageReadError>> {
+    let MaterializedPageQuery {
+        unit: _,
+        selection,
+        after,
+        bounds,
+        catalog_requested,
+        filter,
+    } = query;
+    let selection = *selection;
+    let after = *after;
+    let catalog_requested = *catalog_requested;
+    let max_rows = bounds.rows;
+    let max_bytes = bounds.bytes;
+    let SelectedSource {
+        generation,
+        views,
+        mut memory,
+        stored,
+        stage,
+        sources,
+    } = source;
+    let mut catalog = if catalog_requested {
+        nervix_models::StateInspectionKeyCatalog::requested()
+    } else {
+        nervix_models::StateInspectionKeyCatalog::Unrequested
+    };
+    let capacity = charge_page_metadata(
+        &mut memory,
+        generation.records().len(),
+        catalog_requested,
+        max_rows,
+        max_bytes,
+    )?;
+    let mut fingerprint = nervix_crypto::digest::Sha256::new();
+    fingerprint.update(b"nervix/state-inspection/materialized-metadata");
+    fingerprint.update(&sources);
+    if let super::RuntimeState::MaterializedRelay { schema } = &placement.state {
+        fingerprint.update(schema.as_digest());
+    }
+
+    let mut counts = StateInspectionCounts::default();
+    let mut selected = Vec::with_capacity(capacity);
+    let start = match after {
+        Some((_, offset)) => offset,
+        None => 0,
+    };
+    let mut previous_branch = None;
+    let mut next = start;
+    let mut selected_bytes = 0_u64;
+    let mut full = false;
+    for record in generation.records() {
+        cancellation
+            .check()
+            .change_context(StatePageReadError::Admission)?;
+        if !runtime.materialized_stream_key_is_visible(Some(routing), placement, &record.branch) {
+            continue;
+        }
+        let branch = record.branch.as_ref().map(|branch| branch.fingerprint());
+        if !in_selection(selection, branch) {
+            continue;
+        }
+        if catalog_requested && let Some(key) = &record.branch {
+            catalog.insert(key.fingerprint(), key.inherited_origin());
+        }
+        if filter
+            .as_ref()
+            .is_some_and(|filter| branch.is_some_and(|branch| filter.excluded.contains(&branch)))
+        {
+            continue;
+        }
+        fingerprint_row(&mut fingerprint, branch, record);
+        let index = counts.rows;
+        let bytes =
+            batch_payload_bytes(&record.row.batch().batch().slice(record.row.row_index(), 1));
+        counts.rows = counts
+            .rows
+            .checked_add(1)
+            .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
+        counts.branches += u64::from(branch.is_some());
+        counts.bytes = counts
+            .bytes
+            .checked_add(bytes)
+            .ok_or_else(|| Report::new(StatePageReadError::RowTooLarge))?;
+        if index < start {
+            previous_branch = branch;
+            continue;
+        }
+        if index == start && after.is_some_and(|(expected, _)| expected != previous_branch) {
+            return Err(Report::new(StatePageReadError::Position));
+        }
+        if full || selected.len() == max_rows {
+            full = true;
+            continue;
+        }
+        let Some(total) = selected_bytes.checked_add(bytes) else {
+            return Err(Report::new(StatePageReadError::RowTooLarge));
+        };
+        if total > max_bytes {
+            full = true;
+            continue;
+        }
+        selected.push(record.clone());
+        selected_bytes = total;
+        previous_branch = branch;
+        next += 1;
+    }
+    if start > counts.rows
+        || (start == counts.rows && after.is_some_and(|(expected, _)| expected != previous_branch))
+    {
+        return Err(Report::new(StatePageReadError::Position));
+    }
+    let selected = MaterializedGeneration::new(
+        generation.revision(),
+        generation.fence(),
+        generation.branch_generation(),
+        schema,
+        selected,
+    );
+    if filter
+        .as_ref()
+        .is_some_and(|filter| filter.catalog != catalog)
+    {
+        return Err(Report::new(StatePageReadError::CatalogChanged));
+    }
+    // The page keeps only its selected rows; the source's row views go with it.
+    drop(generation);
+    memory.release(views);
+    Ok(MaterializedStateCapture {
+        page: MaterializedInspectionPage {
+            fingerprint: fingerprint.finish(),
+            counts,
+            generation: selected,
+            offset: next,
+            last_branch: previous_branch,
+            more: next < counts.rows,
+            stage,
+            _metadata: memory.into_reservation(),
+            _stored: stored,
+        },
+        catalog,
+    })
+}
+
+/// Geometric metadata growth is counted before allocation, in the page's one charge, and the
+/// bytes counted are returned. The finite Bulk memory class bounds captures across branch-local
+/// states independently of the selected page length.
 fn reserve_views<T>(
     values: &mut Vec<T>,
     additional: usize,
-    charge: &mut Reservation,
-) -> Result<(), Report<StatePageReadError>> {
+    memory: &mut GrowingCharge,
+) -> Result<u64, Report<StatePageReadError>> {
     let length = values
         .len()
         .checked_add(additional)
         .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
     if length <= values.capacity() {
-        return Ok(());
+        return Ok(0);
     }
     let capacity = length
         .checked_next_power_of_two()
         .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
-    let bytes = capacity
+    let grown = capacity
+        .checked_sub(values.capacity())
+        .verified("the next capacity holds more than the current one, which is below the length");
+    let bytes = grown
         .checked_mul(std::mem::size_of::<T>())
         .ok_or_else(|| Report::new(StatePageReadError::Admission))?;
     let bytes = u64::try_from(bytes).map_err(|_| Report::new(StatePageReadError::Admission))?;
-    charge
-        .grow_to(bytes.max(1))
+    memory
+        .grow_by(bytes)
         .change_context(StatePageReadError::Admission)?;
     values.reserve_exact(capacity - values.len());
-    Ok(())
+    Ok(bytes)
 }

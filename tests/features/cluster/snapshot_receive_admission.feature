@@ -1,7 +1,9 @@
 @snapshot_receive_admission @deloxide_stress_restore
 Feature: Snapshot receive decoding under overlapping bulk memory
 
-  Scenario Outline: A snapshot receive refuses overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys
+  # A full bulk class holds a snapshot receive's decoding back until it frees room; nothing refuses
+  # the receive, and the exact checkpoint transfers once the class frees.
+  Scenario Outline: A snapshot receive waits for overlapping decode memory and preserves both branches on <cluster_size> nodes with <key_bytes> byte keys
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
@@ -57,7 +59,7 @@ Feature: Snapshot receive decoding under overlapping bulk memory
     And the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "snapshot.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    And snapshot checkpoints in backup "snapshot.nvxb" refuse overlapping receive memory on node "node-1" and transfer completely after release
+    And snapshot checkpoints in backup "snapshot.nvxb" wait for overlapping receive memory on node "node-1" and transfer completely after release
     And within "60s" every node reserves only the bulk memory the scenario holds
 
     Examples:

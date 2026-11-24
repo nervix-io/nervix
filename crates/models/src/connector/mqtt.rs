@@ -353,7 +353,8 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
-            wait: "retire a refused or downgraded subscription before retrying",
+            wait: "retire a refused or downgraded subscription, or a session its preceding input \
+                   left with another subscription, before subscribing",
             bound: WaitBound::Driver("5 s"),
         },
         DeclaredWait {

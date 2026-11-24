@@ -373,18 +373,21 @@ cannot police import paths, so it keeps only genuinely forbidden types and opera
 - **The bounded executor.** Work off the async workers goes through `nervix-execution` with its CPU
   or storage class, a charged memory class and `Cancellation` checks between bounded units; operator
   code the node cannot bound (UDF calls, JAQ transformations, ONNX model runs) takes the extension
-  class and password hashing the credentials class. A full queue is a temporary condition and never
-  costs data: work a source handed over, with or without an acknowledgement, and every other work
-  no caller waits to be answered about (relay and subscription deliveries, the answer of an
-  interconnect request whose handler already ran, checkpoints and state captures, consensus
-  storage, compilation for a committed change, lifecycle steps) states
-  `QueueAdmission::WaitForPlace`, and its owner holds back whatever feeds it while it waits, lets
-  shutdown and a new quiesce end the wait, and keeps or re-decides the work. Only a request whose
-  caller still holds its input and waits on the answer may be refused, with a typed, retryable busy
-  answer the caller maps to its own outcome, never a decode, encode or authentication failure; the
-  executor's refusing `run_cpu` and `run_storage` serve only such requests. A wait ends in a refusal
-  only once the executor admits no more work, which its owner treats as its own stop. Loss is reserved
-  for cluster disruption ([Planned operations cost backpressure, never
+  class and password hashing the credentials class. Its worker queues and memory classes are
+  backpressure on machine resources, never a reason to refuse work, requests included: every job
+  waits for a place in FIFO order and every charge waits for room. Its owner holds back whatever
+  feeds it while it waits, lets its own limit end the wait (a statement's deadline, a request's
+  lifetime, shutdown, a new quiesce) and keeps or re-decides the work. Admission fails only for an
+  operation larger than its whole class, which no wait could hold, and once the executor admits no
+  more work, which its owner treats as its own stop; `try_reserve` serves only an optional extra,
+  such as a cache, that proceeds without its charge. Nothing waits for room while it holds part of
+  the same class, since a queued charge takes every byte its class frees: an operation takes its
+  whole working set while it holds nothing, as one charge or as an allowance
+  (`Executor::within_allowance`) it draws every charge of that class from without waiting, and a
+  synchronous job that outgrows its charge gives everything back and runs again under the charge it
+  needs (`Executor::run_cpu_growing`). An operation that holds several classes takes them in one
+  order, state-read and restore metadata before bulk. Loss is reserved for cluster disruption
+  ([Planned operations cost backpressure, never
   data](#planned-operations-cost-backpressure-never-data)). `task::spawn_cpu` belongs to the
   executor's worker pools, `spawn_blocking` to its storage workers, and `block_in_place` to no file
   by default. An embedded engine's own parallelism (ONNX Runtime's threads, WASM parallel
@@ -506,7 +509,8 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   permissions, build contracts, and the distinction between API, graph, compiler and execution
   evidence.
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md): hot-path state publication, task or
-  branch ownership, delivery or assignment fences, the typed ratchet's synchronization rule and its
+  branch ownership, which task answers control commands beside data work, delivery or assignment
+  fences, the typed ratchet's synchronization rule and its
   execution contracts, a Shuttle check or Loom model, and the diagnostic mode's deadlock detection
   and its evidence. A change that adds a concurrent map, or changes how often one is reached or what
   disposes of it, also updates `tests/concurrent-map-inventory-ledger.md`.
@@ -589,6 +593,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   product contracts its scenarios verify stay with their own chapters.
 - [Developing Nervix](docs/src/developing-nervix.md#ci-labels): every label that changes what CI
   runs.
+- [Licensing](docs/src/licensing.md): what licensing grants and never limits, what a cluster without
+  a license may do, persistent and ephemeral activations, how a licensed cluster stays licensed and
+  how to obtain a license. The page always describes licensing as it currently is: a change to
+  licensing behavior, the free policy, the condition catalog or a licensing statement updates it in
+  the same change.
 
 ## Language and Model Invariants
 
@@ -781,9 +790,9 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   Callers never choose blocking, yielding, batching, throttling or similar safety behavior unless it
   is an explicit typed part of the operation's contract.
 - Planned operations cost backpressure, never data. A stop, a shutdown, an ownership move or an
-  alteration waits for the work in motion, a payload an ingestor holds while it waits for a place on
-  the bounded executor included, rather than cutting it, and a full queue holds back what feeds it
-  rather than dropping what it was handed.
+  alteration waits for the work in motion, a payload an ingestor holds while it waits for a place or
+  for room on the bounded executor included, rather than cutting it, and a full queue or memory
+  class holds back what feeds it rather than dropping or refusing what it was handed.
 - Backpressure is the one control of data-plane resources, and the data plane has no magic limits.
   What a data-plane path holds, the bookkeeping that keeps its processing correct included (channel
   watermarks, acknowledgement and admission state, outcomes kept for reconciliation), is charged to
@@ -794,6 +803,16 @@ No justification makes an inversion acceptable: not that it is temporary, smalle
   its own captured deadline passes or the cluster is disrupted. An existing limit that loses,
   forgets or refuses work in place of backpressure is a defect recorded on ClickUp, never extended
   or copied.
+- Control commands are answered apart from data-plane work. Commands (lifecycle steps, checkpoints,
+  handoffs, resets, partition-move steps, inspections, stops) are light, rare and time-sensitive;
+  data work is heavy and backpressured. A command never triggers heavy work by blocking the answers
+  to its owner's other commands, and never refuses that work to stay responsive: the heavy work a
+  command needs runs on the owner's data side, and the command is answered when that work completes
+  while the owner keeps answering its other commands. New owners serve the two planes from separate
+  tasks. A loop that still serves both runs the heavy work a command needs as an attempt that runs
+  alone while it makes progress and answers commands beside it while it waits for capacity.
+  [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#control-commands-beside-data-work)
+  owns the rule and names the loops that still serve both planes.
 - In async code, a loop whose body performs async work calls
   `nervix_primitives::task::consume_budget().await` once per iteration, near the top of the body.
 - State that changes for every record, row, batch, remote frame or acknowledgement has exactly one

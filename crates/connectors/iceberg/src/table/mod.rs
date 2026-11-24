@@ -78,8 +78,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_execution::{
-    AdmissionError, Cancellation, CpuClass, Executor, MemoryClass, QueueAdmission, Reservation,
-    StorageClass,
+    AdmissionError, Cancellation, CpuClass, Executor, MemoryClass, Reservation, StorageClass,
 };
 use nervix_models::{
     ClientConfigEntry, EmitterBatchPolicy, IcebergCatalogProperties, IcebergStorageBackend,
@@ -454,30 +453,33 @@ impl IcebergLoadCharge {
         }
     }
 
-    /// The commit failure the class's refusal of this charge becomes. Its description is what the
-    /// emitter shows as its transient error while it retries the commit, which keeps its staged
-    /// files and acknowledgements.
-    fn refused(self, refusal: Report<AdmissionError>) -> Report<EmitterWriteError> {
-        let description = match (refusal.current_context(), self) {
-            (AdmissionError::BudgetExhausted { .. }, Self::Staged { bytes }) => format!(
+    /// What the emitter shows as its transient status while the commit waits for room for this
+    /// charge in a full bulk class.
+    fn waiting(self) -> String {
+        match self {
+            Self::Staged { bytes } => format!(
                 "Iceberg commit waits for room in the bulk memory class for {bytes} staged bytes"
             ),
-            (
-                AdmissionError::BudgetExhausted { .. },
-                Self::WholeClass {
-                    batch_bytes,
-                    capacity,
-                },
-            ) => format!(
+            Self::WholeClass {
+                batch_bytes,
+                capacity,
+            } => format!(
                 "Iceberg commit waits for the whole bulk memory class of {capacity} bytes for a \
                  staged batch of {batch_bytes} bytes"
             ),
-            (
-                AdmissionError::ExceedsBudget { .. }
-                | AdmissionError::BudgetClosed { .. }
-                | AdmissionError::DifferentBudget { .. },
-                _,
-            ) => format!(
+        }
+    }
+
+    /// The commit failure a refusal of this charge becomes: a charge larger than the whole class,
+    /// or a class closed because the node stops. Its description is what the emitter shows as its
+    /// transient error while it retries the commit, which keeps its staged files and
+    /// acknowledgements.
+    fn refused(self, refusal: Report<AdmissionError>) -> Report<EmitterWriteError> {
+        let description = match refusal.current_context() {
+            AdmissionError::BudgetExhausted { .. } => self.waiting(),
+            AdmissionError::ExceedsBudget { .. }
+            | AdmissionError::BudgetClosed { .. }
+            | AdmissionError::DifferentBudget { .. } => format!(
                 "Iceberg commit could not charge the bulk memory class: {}",
                 refusal.current_context()
             ),
@@ -991,9 +993,8 @@ impl IcebergTableEmitter {
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
         let target = target.clone();
         executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation: &Cancellation| {
                     target
@@ -1010,23 +1011,39 @@ impl IcebergTableEmitter {
     /// whether the commit stopped waiting. The reservation comes back with the rows it covers, so
     /// it lasts for as long as the commit holds them.
     ///
-    /// The charge is taken only when the class has room for it now: a place in the class's queue
-    /// would take every byte the class frees until it was satisfied, holding the node's other bulk
-    /// work behind this commit. The read waits for a place among the filesystem workers instead of
-    /// being refused, because nothing could present again the rows the emitter already accepted.
+    /// A full class holds the commit back until it has room: the commit holds nothing of the
+    /// class while it waits, because the previous group's charge ended with its data files, and
+    /// the emitter shows the wait as its transient status, through `host`, until the charge is
+    /// granted. The read waits for a place among the filesystem workers in the same way, because
+    /// nothing could present again the rows the emitter already accepted. Only a charge larger
+    /// than the whole class, or a class closed because the node stops, fails the commit.
     async fn load_group(
         executor: &Executor,
+        host: &EmitterHost,
         schema: StdArc<arrow_schema::Schema>,
         spans: Vec<staging::Span>,
         charge: IcebergLoadCharge,
     ) -> EmitterWriteResult<IcebergLoadedGroup> {
-        let reservation = executor
-            .try_reserve(MemoryClass::Bulk, charge.reserved_bytes())
-            .map_err(|refusal| charge.refused(refusal))?;
+        let reservation = match executor.try_reserve(MemoryClass::Bulk, charge.reserved_bytes()) {
+            Ok(reservation) => reservation,
+            Err(refusal)
+                if matches!(
+                    refusal.current_context(),
+                    AdmissionError::BudgetExhausted { .. }
+                ) =>
+            {
+                host.record_transient_error(charge.waiting(), Duration::ZERO);
+                let granted = executor
+                    .reserve(MemoryClass::Bulk, charge.reserved_bytes())
+                    .await;
+                host.clear_transient_error();
+                granted.map_err(|refusal| charge.refused(refusal))?
+            }
+            Err(refusal) => return Err(charge.refused(refusal)),
+        };
         executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                QueueAdmission::WaitForPlace,
                 reservation,
                 move |reservation, cancellation| {
                     let mut batches = Vec::new();
@@ -1279,9 +1296,8 @@ impl IcebergTableEmitter {
             .await
             .change_context(EmitterWriteError::Publish { connector: ICEBERG })?;
         self.executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Bulk,
-                QueueAdmission::WaitForPlace,
                 reservation,
                 move |_reservation, cancellation| {
                     RowRequestLimits::from(policy).try_divide(projected.num_rows(), |members| {
@@ -1463,6 +1479,7 @@ impl IcebergTableEmitter {
             let spans = Self::staged_spans(&self.staging_files, &unwritten[..group.batches]);
             let IcebergLoadedGroup { batches, charge } = Self::load_group(
                 &self.executor,
+                &self.host,
                 StdArc::clone(&self.staged_schema),
                 spans,
                 group.charge,

@@ -136,3 +136,29 @@ Feature: Control-plane and session settings
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: Configured web console pacing is visible through inspection and announced when a console session opens on a cluster of <cluster_size>
+    Given node-1 starts with session-snapshot-interval = 2s
+    And node-1 starts with web-console-request-timeout = 45s
+    And node-1 starts with web-console-connect-timeout = 4s
+    And node-1 starts with web-console-retry-backoff = 300ms
+    And node-1 starts with web-console-retry-max-backoff = 6s
+    And node-1 starts with web-console-restoration-backoff = 2s
+    And node-1 starts with web-console-restore-frame-capacity = 8
+    And a <cluster_size> node nervix cluster is started
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      DESCRIBE CLUSTER;
+      """
+    Then the last command output contains
+      """
+      web-console-request-timeout=45s web-console-connect-timeout=4s web-console-retry-backoff=300ms web-console-retry-max-backoff=6s web-console-restoration-backoff=2s web-console-restore-frame-capacity=8
+      """
+    And node "node-1" announces session pacing when a console session opens
+      | snapshot_interval | command_retry_validity | web_console_request_timeout | web_console_connect_timeout | web_console_retry_backoff | web_console_retry_max_backoff | web_console_restoration_backoff | web_console_restore_frame_capacity |
+      | 2s                | 15m                    | 45s                         | 4s                          | 300ms                     | 6s                            | 2s                              | 8                                  |
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
