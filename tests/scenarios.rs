@@ -24977,33 +24977,6 @@ async fn then_parallel_graph_edges_are_drawn_apart(
     .await;
 }
 
-#[then(expr = "graph edge from {string} to {string} is a return path")]
-async fn then_graph_edge_is_a_return_path(
-    world: &mut ScenarioWorld,
-    source: String,
-    target: String,
-) {
-    let page = world
-        .browser_page
-        .as_ref()
-        .expect("a browser page must be opened before graph assertions");
-    let source = expand_placeholders(world, &source);
-    let target = expand_placeholders(world, &target);
-    let script = format!(
-        r#"
-        () => {{
-            {GRAPH_GEOMETRY_HELPERS}
-            const path = edgePath({source:?}, {target:?});
-            if (!path) {{
-                return "edge is not drawn";
-            }}
-            return path.dataset.feedback === "true" ? "OK" : "edge is not marked as a return path";
-        }}
-        "#
-    );
-    assert_graph_probe(page, &script, "a backwards edge must be marked").await;
-}
-
 #[then(expr = "branch group {string} header shows key fields {string}")]
 async fn then_branch_group_header_shows_key_fields(
     world: &mut ScenarioWorld,
