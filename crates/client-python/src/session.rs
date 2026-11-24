@@ -18,7 +18,7 @@
 //! collecting it does; a call another thread is in keeps its own share until it returns, so the
 //! release never waits for it, and every later call raises `ClosedError`.
 
-use std::time::Duration;
+use std::{num::NonZeroU32, time::Duration};
 
 use nervix_client_core::{CommandExecutionReference, ConnectOptions, DomainName, SourceSpan};
 use nervix_client_host as host;
@@ -128,6 +128,10 @@ struct Connection<'a> {
     request_timeout: Option<f64>,
     retry_timeout: Option<f64>,
     backup_wait_timeout: Option<f64>,
+    keepalive_interval: Option<f64>,
+    keepalive_timeout: Option<f64>,
+    stream_window_bytes: Option<i64>,
+    connection_window_bytes: Option<i64>,
 }
 
 impl Connection<'_> {
@@ -179,8 +183,25 @@ impl Connection<'_> {
         if let Some(timeout) = self.backup_wait_timeout {
             options.backup_wait_timeout = seconds(py, "backup_wait_timeout", timeout)?;
         }
+        if let Some(interval) = self.keepalive_interval {
+            options.keepalive_interval = seconds(py, "keepalive_interval", interval)?;
+        }
+        if let Some(timeout) = self.keepalive_timeout {
+            options.keepalive_timeout = seconds(py, "keepalive_timeout", timeout)?;
+        }
+        if let Some(bytes) = self.stream_window_bytes {
+            options.stream_window_bytes = window(py, "stream_window_bytes", bytes)?;
+        }
+        if let Some(bytes) = self.connection_window_bytes {
+            options.connection_window_bytes = window(py, "connection_window_bytes", bytes)?;
+        }
         Ok(options)
     }
+}
+
+/// A receive window a host passed in bytes.
+fn window(py: Python<'_>, argument: &'static str, bytes: i64) -> PyResult<NonZeroU32> {
+    host::Session::receive_window(argument, bytes).map_err(|failure| errors::raise(py, failure))
 }
 
 impl Session {
@@ -200,7 +221,8 @@ impl Session {
     /// Opens a session on `server`, blocking until it is open.
     ///
     /// Every option the host leaves out takes the Rust client's default. `seeds` are further
-    /// servers the session may reach, and the timeouts are in seconds.
+    /// servers the session may reach, the timeouts and keepalive values are in seconds, and the
+    /// receive windows in bytes.
     #[new]
     #[pyo3(signature = (
         server,
@@ -215,6 +237,10 @@ impl Session {
         request_timeout = None,
         retry_timeout = None,
         backup_wait_timeout = None,
+        keepalive_interval = None,
+        keepalive_timeout = None,
+        stream_window_bytes = None,
+        connection_window_bytes = None,
         cancel = None,
     ))]
     #[expect(
@@ -234,6 +260,10 @@ impl Session {
         request_timeout: Option<f64>,
         retry_timeout: Option<f64>,
         backup_wait_timeout: Option<f64>,
+        keepalive_interval: Option<f64>,
+        keepalive_timeout: Option<f64>,
+        stream_window_bytes: Option<i64>,
+        connection_window_bytes: Option<i64>,
         cancel: Option<PyRef<'_, Cancel>>,
     ) -> PyResult<Self> {
         let connection = Connection {
@@ -246,6 +276,10 @@ impl Session {
             request_timeout,
             retry_timeout,
             backup_wait_timeout,
+            keepalive_interval,
+            keepalive_timeout,
+            stream_window_bytes,
+            connection_window_bytes,
         };
         let options = connection.options(py)?;
         let cancel = token(cancel.as_ref());

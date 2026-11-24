@@ -589,6 +589,11 @@ keeps the chapter current in the same change. Where areas meet, each chapter kee
   product contracts its scenarios verify stay with their own chapters.
 - [Developing Nervix](docs/src/developing-nervix.md#ci-labels): every label that changes what CI
   runs.
+- [Licensing](docs/src/licensing.md): what licensing grants and never limits, what a cluster without
+  a license may do, persistent and ephemeral activations, how a licensed cluster stays licensed and
+  how to obtain a license. The page always describes licensing as it currently is: a change to
+  licensing behavior, the free policy, the condition catalog or a licensing statement updates it in
+  the same change.
 
 ## Language and Model Invariants
 

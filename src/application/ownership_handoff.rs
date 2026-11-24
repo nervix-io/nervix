@@ -2445,7 +2445,7 @@ impl SessionServiceImpl {
             )?;
 
             let mut schedule_rx = self.inner.consensus.subscribe_schedule();
-            let target_schedule = loop {
+            loop {
                 nervix_primitives::task::consume_budget().await;
                 let schedule = self.inner.consensus.current_schedule().await;
                 let current = schedule.domain(&request.domain).ok_or_else(|| {
@@ -2476,7 +2476,7 @@ impl SessionServiceImpl {
                             request.destination
                         )));
                     }
-                    break current.clone();
+                    break;
                 }
                 if fingerprint != request.base_schedule_fingerprint {
                     return Err(OwnershipHandoffError::schedule(format!(
@@ -2488,16 +2488,11 @@ impl SessionServiceImpl {
                 schedule_rx.changed().await.assured(
                     "the consensus observer retains its schedule sender for the server lifetime",
                 );
-            };
+            }
 
             self.inner
                 .runtime
-                .activate_persisted_ownership_handoff(
-                    self.inner.consensus.local_node_id(),
-                    request,
-                    ExecutionRevision::from_schedule(&target_schedule)
-                        .map_err(|error| OwnershipHandoffError::schedule(format!("{error:#}")))?,
-                )
+                .wait_for_ownership_handoff_activation(request)
                 .await
         };
 

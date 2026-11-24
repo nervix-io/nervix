@@ -65,7 +65,7 @@ pub use clock_event::{
 pub use connect_options::{
     ConnectionOptions, nx_connect_options_add_seed, nx_connect_options_basic_auth,
     nx_connect_options_ca_certificate, nx_connect_options_free, nx_connect_options_new,
-    nx_connect_options_timeout, nx_connect_options_tls_requirement,
+    nx_connect_options_timeout, nx_connect_options_tls_requirement, nx_connect_options_window,
 };
 pub use consumer::{
     nx_consumer_close, nx_consumer_contract, nx_consumer_free, nx_consumer_generation,

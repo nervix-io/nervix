@@ -154,18 +154,19 @@ To keep work on chosen cluster nodes, read [Node Rules](../../../docs/src/placem
 `PREFER NODES WHERE` or `ANY NODE`. Preview the selector with `SHOW NODES WHERE` first. A running
 domain refuses a rule an executing unit would break, and a stopped domain's `START` waits while a
 unit has no admitted node, so tell the user which node must carry the tag.
+For what licensing grants, what a cluster without a license may do and how to obtain a license,
+read [Licensing](../../../docs/src/licensing.md); licensing never limits nodes or domains.
 For activation, refresh, `ROTATE LICENSE CLUSTER KEY`, `RELEASE LICENSE`, `DESCRIBE LICENSE`,
-effective policy, capabilities, credential handling and quota usage, read
+effective policy, capabilities and credential handling, read
 [Node Settings → Cluster Licensing](../../../docs/src/node-settings.md#cluster-licensing) and
 [Licensing Metrics](../../../docs/src/metrics-and-observability.md#licensing-metrics).
-For grace, replacement allowances and over-limit outcomes, also read
+For grace periods, also read
 [Licensing Transition Warnings](../../../docs/src/errors-and-diagnostics.md#licensing-transition-warnings).
-Distinguish the target quota from a temporary recovery allowance when advising growth or replacement.
 For notification freshness, reconnects and polling fallback, use that chapter’s event-stream contract.
 Treat notification hints as requests to obtain a verified decision, never as permissions.
 Keep licensing commands cluster-scoped and obtain credentials and trust provisioning externally;
 Plexus supplies no service-address or trust-anchor override. The same section owns ephemeral
-expiry and the stop gate: an expired ephemeral cluster refuses `START` and new usage until a new
+expiry and the stop gate: an expired ephemeral cluster refuses `START` until a new
 `ACTIVATE LICENSE`, and the domains licensing stopped still need an explicit `START` afterwards.
 For source UUID inspection and restore behavior, read
 [Backup And Restore](../../../docs/src/backup-and-restore.md#what-a-restore-recreates).

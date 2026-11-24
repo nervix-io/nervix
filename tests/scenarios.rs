@@ -1740,6 +1740,26 @@ fn when_stallable_endpoint_resets_its_connections(world: &mut ScenarioWorld, nam
         .reset_connections();
 }
 
+/// Every connection the endpoint holds is reset, and the step returns once each has ended. A
+/// paused endpoint that resumes afterwards forwards nothing a client wrote on those connections,
+/// so a client that gave up on one while the endpoint was paused leaves no trace at the
+/// dependency.
+#[when(expr = "the stallable endpoint {string} resets its connections and each one ends")]
+async fn when_stallable_endpoint_resets_its_connections_and_each_one_ends(
+    world: &mut ScenarioWorld,
+    name: String,
+) {
+    world
+        .stallable_tcp_proxies
+        .get(&name)
+        .unwrap_or_else(|| panic!("stallable endpoint '{name}' is not configured"))
+        .reset_and_wait_for_ends(Duration::from_secs(60))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("the connections stallable endpoint '{name}' reset did not end: {error}")
+        });
+}
+
 /// Stand a stallable endpoint in front of the dependency whose URL placeholder `endpoint` holds,
 /// and record that URL in placeholder `name` with the endpoint's loopback address in place of the
 /// dependency's host and port.
@@ -10535,6 +10555,23 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .stop(address)
         .await
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+/// Stalls the TCP forwarder at `address`: it refuses new connections, and every connection it
+/// carries stays open but passes no further byte either way. A client connected through it sees
+/// its node fall silent without the connection closing, as after a network cut or a frozen host.
+#[when(expr = "the TCP forwarder at {string} stalls its connections")]
+async fn when_the_tcp_forwarder_stalls(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders")
+        .stall(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stall: {error}"));
 }
 
 /// Stops the TCP forwarder at `address` and starts it again `seconds` later. Every session through

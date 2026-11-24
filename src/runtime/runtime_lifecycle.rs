@@ -122,7 +122,7 @@ impl Runtime {
                         base_schedule_fingerprint: persisted.base_schedule_fingerprint,
                         target_schedule_fingerprint: persisted.target_schedule_fingerprint,
                         activation_authorization: super::state_replication::
-                            OwnershipHandoffActivationAuthorization::RecoveredAwaitingRequest,
+                            OwnershipHandoffActivationAuthorization::AuthorizedByCommittedTransition,
                         activation: watch::channel(
                             super::state_replication::OwnershipHandoffActivation::Prepared,
                         )
@@ -150,6 +150,7 @@ impl Runtime {
                 dns,
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),
+                mqtt_session_retirements: DashMap::default(),
                 memory_pressure: MemoryPressurePause::default(),
                 ingestor_statuses: DashMap::default(),
                 ingestor_readiness: DashMap::default(),

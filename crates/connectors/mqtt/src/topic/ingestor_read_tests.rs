@@ -24,9 +24,9 @@ use nervix_primitives::{
 use rumqttc::{Publish, QoS};
 
 use super::{
-    GatherPublishOutcome, MqttReadAheadSettings, MqttTopicIngestor, MqttTopicIngestorError,
-    MqttTopicIngestorMessage, MqttTopicIngestorPlan, MqttTopicIngestorResult,
-    MqttTopicIngestorSettings, PublishRead, PublishReadOutcome,
+    GatherPublishOutcome, MqttReadAheadSettings, MqttSessionRetirement, MqttTopicIngestor,
+    MqttTopicIngestorError, MqttTopicIngestorMessage, MqttTopicIngestorPlan,
+    MqttTopicIngestorResult, MqttTopicIngestorSettings, PublishRead, PublishReadOutcome,
 };
 use crate::topic::{
     ingestor::overflow_fixture::ReadAheadOverflowFixture,
@@ -1493,4 +1493,175 @@ async fn a_downgraded_subscription_retires_its_session_before_another_attempt() 
         !ingestor.needs_resume(),
         "only the accepted replacement becomes ready"
     );
+}
+
+/// Answers the cleanup connection of an instance that retires its session: a clean start, the
+/// declared filter's `UNSUBSCRIBE`, and `DISCONNECT` with session expiry zero.
+async fn answer_retirement(broker: &ScriptedBroker) {
+    let mut cleanup = broker.accept_expiring_session().await;
+    let (packet_type, body) = cleanup.read_packet().await;
+    assert_eq!(
+        packet_type, 10,
+        "retirement unsubscribes the declared filter"
+    );
+    cleanup.write(&[0xb0, 4, body[0], body[1], 0, 0]).await;
+    cleanup.expect_session_expiry_zero().await;
+}
+
+#[nervix_primitives::test]
+async fn an_instance_owing_its_session_a_retirement_retires_it_before_it_first_subscribes() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let retirement = MqttSessionRetirement::outstanding();
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+        .with_first_connection_retirement(retirement.clone());
+    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+
+    let retirement_and_grant = async {
+        answer_retirement(&broker).await;
+        let mut replacement = broker.accept_persistent_session().await;
+        replacement.grant_subscription().await;
+        replacement
+    };
+    let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(ingestor.resume(), retirement_and_grant)
+    })
+    .await
+    .assured("retirement and the first subscription complete within the observation budget");
+    result.assured("the instance subscribes once it retired its session");
+    assert!(!ingestor.needs_resume());
+    assert!(
+        !retirement.is_outstanding(),
+        "a subscribed instance owes its session nothing more"
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_instance_whose_session_owes_no_retirement_subscribes_on_its_first_connection() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let retirement = MqttSessionRetirement::outstanding();
+    retirement.complete();
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+        .with_first_connection_retirement(retirement.clone());
+    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+
+    let grant = async {
+        let mut connection = broker.accept_persistent_session().await;
+        connection.grant_subscription().await;
+        connection
+    };
+    let (result, _connection) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(ingestor.resume(), grant)
+    })
+    .await
+    .assured("the first subscription completes within the observation budget");
+    result.assured("the instance subscribes on its first connection");
+    assert!(!retirement.is_outstanding());
+}
+
+#[nervix_primitives::test]
+async fn a_session_retirement_an_instance_could_not_finish_passes_to_the_next_instance() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let retirement = MqttSessionRetirement::outstanding();
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+        .with_first_connection_retirement(retirement.clone());
+    let mut first = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+
+    // The broker closes the cleanup connection before CONNACK, so the session may still hold the
+    // preceding subscription.
+    let closed = async {
+        let _connection = broker.accept_without_reply().await;
+    };
+    let (result, ()) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(first.resume(), closed)
+    })
+    .await
+    .assured("the failed cleanup ends within the observation budget");
+    assert!(
+        result.is_err(),
+        "a peer that closes before CONNACK cannot confirm retirement"
+    );
+    assert!(retirement.is_outstanding());
+    first
+        .close()
+        .await
+        .assured("closing an instance always succeeds");
+
+    let mut next = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+    assert!(matches!(
+        next.connection,
+        super::MqttIngestorConnection::RetiringSubscription
+    ));
+    let retirement_and_grant = async {
+        answer_retirement(&broker).await;
+        let mut replacement = broker.accept_persistent_session().await;
+        replacement.grant_subscription().await;
+        replacement
+    };
+    let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(next.resume(), retirement_and_grant)
+    })
+    .await
+    .assured("retirement and the subscription complete within the observation budget");
+    result.assured("the next instance retires the session and subscribes");
+    assert!(!retirement.is_outstanding());
+}
+
+#[nervix_primitives::test]
+async fn a_subscription_setup_lost_after_retirement_retires_the_session_again() {
+    let fixture = DnsFixture::start().await;
+    let broker = ScriptedBroker::start().await;
+    let retirement = MqttSessionRetirement::outstanding();
+    let plan = acknowledged_plan(&broker.addr(), fixture.dns.clone(), NonZeroU64::MIN)
+        .with_first_connection_retirement(retirement.clone());
+    let mut ingestor = MqttTopicIngestor::open(&plan, 0)
+        .await
+        .assured("opening does not connect");
+
+    // The persistent connection that follows the retirement ends before SUBACK, after its
+    // connection created a session that may hold no subscription.
+    let retirement_then_lost_setup = async {
+        answer_retirement(&broker).await;
+        let mut replacement = broker.accept_persistent_session().await;
+        let (packet_type, _) = replacement.read_packet().await;
+        assert_eq!(packet_type, 8, "the instance subscribes its filter");
+    };
+    let (result, ()) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(ingestor.resume(), retirement_then_lost_setup)
+    })
+    .await
+    .assured("the lost setup ends within the observation budget");
+    assert!(
+        result.is_err(),
+        "a setup that ends without SUBACK fails the resume"
+    );
+    assert!(retirement.is_outstanding());
+    assert!(matches!(
+        ingestor.connection,
+        super::MqttIngestorConnection::RetiringSubscription
+    ));
+
+    let retirement_and_grant = async {
+        answer_retirement(&broker).await;
+        let mut replacement = broker.accept_persistent_session().await;
+        replacement.grant_subscription().await;
+        replacement
+    };
+    let (result, _replacement) = timeout(OBSERVATION_BUDGET, async {
+        tokio::join!(ingestor.resume(), retirement_and_grant)
+    })
+    .await
+    .assured("retirement and the subscription complete within the observation budget");
+    result.assured("the instance retires the session again and subscribes");
+    assert!(!retirement.is_outstanding());
 }

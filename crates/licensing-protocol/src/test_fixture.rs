@@ -44,6 +44,11 @@ pub fn id(value: u128) -> Uuid {
         .into_uuid()
 }
 
+/// A cluster quota name no catalog declares. Licensing limits no base feature and the current
+/// catalog declares no cluster quota, so transition documents and impact arithmetic, whose meaning
+/// does not depend on the catalog, name this one.
+pub const FIXTURE_QUOTA: &str = "fixture.quota";
+
 pub fn signer() -> DocumentSigner {
     let private = EcdsaP256KeyPair::generate_pkcs8().assured("AWS-LC generates a fixture key");
     DocumentSigner::from_pkcs8(private.as_ref())
@@ -60,7 +65,7 @@ pub fn fixture_transition(trigger: TransitionTrigger) -> Transition {
         trigger,
         reason: TransitionReason::PlanChanged,
         affected: vec![AffectedQuota {
-            condition: CLUSTER_NODES.to_owned(),
+            condition: FIXTURE_QUOTA.to_owned(),
             previous: Quota::Unlimited,
             target: Quota::Bounded { value: 3 },
             usage: 7,

@@ -265,24 +265,24 @@ fn an_explicit_management_budget_below_one_consensus_vote_is_refused() {
             class: "management",
             operation: "consensus vote or metadata write",
             budget: ByteUnit::Kibibyte(128).as_u64(),
-            required: ByteUnit::Kibibyte(256).as_u64(),
+            required: ByteUnit::Kibibyte(272).as_u64(),
         }
     );
     assert_eq!(
         error.current_context().to_string(),
         "the management memory budget of 131072 bytes cannot hold its largest consensus vote or \
-         metadata write of 262144 bytes"
+         metadata write of 278528 bytes"
     );
     let floor = resolve(
         ExecutionOverrides {
-            management_memory_bytes: Some(ByteUnit::Kibibyte(256)),
+            management_memory_bytes: Some(ByteUnit::Kibibyte(272)),
             ..Default::default()
         },
         8,
     );
     assert_eq!(
         *floor.management_memory_bytes.value(),
-        ByteUnit::Kibibyte(256)
+        ByteUnit::Kibibyte(272)
     );
 }
 
@@ -293,7 +293,7 @@ fn a_derived_management_budget_keeps_one_consensus_vote() {
     let small = NonZeroU64::new(ByteUnit::Mebibyte(16).as_u64());
     assert_eq!(
         ManagementMemory::default_value(&small),
-        ByteUnit::Kibibyte(256)
+        ByteUnit::Kibibyte(272)
     );
     let error =
         ExecutionSettings::resolve(ExecutionOverrides::default(), NonZeroU64::new(8), small)

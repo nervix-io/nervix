@@ -43,6 +43,7 @@ Feature: Server command-line values
       | --clock-skew-tolerance          | 0s    | clock-skew-tolerance (0ns) must be at least 1ms                                              |
       | --memory-limit                  | 0B    | memory-limit must be greater than zero                                                       |
       | --otel-trace-export-batch-spans | 4096  | otel-trace-export-batch-spans (4096) must not exceed otel-trace-queue-capacity (2048)        |
+      | --web-console-retry-max-backoff | 100ms | web-console-retry-max-backoff (100ms) must be at least web-console-retry-backoff (250ms)     |
 
   Scenario: A node refuses an empty trace collector endpoint and names the option
     When a nervix-server process is started with command-line option "--otel-otlp-endpoint" set to ""

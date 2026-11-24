@@ -12,60 +12,6 @@ use super::*;
 use crate::{StateMachineData, cluster_identity, durable_batch::DurableBatch};
 
 #[test]
-fn committed_domain_admission_serializes_competing_creates_and_preserves_updates() {
-    use nervix_licensing_vocabulary::{LicensingRefusal, Quota, QuotaName};
-
-    use crate::{
-        ConsensusCommand, ConsensusConflict, ConsensusResponse, Proposer, apply_consensus_command,
-    };
-
-    let quota = Quota::Bounded { value: 1 };
-    let command = |name: &str| ConsensusCommand::PutDomain {
-        domain: Box::new(crate::tests::running_domain_state(name)),
-        mutation: None,
-        domain_quota: quota,
-    };
-    let mut state = StateMachineData::default();
-    // Both planners saw zero domains. Only the first durable effect may consume the last slot.
-    assert!(super::admit_domain(&state, quota, false).is_ok());
-    assert!(super::admit_domain(&state, quota, false).is_ok());
-    assert_eq!(
-        apply_consensus_command(&mut state, &command("first")).response,
-        ConsensusResponse::Applied
-    );
-    let result = apply_consensus_command(&mut state, &command("second"));
-    let refusal = LicensingRefusal {
-        state: nervix_licensing_vocabulary::AdmissionState::OverLimit,
-        condition: QuotaName::ClusterDomains,
-        limit: 1,
-        current_usage: 1,
-        requested: 1,
-    };
-    assert_eq!(
-        result.response,
-        ConsensusResponse::Conflict(ConsensusConflict::LicensingQuota { refusal })
-    );
-    assert!(!result.domains_changed);
-    assert_eq!(state.domains.len(), 1);
-    let report = Proposer::applied_response(result.response).unwrap_err();
-    assert_eq!(report.downcast_ref::<LicensingRefusal>(), Some(&refusal));
-    let rendered = format!("{report:#}");
-    assert_eq!(
-        rendered
-            .matches("licensing quota 'cluster.domains'")
-            .count(),
-        1
-    );
-    assert_eq!(crate::ConsensusError::report_message(&report), rendered);
-    // A lifecycle update does not occupy another slot, even at the limit.
-    assert_eq!(
-        apply_consensus_command(&mut state, &command("first")).response,
-        ConsensusResponse::Applied
-    );
-    assert_eq!(state.domains.len(), 1);
-}
-
-#[test]
 fn identity_installation_installs_and_retains_one_free_record() {
     let first = cluster_identity::tests::candidate(0x11);
     let mut state = StateMachineData::default();
@@ -232,20 +178,13 @@ fn generated_committed_transitions(arbitrary: &mut Arbitrary<'_>) -> CommittedLi
             committed.insert_pending(transition, until);
         }
     }
-    let nodes = (0..arbitrary.entropy().count(3))
-        .map(|_| arbitrary.rule_name())
-        .collect();
-    committed.protect_nodes(&nodes);
     committed
 }
 
 pub(crate) fn generated_transitions(
     arbitrary: &mut Arbitrary<'_>,
 ) -> Vec<nervix_licensing_protocol::documents::Transition> {
-    use nervix_licensing_protocol::{
-        conditions::{CLUSTER_DOMAINS, Quota},
-        documents::*,
-    };
+    use nervix_licensing_protocol::{conditions::Quota, documents::*, test_fixture::FIXTURE_QUOTA};
     let mut transitions = Vec::new();
     for index in 0..arbitrary.entropy().count(3) {
         let started_at = arbitrary
@@ -267,7 +206,7 @@ pub(crate) fn generated_transitions(
             trigger: TransitionTrigger::Release { request_id },
             reason: TransitionReason::Released,
             affected: vec![AffectedQuota {
-                condition: CLUSTER_DOMAINS.to_owned(),
+                condition: FIXTURE_QUOTA.to_owned(),
                 previous: Quota::Unlimited,
                 target: Quota::Bounded { value: 0 },
                 usage: arbitrary.entropy().between(1..=u64::MAX),

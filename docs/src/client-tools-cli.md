@@ -88,6 +88,10 @@ name with underscores. The typed native client definitions supply both help and 
 | `--request-frame-capacity` | 32 | queued outbound request frames of one session |
 | `--notice-capacity` | 128 | server notices retained until they are read |
 | `--notice-bytes` | 1048576 (1 MiB) | bytes of server notices retained until they are read, each notice charged its text and in-memory header |
+| `--keepalive-interval` | 30 s | how long a connection with a call open may go without hearing from the node before the CLI pings it |
+| `--keepalive-timeout` | 20 s | how long that ping may go unanswered before the connection is treated as lost and recovered |
+| `--stream-window-bytes` | 2097152 | bytes of one call the node may send before the CLI reads them |
+| `--connection-window-bytes` | 5242880 | bytes of all calls on one connection the node may send before the CLI reads them |
 
 The server reports every request the CLI sends while it still serves it, four times per the shorter
 of the request and call timeouts and at least every 100 milliseconds, and each report starts both
@@ -99,10 +103,12 @@ report arrived.
 Durations accept one millisecond through 24 hours. Neither backoff base, `--retry-backoff` or
 `--restoration-backoff`, can exceed its ceiling. Capacities must be positive, fit the native
 channel bound and produce addressable aggregate byte and record limits; the notice byte bound must
-be positive. Validation happens before connection or credential prompting. Increasing a capacity
-permits more retained memory; it does not change wire-frame limits or server policy. Overflow still
-ends only the affected subscription with `ConsumerOverflow`, preserving other events. A notice that
-does not fit the notice bounds drops the notices held, and the next read reports that gap.
+be positive. A stream window takes 1 through 2,147,483,647 bytes, and a connection window 65,535,
+the window every HTTP/2 connection starts with, through 2,147,483,647 bytes. Validation happens
+before connection or credential prompting. Increasing a capacity or a window permits more retained
+memory; it does not change wire-frame limits or server policy. Overflow still ends only the
+affected subscription with `ConsumerOverflow`, preserving other events. A notice that does not fit
+the notice bounds drops the notices held, and the next read reports that gap.
 
 A call that is redirected or waits for an election is sent again at most as many times as its
 budget holds waits of `--retry-backoff`: the budget is `--retry-timeout`, or `--backup-wait-timeout`
