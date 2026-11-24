@@ -119,11 +119,11 @@ pub use settings::{
     BulkChunkBytes, BulkReceiveWindow, BulkReceiveWindowError, ConcurrentHandshakes,
     ConnectionReceiveWindow, ConnectionSetupTimeout, DuplexSetupDeadline,
     HTTP2_INITIAL_CONNECTION_WINDOW_BYTES, IncomingQueueCapacity, InterconnectLiveness,
-    MAX_HTTP2_WINDOW_BYTES, MaxPeers, MaxReconnectBackoff, PeerReceiveOverrides,
-    PeerReceiveSettings, PeerReceiveSettingsError, PingInterval, PingTimeout, ProgressTimeout,
-    ReconnectBackoff, ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention,
-    RelayDecodedBytes, RequestDeadline, RequestQuota, RequestTimeout, StreamReceiveWindow,
-    TransportSettingValues, TransportSettings, TransportSettingsError,
+    MAX_HTTP2_WINDOW_BYTES, MaxReconnectBackoff, PeerReceiveOverrides, PeerReceiveSettings,
+    PeerReceiveSettingsError, PingInterval, PingTimeout, ProgressTimeout, ReconnectBackoff,
+    ReconnectJitterPermille, RelayBatchBytes, RelayChannelRetention, RelayDecodedBytes,
+    RequestDeadline, RequestTimeout, StreamReceiveWindow, TransportSettingValues,
+    TransportSettings, TransportSettingsError,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
@@ -156,14 +156,8 @@ pub struct TransportOptions {
     pub accept_retry_delay: nervix_models::Setting<AcceptRetryDelay>,
     /// Explicit receiver claims; absence derives each limit from the supplied executor.
     pub peer_receive: Option<settings::PeerReceiveSettings>,
-    pub max_peers: usize,
-    pub max_connections: usize,
     pub max_concurrent_handshakes: usize,
     pub incoming_queue_capacity: usize,
-    pub request_quota: usize,
-    pub append_request_quota: usize,
-    pub completion_request_quota: usize,
-    pub max_concurrent_health_probes: usize,
     /// The HTTP/2 receive windows of every pool but bulk: what one stream, and one connection,
     /// may receive before its reader returns any of it.
     pub initial_stream_window_bytes: u32,
@@ -237,17 +231,8 @@ impl TransportOptions {
             .change_context(TransportError::Settings));
         }
         let nonzero = [
-            (self.max_peers, "max_peers"),
-            (self.max_connections, "max_connections"),
             (self.max_concurrent_handshakes, "max_concurrent_handshakes"),
             (self.incoming_queue_capacity, "incoming_queue_capacity"),
-            (self.request_quota, "request_quota"),
-            (self.append_request_quota, "append_request_quota"),
-            (self.completion_request_quota, "completion_request_quota"),
-            (
-                self.max_concurrent_health_probes,
-                "max_concurrent_health_probes",
-            ),
         ];
         for (value, name) in nonzero {
             if value == 0 {
@@ -262,29 +247,6 @@ impl TransportOptions {
         {
             return Err(Report::new(TransportError::InvalidOptions {
                 reason: "HTTP/2 windows and header limit must be greater than zero".to_string(),
-            }));
-        }
-        let preconnected_connections = self
-            .max_peers
-            .checked_mul(PoolClass::preconnected_connections_per_peer())
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "max_peers cannot be represented for every preconnected pool slot"
-                    .to_string(),
-            })?;
-        let preconnected_connections =
-            preconnected_connections.checked_mul(2).ok_or_else(|| {
-                TransportError::InvalidOptions {
-                    reason: "max_peers cannot be represented as inbound and outbound preconnected \
-                             pools"
-                        .to_string(),
-                }
-            })?;
-        if self.max_connections <= preconnected_connections {
-            return Err(Report::new(TransportError::InvalidOptions {
-                reason: "max_connections must reserve inbound and outbound management, command, \
-                         replication, and relay capacity for every peer and at least one \
-                         on-demand connection"
-                    .to_string(),
             }));
         }
         if self.connection_setup_timeout.is_zero()
@@ -1328,13 +1290,9 @@ impl Transport {
 
     /// Add one discovered peer at its advertised endpoint. Every pool connection still verifies
     /// that its certificate names `node_id` and the endpoint's host before the target becomes
-    /// usable.
-    pub fn register_outbound_target(
-        &self,
-        node_id: ClusterNodeName,
-        endpoint: NodeEndpoint,
-    ) -> Result<(), Report<TransportError>> {
-        self.inner.register_outbound_target(node_id, endpoint)
+    /// usable. No count limits the peers a transport dials, so registering always succeeds.
+    pub fn register_outbound_target(&self, node_id: ClusterNodeName, endpoint: NodeEndpoint) {
+        self.inner.register_outbound_target(node_id, endpoint);
     }
 
     /// Reports whether every outbound pool except bulk is ready for node traffic.

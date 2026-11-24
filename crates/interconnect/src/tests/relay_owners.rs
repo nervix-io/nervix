@@ -16,12 +16,10 @@ async fn remote_relay_frame_cost() {
     use sorted_vec::SortedVec;
 
     let mut pair = connected_transports().await;
-    pair.transport_b
-        .register_outbound_target(
-            pair.node_a.clone(),
-            NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
-        )
-        .assured("the terminal ACK has a reverse authenticated route");
+    pair.transport_b.register_outbound_target(
+        pair.node_a.clone(),
+        NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
+    );
     let schema = StdArc::new(Schema::new(vec![Field::new(
         "value",
         DataType::Int32,
@@ -287,12 +285,10 @@ async fn a_receiver_charges_every_channel_watermark_until_its_retention_passes()
     };
     let timing = one_second_timing();
     let mut pair = connected_transports_with_options(options).await;
-    pair.transport_b
-        .register_outbound_target(
-            pair.node_a.clone(),
-            NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
-        )
-        .assured("the terminal outcome has a reverse authenticated route");
+    pair.transport_b.register_outbound_target(
+        pair.node_a.clone(),
+        NodeEndpoint::new("localhost", pair.transport_a.local_addr().port()),
+    );
     for channel in 1..=6_u8 {
         let delivery = RelayDelivery {
             channel_incarnation: [channel; 16],

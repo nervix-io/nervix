@@ -61,8 +61,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
     )
 )]
 pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
-    0x7a, 0x17, 0xe7, 0x87, 0xbc, 0xc3, 0x5c, 0x7a, 0x6f, 0xf7, 0xef, 0x15, 0xd9, 0xe2, 0x1e, 0xdf,
-    0x66, 0xbd, 0x3b, 0x2a, 0x8a, 0x08, 0xa7, 0x31, 0xf0, 0xdb, 0x8e, 0x65, 0xed, 0x14, 0x85, 0xaf,
+    0x33, 0xce, 0xce, 0x42, 0x4d, 0x51, 0x68, 0x8b, 0x4c, 0xed, 0x22, 0x10, 0xf5, 0x9a, 0x5c, 0x3f,
+    0x83, 0xe4, 0x42, 0x05, 0x85, 0x8a, 0xf9, 0x18, 0x61, 0xcc, 0x1b, 0x51, 0x55, 0x1a, 0x4e, 0x2d,
 ]);
 
 /// The first message of every connection: who dials, for which pool, and everything the dialing
@@ -317,9 +317,10 @@ where
 }
 
 /// Encode a stream request's envelope, which copies the payload it nests. The caller gives the
-/// payload's own charge back first, so the encoding never waits for room while holding it; the
-/// request's outbound admission bounds the nested payload until the encoding's charge covers its
-/// copy. An output its class has no room for now waits for room while holding nothing.
+/// payload's own charge back first, so the encoding never waits for room while holding it. The
+/// request's place in the incoming queue bounds the nested payload until the encoding's charge
+/// covers its copy, or, for a request of a reserved kind, the stream it leased before encoding its
+/// payload. An output its class has no room for now waits for room while holding nothing.
 pub(crate) async fn encode_stream_request(
     executor: &Executor,
     envelope: crate::request::StreamRequestEnvelope,
@@ -516,7 +517,9 @@ where
 /// because cancellation can end its caller before a submitted CPU job exits, and one for the decoded
 /// value: both as one charge, waited for while the caller holds nothing of the class. A caller
 /// therefore gives back the charge of the envelope that carried the payload before it decodes it,
-/// and the request's admission bounds the payload until this charge covers it.
+/// and the request's own bound covers the payload until this charge does. A request this node
+/// sends keeps its place in the incoming queue until its answer is decoded, or, for a reserved
+/// kind, its stream. A request it serves keeps its stream open until its handler answers.
 pub(crate) async fn decode_rkyv_payload<T>(
     executor: &Executor,
     class: MemoryClass,

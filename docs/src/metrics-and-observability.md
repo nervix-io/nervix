@@ -400,8 +400,9 @@ Transport pools:
   differs, or a timing is outside the bound two nodes may hold apart
 - `nervix_interconnect_stream_resets_total`: streams that ended without a result, by `class` and
   `reason`, where `reason` is `deadline`, `capacity`, `peer`, `shutdown`, or `malformed`
-- `nervix_interconnect_quota_failures_total`: requests refused because their reserved subquota was
-  full, by `direction` and `operation`
+- `nervix_interconnect_quota_failures_total`: requests refused because every place of the shared
+  admission queue was held, by `direction` and `operation`; a request of a reserved subquota waits
+  for a stream slot instead, so only `operation="shared"` counts refusals
 - `nervix_interconnect_requests_total` and `nervix_interconnect_request_seconds_total`: typed
   requests completed and the round trip they took, by `operation`. Divide the seconds by the count
   for average latency; `operation="liveness"` is the peer health probe, so that ratio is health

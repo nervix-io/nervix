@@ -2,7 +2,7 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Deadlines, reserved request quotas, handler dispatch, response validation, and
+//! - **Owns.** Deadlines, request admission, handler dispatch, response validation, and
 //!   membership cancellation for typed internal requests.
 //! - **Depends on.** The authenticated HTTP/2 transport and rkyv payload vocabulary.
 //! - **Must not know.** The runtime meaning of a request or response.
@@ -21,7 +21,7 @@ use ahash::HashMap;
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity, DomainClockAuthorityRevision,
@@ -29,7 +29,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
-    sync::{Arc, Notify, OwnedSemaphorePermit, Semaphore, StdArc},
+    sync::{Arc, Notify, StdArc},
     time::{Instant, timeout},
 };
 use rkyv::{
@@ -39,7 +39,7 @@ use rkyv::{
     ser::allocator::ArenaHandle,
     util::AlignedVec,
 };
-use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
+use strum::{AsRefStr, EnumCount, EnumIter};
 use thiserror::Error;
 
 use super::{
@@ -56,6 +56,7 @@ use crate::{
     connection::{
         ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSender,
         EncodedMessage, FrameReader, OutboundByteStreamRequest, PeerProcessFence, RawDuplexRequest,
+        StreamLease,
     },
     observation::{ConnectionDirection, RequestOutcome, TransportObservations},
 };
@@ -886,6 +887,45 @@ pub enum RequestError {
 }
 
 impl RequestError {
+    /// The request failure a control request's transport failure means.
+    pub(crate) fn control_with_cause(
+        cause: Report<super::TransportError>,
+        node: &ClusterNodeName,
+        request: &'static str,
+        timeout: Duration,
+    ) -> Report<Self> {
+        let request_error = match cause.current_context() {
+            super::TransportError::PeerProcessChanged {
+                expected, actual, ..
+            } => Self::PeerProcessChanged {
+                node: node.clone(),
+                request,
+                expected: *expected,
+                actual: *actual,
+            },
+            super::TransportError::ShuttingDown => Self::ShuttingDown {
+                node: node.clone(),
+                request,
+            },
+            super::TransportError::RequestTimeout { .. }
+            | super::TransportError::ProgressTimeout { .. } => Self::Timeout {
+                node: node.clone(),
+                request,
+                timeout,
+            },
+            super::TransportError::PoolExhausted => Self::ConnectionCapacityExhausted {
+                node: node.clone(),
+                request,
+            },
+            cause => Self::Transport {
+                node: node.clone(),
+                request,
+                reason: cause.to_string(),
+            },
+        };
+        cause.change_context(request_error)
+    }
+
     pub(crate) fn stream_with_cause<C: error_stack::Context>(
         cause: Report<C>,
         node: ClusterNodeName,
@@ -1016,6 +1056,11 @@ impl HandlerTable {
     }
 }
 
+mod admissions;
+
+pub(crate) use admissions::RequestAdmission;
+use admissions::RequestAdmissions;
+
 pub(crate) struct RequestState {
     /// Registration publishes a complete replacement table, so dispatch reads it without a lock.
     handlers: ArcSwap<HandlerTable>,
@@ -1023,93 +1068,13 @@ pub(crate) struct RequestState {
     /// target counts as live so bootstrap discovery can reach its peers.
     live_nodes: ArcSwapOption<BTreeSet<ClusterNodeName>>,
     membership_changed: Notify,
-    outbound: RequestQuotas,
-    inbound: RequestQuotas,
+    /// The admission of the requests this node sends.
+    outbound: Arc<RequestAdmissions>,
+    /// The admission of the requests this node serves.
+    inbound: Arc<RequestAdmissions>,
     /// The same observations the transport records connection and relay events into, so a node
     /// reports one view of what its pools carried.
     observations: Arc<TransportObservations>,
-}
-
-pub(crate) struct RequestAdmission {
-    _permit: OwnedSemaphorePermit,
-}
-
-struct RequestQuotas {
-    shared: StdArc<Semaphore>,
-    append: StdArc<Semaphore>,
-    resource: StdArc<Semaphore>,
-    snapshot: StdArc<Semaphore>,
-    discovery: StdArc<Semaphore>,
-    liveness: StdArc<Semaphore>,
-    progress: StdArc<Semaphore>,
-    admission: StdArc<Semaphore>,
-    cancellation: StdArc<Semaphore>,
-    terminal: StdArc<Semaphore>,
-    /// What each subquota was built with, so the requests in flight can be read back out of the
-    /// permits the subquota is currently holding.
-    capacities: [usize; RequestSubquota::COUNT],
-}
-
-impl RequestQuotas {
-    fn new(options: &crate::TransportOptions) -> Self {
-        let capacity = options.incoming_queue_capacity;
-        // Each reserve is independent; a full general queue never consumes liveness or completion.
-        let standard = options.request_quota.min(capacity).max(1);
-        let append = options.append_request_quota.min(capacity).max(1);
-        let completion = options.completion_request_quota.min(capacity).max(1);
-        let liveness = options.max_concurrent_health_probes;
-        Self {
-            shared: StdArc::new(Semaphore::new(capacity)),
-            append: StdArc::new(Semaphore::new(append)),
-            resource: StdArc::new(Semaphore::new(standard)),
-            snapshot: StdArc::new(Semaphore::new(standard)),
-            discovery: StdArc::new(Semaphore::new(standard)),
-            liveness: StdArc::new(Semaphore::new(liveness)),
-            progress: StdArc::new(Semaphore::new(standard)),
-            admission: StdArc::new(Semaphore::new(standard)),
-            cancellation: StdArc::new(Semaphore::new(completion)),
-            terminal: StdArc::new(Semaphore::new(completion)),
-            capacities: [
-                capacity, append, standard, standard, standard, liveness, standard, standard,
-                completion, completion,
-            ],
-        }
-    }
-
-    fn for_subquota(&self, subquota: RequestSubquota) -> &StdArc<Semaphore> {
-        match subquota {
-            RequestSubquota::Shared => &self.shared,
-            RequestSubquota::Append => &self.append,
-            RequestSubquota::Resource => &self.resource,
-            RequestSubquota::Snapshot => &self.snapshot,
-            RequestSubquota::Discovery => &self.discovery,
-            RequestSubquota::Liveness => &self.liveness,
-            RequestSubquota::Progress => &self.progress,
-            RequestSubquota::Admission => &self.admission,
-            RequestSubquota::Cancellation => &self.cancellation,
-            RequestSubquota::Terminal => &self.terminal,
-        }
-    }
-
-    fn try_admit(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        let permit = StdArc::clone(self.for_subquota(subquota))
-            .try_acquire_owned()
-            .ok()?;
-        Some(RequestAdmission { _permit: permit })
-    }
-
-    /// Requests admitted into each subquota and not yet resolved.
-    fn in_flight(&self) -> [usize; RequestSubquota::COUNT] {
-        let mut pending = [0_usize; RequestSubquota::COUNT];
-        for subquota in RequestSubquota::iter() {
-            let capacity = self.capacities[subquota.index()];
-            let available = self.for_subquota(subquota).available_permits();
-            pending[subquota.index()] = capacity.checked_sub(available).verified(
-                "subquota permits are only taken and returned by the requests this node admitted",
-            );
-        }
-        pending
-    }
 }
 
 fn subquota_belongs_to_class(subquota: RequestSubquota, class: PoolClass) -> bool {
@@ -1135,14 +1100,14 @@ impl RequestState {
             handlers: ArcSwap::from_pointee(HandlerTable::default()),
             live_nodes: ArcSwapOption::empty(),
             membership_changed: Notify::new(),
-            outbound: RequestQuotas::new(options),
-            inbound: RequestQuotas::new(options),
+            outbound: Arc::new(RequestAdmissions::new(options)),
+            inbound: Arc::new(RequestAdmissions::new(options)),
             observations,
         }
     }
 
     pub(crate) fn try_admit_outbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        let admitted = self.outbound.try_admit(subquota);
+        let admitted = RequestAdmissions::try_admit(&self.outbound, subquota);
         if admitted.is_none() {
             self.observations
                 .quota_failure(ConnectionDirection::Outbound, subquota);
@@ -1151,7 +1116,7 @@ impl RequestState {
     }
 
     fn try_admit_inbound(&self, subquota: RequestSubquota) -> Option<RequestAdmission> {
-        let admitted = self.inbound.try_admit(subquota);
+        let admitted = RequestAdmissions::try_admit(&self.inbound, subquota);
         if admitted.is_none() {
             self.observations
                 .quota_failure(ConnectionDirection::Inbound, subquota);
@@ -1941,6 +1906,48 @@ impl Transport {
         Ok(())
     }
 
+    /// Leases the stream a control request `M` exchanges on, by `deadline`.
+    async fn lease_control_stream<M, F>(
+        &self,
+        node: &ClusterNodeName,
+        deadline: Instant,
+        fence: F,
+        timeout_duration: Duration,
+    ) -> Result<StreamLease, Report<RequestError>>
+    where
+        M: InterconnectRequest,
+        F: PeerProcessFence,
+    {
+        self.inner
+            .lease_control(node, M::CLASS, M::SUBQUOTA, deadline, fence)
+            .await
+            .map_err(|error| {
+                RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
+            })
+    }
+
+    /// Leases the stream a byte-stream request `M` opens on, by a deadline `timeout` from now, and
+    /// returns the stream with that deadline.
+    async fn lease_byte_stream<M>(
+        &self,
+        node: &ClusterNodeName,
+        timeout: Duration,
+    ) -> Result<(StreamLease, Instant), Report<RequestError>>
+    where
+        M: InterconnectStreamRequest,
+    {
+        let deadline = self
+            .inner
+            .request_deadline(timeout)
+            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))?;
+        let lease = self
+            .inner
+            .lease(node, M::CLASS, M::SUBQUOTA, deadline)
+            .await
+            .map_err(|error| RequestError::stream_with_cause(error, node.clone(), M::NAME))?;
+        Ok((lease, deadline))
+    }
+
     pub async fn request_stream<M>(
         &self,
         node: &ClusterNodeName,
@@ -1985,6 +1992,16 @@ impl Transport {
                     subquota: M::SUBQUOTA,
                 })
             })?;
+        // The payload's copy goes uncharged while the envelope's encoding waits for room. A request
+        // holding a place of the incoming queue is bounded by that place and leases its stream once
+        // its body is encoded. A request of a reserved kind holds no place, so it leases its stream
+        // before it encodes its payload: the streams the peer's connection has bound that copy.
+        let early_lease = if admission.holds_a_place() {
+            None
+        } else {
+            let leased = self.lease_byte_stream::<M>(node, timeout).await?;
+            Some(leased)
+        };
         let (payload, payload_reservation) = message
             .encode_rkyv(
                 self.inner.executor().clone(),
@@ -2002,22 +2019,25 @@ impl Transport {
             },
         };
         // The envelope's encoding copies the payload, whose charge is given back first so the
-        // encoding never waits for room while holding it; the outbound admission bounds the payload
-        // meanwhile.
+        // encoding never waits for room while holding it.
         drop(payload_reservation);
         let body = wire::encode_stream_request(self.inner.executor(), request)
             .await
             .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
+        let (lease, deadline) = match early_lease {
+            Some(leased) => leased,
+            None => self.lease_byte_stream::<M>(node, timeout).await?,
+        };
         self.inner
             .open_byte_stream(
                 node,
                 OutboundByteStreamRequest {
                     class: M::CLASS,
-                    subquota: M::SUBQUOTA,
                     name: M::NAME,
                     body,
-                    timeout,
+                    deadline,
                     admission,
+                    lease,
                 },
             )
             .await
@@ -2080,7 +2100,7 @@ impl Transport {
             }));
         }
         let operation = async {
-            let _admission = self
+            let admission = self
                 .inner
                 .requests()
                 .try_admit_outbound(M::SUBQUOTA)
@@ -2090,6 +2110,26 @@ impl Transport {
                         subquota: M::SUBQUOTA,
                     })
                 })?;
+            let deadline = self
+                .inner
+                .request_deadline(timeout_duration)
+                .map_err(|error| {
+                    RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
+                })?;
+            // The payload's copy goes uncharged while the envelope's encoding waits for room, and so
+            // does the answer's payload while its typed decoding waits. A request holding a place of
+            // the incoming queue is bounded by that place and leases its stream only to exchange.
+            // A request of a reserved kind holds no place, so it leases its stream before it
+            // encodes its payload and keeps it until its answer is decoded: the streams the peer's
+            // connection has bound its copies.
+            let early_lease = if admission.holds_a_place() {
+                None
+            } else {
+                let lease = self
+                    .lease_control_stream::<M, F>(node, deadline, fence, timeout_duration)
+                    .await?;
+                Some(lease)
+            };
             let (payload, payload_reservation) = message
                 .encode_rkyv(
                     self.inner.executor().clone(),
@@ -2099,62 +2139,37 @@ impl Transport {
                 .await
                 .map_err(|error| error.change_context(RequestError::Encode { request: M::NAME }))?;
             // The envelope's encoding copies the payload, whose charge is given back first so the
-            // encoding and the answer never wait for room while holding it; the outbound admission
-            // bounds the payload meanwhile.
+            // encoding and the answer never wait for room while holding it.
             drop(payload_reservation);
             let request = ControlEnvelope::Request(RequestEnvelope {
                 class: M::CLASS,
                 request: M::NAME.to_string(),
                 payload,
             });
-            let response = {
-                let mapping_input = self
-                    .inner
-                    .round_trip_control(node, request, M::SUBQUOTA, timeout_duration, fence)
-                    .await;
-                match mapping_input {
-                    Ok(mapped_value) => Ok(mapped_value),
-                    Err(error) => Err({
-                        let request_error = match error.current_context() {
-                            super::TransportError::PeerProcessChanged {
-                                expected, actual, ..
-                            } => RequestError::PeerProcessChanged {
-                                node: node.clone(),
-                                request: M::NAME,
-                                expected: *expected,
-                                actual: *actual,
-                            },
-                            super::TransportError::ShuttingDown => RequestError::ShuttingDown {
-                                node: node.clone(),
-                                request: M::NAME,
-                            },
-                            super::TransportError::RequestTimeout { .. }
-                            | super::TransportError::ProgressTimeout { .. } => {
-                                RequestError::Timeout {
-                                    node: node.clone(),
-                                    request: M::NAME,
-                                    timeout: timeout_duration,
-                                }
-                            }
-                            super::TransportError::PoolExhausted => {
-                                RequestError::ConnectionCapacityExhausted {
-                                    node: node.clone(),
-                                    request: M::NAME,
-                                }
-                            }
-                            cause => RequestError::Transport {
-                                node: node.clone(),
-                                request: M::NAME,
-                                reason: cause.to_string(),
-                            },
-                        };
-                        error.change_context(request_error)
-                    }),
+            let lease = match early_lease {
+                Some(lease) => lease,
+                None => {
+                    self.lease_control_stream::<M, F>(node, deadline, fence, timeout_duration)
+                        .await?
                 }
-            }?;
+            };
+            let response = self
+                .inner
+                .exchange_control(&lease, request, deadline)
+                .await
+                .map_err(|error| {
+                    RequestError::control_with_cause(error, node, M::NAME, timeout_duration)
+                })?;
+            // Only a request whose stream bounds its answer's copy keeps the stream while that
+            // answer decodes.
+            let held_lease = if admission.holds_a_place() {
+                drop(lease);
+                None
+            } else {
+                Some(lease)
+            };
             // The typed answer's decoding copies the payload this envelope carries, so the envelope's
-            // charge is given back before that decoding waits for its own; the outbound admission
-            // bounds the envelope meanwhile.
+            // charge is given back before that decoding waits for its own.
             let (response, response_reservation) = response.into_parts();
             drop(response_reservation);
             let ControlEnvelope::Response(response) = response else {
@@ -2169,7 +2184,7 @@ impl Transport {
                     request: M::NAME,
                 }));
             }
-            match response.result {
+            let answer = match response.result {
                 Ok(payload) => {
                     // The peer already did the work, so a full queue holds the answer back until
                     // the request's own deadline rather than discarding it.
@@ -2189,7 +2204,10 @@ impl Transport {
                     request: M::NAME,
                     failure,
                 })),
-            }
+            };
+            // The answer is decoded, so a stream held for its copy goes back now.
+            drop(held_lease);
+            answer
         };
         let shutdown = self.inner.shutdown_token();
         let submitted_at = Instant::now();
@@ -2337,6 +2355,8 @@ mod shuttle_checks;
 
 #[cfg(test)]
 mod tests {
+    use meticulous::OptionExt as _;
+
     use super::*;
 
     #[test]
@@ -2724,42 +2744,81 @@ mod tests {
     }
 
     #[test]
-    fn configured_append_capacity_refuses_excess_without_consuming_other_reserves() {
-        let settings = crate::TransportSettings::resolve(crate::TransportSettingValues {
-            max_peers: Some(16),
-            request_quota: Some(4),
-            ..Default::default()
-        })
-        .assured("a four-request quota fits node admission");
-        let options = settings.options(None);
-        let quotas = RequestQuotas::new(&options);
-        let held: Vec<_> = (0..4)
-            .map(|_| {
-                quotas
-                    .try_admit(RequestSubquota::Append)
-                    .assured("declared append room")
-            })
-            .collect();
-        assert!(quotas.try_admit(RequestSubquota::Append).is_none());
-        assert!(quotas.try_admit(RequestSubquota::Liveness).is_some());
-        assert!(quotas.try_admit(RequestSubquota::Cancellation).is_some());
-        assert!(quotas.try_admit(RequestSubquota::Shared).is_some());
-        drop(held);
-        assert!(quotas.try_admit(RequestSubquota::Append).is_some());
-    }
-
-    #[test]
-    fn liveness_quota_supports_the_node_health_probe_limit() {
+    fn a_reserved_kind_has_no_count_of_its_own_and_the_shared_queue_keeps_its_places() {
         let options = crate::TransportOptions {
-            incoming_queue_capacity: 1,
+            incoming_queue_capacity: 2,
             ..Default::default()
         };
-        let quotas = RequestQuotas::new(&options);
+        let admissions = Arc::new(RequestAdmissions::new(&options));
+        let appends: Vec<_> = (0..200)
+            .map(|_| {
+                RequestAdmissions::try_admit(&admissions, RequestSubquota::Append)
+                    .assured("a reserved kind has no count of its own that could refuse it")
+            })
+            .collect();
+        let shared: Vec<_> = (0..2)
+            .map(|_| {
+                RequestAdmissions::try_admit(&admissions, RequestSubquota::Shared)
+                    .assured("the incoming queue has two places")
+            })
+            .collect();
+        assert!(
+            RequestAdmissions::try_admit(&admissions, RequestSubquota::Shared).is_none(),
+            "a request without a reserved kind is refused while every place of the queue is held"
+        );
+        assert!(
+            RequestAdmissions::try_admit(&admissions, RequestSubquota::Liveness).is_some(),
+            "a full incoming queue never refuses a reserved kind"
+        );
+
+        let in_flight = admissions.in_flight();
+        assert_eq!(in_flight[RequestSubquota::Append.index()], 200);
+        assert_eq!(in_flight[RequestSubquota::Shared.index()], 2);
+        assert_eq!(
+            in_flight[RequestSubquota::Liveness.index()],
+            0,
+            "the liveness admission resolved when it was dropped"
+        );
+
+        drop(appends);
+        drop(shared);
+        assert_eq!(admissions.in_flight(), [0; RequestSubquota::COUNT]);
+        assert!(
+            RequestAdmissions::try_admit(&admissions, RequestSubquota::Shared).is_some(),
+            "a resolved request gives its place back"
+        );
+    }
+
+    // Worker threads of the ordinary runtime contend on one count here; a Shuttle build models its
+    // atomics only inside an explored execution.
+    #[cfg(not(feature = "shuttle"))]
+    #[nervix_primitives::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_admissions_and_resolutions_of_one_kind_keep_its_count_exact() {
+        let admissions = Arc::new(RequestAdmissions::new(&crate::TransportOptions::default()));
+        let mut workers = Vec::new();
+        for _ in 0..4 {
+            let admissions = Arc::clone(&admissions);
+            workers.push(nervix_primitives::task::spawn(async move {
+                for _ in 0..10_000 {
+                    let admission =
+                        RequestAdmissions::try_admit(&admissions, RequestSubquota::Append).assured(
+                            "a reserved kind has no count of its own that could refuse it",
+                        );
+                    drop(admission);
+                }
+            }));
+        }
+        for worker in workers {
+            worker.await.assured(
+                "a worker ends: a reserved kind is never refused, and a count that loses no \
+                 update never leaves its bounds",
+            );
+        }
 
         assert_eq!(
-            quotas.liveness.available_permits(),
-            options.max_concurrent_health_probes,
-            "health capacity must not shrink with the general incoming request queue"
+            admissions.in_flight(),
+            [0; RequestSubquota::COUNT],
+            "every admission counted in and resolved out, however the workers interleaved"
         );
     }
 

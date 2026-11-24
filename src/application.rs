@@ -69,7 +69,7 @@ use error_stack::{Report, ResultExt};
 use futures_util::{
     StreamExt,
     future::join_all,
-    stream::{self},
+    stream::{self, FuturesUnordered},
 };
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
@@ -1763,7 +1763,9 @@ impl Application {
                     interconnect_for_health.replace_outbound_targets(&outbound_targets);
                 }
 
-                let probe_results = stream::iter(scheduled_probes.into_iter().map(|target| {
+                // One round probes every peer together: each peer's management connection
+                // reserves streams of its own for health probes.
+                let probe_results = scheduled_probes.into_iter().map(|target| {
                     let interconnect = interconnect_for_health.clone();
                     async move {
                         let outcome = match interconnect
@@ -1799,8 +1801,8 @@ impl Application {
                             nervix_primitives::time::Instant::now(),
                         )
                     }
-                }))
-                .buffer_unordered(settings.interconnect.health_probes());
+                })
+                .collect::<FuturesUnordered<_>>();
                 tokio::pin!(probe_results);
                 // Let each bounded probe finish even when gossip publishes another update.
                 // Cancelling the round on every update can indefinitely hide an unreachable

@@ -27,7 +27,7 @@ use nervix_primitives::{
     sync::{blocking::Mutex, oneshot},
     task::JoinHandle,
 };
-use strum::{EnumCount as _, IntoEnumIterator as _};
+use strum::EnumCount as _;
 
 use super::*;
 
@@ -226,26 +226,14 @@ struct HostBounds {
 }
 
 impl HostBounds {
-    /// The documented node-wide admissions of one direction at the standard node capacity.
-    fn admissions(subquota: RequestSubquota) -> usize {
-        match subquota {
-            RequestSubquota::Shared => TransportOptions::default().incoming_queue_capacity,
-            RequestSubquota::Liveness => {
-                nervix_interconnect::TransportSettings::default().health_probes()
-            }
-            RequestSubquota::Cancellation | RequestSubquota::Terminal => {
-                TransportOptions::default().completion_request_quota
-            }
-            RequestSubquota::Append
-            | RequestSubquota::Resource
-            | RequestSubquota::Snapshot
-            | RequestSubquota::Discovery
-            | RequestSubquota::Progress
-            | RequestSubquota::Admission => TransportOptions::default().request_quota,
-        }
+    /// The documented node-wide admissions of the shared queue in one direction: the incoming
+    /// queue. A request of a reserved kind waits for a stream slot of its kind instead, which the
+    /// lease bound below covers.
+    fn shared_admissions() -> usize {
+        TransportOptions::default().incoming_queue_capacity
     }
 
-    /// No pool, stream partition, admission quota, worker queue or memory budget exceeds its
+    /// No pool, stream partition, shared admission queue, worker queue or memory budget exceeds its
     /// configured bound.
     fn check(self, host: &str, observation: &Observation) {
         for class in PoolClass::ALL {
@@ -272,14 +260,11 @@ impl HostBounds {
             );
         }
         for direction in [ConnectionDirection::Outbound, ConnectionDirection::Inbound] {
-            for subquota in RequestSubquota::iter() {
-                let pending = observation.pending(direction, subquota);
-                assert!(
-                    pending <= Self::admissions(subquota),
-                    "{host} admitted {pending} {direction:?} {subquota:?} requests: \
-                     {observation:?}"
-                );
-            }
+            let pending = observation.pending(direction, RequestSubquota::Shared);
+            assert!(
+                pending <= Self::shared_admissions(),
+                "{host} admitted {pending} {direction:?} shared requests: {observation:?}"
+            );
         }
         let executor = &observation.executor;
         for workers in [

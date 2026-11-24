@@ -160,7 +160,7 @@ the `DYNAMIC` TLS refresh, and failure and recovery.
 
 All node-to-node traffic uses one mutually authenticated TLS 1.3 and HTTP/2 listener. Independent
 management, command, replication, relay, and bulk pools isolate traffic, while typed operations,
-bounded payloads, admission quotas, memory budgets, and deadlines keep one workload from exhausting
+bounded payloads, reserved stream slots, memory budgets, and deadlines keep one workload from exhausting
 the node. Application health is observed separately from transport connectivity.
 
 The [Cluster Interconnect](./interconnect.md) chapter defines peer identity, connection topology,

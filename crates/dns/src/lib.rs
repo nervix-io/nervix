@@ -23,7 +23,7 @@
 //! # Bounds
 //!
 //! Every lookup runs within the budget its caller gives it, so name resolution never outlasts the
-//! connection or request deadline it belongs to. At most the declared peer capacity DNS lookups run
+//! connection or request deadline it belongs to. At most `dns-concurrent-lookups` DNS lookups run
 //! at once; a lookup beyond that waits for a slot inside its own budget. Answers are cached for
 //! their DNS TTL, bounded above by one hour for addresses and thirty seconds for a name that does not
 //! exist or has no address, in a cache of 4,096 entries. An expired answer is looked up again on the

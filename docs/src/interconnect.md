@@ -170,12 +170,12 @@ traffic does not delay readiness; its connection is opened when needed. The two 
 allow unrelated relay channels to make progress independently while preserving ordering within each
 logical channel.
 
-A node retains at most `--interconnect-max-peers` other node identities, 64 by default. It admits
-twelve incoming and outgoing connections per declared peer, 768 by default, which covers the six
-possible connections in each direction for every peer: five preconnected connections plus the
-on-demand bulk connection. It performs at most `--interconnect-concurrent-handshakes` connection
-handshakes concurrently, 32 by default. [Node Settings](node-settings.md) owns these options and
-their derivations.
+A node keeps this layout for every peer it has, and no count limits the peers: every member must
+reach every other member, so a node dials every peer the application publishes and accepts the
+connections of every peer that authenticates. The layout bounds each peer's connections to six in
+each direction, the five preconnected connections plus the on-demand bulk connection, and a node
+performs at most `--interconnect-concurrent-handshakes` connection handshakes at once, 32 by
+default. [Node Settings](node-settings.md) owns these options.
 
 ## Peer Name Resolution
 
@@ -703,7 +703,7 @@ connection carries toward its peer arrive under that peer's 64 KiB windows.
 
 ## Traffic And Resource Isolation
 
-An operation's type fixes its pool, admission quota, response type, and deadline policy. Callers do
+An operation's type fixes its pool, subquota, response type, and deadline policy. Callers do
 not select a less restricted pool at the call site. This preserves traffic isolation even when a
 busy subsystem issues many requests.
 
@@ -725,24 +725,15 @@ replication slots. The bulk pool reserves two slots for resources, one for snaps
 other bulk work, which backup section fetches use. Commands and relay bodies use the shared capacity
 of their dedicated pools.
 
-Typed requests also have independent node-wide admission quotas, applied separately to incoming
-and outgoing work across all peers and connections. They derive from `--interconnect-max-peers` and
-`--interconnect-incoming-queue-capacity`; with the default 64 peers and 1,024 queued requests:
+A typed request of a reserved subquota has no node-wide count of its own: it waits for a stream
+slot of its subquota on its peer's connection, within its own deadline, and its bytes are charged to
+its class's memory budget as their size becomes known. Every peer brings its own connections, so a
+node's capacity for each subquota follows the peers it has. Requests of the shared subquota are also
+admitted against `--interconnect-incoming-queue-capacity`, 1,024 by default, separately for incoming
+and outgoing work across all peers; one that finds every place held is refused with a typed capacity
+outcome. Every admitted request is counted in flight by direction and subquota until it resolves.
 
-| Request use | Default admissions per direction | Derivation |
-| --- | ---: | --- |
-| Shared | 1,024 | `--interconnect-incoming-queue-capacity` |
-| Consensus append | 128 | `--interconnect-request-quota`, as an independent reserve of the same size |
-| Resource transfer | 128 | `--interconnect-request-quota`: two per declared peer, bounded by the incoming queue |
-| Snapshot transfer | 128 | `--interconnect-request-quota` |
-| Discovery | 128 | `--interconnect-request-quota` |
-| Application liveness | 64 | one per declared peer |
-| Domain-clock progress | 128 | `--interconnect-request-quota` |
-| Runtime and relay admission | 128 | `--interconnect-request-quota` |
-| Relay cancellation | 4 | one per sixteen declared peers, at least one |
-| Relay terminal outcomes | 4 | one per sixteen declared peers, at least one |
-
-These reservations mean that ordinary management traffic cannot consume the capacity required to
+These reserved slots mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
 Consensus heartbeats use the management pool independently of log replication. The worker waits
@@ -751,7 +742,7 @@ and its interconnect request uses the same full bound. An answer after one heart
 but before that lease expires can therefore reach Raft; timeout or transport failure still ends the
 request and releases its management stream. Initial empty replication probes continue to use their
 shorter soft deadline and the same typed management response. This changes neither the wire shape
-nor pool and admission quotas.
+nor the pools and their stream slots.
 
 Leasing an established stream allocates nothing and acquires no shared discovery map. An immutable
 persistent target table selects the peer's fixed pool arrays. Each slot retains its cancellation
@@ -811,9 +802,13 @@ validates the relationships among operation limits and these budgets, including 
 that must fit for independent operations to keep making progress.
 
 No stage of a request waits for room while it holds a charge of the same class. A typed request's
-caller gives its payload's charge back before the envelope's encoding copies the payload, and the
-request's outbound admission bounds the payload meanwhile; an encoding whose output outgrows its
-charge gives back what it holds and waits for the larger charge, holding nothing.
+caller gives the payload's charge back before the envelope's encoding copies the payload, and the
+answer envelope's charge back before the typed answer's decoding copies its payload. A request
+without a reserved kind holds a place of the incoming queue meanwhile, which bounds those copies.
+A request of a reserved kind holds no place, so it leases its stream before it encodes its payload
+and keeps the stream until its answer is decoded, and a peer connection's stream slots bound its
+copies. An encoding whose output outgrows its charge gives back what it holds and waits for the
+larger charge, holding nothing.
 
 Every request and answer body declares its length (`content-length`), and its receiver waits for
 the body and the room its decoding takes as one charge while it holds nothing of the class, then
@@ -828,8 +823,8 @@ meanwhile. A memory charge larger than its whole budget answers HTTP 413 while a
 stream opens, and a budget or pool closed because the node stops answers 503; neither means that
 the input was malformed. A full class answers nothing, because every opening waits for its room.
 
-Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
-and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
+Stream slots are isolated per connection, and therefore per peer. Memory budgets and CPU wait
+queues are isolated per class, and they and the shared admission queue serve every peer of the node. A slow or stalled
 peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
 management streams of a connection, a further shared operation to that peer waits for a slot
 until its own deadline, while liveness, cancellation, and discovery still use the reserved streams
@@ -1086,7 +1081,7 @@ A delivery proceeds as follows:
    [Held Deliveries](#held-deliveries) describes.
 2. The sender leases a relay-body stream before requesting receiver capacity. This prevents a
    saturated body pool from holding a remote reservation that it cannot use.
-3. The sender requests a grant over the reserved management admission quota. The request identifies
+3. The sender requests a grant over the management connection's reserved admission streams. The request identifies
    the delivery process, channel, sequence, encoded and logical decoded lengths, branch, relay, and acknowledgement shape.
 4. The receiver verifies the sender process epoch and delivery order. Before issuing a grant, it
    reserves the encoded body, maximum decoded batch and scratch memory, an incoming queue item, and
@@ -1385,8 +1380,8 @@ stopped using that incarnation. `nervix_interconnect_relay_channel_watermarks` s
 node retains. Authentication before gossip membership permits discovery, while relay operations
 wait for live membership. An owner still awaiting membership ends after twice the installed
 committed `REMOTE_RELAY_TOTAL_TIMEOUT`, ten minutes by default, and closes its bound intake
-connections. Routing publication has at most the configured peer limit; normal frame and ACK
-operations use retained owners rather than a node-wide shared-map guard.
+connections. Routing publication holds one relay owner for each peer the node keeps; normal frame
+and ACK operations use retained owners rather than a node-wide shared-map guard.
 
 ### Held Deliveries
 
@@ -2483,10 +2478,11 @@ and outbound connections through a Chitchat liveness loss while application heal
 observation of it from the node-unavailability interval, as described below. A different
 incarnation or advertised endpoint must establish a new target.
 
-Each health round has at most one probe in flight for each peer and at most
-`interconnect-max-peers` probes across the node, 64 by default. A probe's total deadline is the
-probe timeout, a tenth of the node-unavailability interval: one second at the default ten seconds.
-Results are published as they complete, so a silent peer occupies only its own concurrency slot.
+Each health round probes every peer together, with one probe for each peer: a peer's management
+connection reserves liveness streams of its own, so a probe never waits behind another peer's. A
+probe's total deadline is the probe timeout, a tenth of the node-unavailability interval: one second
+at the default ten seconds, so a round ends within one probe timeout however many peers the node
+has. Results are published as they complete, so a silent peer delays only its own observation.
 The next regular round begins one `--control-plane-health-probe-interval` after the previous round
 finishes, one second by default. Gossip updates remain pending while those bounded probes finish and
 start the next round immediately afterward. They never cancel an in-flight round: repeated gossip
@@ -2795,8 +2791,8 @@ count grows with every bulk stream it opens.
 Typed-request observations are labeled by the subquota a request uses: operation `liveness` counts
 application health together with the other requests of that subquota, the drain-status polls of
 backups, domains and entities among them, and operation `progress` counts replaceable domain-clock
-delivery and HTTPS listener installation probes, so their request counts, outcomes, latency, and
-quota failures can be evaluated independently. Only unary requests are counted there; a streamed
+delivery and HTTPS listener installation probes, so their request counts, outcomes and latency can
+be evaluated independently. Only unary requests are counted there; a streamed
 response, such as a backup section fetch, appears in the bulk-transfer byte series. A client
 producer link's opening, failure, silence, and the producers it ends or detaches are logged at
 `debug` on both ends; the owning node's client-ingestor metrics count forwarded producers apart
@@ -2893,7 +2889,7 @@ and its grouping, confirmation, integrity and admission behavior remain unchange
 ## Declared Transport Policy
 
 [Node Settings](node-settings.md#transport-resolver-and-database-capacities) lists the transport
-capacity and deadline options, derived request reserves and the committed per-node view.
+capacity and deadline options and the committed per-node view.
 The application root constructs transport options from those validated declarations. Bulk
 receive windows retain their independent memory backing and their receiver-specific bounds.
 

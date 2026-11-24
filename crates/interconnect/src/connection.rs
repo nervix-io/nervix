@@ -487,15 +487,9 @@ pub(crate) struct RawDuplexRequest {
     pub(crate) admission: RequestAdmission,
 }
 
-struct ConnectionPermits {
-    _connection: OwnedSemaphorePermit,
-    _non_management: Option<OwnedSemaphorePermit>,
-    _non_preconnected: Option<OwnedSemaphorePermit>,
-}
-
+/// The connections one peer holds with this transport, in both directions.
 struct PeerConnections {
     count: usize,
-    _permit: OwnedSemaphorePermit,
 }
 
 struct InboundConnectionRegistration {
@@ -513,8 +507,6 @@ struct InboundBinding {
 struct BoundInboundConnection {
     peer: InboundPeer,
     _registration: InboundConnectionRegistration,
-    _non_management: Option<OwnedSemaphorePermit>,
-    _non_preconnected: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for InboundConnectionRegistration {
@@ -983,12 +975,8 @@ pub(crate) struct TransportStateInner {
     connections: DashMap<ConnectionSlotKey, StdArc<ClientConnection>, RandomState>,
     peer_connections: DashMap<ClusterNodeName, PeerConnections, RandomState>,
     inbound_pool_connections: DashMap<InboundPoolKey, usize, RandomState>,
-    peer_permits: StdArc<Semaphore>,
     next_connection: AtomicUsize,
     connection_changed: Notify,
-    connection_permits: StdArc<Semaphore>,
-    non_management_connection_permits: StdArc<Semaphore>,
-    non_preconnected_connection_permits: StdArc<Semaphore>,
     handshake_permits: StdArc<Semaphore>,
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
     requests: super::RequestState,
@@ -1063,13 +1051,6 @@ impl TransportState {
         let local_addr = listener.local_addr().map_err(TransportError::from)?;
         let (incoming_tx, incoming_rx) = mpsc::channel(options.incoming_queue_capacity);
         let process_epoch = options.entropy.next_u64();
-        let management_connection_reserve = options
-            .max_peers
-            .checked_mul(2)
-            .verified("transport options validated the inbound and outbound management reserve");
-        let preconnected_connection_reserve = management_connection_reserve
-            .checked_mul(PoolClass::preconnected_connections_per_peer())
-            .verified("transport options validated every inbound and outbound preconnected slot");
         let observations = Arc::new(TransportObservations::default());
         let state = Self {
             inner: Arc::new(TransportStateInner {
@@ -1091,27 +1072,8 @@ impl TransportState {
                 connections: DashMap::default(),
                 peer_connections: DashMap::default(),
                 inbound_pool_connections: DashMap::default(),
-                peer_permits: StdArc::new(Semaphore::new(options.max_peers)),
                 next_connection: AtomicUsize::new(0),
                 connection_changed: Notify::new(),
-                connection_permits: StdArc::new(Semaphore::new(options.max_connections)),
-                non_management_connection_permits: StdArc::new(Semaphore::new(
-                    options
-                        .max_connections
-                        .checked_sub(management_connection_reserve)
-                        .verified(
-                            "transport options reserve fewer management connections than the total",
-                        ),
-                )),
-                non_preconnected_connection_permits: StdArc::new(Semaphore::new(
-                    options
-                        .max_connections
-                        .checked_sub(preconnected_connection_reserve)
-                        .verified(
-                            "transport options reserve fewer preconnected connections than the \
-                             total",
-                        ),
-                )),
                 handshake_permits: StdArc::new(Semaphore::new(options.max_concurrent_handshakes)),
                 requests: super::RequestState::new(&options, Arc::clone(&observations)),
                 relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
@@ -1278,11 +1240,6 @@ impl TransportState {
         }
         let peer_addr = target.addr;
         let setup = async {
-            let cancel = CancellationToken::new();
-            let _connection_permits = self
-                .acquire_connection_permits(PoolClass::Management, &cancel)
-                .await
-                .ok_or(TransportError::ShuttingDown)?;
             let _handshake_permit = nervix_primitives::select! {
                 _ = self.admission_closed.cancelled() => {
                     return Err(Report::new(TransportError::ShuttingDown));
@@ -1308,7 +1265,7 @@ impl TransportState {
                 ))));
             }
             let node_id = identity.node_id;
-            let outbound = self.install_authenticated_target(node_id.clone(), target)?;
+            let outbound = self.install_authenticated_target(node_id.clone(), target);
             self.ensure_preconnected_slots(&outbound);
             Ok::<_, Report<TransportError>>(node_id)
         };
@@ -1428,13 +1385,6 @@ impl TransportState {
             if slot_cancel.is_cancelled() || self.admission_closed.is_cancelled() {
                 break;
             }
-            let permits = self
-                .acquire_connection_permits(key.class, &slot_cancel)
-                .await;
-            let permits = match permits {
-                Some(permits) => permits,
-                None => break,
-            };
             let connected = nervix_primitives::select! {
                 _ = slot_cancel.cancelled() => break,
                 _ = self.admission_closed.cancelled() => break,
@@ -1488,7 +1438,6 @@ impl TransportState {
                     );
                 }
             }
-            drop(permits);
             nervix_primitives::select! {
                 _ = slot_cancel.cancelled() => break,
                 _ = self.admission_closed.cancelled() => break,
@@ -1561,53 +1510,6 @@ impl TransportState {
         *self.liveness.borrow()
     }
 
-    async fn acquire_connection_permits(
-        &self,
-        class: PoolClass,
-        cancel: &CancellationToken,
-    ) -> Option<ConnectionPermits> {
-        let non_management = if class == PoolClass::Management {
-            None
-        } else {
-            let acquired = nervix_primitives::select! {
-                _ = cancel.cancelled() => return None,
-                _ = self.admission_closed.cancelled() => return None,
-                acquired = StdArc::clone(&self.non_management_connection_permits).acquire_owned() => acquired,
-            };
-            match acquired {
-                Ok(permit) => Some(permit),
-                Err(_) => return None,
-            }
-        };
-        let non_preconnected = if class.is_preconnected() {
-            None
-        } else {
-            let acquired = nervix_primitives::select! {
-                _ = cancel.cancelled() => return None,
-                _ = self.admission_closed.cancelled() => return None,
-                acquired = StdArc::clone(&self.non_preconnected_connection_permits).acquire_owned() => acquired,
-            };
-            match acquired {
-                Ok(permit) => Some(permit),
-                Err(_) => return None,
-            }
-        };
-        let acquired = nervix_primitives::select! {
-            _ = cancel.cancelled() => return None,
-            _ = self.admission_closed.cancelled() => return None,
-            acquired = StdArc::clone(&self.connection_permits).acquire_owned() => acquired,
-        };
-        let connection = match acquired {
-            Ok(permit) => permit,
-            Err(_) => return None,
-        };
-        Some(ConnectionPermits {
-            _connection: connection,
-            _non_management: non_management,
-            _non_preconnected: non_preconnected,
-        })
-    }
-
     fn register_connection(
         &self,
         slot: &SlotControl,
@@ -1617,7 +1519,7 @@ impl TransportState {
         let Entry::Vacant(entry) = self.connections.entry(key.clone()) else {
             return Err(Report::new(TransportError::PoolExhausted));
         };
-        self.increment_peer(&key.node_id)?;
+        self.increment_peer(&key.node_id);
         entry.insert(connection.clone());
         slot.connection.store(Some(connection));
         self.connection_changed.notify_waiters();
@@ -2161,14 +2063,6 @@ impl TransportState {
                     continue;
                 }
             };
-            let connection_permit =
-                match StdArc::clone(&self.connection_permits).try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        debug!(%peer_addr, "interconnect connection quota is full");
-                        continue;
-                    }
-                };
             let binding_sequence = self.allocate_binding_sequence();
             let state = self.clone();
             self.tasks.spawn(async move {
@@ -2179,7 +2073,6 @@ impl TransportState {
                         tcp,
                         peer_addr,
                         handshake_permit,
-                        connection_permit,
                         binding_sequence,
                     ) => {
                         if let Err(error) = result {
@@ -2205,7 +2098,6 @@ impl TransportState {
         tcp: TcpStream,
         peer_addr: SocketAddr,
         handshake_permit: OwnedSemaphorePermit,
-        _connection_permit: OwnedSemaphorePermit,
         binding_sequence: u64,
     ) -> Result<(), Report<TransportError>> {
         tcp.set_nodelay(true).map_err(TransportError::from)?;
@@ -2328,26 +2220,6 @@ impl TransportState {
                     .refuse_binding(respond, &peer_identity.node_id, mismatch)
                     .await;
             }
-            let non_management = if hello.class == PoolClass::Management {
-                None
-            } else {
-                match StdArc::clone(&self.non_management_connection_permits).try_acquire_owned() {
-                    Ok(permit) => Some(permit),
-                    Err(_) => {
-                        return Err(Report::new(TransportError::PoolExhausted));
-                    }
-                }
-            };
-            let non_preconnected = if hello.class.is_preconnected() {
-                None
-            } else {
-                match StdArc::clone(&self.non_preconnected_connection_permits).try_acquire_owned() {
-                    Ok(permit) => Some(permit),
-                    Err(_) => {
-                        return Err(Report::new(TransportError::PoolExhausted));
-                    }
-                }
-            };
             drop(handshake_permit);
             let registration =
                 self.register_inbound_pool(peer_identity.node_id.clone(), hello.class)?;
@@ -2396,8 +2268,6 @@ impl TransportState {
                     relay_owner,
                 },
                 _registration: registration,
-                _non_management: non_management,
-                _non_preconnected: non_preconnected,
             }))
         };
 
@@ -2732,7 +2602,9 @@ impl TransportState {
         .await?;
         Ok(())
     }
-    fn increment_peer(&self, node_id: &ClusterNodeName) -> Result<(), Report<TransportError>> {
+
+    /// Counts one more connection of `node_id`.
+    fn increment_peer(&self, node_id: &ClusterNodeName) {
         match self.peer_connections.entry(node_id.clone()) {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().count = entry
@@ -2742,17 +2614,10 @@ impl TransportState {
                     .assured("a peer has a bounded number of inbound and outbound connections");
             }
             Entry::Vacant(entry) => {
-                let permit = StdArc::clone(&self.peer_permits)
-                    .try_acquire_owned()
-                    .map_err(|_| TransportError::PoolExhausted)?;
-                entry.insert(PeerConnections {
-                    count: 1,
-                    _permit: permit,
-                });
+                entry.insert(PeerConnections { count: 1 });
             }
         }
         self.connection_changed.notify_waiters();
-        Ok(())
     }
 
     fn register_inbound_pool(
@@ -2775,36 +2640,37 @@ impl TransportState {
                 entry.insert(1);
             }
         }
-        if let Err(error) = self.increment_peer(&key.node_id) {
-            self.decrement_inbound_pool(&key);
-            return Err(error);
-        }
+        self.increment_peer(&key.node_id);
         Ok(InboundConnectionRegistration {
             state: self.clone(),
             key,
         })
     }
 
+    /// Counts one connection of `key`'s pool fewer. The count and its removal change under one
+    /// entry, so a connection registering meanwhile is never dropped from the pool's count.
     fn decrement_inbound_pool(&self, key: &InboundPoolKey) {
-        if let Some(mut count) = self.inbound_pool_connections.get_mut(key) {
-            if *count <= 1 {
-                drop(count);
-                self.inbound_pool_connections.remove(key);
+        if let Entry::Occupied(mut entry) = self.inbound_pool_connections.entry(key.clone()) {
+            if *entry.get() <= 1 {
+                entry.remove();
             } else {
-                *count = count
+                *entry.get_mut() = entry
+                    .get()
                     .checked_sub(1)
                     .verified("the branch above handled the final inbound class connection");
             }
         }
     }
 
+    /// Counts one connection of `node_id` fewer. The count and its removal change under one entry,
+    /// so a connection registering meanwhile never loses its peer's entry.
     fn decrement_peer(&self, node_id: &ClusterNodeName) {
-        if let Some(mut connections) = self.peer_connections.get_mut(node_id) {
-            if connections.count <= 1 {
-                drop(connections);
-                self.peer_connections.remove(node_id);
+        if let Entry::Occupied(mut entry) = self.peer_connections.entry(node_id.clone()) {
+            if entry.get().count <= 1 {
+                entry.remove();
             } else {
-                connections.count = connections
+                entry.get_mut().count = entry
+                    .get()
                     .count
                     .checked_sub(1)
                     .verified("the branch above handled the final peer connection");

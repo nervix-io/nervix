@@ -90,13 +90,10 @@ impl Cluster {
             end,
             cleanup,
         };
-        probe
-            .transport
-            .register_outbound_target(
-                node_name(node),
-                PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
-            )
-            .map_err(io::Error::other)?;
+        probe.transport.register_outbound_target(
+            node_name(node),
+            PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
+        );
         Ok(probe)
     }
 
@@ -272,14 +269,10 @@ impl Cluster {
                     .nodes
                     .get(*replica)
                     .ok_or_else(|| io::Error::other("unknown replica"))?;
-                probe
-                    .transport
-                    .register_outbound_target(
-                        node_name(replica),
-                        PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost")
-                            .endpoint(),
-                    )
-                    .map_err(io::Error::other)?;
+                probe.transport.register_outbound_target(
+                    node_name(replica),
+                    PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
+                );
             }
             for (placement, revision) in placements {
                 nervix_primitives::task::consume_budget().await;
@@ -323,13 +316,10 @@ impl Cluster {
             .nodes
             .get(replica)
             .ok_or_else(|| io::Error::other("unknown replica"))?;
-        probe
-            .transport
-            .register_outbound_target(
-                node_name(replica),
-                PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
-            )
-            .map_err(io::Error::other)?;
+        probe.transport.register_outbound_target(
+            node_name(replica),
+            PeerTarget::new(target.spec.interconnect_listen_addr(), "localhost").endpoint(),
+        );
         let result = nervix_primitives::time::timeout(Duration::from_secs(90), async {
             let page = probe
                 .transport

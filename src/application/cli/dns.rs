@@ -30,20 +30,20 @@ pub struct DnsArgs {
     pub address_family_policy: Option<nervix_dns::AddressFamilies>,
     #[arg(long = nervix_dns::TrustNegativeAnswers::NAME, env = "NERVIX_DNS_TRUST_NEGATIVE_ANSWERS", help = super::settings::capability_help::<nervix_dns::TrustNegativeAnswers>("Trust negative answers", nervix_dns::TrustNegativeAnswers::default_value(&())))]
     pub trust_negative_answers: Option<bool>,
+    #[arg(long = nervix_dns::ConcurrentLookups::NAME, env = "NERVIX_DNS_CONCURRENT_LOOKUPS", help = super::settings::capability_help::<nervix_dns::ConcurrentLookups>("Concurrent lookups", nervix_dns::ConcurrentLookups::default_value(&())))]
+    pub concurrent_lookups: Option<usize>,
 }
 impl DnsArgs {
-    pub(super) fn settings(&self, peers: usize) -> Result<DnsSettings, Report<DnsSettingsError>> {
-        DnsSettings::resolve(
-            DnsSettingValues {
-                cache_entries: self.cache_entries,
-                positive_max_ttl: self.positive_max_ttl.map(|value| value.0),
-                negative_max_ttl: self.negative_max_ttl.map(|value| value.0),
-                hook_lookup_budget: self.hook_lookup_budget.map(|value| value.0),
-                address_family_policy: self.address_family_policy,
-                trust_negative_answers: self.trust_negative_answers,
-            },
-            peers,
-        )
+    pub(super) fn settings(&self) -> Result<DnsSettings, Report<DnsSettingsError>> {
+        DnsSettings::resolve(DnsSettingValues {
+            cache_entries: self.cache_entries,
+            positive_max_ttl: self.positive_max_ttl.map(|value| value.0),
+            negative_max_ttl: self.negative_max_ttl.map(|value| value.0),
+            hook_lookup_budget: self.hook_lookup_budget.map(|value| value.0),
+            address_family_policy: self.address_family_policy,
+            trust_negative_answers: self.trust_negative_answers,
+            concurrent_lookups: self.concurrent_lookups,
+        })
     }
     pub(super) fn from_settings(settings: &DnsSettings) -> Self {
         Self {
@@ -53,6 +53,7 @@ impl DnsArgs {
             hook_lookup_budget: Some(HumanDuration(*settings.hook_lookup_budget.value())),
             address_family_policy: Some(*settings.address_family_policy.value()),
             trust_negative_answers: Some(*settings.trust_negative_answers.value()),
+            concurrent_lookups: Some(*settings.concurrent_lookups.value()),
         }
     }
     pub(super) fn render(&self, command_line: &mut CommandLine) {
@@ -68,5 +69,6 @@ impl DnsArgs {
             nervix_dns::TrustNegativeAnswers::NAME,
             self.trust_negative_answers,
         );
+        command_line.optional(nervix_dns::ConcurrentLookups::NAME, self.concurrent_lookups);
     }
 }

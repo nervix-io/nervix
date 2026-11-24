@@ -29,13 +29,10 @@ fn placement() -> StatePlacementEnvelope {
 /// Connected transports whose sending side has registered the receiving node as its target.
 async fn connected() -> ConnectedTransports {
     let transports = bound_transports_with_options(TransportOptions::default()).await;
-    transports
-        .transport_a
-        .register_outbound_target(
-            transports.node_b.clone(),
-            NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
-        )
-        .expect("authenticated test target should register");
+    transports.transport_a.register_outbound_target(
+        transports.node_b.clone(),
+        NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
+    );
     transports
 }
 

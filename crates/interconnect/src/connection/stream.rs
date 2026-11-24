@@ -32,7 +32,7 @@ use super::{
     read_body_to_decode, send_decode_refusal, send_static_error, until_reset,
 };
 use crate::{
-    PoolClass, RequestError, RequestSubquota, TransportError,
+    PoolClass, RequestError, TransportError,
     observation::TransferDirection,
     request::{
         RequestAdmission, StreamOpeningFailure, StreamPreconditionDeadline, StreamRequestEnvelope,
@@ -70,11 +70,13 @@ pub struct IncomingByteStream {
 
 pub(crate) struct OutboundByteStreamRequest {
     pub(crate) class: PoolClass,
-    pub(crate) subquota: RequestSubquota,
     pub(crate) name: &'static str,
     pub(crate) body: ChargedBytes,
-    pub(crate) timeout: Duration,
+    /// When the request stops waiting for its stream's answer to begin.
+    pub(crate) deadline: Instant,
     pub(crate) admission: RequestAdmission,
+    /// The stream the request leased before it encoded its payload.
+    pub(crate) lease: StreamLease,
 }
 
 impl IncomingByteStream {
@@ -337,18 +339,12 @@ impl TransportState {
     ) -> Result<IncomingByteStream, Report<TransportError>> {
         let OutboundByteStreamRequest {
             class,
-            subquota,
             name,
             body,
-            timeout: timeout_duration,
+            deadline,
             admission,
+            lease,
         } = request;
-        let deadline = Instant::now()
-            .checked_add(timeout_duration)
-            .ok_or_else(|| TransportError::InvalidOptions {
-                reason: "request deadline exceeds the monotonic clock range".to_string(),
-            })?;
-        let lease = self.lease(node_id, class, subquota, deadline).await?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         let (body, content_length) = lease
             .connection
