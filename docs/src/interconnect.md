@@ -650,7 +650,7 @@ The primary payload limits are:
 
 | Payload | Default | Set by |
 | --- | ---: | --- |
-| Management event | 64 KiB | fixed; every member must bring the same bound to join |
+| Management event | 68 KiB | fixed: the largest gossip exchange, a 65,510-byte Chitchat message with its typed request fields and envelope, with room to spare; every member must bring the same bound to join |
 | Command | 1 MiB | fixed |
 | Replication batch | 2 MiB | fixed |
 | Encoded relay batch | 32 MiB | `--execution-relay-encoded-bytes`, one sixth of the relay pool at most 32 MiB; a receiver announces `--interconnect-relay-batch-bytes`, which defaults to it |
@@ -1598,24 +1598,34 @@ state can change while its incarnation stays live. Application readiness travels
 [progress reports and queries](#application-progress), and clock installation through
 [receiver attachments](#domain-clock-progress). Neither becomes a per-revision gossip key.
 
-Cluster membership gossip uses management discovery capacity. It discovers topology and
-incarnations but does not replace application health checks. Gossip payloads remain below the
-management-event bound, so discovery cannot allocate an arbitrary wire message: both peers hold an
-exchange's payload to 60 KiB, and a node refuses to start when its management-event bound cannot
-carry the largest exchange, its typed request fields and envelope included, encoded as a send
-encodes it. A node that cannot
-take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
-bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
-shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination. One
-worker per destination drives its interconnect requests in order, under the one-second request
+Cluster membership gossip uses management discovery capacity. It discovers topology and incarnations
+but does not replace application health checks. Chitchat decides what each gossip message carries,
+and the interconnect carries each message as one exchange in the Management class. Chitchat budgets
+each message that carries state, a SynAck or an Ack, to the largest IPv4 UDP payload, 65,507 bytes,
+whatever transport carries it: the message type, the sender's digest and the state delta fit that
+budget together, and the 3-byte header Chitchat writes before them, its magic number and protocol
+version, comes on top. It gossips state larger than one message over several rounds, one message per
+exchange. The gossip bound is the largest message Chitchat builds, 65,510 bytes, and both peers hold
+an exchange's payload to it. The management event is 68 KiB so that the largest exchange, that
+payload with its typed request fields and envelope, travels as one management request; a node
+refuses to start when its management-event bound cannot carry the largest exchange, encoded as a
+send encodes it. Every SynAck and Ack therefore fits one exchange. Chitchat does not budget a Syn,
+which carries only the sender's digest, with an entry for every known node, and the cluster
+identifier; a Syn outgrows the bound only once that digest and identifier no longer fit one message.
+The sender refuses any message above the bound and logs it at `warn`, because Chitchat discards the
+error of a reply it cannot send and builds the same reply again on the next round. A node that
+cannot take an exchange answers with a typed refusal rather than text: the message exceeds the
+gossip bound, the sending node could not be registered as an outbound peer, or its gossip receiver
+has shut down. Chitchat hands each outgoing datagram to a four-message queue for that destination.
+One worker per destination drives its interconnect requests in order, under the one-second request
 deadline; an unreachable peer therefore cannot hold the gossip loop while it receives from or sends
 to healthy peers. A full destination queue drops its newest datagram, and the next gossip round
 retries. Closing the transport cancels queued work and exchanges in flight.
 
 Incoming exchanges take one bounded queue between the interconnect handler and Chitchat, which
 reads it as its socket. The node capability `--gossip-receive-queue-capacity` sets how many
-datagrams it holds, 1,024 by default. Each holds at most the 60 KiB gossip bound, so the queue
-retains at most its capacity times that bound. A full queue holds an exchange's answer until
+datagrams it holds, 1,024 by default. Each holds at most the 65,510-byte gossip bound, so the
+queue retains at most its capacity times that bound. A full queue holds an exchange's answer until
 Chitchat takes a datagram; an exchange that waits beyond its request deadline fails at its sender,
 and the next gossip round retries.
 
@@ -1810,7 +1820,7 @@ content kind and digest, and the leader stages and verifies the stream before ad
 archive. The owner keeps a
 staged section only for the coordinator process that requested it, serves it once in 1 MiB reads,
 and releases a stage nobody fetched 600 seconds after staging it. One owner's inventory of a
-domain's capture is one management reply, at most 64 KiB.
+domain's capture is one management reply, at most 68 KiB.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot

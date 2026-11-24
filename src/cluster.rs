@@ -106,19 +106,43 @@ const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
     )
 )]
 const GOSSIP_OUTGOING_QUEUE_CAPACITY: usize = 4;
-/// Leaves room for the typed request fields inside the 64-KiB management-event limit. Startup
-/// refuses a node whose management-event bound cannot carry the largest exchange, its typed
-/// request fields and envelope included: [`GossipExchange::check_fits`].
+/// Chitchat's budget for one message: it builds every SynAck and Ack so that the message type, the
+/// sender's digest and the state delta take at most one IPv4 UDP datagram's payload together,
+/// whatever transport carries them, and splits larger state over later gossip rounds.
 #[cfg_attr(
     nervix_lint,
     nervix::constant(
         fixed,
-        reason = "both peers of a gossip exchange hold its payload to this bound, which keeps the \
-                  exchange and its typed request fields inside the 64 KiB management-event bound \
-                  every member must share"
+        reason = "Chitchat budgets every SynAck and Ack it builds to \
+                  MAX_UDP_DATAGRAM_PAYLOAD_SIZE, the largest IPv4 UDP payload: 65,535 bytes less \
+                  the 20-byte IPv4 and 8-byte UDP headers"
     )
 )]
-const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
+const CHITCHAT_MESSAGE_BUDGET_BYTES: usize = 65_507;
+/// The header Chitchat writes before every message's type, outside its message budget.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "Chitchat's message format opens with a two-byte magic number and a one-byte \
+                  protocol version, which its message budget does not count"
+    )
+)]
+const CHITCHAT_MESSAGE_HEADER_BYTES: usize = 3;
+/// The largest message Chitchat builds, a whole budget behind its header, and so the largest
+/// payload of a gossip exchange both peers accept. The management event is sized to carry this
+/// payload with the exchange's typed request fields and envelope, and startup refuses a node whose
+/// management-event bound cannot: [`GossipExchange::check_fits`].
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the Cluster Interconnect chapter bounds a gossip message by the largest message \
+                  Chitchat builds: its message budget and the header it writes outside that budget"
+    )
+)]
+const MAX_GOSSIP_MESSAGE_BYTES: usize =
+    CHITCHAT_MESSAGE_BUDGET_BYTES + CHITCHAT_MESSAGE_HEADER_BYTES;
 
 #[cfg_attr(
     nervix_lint,
@@ -1282,6 +1306,14 @@ impl GossipSocket for InterconnectGossipSocket {
     async fn send(&mut self, to: SocketAddr, message: ChitchatMessage) -> anyhow::Result<()> {
         let payload = message.serialize_to_vec();
         if payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
+            // Chitchat discards the error of a reply it cannot send and builds the same reply
+            // again on the next round, so this line is the refusal's only witness.
+            warn!(
+                peer = %to,
+                size = payload.len(),
+                bound = MAX_GOSSIP_MESSAGE_BYTES,
+                "refused to send a gossip message larger than the gossip bound"
+            );
             anyhow::bail!("gossip message exceeds {MAX_GOSSIP_MESSAGE_BYTES} bytes");
         }
         self.transport.enqueue(to, payload)
