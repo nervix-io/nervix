@@ -65,6 +65,8 @@ impl CheckpointReader {
     }
 
     /// Read the checkpoint again from its first byte, its checksum started afresh.
+    ///
+    /// Non-security BLAKE3: restarts the checksum for the checkpoint the node-owned view selected.
     pub(in crate::runtime) fn rewind(&mut self) {
         match self {
             Self::Inline(reader) => reader.set_position(0),
