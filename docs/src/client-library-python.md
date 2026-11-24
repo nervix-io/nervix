@@ -54,18 +54,24 @@ again when the session reconnects. Every timeout is in seconds: `connect_timeout
 connection, `request_timeout` one request, `retry_timeout` a call with all of its retries and
 redirects, and `backup_wait_timeout` a backup's wait for its archive. The request and call timeouts
 count only time without the answer or a server progress report, which restarts them, so a
-long-running statement such as a waiting `STOP` is still answered.
+long-running statement such as a waiting `STOP` is still answered. `keepalive_interval` and
+`keepalive_timeout`, also in seconds (30 and 20 by default), make the session ping its node after
+that long without hearing from it while a call is open, and treat the connection as lost when the
+ping goes unanswered within the timeout; the session then reconnects and restores its subscriptions
+as after any other dropped connection. `stream_window_bytes` and `connection_window_bytes` are
+integers: how many bytes of one call, and of all calls on a connection together, the node may send
+before the session reads them (2 MiB and 5 MiB by default).
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:seeds}}
 ```
 
-An option the session cannot use, such as a username without a password, a seed that is not a URL
-or a negative timeout, raises `InvalidArgumentError` and sends nothing. Opening a session tries the
-server and then each seed once, within `retry_timeout`. A server no connection reaches, a
-certificate the session does not trust, a TLS requirement a plaintext address cannot meet and a
-wrong password, which the server refuses before the session starts, raise `ConnectError`, whose
-message never repeats the password.
+An option the session cannot use, such as a username without a password, a seed that is not a URL, a
+negative timeout or a window outside its bounds, raises `InvalidArgumentError` and sends nothing.
+Opening a session tries the server and then each seed once, within `retry_timeout`. A server no
+connection reaches, a certificate the session does not trust, a TLS requirement a plaintext address
+cannot meet and a wrong password, which the server refuses before the session starts, raise
+`ConnectError`, whose message never repeats the password.
 
 ```python
 {{#include ../../tests/client_conformance/python/suite/cluster/test_connect.py:wrong_password}}

@@ -13,7 +13,8 @@ use super::{failure_kind, succeeded};
 use crate::{
     FailureKind, nx_connect_options_add_seed, nx_connect_options_basic_auth,
     nx_connect_options_ca_certificate, nx_connect_options_free, nx_connect_options_new,
-    nx_connect_options_timeout, nx_connect_options_tls_requirement, nx_session_connect,
+    nx_connect_options_timeout, nx_connect_options_tls_requirement, nx_connect_options_window,
+    nx_session_connect,
 };
 
 #[test]
@@ -48,9 +49,11 @@ fn options_copy_host_buffers_and_validate_their_choices() {
             Some(nervix_client_core::TlsRequirement::Preferred),
         );
         succeeded(nx_connect_options_tls_requirement(options, 2));
-        for kind in 1..=4 {
+        for kind in 1..=6 {
             succeeded(nx_connect_options_timeout(options, kind, 2_000));
         }
+        succeeded(nx_connect_options_window(options, 1, 1_000));
+        succeeded(nx_connect_options_window(options, 2, 300_000));
         username.fill(0);
         password.fill(0);
         pem.fill(0);
@@ -67,6 +70,10 @@ fn options_copy_host_buffers_and_validate_their_choices() {
         assert_eq!(owned.request_timeout.as_millis(), 2_000);
         assert_eq!(owned.retry_timeout.as_millis(), 2_000);
         assert_eq!(owned.backup_wait_timeout.as_millis(), 2_000);
+        assert_eq!(owned.keepalive_interval.as_millis(), 2_000);
+        assert_eq!(owned.keepalive_timeout.as_millis(), 2_000);
+        assert_eq!(owned.stream_window_bytes.get(), 1_000);
+        assert_eq!(owned.connection_window_bytes.get(), 300_000);
         let extra = b"https://example.com";
         for _ in 1..nervix_client_core::ConnectOptions::MAX_SEED_SERVERS {
             succeeded(nx_connect_options_add_seed(
@@ -88,9 +95,20 @@ fn options_copy_host_buffers_and_validate_their_choices() {
             FailureKind::InvalidArgument,
         );
         assert_eq!(
-            failure_kind(nx_connect_options_timeout(options, 5, 1)),
+            failure_kind(nx_connect_options_timeout(options, 7, 1)),
             FailureKind::InvalidArgument,
         );
+        assert_eq!(
+            failure_kind(nx_connect_options_window(options, 3, 70_000)),
+            FailureKind::InvalidArgument,
+        );
+        for bytes in [0, u64::from(u32::MAX) + 1] {
+            assert_eq!(
+                failure_kind(nx_connect_options_window(options, 1, bytes)),
+                FailureKind::InvalidArgument,
+            );
+        }
+        assert_eq!((*options).0.stream_window_bytes.get(), 1_000);
         assert_eq!(
             failure_kind(nx_connect_options_ca_certificate(options, ptr::null(), 0)),
             FailureKind::InvalidArgument,
@@ -163,6 +181,35 @@ fn invalid_deadlines_are_rejected_before_connecting() {
             FailureKind::InvalidArgument,
         );
         nx_connect_options_free(options);
+    }
+}
+
+/// A window a `u32` holds but HTTP/2 does not is kept by the setter and refused when the session
+/// connects, before any network access, as an invalid deadline is.
+#[test]
+fn windows_outside_their_http2_bounds_are_rejected_before_connecting() {
+    let server = b"http://127.0.0.1:1";
+    let mut session = ptr::null_mut();
+    // SAFETY: the inputs are live, and no call succeeds or creates a session.
+    unsafe {
+        for (kind, bytes) in [(2, 65_534), (1, 2_147_483_648), (2, u64::from(u32::MAX))] {
+            let options = nx_connect_options_new();
+            succeeded(nx_connect_options_window(options, kind, bytes));
+            assert_eq!(
+                failure_kind(nx_session_connect(
+                    server.as_ptr(),
+                    server.len(),
+                    ptr::null(),
+                    0,
+                    options,
+                    ptr::null(),
+                    &mut session,
+                )),
+                FailureKind::InvalidArgument,
+            );
+            assert!(session.is_null());
+            nx_connect_options_free(options);
+        }
     }
 }
 

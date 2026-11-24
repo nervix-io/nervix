@@ -109,6 +109,10 @@ def test_a_seed_reaches_the_cluster_when_the_server_does_not(cluster: Cluster) -
         request_timeout=30.0,
         retry_timeout=60.0,
         backup_wait_timeout=300.0,
+        keepalive_interval=15.0,
+        keepalive_timeout=10.0,
+        stream_window_bytes=1024 * 1024,
+        connection_window_bytes=4 * 1024 * 1024,
         cancel=deadline(),
     ) as session:
         completed(session, "LIST DOMAINS;")

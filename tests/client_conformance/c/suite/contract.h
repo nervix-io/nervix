@@ -116,6 +116,10 @@ static nx_connect_options *suite_options(void) {
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_REQUEST, 120000));
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_RETRY, 120000));
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_BACKUP_WAIT, 300000));
+    suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_KEEPALIVE_INTERVAL, 30000));
+    suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_KEEPALIVE_TIMEOUT, 20000));
+    suite_check(nx_connect_options_window(options, NX_WINDOW_STREAM, 2097152));
+    suite_check(nx_connect_options_window(options, NX_WINDOW_CONNECTION, 5242880));
     memset(certificate, 0, length); /* B-4: the setter copied the caller's bytes. */
     return options;
 }
@@ -673,9 +677,18 @@ static void test_boundary_fields_and_arguments(void) {
     suite_kind(nx_connect_options_basic_auth(options, invalid_utf8, 1, NULL, 0),
                 NX_ERROR_INVALID_ARGUMENT);
     suite_kind(nx_connect_options_tls_requirement(options, 999), NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_window(options, 999, 70000), NX_ERROR_INVALID_ARGUMENT);
+    suite_kind(nx_connect_options_window(options, NX_WINDOW_STREAM, 0), NX_ERROR_INVALID_ARGUMENT);
     suite_check(nx_connect_options_timeout(options, NX_TIMEOUT_CONNECT, 0));
     nx_session *session = NULL;
     suite_kind(nx_session_connect(suite_bytes("http://127.0.0.1:1"), 18, NULL, 0, options,
+                                  NULL, &session), NX_ERROR_INVALID_ARGUMENT);
+    REQUIRE(session == NULL);
+    /* A window HTTP/2 does not allow is kept by the setter and refused at connect. */
+    nx_connect_options *narrow = nx_connect_options_new();
+    HOLD(nx_connect_options, narrow);
+    suite_check(nx_connect_options_window(narrow, NX_WINDOW_CONNECTION, 65534));
+    suite_kind(nx_session_connect(suite_bytes("http://127.0.0.1:1"), 18, NULL, 0, narrow,
                                   NULL, &session), NX_ERROR_INVALID_ARGUMENT);
     REQUIRE(session == NULL);
     suite_kind(nx_cancel_with_deadline(UINT64_MAX, NULL), NX_ERROR_INVALID_ARGUMENT);
@@ -694,7 +707,9 @@ static void test_boundary_fields_and_arguments(void) {
 
 static void test_boundary_public_enumeration_domains(void) {
     DOMAIN(nx_tls_requirement, NX_TLS_PREFERRED, NX_TLS_REQUIRED);
-    DOMAIN(nx_timeout_kind, NX_TIMEOUT_CONNECT, NX_TIMEOUT_REQUEST, NX_TIMEOUT_RETRY, NX_TIMEOUT_BACKUP_WAIT);
+    DOMAIN(nx_timeout_kind, NX_TIMEOUT_CONNECT, NX_TIMEOUT_REQUEST, NX_TIMEOUT_RETRY, NX_TIMEOUT_BACKUP_WAIT,
+        NX_TIMEOUT_KEEPALIVE_INTERVAL, NX_TIMEOUT_KEEPALIVE_TIMEOUT);
+    DOMAIN(nx_window_kind, NX_WINDOW_STREAM, NX_WINDOW_CONNECTION);
     DOMAIN(nx_error_kind, NX_ERROR_INVALID_ARGUMENT, NX_ERROR_CONNECT, NX_ERROR_TRANSPORT,
         NX_ERROR_UNCERTAIN, NX_ERROR_REJECTED, NX_ERROR_DEADLINE, NX_ERROR_CANCELLED,
         NX_ERROR_OVERFLOW, NX_ERROR_PROTOCOL, NX_ERROR_TYPE, NX_ERROR_CLOSED,

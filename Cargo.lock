@@ -6929,6 +6929,7 @@ dependencies = [
  "bytes",
  "error-stack",
  "flatbuffers",
+ "h2",
  "http-body",
  "hyper-util",
  "indexmap 2.14.2",

@@ -2,12 +2,17 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The connect options, the channel a server is reached over, the `authorization`
-//!   metadata every call carries, and the directory of servers a lost session reconnects to.
+//! - **Owns.** The connect options, the channel a server is reached over with the HTTP/2
+//!   keepalive and windows it takes, the `authorization` metadata every call carries, and the
+//!   directory of servers a lost session reconnects to.
 //! - **Depends on.** tonic's transport, the cryptography boundary and the native DNS resolver.
 //! - **Must not know.** What the calls on a channel carry.
 
-use std::{num::NonZeroUsize, str::FromStr as _, time::Duration};
+use std::{
+    num::{NonZeroU32, NonZeroUsize},
+    str::FromStr as _,
+    time::Duration,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::{Report, ResultExt as _};
@@ -19,7 +24,7 @@ use nervix_recovery::Discarded as _;
 use tonic::{
     Request,
     metadata::AsciiMetadataValue,
-    transport::{Certificate, Channel, ClientTlsConfig},
+    transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
 };
 use url::Url;
 
@@ -44,6 +49,14 @@ impl EndpointValidationError {
         report.change_context(failure)
     }
 }
+
+/// Whether a connection with no call open is pinged. It is not: such a connection protects no call,
+/// and the next call's connect and request deadlines find a dead one.
+const KEEPALIVE_WHILE_IDLE: bool = false;
+
+/// Whether hyper sizes the receive windows from its bandwidth-delay estimate. It does not: the
+/// estimate replaces the declared windows and grows them past what the client declared.
+const ADAPTIVE_WINDOW: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsRequirement {
@@ -84,6 +97,16 @@ pub struct ConnectOptions {
     /// Bytes of unread server notices one session retains, each notice charged its text and its
     /// in-memory header.
     pub notice_bytes: NonZeroUsize,
+    /// How long a connection with a call open may go without call data or a ping answer from the
+    /// server before the client pings it.
+    pub keepalive_interval: Duration,
+    /// How long that ping may go unanswered before the connection is lost.
+    pub keepalive_timeout: Duration,
+    /// How many bytes of one call the server may send before the client reads them.
+    pub stream_window_bytes: NonZeroU32,
+    /// How many bytes of every call on one connection together the server may send before the
+    /// client reads them.
+    pub connection_window_bytes: NonZeroU32,
 }
 
 impl Default for ConnectOptions {
@@ -112,6 +135,10 @@ impl Default for ConnectOptions {
             request_frame_capacity: capabilities.request_frame_capacity(),
             notice_capacity: capabilities.notice_capacity(),
             notice_bytes: capabilities.notice_bytes(),
+            keepalive_interval: capabilities.keepalive_interval(),
+            keepalive_timeout: capabilities.keepalive_timeout(),
+            stream_window_bytes: capabilities.stream_window_bytes(),
+            connection_window_bytes: capabilities.connection_window_bytes(),
         }
     }
 }
@@ -214,13 +241,23 @@ impl GrpcConnector {
         Ok(())
     }
 
-    pub(crate) async fn connect(&self, server: &Url) -> error_stack::Result<Channel, ClientError> {
+    /// The endpoint `server` is reached at: its validated origin, TLS when the origin asks for
+    /// it, the connection deadline, and the HTTP/2 keepalive and receive windows every connection
+    /// of this client takes.
+    pub(crate) fn endpoint(&self, server: &Url) -> error_stack::Result<Endpoint, ClientError> {
         self.validate_server(server)
             .map_err(EndpointValidationError::into_client)?;
         let is_https = server.scheme() == "https";
         let mut endpoint = Channel::from_shared(server.as_str().to_string())
             .map_err(|error| Report::new(ClientError::InvalidServerUri(error)))?;
-        endpoint = endpoint.connect_timeout(self.capabilities.connect_timeout());
+        endpoint = endpoint
+            .connect_timeout(self.capabilities.connect_timeout())
+            .http2_keep_alive_interval(self.capabilities.keepalive_interval())
+            .keep_alive_timeout(self.capabilities.keepalive_timeout())
+            .keep_alive_while_idle(KEEPALIVE_WHILE_IDLE)
+            .initial_stream_window_size(self.capabilities.stream_window_bytes().get())
+            .initial_connection_window_size(self.capabilities.connection_window_bytes().get())
+            .http2_adaptive_window(ADAPTIVE_WINDOW);
         if is_https {
             nervix_crypto::tls::install_default_provider();
             let mut tls =
@@ -232,6 +269,11 @@ impl GrpcConnector {
                 .tls_config(tls)
                 .map_err(|error| Report::new(ClientError::ConfigureTls(error)))?;
         }
+        Ok(endpoint)
+    }
+
+    pub(crate) async fn connect(&self, server: &Url) -> error_stack::Result<Channel, ClientError> {
+        let endpoint = self.endpoint(server)?;
         let dns = self
             .dns
             .as_ref()
