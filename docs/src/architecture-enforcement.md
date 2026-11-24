@@ -288,17 +288,19 @@ classification a site takes: a setting of its class, a derivation, or a fixed va
 ## Host Memory Admission
 
 An analysis compilation needs about the memory of rustc's own check of its target, and the server
-library's dwarfs every other. Its diagnostic analysis has peaked just over 25 GiB in CI, while other
-crates stay below the 4 GiB threshold. Its 26 GiB reservation accounts for that peak when the host
-admits compilations. Every configuration builds in a directory of its own, and up to four
+library's dwarfs every other. Its analysis peaks at 3.9 GiB in CI in every configuration, the
+diagnostic ones included, while other crates stay below the 4 GiB threshold. Its 5 GiB reservation,
+the smallest whole reservation above the threshold, accounts for that peak when the host admits
+compilations. Every configuration builds in a directory of its own, and up to four
 configurations analyze at once, a
 bound `--jobs` or `NERVIX_TYPED_RATCHET_JOBS` sets otherwise; the evidence keeps the declared order
 whatever order they end in, and once one analysis fails no configuration starts another.
 Configurations at once, and validations in several worktrees of one host, would hold several server
 analyses at a time, and nothing else admits them against the host's memory: kache, the compiler
 wrapper the host configures, runs a chain with a workspace wrapper directly, outside its own
-memory-weighted scheduler. Five server analyses at once exceed a 62 GiB host, and the kernel's
-out-of-memory killer ends one of them.
+memory-weighted scheduler. Each worktree analyzes up to four configurations at once, so the
+validations of several worktrees together can fill a host's memory, and the kernel's out-of-memory
+killer then ends one of them.
 
 `tools/nervix-lint/configurations.toml` declares the admission: a threshold, a wait limit and a
 reservation for every compilation, by crate and target kind, that peaks above the threshold. The
