@@ -25,12 +25,10 @@
     )
 )]
 
-use std::{future::Future, pin::Pin};
-
 use error_stack::ResultExt as _;
 use nervix_execution::CapacityWaits;
 
-use super::*;
+use super::{capacity_attempt::CapacityAttempt, *};
 
 /// Where the branches a processor task restores come from.
 enum ProcessorBranchRestoreSource {
@@ -52,32 +50,12 @@ pub(super) struct PendingProcessorBranchRestore {
 
 /// One attempt of a pending restore. It builds every branch the restore names, opening their
 /// retained state on executor work that waits for a place in a full worker class, or for room in
-/// a full memory class, rather than being refused, and it tells its task whenever that work waits.
-pub(super) struct ProcessorBranchRestoreAttempt {
-    waits: CapacityWaits,
-    build: RestoreBuild,
-}
-
-/// Where one attempt's build stands.
-enum RestoreBuild {
-    /// Still building, on a future that owns everything it reads, so that the task can answer its
-    /// commands between polls of it.
-    Building(Pin<Box<dyn Future<Output = RestoreBuilt> + Send>>),
-    /// Finished, with what it built or why it failed, until the task installs it.
-    Built(RestoreBuilt),
-}
+/// a full memory class, and it tells its task whenever that work waits.
+pub(super) type ProcessorBranchRestoreAttempt = CapacityAttempt<RestoreBuilt>;
 
 /// What one attempt built: every branch its restore names with the lifecycle that names them,
 /// nothing when the processor never formed a lifecycle, or why it could not build them.
-type RestoreBuilt = error_stack::Result<Option<BuiltBranches>, ProcessorBranchTaskError>;
-
-/// What a restore attempt does after its task has run it.
-pub(super) enum RestoreProgress {
-    /// Its build finished, and the task installs what it built.
-    Built,
-    /// Its build waits for capacity, and the task answers its commands beside it.
-    Waiting,
-}
+pub(super) type RestoreBuilt = error_stack::Result<Option<BuiltBranches>, ProcessorBranchTaskError>;
 
 /// The lifecycle a restore's branches belong to and the lifetime each of them resumes.
 struct RestorePlan {
@@ -86,7 +64,7 @@ struct RestorePlan {
 }
 
 /// Every branch one attempt built and has not started yet, with the lifecycle that names them.
-struct BuiltBranches {
+pub(super) struct BuiltBranches {
     lifecycle: RestorableBranchLifecycle,
     branches: Vec<BuiltBranch>,
 }
@@ -150,24 +128,23 @@ impl PendingProcessorBranchRestore {
         context: &ProcessorRuntimeContext,
         template: &BranchInstanceTemplate,
     ) -> ProcessorBranchRestoreAttempt {
-        let waits = CapacityWaits::new();
-        let build = match self.plan(context, template) {
-            Err(error) => RestoreBuild::Built(Err(error)),
+        match self.plan(context, template) {
+            Err(error) => ProcessorBranchRestoreAttempt::ended(Err(error)),
             // The processor has never formed a branch lifecycle, so it has no branch to restore.
-            Ok(None) => RestoreBuild::Built(Ok(None)),
+            Ok(None) => ProcessorBranchRestoreAttempt::ended(Ok(None)),
             Ok(Some(plan)) if plan.lifetimes.is_empty() => {
-                RestoreBuild::Built(Ok(Some(BuiltBranches {
+                ProcessorBranchRestoreAttempt::ended(Ok(Some(BuiltBranches {
                     lifecycle: plan.lifecycle,
                     branches: Vec::new(),
                 })))
             }
             Ok(Some(plan)) => {
+                let waits = CapacityWaits::new();
                 let executor = context.runtime_handle.executor().reporting_waits_to(&waits);
                 let built = plan.build(context.clone(), Arc::new(template.clone()), executor);
-                RestoreBuild::Building(Box::pin(built))
+                ProcessorBranchRestoreAttempt::start(waits, built)
             }
-        };
-        ProcessorBranchRestoreAttempt { waits, build }
+        }
     }
 
     /// The lifecycle this restore's branches belong to, with the lifetime each resumes, or nothing
@@ -249,7 +226,7 @@ impl PendingProcessorBranchRestore {
         last_persisted_lru_lsm: &mut u64,
     ) -> error_stack::Result<(), ProcessorBranchTaskError> {
         let built = attempt
-            .into_built()
+            .into_outcome()
             .verified("the task finishes an attempt only once its build has ended");
         let built = match built {
             Ok(built) => built,
@@ -264,74 +241,6 @@ impl PendingProcessorBranchRestore {
             *last_persisted_lru_lsm = built.start(context, template, instances, &mut self.source);
         }
         Ok(())
-    }
-}
-
-impl ProcessorBranchRestoreAttempt {
-    /// Build until the attempt has finished or waits for capacity.
-    ///
-    /// Its task answers no command meanwhile: an attempt that makes progress keeps every command
-    /// behind it, as a restore its task awaited inline did.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            lifecycle,
-            reason = "one restore attempt builds the processor's retained branch lifetimes"
-        )
-    )]
-    pub(super) async fn run_until_waiting(&mut self) -> RestoreProgress {
-        let Self { waits, build } = self;
-        let RestoreBuild::Building(building) = build else {
-            return RestoreProgress::Built;
-        };
-        let built = nervix_primitives::select! {
-            biased;
-            built = building.as_mut() => Some(built),
-            () = waits.began() => None,
-        };
-        match built {
-            Some(built) => {
-                *build = RestoreBuild::Built(built);
-                RestoreProgress::Built
-            }
-            None => RestoreProgress::Waiting,
-        }
-    }
-
-    /// Build while the attempt waits for capacity, and return once it no longer does: it took its
-    /// place or its room and goes on, or it finished.
-    ///
-    /// The task answers its commands beside this future and may drop it between them: the build
-    /// it drives stays in the attempt, and so does its place in line.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            lifecycle,
-            reason = "one restore attempt waits for the capacity its retained branch lifetimes \
-                      need"
-        )
-    )]
-    pub(super) async fn until_no_longer_waiting(&mut self) {
-        let Self { waits, build } = self;
-        let RestoreBuild::Building(building) = build else {
-            return;
-        };
-        let built = nervix_primitives::select! {
-            biased;
-            built = building.as_mut() => Some(built),
-            () = waits.ended() => None,
-        };
-        if let Some(built) = built {
-            *build = RestoreBuild::Built(built);
-        }
-    }
-
-    /// What the attempt built, once its build has ended.
-    fn into_built(self) -> Option<RestoreBuilt> {
-        match self.build {
-            RestoreBuild::Built(built) => Some(built),
-            RestoreBuild::Building(_) => None,
-        }
     }
 }
 
@@ -354,7 +263,7 @@ impl RestorePlan {
             .fault_injection
             .pause_processor_branch_restore_if_armed(&context.domain, &template.owner.node)
             .await;
-        let opening = RetainedStateOpening::WaitingForPlace(executor);
+        let opening = RetainedStateOpening::ReportingWaits(executor);
         let mut branches = Vec::with_capacity(lifetimes.len());
         for lifetime in lifetimes {
             nervix_primitives::task::consume_budget().await;

@@ -188,10 +188,11 @@ async fn connect(
     };
     let executor = service.inner.runtime.executor();
     let _reservation = executor
-        .try_reserve(
+        .reserve(
             MemoryClass::Management,
             executor.limits().management_event_bytes.as_u64(),
         )
+        .await
         .change_context(StreamError::Read)?;
     let _connected = Connected::new(service.inner.licensing.clone());
     // Bound all bytes admitted during one parser lifetime. Renewal retains the cursor and sync

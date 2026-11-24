@@ -613,8 +613,8 @@ pub(super) async fn evaluate_correlator_where_matches(
             &incoming.message.acks,
             ack_timing.keep_alive_while_pending(
                 candidates,
-                execute_accepted_program_with_selection_in_context(
-                    executor.accepted_work(),
+                execute_program_with_selection_in_context(
+                    executor,
                     &program.program,
                     &input,
                     &VmExecutionContext {
@@ -852,8 +852,8 @@ pub(super) async fn evaluate_correlator_output_batch(
     let result = match ack_timing
         .keep_alive_while_pending(
             acks.as_slice(),
-            execute_accepted_program_with_selection_in_context(
-                executor.accepted_work(),
+            execute_program_with_selection_in_context(
+                executor,
                 &program.program.compiled,
                 &input,
                 &VmExecutionContext {

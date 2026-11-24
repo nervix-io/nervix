@@ -94,7 +94,7 @@ impl FaultInjection {
             let executor = executor.clone();
             let started = started.clone();
             nervix_primitives::task::spawn(async move {
-                Self::run_refusing(
+                Self::run_holding(
                     &executor,
                     class,
                     reservation,
@@ -122,8 +122,8 @@ impl FaultInjection {
     }
 
     /// Fill every worker of `class`, a CPU or storage class, on `node_id`, then every place in its
-    /// wait queue, and return once the class refuses the next job it is handed. A job that waits
-    /// for a place instead then waits until the scenario releases the class.
+    /// wait queue, and return once the next job the class is handed waits for a place, until the
+    /// scenario releases the class.
     pub async fn saturate_execution(
         &self,
         node_id: &ClusterNodeName,
@@ -144,7 +144,7 @@ impl FaultInjection {
                 });
             let waiter = executor.clone();
             nervix_primitives::task::spawn(async move {
-                Self::run_refusing(&waiter, class, reservation, |_charge, _cancellation| ())
+                Self::run_holding(&waiter, class, reservation, |_charge, _cancellation| ())
                     .await
                     .discarded(
                         "this job exists to hold a place in the wait queue; once the scenario \
@@ -158,10 +158,10 @@ impl FaultInjection {
         }
     }
 
-    /// Run `job` on `class`'s workers the way request work runs: refused at once when the class's
-    /// wait queue is full. The jobs a scenario holds a class with therefore never wait themselves,
-    /// so they never count among the jobs waiting for a place.
-    async fn run_refusing<T: Send + 'static>(
+    /// Run `job` on `class`'s workers. A scenario submits exactly as many holding jobs as the
+    /// class has free workers and places, so they take free ones at once and never count among the
+    /// jobs waiting for a place.
+    async fn run_holding<T: Send + 'static>(
         executor: &Executor,
         class: WorkerClassName,
         reservation: Reservation,
@@ -208,7 +208,7 @@ impl FaultInjection {
     }
 
     /// Hold every byte of `node_id`'s bulk memory but `room`, so that a charge needing more room
-    /// than that is refused until the scenario releases the hold. A node that already holds bulk
+    /// than that waits until the scenario releases the hold. A node that already holds bulk
     /// memory for the scenario adds what is free beyond `room` to its hold.
     pub fn hold_bulk_memory_leaving_room_on(&self, node_id: &ClusterNodeName, room: u64) {
         let Some(mut node) = self.inner.executions.get_mut(node_id) else {

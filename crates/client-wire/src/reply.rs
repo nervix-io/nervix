@@ -616,8 +616,9 @@ pub enum RequestRejection {
     /// The session already has as many requests in flight as the server admits. Nothing was
     /// admitted; the request can be sent again once an earlier one has its terminal reply.
     TooManyRequestsInFlight,
-    /// The server had no capacity left to prepare the reply of a request that changes nothing.
-    /// The request can be sent again later.
+    /// The server's workers did not prepare the reply of a request that changes nothing, because
+    /// the node is stopping or the job failed. A full memory class or worker queue holds a reply
+    /// back rather than refusing it. The request can be sent again later.
     ServerBusy,
 }
 

@@ -55,6 +55,7 @@ impl SessionServiceImpl {
     /// returned by the same read that produced its blob.
     pub(super) async fn stage_guest_state_sections(
         &self,
+        executor: &Executor,
         captured: Vec<CapturedGuestSave>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
@@ -80,7 +81,9 @@ impl SessionServiceImpl {
             }
             let placement = save.placement.clone();
             let branch_fingerprint = save.branch_fingerprint;
-            let (blob, revision) = self.stage_guest_blob(save, &request.domain).await?;
+            let (blob, revision) = self
+                .stage_guest_blob(executor, save, &request.domain)
+                .await?;
             let descriptor = WasmStateDescriptor {
                 domain: placement.domain.clone(),
                 entity: placement.identifier.clone(),
@@ -107,7 +110,7 @@ impl SessionServiceImpl {
                 ))
             })?;
             let descriptor_artifact = self
-                .stage_captured_section(descriptor_bytes, &request.domain)
+                .stage_captured_section(executor, descriptor_bytes, &request.domain)
                 .await
                 .map_err(|error| {
                     error.change_context(failure_context(
@@ -148,10 +151,11 @@ impl SessionServiceImpl {
 
     async fn stage_guest_blob(
         &self,
+        executor: &Executor,
         save: CapturedGuestSave,
         domain: &DomainName,
     ) -> Result<(StagedArtifact, u64), Report<RemoteOperationFailure>> {
-        let executor = self.inner.runtime.executor().clone();
+        let executor = executor.clone();
         let entity = save.placement.identifier.clone();
         let (stored_bytes, conversion_bytes) =
             save.size_and_conversion_charge().map_err(|error| {

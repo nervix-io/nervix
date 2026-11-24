@@ -108,12 +108,13 @@ impl StoredWindowState {
             .checked_mul(std::mem::size_of::<RowSizes>() + std::mem::size_of::<u64>())
             .ok_or_else(|| Report::new(WindowArchiveError::Open))?;
         let size_memory = executor
-            .try_reserve(
+            .reserve(
                 MemoryClass::RestoreMetadata,
                 u64::try_from(bytes)
                     .map_err(|_| Report::new(WindowArchiveError::Open))?
                     .max(1),
             )
+            .await
             .change_context(WindowArchiveError::Open)?;
         let mut input_sizes = Vec::with_capacity(rows);
         let mut row_sizes = Vec::with_capacity(rows);

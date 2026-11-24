@@ -254,9 +254,10 @@ truncated, and it can never mix two reads of the server's state. Parts of one re
 but other replies and unsolicited frames may arrive between them, which is why a client keeps one
 reassembly per request identity. A reply above the transfer limit is not sent at all: the request
 receives the typed rejection `ReplyTooLarge` instead. A reply that carries an impact report is
-encoded on the bulk workers under the bulk memory class; when neither memory nor a worker is
-available for it, the request receives `ServerBusy`, which is safe to repeat because such a reply
-belongs to a request that changes nothing.
+encoded on the bulk workers under the bulk memory class. A full class or worker queue holds the
+reply back until it frees; the request receives `ServerBusy` only when the bulk workers do not run
+the encoding, because the node is stopping or the job failed, which is safe to repeat because such a
+reply belongs to a request that changes nothing.
 
 ### One Current Form
 
@@ -711,7 +712,7 @@ when there is one, and a message for display. The session keeps serving after an
 | `DuplicateRequestId` | The request identity is already in flight in this session. |
 | `TooManyRequestsInFlight` | The session already has 64 requests in flight. Nothing was admitted. |
 | `ReplyTooLarge` | The complete reply cannot be encoded within the session limits, above all because it exceeds the transfer limit. |
-| `ServerBusy` | The server had no memory or worker left to prepare the reply of an inspection. |
+| `ServerBusy` | The server's workers did not prepare the reply of an inspection: the node is stopping, or the job failed. A full memory class or worker queue holds a reply back instead. |
 
 The first five refuse a request before anything about it runs. `ReplyTooLarge` and `ServerBusy`
 replace a reply that could not be prepared. For a read, repeating the request reads again. For a

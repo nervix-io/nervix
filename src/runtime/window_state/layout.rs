@@ -73,6 +73,10 @@ impl WindowCheckpointLayout {
             .change_context(WindowSnapshotError::Execution)?
     }
 
+    /// Draw the parse's working metadata from the restore-metadata share its caller's operation
+    /// holds: a backup's conversion of a stored window, or an inspection's capture of a published
+    /// one. A share without room reports the shortfall that operation gives everything back for
+    /// and waits on while it holds nothing.
     fn admit_metadata(
         executor: &Executor,
         native_bytes: u64,

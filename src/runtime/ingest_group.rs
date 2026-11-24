@@ -507,7 +507,6 @@ impl PendingIngestGroup {
     pub(super) async fn decode_payload(
         &mut self,
         executor: &Executor,
-        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
         unfold_limit: usize,
@@ -518,7 +517,6 @@ impl PendingIngestGroup {
             .get_or_insert_with(|| codec.schema().batch_builder(row_bound));
         let decoded = decode_ingested_payload(
             executor,
-            admission,
             codec,
             payload,
             &mut self.decoder,
@@ -846,13 +844,12 @@ impl IngestRouteCollector {
     pub(super) async fn decode_payload(
         &mut self,
         executor: &Executor,
-        admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
         payload: &[u8],
         unfold_limit: usize,
     ) -> Result<(), PayloadDecodeFailure> {
         self.pending
-            .decode_payload(executor, admission, codec, payload, unfold_limit)
+            .decode_payload(executor, codec, payload, unfold_limit)
             .await
     }
 
@@ -1343,34 +1340,28 @@ pub(super) async fn prepare_branched_entrypoint_input(
     let prepared = ack_timing
         .keep_alive_while_pending(
             &acks,
-            executor.accepted_work().run_cpu(
-                CpuClass::Data,
-                reservation,
-                move |_charge, cancellation| {
-                    let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
-                    let selections = match batch.branch_selections() {
-                        Ok(selections) => selections,
-                        Err(error) => {
-                            return Err(IngestGroupFailure::new(error, batch.acks.clone()));
-                        }
-                    };
-                    let mut branches = Vec::with_capacity(selections.len());
-                    for selection in selections {
-                        if let Err(cancelled) = cancellation.check() {
-                            return Err(IngestGroupFailure::new(
-                                Report::new(cancelled).change_context(
-                                    IngestGroupError::Execution {
-                                        operation: IngestGroupAdmittedOperation::PrepareBranchInput,
-                                    },
-                                ),
-                                batch.acks.clone(),
-                            ));
-                        }
-                        branches.push(batch.filter_branch(selection, ack_boundary));
+            executor.run_cpu(CpuClass::Data, reservation, move |_charge, cancellation| {
+                let batch = BranchedEntrypointBatch::from_inputs(vec![input])?;
+                let selections = match batch.branch_selections() {
+                    Ok(selections) => selections,
+                    Err(error) => {
+                        return Err(IngestGroupFailure::new(error, batch.acks.clone()));
                     }
-                    Ok(branches)
-                },
-            ),
+                };
+                let mut branches = Vec::with_capacity(selections.len());
+                for selection in selections {
+                    if let Err(cancelled) = cancellation.check() {
+                        return Err(IngestGroupFailure::new(
+                            Report::new(cancelled).change_context(IngestGroupError::Execution {
+                                operation: IngestGroupAdmittedOperation::PrepareBranchInput,
+                            }),
+                            batch.acks.clone(),
+                        ));
+                    }
+                    branches.push(batch.filter_branch(selection, ack_boundary));
+                }
+                Ok(branches)
+            }),
         )
         .await;
     match prepared {
@@ -1396,7 +1387,6 @@ pub(super) async fn prepare_branched_entrypoint_input(
 /// judged, and one the node keeps waits for a place.
 pub(super) async fn decode_ingested_payload(
     executor: &Executor,
-    admission: QueueAdmission,
     codec: &Arc<CompiledCodec>,
     payload: &[u8],
     decoder: &mut JsonDecoder,
@@ -1427,9 +1417,8 @@ pub(super) async fn decode_ingested_payload(
     let unfolding_codec = codec.clone();
     let payload = Bytes::copy_from_slice(payload);
     let unfolded = executor
-        .run_cpu_with(
+        .run_cpu(
             CpuClass::Extension,
-            admission,
             reservation,
             move |_charge, cancellation| {
                 if let Err(cancelled) = cancellation.check() {
@@ -2434,7 +2423,6 @@ impl Runtime {
             let outcome = collector
                 .decode_payload(
                     self.executor(),
-                    QueueAdmission::WaitForPlace,
                     codec,
                     payload,
                     usize::try_from(self.cluster_parameters().payload_unfold_limit())

@@ -125,7 +125,7 @@ impl WindowBranch<'_> {
 pub(super) fn snapshot_charge(
     snapshot: &WindowProcessorStateSnapshot,
     plan: &WindowAccumulatorPlan,
-    memory: &mut Reservation,
+    memory: &mut GrowingCharge,
     cancellation: &Cancellation,
 ) -> ReadResult<u64> {
     use std::collections::hash_map::Entry;

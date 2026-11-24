@@ -21,9 +21,7 @@
 
 use async_trait::async_trait;
 use nervix_connector::{EmitterLifecycle, EmitterRecordPosition, RecordEmitter};
-use nervix_execution::{
-    Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass, QueueAdmission,
-};
+use nervix_execution::{Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::EmitterBatchPolicy;
 
 use super::{
@@ -244,9 +242,8 @@ impl EmitterConnectorContext {
         // The emitter already accepted the rows it encodes, so a full queue holds the encoding
         // back rather than refusing it for a retry.
         let encoded = executor
-            .run_cpu_with(
+            .run_cpu(
                 CpuClass::Extension,
-                QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, cancellation| encode(cancellation),
             )
@@ -261,13 +258,6 @@ impl EmitterConnectorContext {
                     .attach_printable(format!(
                         "emitter '{}' could not start its encoding: the node's extension workers \
                          admit no more work as the node stops",
-                        self.emitter.as_str()
-                    ))),
-                ExecutionError::QueueFull { .. } => Err(error
-                    .change_context(EmitterRuntimeError::EncodingRefused)
-                    .attach_printable(format!(
-                        "emitter '{}' could not start its encoding: the node's extension workers \
-                         have no room now",
                         self.emitter.as_str()
                     ))),
                 ExecutionError::JobPanicked { .. } => Err(error
@@ -1241,7 +1231,6 @@ mod tests {
             .as_ref()
             .expect("the identity program encodes the row");
         assert_eq!(payload.as_slice(), br#"{"value": 3}"#);
-        assert_eq!(executor.snapshot().extension_cpu.refused, 0);
     }
 
     #[nervix_primitives::test]

@@ -25,19 +25,20 @@ use arrow_array::{StringArray, TimestampNanosecondArray, UInt32Array};
 use arrow_schema::{FieldRef, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{Cancellation, CpuClass, MemoryClass, Reservation};
+use nervix_execution::{Cancellation, CpuClass, Executor, GrowingCharge, MemoryClass};
 use nervix_models::{ProcessorStateSection, StateInspectionBranchSelection, StateInspectionCounts};
 use nervix_primitives::sync::{Arc, StdArc};
 
 use super::{
-    BranchKey, DomainName, NodeRef, NodeUnitRef, RelayMessage, RelayProcessorOperationTemplate,
-    ReorderKeyPart, Runtime, RuntimeStateKind, Timestamp, Unit, WindowAccumulatorPlan,
-    WindowAggregateStorageKind, WindowArgumentColumns, checked_add_duration_to_timestamp,
+    BranchKey, NodeUnitRef, RelayMessage, RelayProcessorOperationTemplate, ReorderKeyPart, Runtime,
+    RuntimeStateKind, Timestamp, WindowAccumulatorPlan, WindowAggregateStorageKind,
+    WindowArgumentColumns, checked_add_duration_to_timestamp,
     deduplicator::PublishedDeduplicatorKey,
     processor_state_inspection::{
         ProcessorStatePage, ProcessorStatePageBounds, ProcessorStatePageError,
-        ProcessorStatePageMemory, ProcessorStateRun, ProcessorStateSectionColumns,
-        ProcessorStateSelection, extend_runs, held_row_bytes, payload_columns, timestamp_column,
+        ProcessorStatePageMemory, ProcessorStatePageRead, ProcessorStateRun,
+        ProcessorStateSectionColumns, ProcessorStateSelection, extend_runs, held_row_bytes,
+        payload_columns, timestamp_column,
     },
     published_generation::Generation,
     window_state::{
@@ -127,7 +128,7 @@ fn selected(selection: StateInspectionBranchSelection, key: &Option<BranchKey>) 
     }
 }
 
-fn reserve_item<T>(memory: &mut Reservation) -> ReadResult<()> {
+fn reserve_item<T>(memory: &mut GrowingCharge) -> ReadResult<()> {
     let bytes =
         u64::try_from(std::mem::size_of::<T>()).assured("a resident object's size fits u64");
     // Cover geometric Vec capacity and bounded scratch copies before a push allocates them.
@@ -137,13 +138,11 @@ fn reserve_item<T>(memory: &mut Reservation) -> ReadResult<()> {
     reserve_bytes(memory, bytes)
 }
 
-fn reserve_bytes(memory: &mut Reservation, bytes: u64) -> ReadResult<()> {
-    let total = memory
-        .bytes()
-        .checked_add(bytes)
-        .ok_or_else(|| Report::new(ProcessorStatePageError::Admission))?;
+/// Count `bytes` more of a page and grow its charge to cover them. A class without room for
+/// them now fails with the [`nervix_execution::Shortfall`] the page needs.
+fn reserve_bytes(memory: &mut GrowingCharge, bytes: u64) -> ReadResult<()> {
     memory
-        .grow_to(total)
+        .grow_by(bytes)
         .change_context(ProcessorStatePageError::Admission)
 }
 
@@ -199,5 +198,5 @@ struct PublishedPage {
     structures: Vec<StructureRow>,
     runs: Vec<ProcessorStateRun>,
     metadata_runs: Vec<ProcessorStateRun>,
-    memory: Reservation,
+    memory: GrowingCharge,
 }

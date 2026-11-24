@@ -264,7 +264,7 @@ Feature: Endpoint request outcomes
       | 1            |
       | 3            |
 
-  Scenario Outline: An endpoint counts a request the extension workers cannot take as not admitted in <mode> on <cluster_size> nodes
+  Scenario Outline: An endpoint holds a request while the extension workers are full and answers it once they free in <mode> on <cluster_size> nodes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -285,28 +285,13 @@ Feature: Endpoint request outcomes
       """
     Then within "30s" node "node-1" eventually reports describe ingestor "measured" as "ready: true"
     When extension execution is saturated on every node
-    And endpoint request "refused" is posted on node "node-1" host "unfolding-{{test_id}}.example.com" path "/events"
+    And endpoint request "held" is posted on node "node-1" host "unfolding-{{test_id}}.example.com" path "/events"
       """
       {"user_id":42}
       """
-    Then endpoint request "refused" answers HTTP 503
-    And node "node-1" observability metric "nervix_ingestor_unfolding_refused_total" with labels eventually equals 1
-      """
-      domain="{{domain}}"
-      ingestor="measured"
-      """
-    And node "node-1" observability metric "nervix_ingestor_endpoint_requests_total" with labels eventually equals 1
-      """
-      domain="{{domain}}"
-      ingestor="measured"
-      outcome="not_admitted"
-      """
+    Then endpoint request "held" has not answered within "2s"
     When extension execution is released on every node
-    And endpoint request "accepted" is posted on node "node-1" host "unfolding-{{test_id}}.example.com" path "/events"
-      """
-      {"user_id":42}
-      """
-    Then endpoint request "accepted" answers HTTP <accepted_status>
+    Then endpoint request "held" answers HTTP <accepted_status>
     And within "30s" the relay subscription receives a payload
       """
       "user_id":42
@@ -317,11 +302,10 @@ Feature: Endpoint request outcomes
       ingestor="measured"
       outcome="accepted"
       """
-    And node "node-1" observability metric "nervix_ingestor_endpoint_requests_total" with labels eventually equals 1
+    And node "node-1" observability metric "nervix_ingestor_unfolding_refused_total" with labels eventually equals 0
       """
       domain="{{domain}}"
       ingestor="measured"
-      outcome="not_admitted"
       """
 
     Examples:
