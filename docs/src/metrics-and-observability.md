@@ -920,12 +920,13 @@ no connection because it has asked a shared client's pool for one and has not be
 see [Database Client Connection Pools](database-client-pools.md). A full pool is a waiting state,
 not a failure, so an acquisition timeout or a lost connection is reported as `ERROR` instead.
 
-Below it, `transient error:` shows the failure the emitter is retrying, and `misconfigured:` shows
-instead a destination that refuses the writes as the emitter is configured, which it retries on the
-same policy until an operator repairs the setup; the other line reads `-`. `reconnect backoff:` and
-`reconnect wait:` show the retry's delay and what remains of it, and `give up in:` how long remains
-before the emitter's [`GIVE UP AFTER`](./emitters.md#giving-up) gives up the oldest unit it
-retries, in milliseconds, or `-` when no unit's clock runs.
+Below it, `transient error:` shows the failure the emitter is retrying, and `reconnect backoff:` and
+`reconnect wait:` show the retry's delay and what remains of it. `misconfigured:` follows them and
+shows, in place of `transient error:`, a destination that refuses the writes as the emitter is
+configured, which it retries on the same policy until an operator repairs the setup; of those two
+lines, the one that does not apply reads `-`. `give up in:` shows how long remains before the
+emitter's [`GIVE UP AFTER`](./emitters.md#giving-up) gives up the oldest unit it retries, in
+milliseconds, or `-` when no unit's clock runs.
 
 `DESCRIBE INGESTOR` also reports the declared `quiesce:` policy, current `quiesce state:`, all
 four quiesce values and the node's `nervix_ingestor_transport_redeliveries_total`,

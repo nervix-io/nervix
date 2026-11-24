@@ -1201,7 +1201,6 @@ pub(in crate::application) fn format_emitter_describe_output(
             // connection from a shared client's pool.
             format!("detail: {}", status.detail.as_deref().unwrap_or("-")),
             format!("transient error: {}", transient_error.unwrap_or("-")),
-            format!("misconfigured: {}", misconfiguration.unwrap_or("-")),
             format!(
                 "reconnect backoff: {}",
                 status.reconnect_backoff.as_deref().unwrap_or("-")
@@ -1213,6 +1212,8 @@ pub(in crate::application) fn format_emitter_describe_output(
                     None => "-".to_string(),
                 }
             ),
+            // A refusal of the configured writes and the give-up clock follow the retry delay.
+            format!("misconfigured: {}", misconfiguration.unwrap_or("-")),
             format!(
                 "give up in: {}",
                 match status.give_up_wait_millis {
