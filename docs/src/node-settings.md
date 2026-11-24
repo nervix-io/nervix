@@ -395,9 +395,9 @@ whole-transfer deadlines and the explicit maintained OpenRaft configuration.
 
 ## Control-Plane And Session Capabilities
 
-Each incarnation's claim also records its resolved control-plane, session and client-link
-capabilities. `DESCRIBE CLUSTER` reports those values for live and departed nodes. Reconcile
-cadences are exported locally as `nervix_control_plane_cadence_seconds{operation="..."}`;
+Each incarnation's claim also records its resolved control-plane, session, client-link, trace export
+and web console capabilities. `DESCRIBE CLUSTER` reports those values for live and departed nodes.
+Reconcile cadences are exported locally as `nervix_control_plane_cadence_seconds{operation="..."}`;
 `membership` and `scheduling` identify their respective passes. A cadence changes when that node
 restarts. It changes neither the cluster's accepted Models nor an existing operation's deadline.
 
@@ -442,10 +442,11 @@ retain one such frame per subscription and four full subscriptions. A configured
 cannot be represented with the contacted peer's frame size refuses that opening before queue
 activation.
 
-An authenticated session announces its checked limits to the client. Reconnects adopt the node
-they reach, including after a capability roll. Producer and consumer links announce each
-sender's heartbeat at open; a receiver tolerates five of its peer's intervals. This permits
-different operational cadences within one cluster without a uniform-heartbeat assertion.
+An authenticated session announces its checked limits to the client, and a console WebSocket's
+opening also announces the node's snapshot interval and [web console pacing](#web-console-pacing).
+Reconnects adopt the node they reach, including after a capability roll. Producer and consumer links
+announce each sender's heartbeat at open; a receiver tolerates five of its peer's intervals. This
+permits different operational cadences within one cluster without a uniform-heartbeat assertion.
 [Client Session Protocol](client-session-protocol.md#session-limits) and
 [Cluster Interconnect](interconnect.md#client-producer-links) own the framing and failure rules.
 
@@ -513,6 +514,33 @@ OpenTelemetry specification's default limits: 128 attributes, events and links p
 attributes per event and per link. [Node Trace Export](name-resolution.md#node-trace-export)
 describes how the exporter reaches its collector, and
 [Metrics And Observability](metrics-and-observability.md#the-nodes-own-traces) what it exports.
+
+### Web Console Pacing
+
+The browser console has no command line of its own, so the node that serves it declares how it
+paces itself. These node capabilities form a group of the node's operational claim, beside the
+control-plane, session, client-link and trace export groups. `DESCRIBE CLUSTER` shows them on each
+node's capability line, and changing one requires restarting that node.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--web-console-request-timeout` | 2m | how long a backup download waits for its opening and for each next frame, and a restore for its connection to take a chunk and for its reply once the last chunk was sent |
+| `--web-console-connect-timeout` | 3s | how long the console waits for the answer to its credential check after a connection failed, before it keeps the credentials for the next attempt |
+| `--web-console-retry-backoff` | 250ms | the first wait before the console connects again, and before it repeats a command whose outcome is unknown; each further wait doubles |
+| `--web-console-retry-max-backoff` | 5s, at least each first wait | the longest wait those doubling backoffs and the subscription restoration backoff reach |
+| `--web-console-restoration-backoff` | 1s | the first wait before an interrupted subscription tab is restored again, which doubles; the period of the session's retry timer; and the pause before a download or a restore is streamed again |
+| `--web-console-restore-frame-capacity` | 4 frames | restore frames the browser keeps queued on its connection: 1 MiB at the default 4 MiB session frame |
+
+Every wait is a whole number of milliseconds from 1ms through 24 hours, because browser timers
+count whole milliseconds. The longest backoff must be at least the retry and restoration backoffs,
+and an omitted one follows a longer first wait. The restore queue holds at most 16,383 frames, the
+most whose 256 KiB chunks the browser can still count as queued bytes.
+
+The node announces the group when a console WebSocket opens, together with its
+`--session-snapshot-interval` and, once the node has applied the cluster's committed parameters,
+`COMMAND_RETRY_VALIDITY`. [Client Session Protocol](client-session-protocol.md#session-limits)
+describes the announcement and [Web Console](client-tools-web-console.md) how the console follows
+it.
 
 ## The Node Record
 
@@ -1345,6 +1373,7 @@ describes, defaults included.
 | `--shutdown-timeout`, `--task-grace-period` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio`, `--otel-trace-export-timeout`, `--otel-trace-export-interval`, `--otel-trace-queue-capacity`, `--otel-trace-export-batch-spans` | node capability | trace export |
+| `--web-console-request-timeout`, `--web-console-connect-timeout`, `--web-console-retry-backoff`, `--web-console-retry-max-backoff`, `--web-console-restoration-backoff`, `--web-console-restore-frame-capacity` | node capability | [web console pacing](#web-console-pacing) |
 | `--cpu-count`, `--memory-limit`, `--node-detection-timeout` | node capability | capacity |
 | `--execution-*`, `--runtime-worker-threads`, `--runtime-max-blocking-threads`, `--runtime-thread-stack-size` | node capability | execution |
 | `--client-producer-node-bytes`, `--client-consumer-node-bytes` | node capability | client admission |

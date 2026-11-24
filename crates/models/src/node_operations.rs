@@ -1,8 +1,8 @@
 //! Class-typed operational capacity of one concrete node run.
 //!
 //! Layer: vocabulary.
-//! - **Owns.** Immutable control-plane, session, client-link and trace export capability
-//!   declarations and claims.
+//! - **Owns.** Immutable control-plane, session, client-link, trace export and web console
+//!   capability declarations and claims.
 //! - **Depends on.** Setting classes, scalar values and validated serialization.
 //! - **Must not know.** Machines, command lines, consensus, transports or graph execution.
 
@@ -58,6 +58,23 @@ pub enum NodeOperationalError {
         batch: u64,
         queue_setting: &'static str,
         queue: u64,
+    },
+    #[error(
+        "{setting} must be a whole number of milliseconds from {minimum:?} through {maximum:?}, \
+         found {value:?}"
+    )]
+    WebConsoleWait {
+        setting: &'static str,
+        value: Duration,
+        minimum: Duration,
+        maximum: Duration,
+    },
+    #[error("{setting} ({value:?}) must be at least {first_setting} ({first:?})")]
+    WebConsoleBackoffCeiling {
+        setting: &'static str,
+        value: Duration,
+        first_setting: &'static str,
+        first: Duration,
     },
 }
 
@@ -276,6 +293,8 @@ mod session;
 pub use session::*;
 mod traces;
 pub use traces::*;
+mod web_console;
+pub use web_console::*;
 
 /// Required operational values of one incarnation; no stored field has a default.
 #[derive(
@@ -297,6 +316,7 @@ pub struct NodeOperationalCapabilities {
     pub session: SessionCapabilities,
     pub links: ClientLinkCapabilities,
     pub traces: TraceExportCapabilities,
+    pub web_console: WebConsoleCapabilities,
 }
 
 impl NodeOperationalCapabilities {
@@ -305,6 +325,7 @@ impl NodeOperationalCapabilities {
         values.extend(self.session.described());
         values.extend(self.links.described());
         values.extend(self.traces.described());
+        values.extend(self.web_console.described());
         values
     }
 }

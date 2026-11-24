@@ -2,7 +2,7 @@
 //!
 //! Layer: edges.
 //! - **Owns.** One bounded delay and waiting/ready state per retained command's original issue order.
-//! - **Depends on.** The console's issue identity and existing reconnect-delay policy.
+//! - **Depends on.** The console's issue identity and the retry backoff of the pacing it follows.
 //! - **Must not know.** Sockets, browser timers, query text, replies or server execution.
 
 #![cfg_attr(
@@ -12,15 +12,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use meticulous::OptionExt as _;
-
-use super::{IssueOrder, WEBSOCKET_INITIAL_RECONNECT_DELAY, WEBSOCKET_MAX_RECONNECT_DELAY};
-
-const _: () = assert!(!WEBSOCKET_INITIAL_RECONNECT_DELAY.is_zero());
-const _: () = assert!(
-    WEBSOCKET_INITIAL_RECONNECT_DELAY.as_nanos() <= WEBSOCKET_MAX_RECONNECT_DELAY.as_nanos()
-);
-const _: () = assert!(WEBSOCKET_MAX_RECONNECT_DELAY.checked_mul(2).is_some());
+use super::{IssueOrder, pacing::Backoff};
 
 #[derive(Clone, Copy)]
 enum RetryState {
@@ -47,11 +39,13 @@ pub(super) struct CommandRetries {
 }
 
 impl CommandRetries {
-    pub(super) fn wait(&mut self, order: IssueOrder) -> CommandRetryWait {
+    /// Waits the first wait of `backoff` before a command's first repetition, and twice the last
+    /// wait, up to the backoff's ceiling, before every further one.
+    pub(super) fn wait(&mut self, order: IssueOrder, backoff: Backoff) -> CommandRetryWait {
         let delay;
         match self.retries.entry(order) {
             std::collections::btree_map::Entry::Vacant(entry) => {
-                delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+                delay = backoff.first();
                 entry.insert(RetryState::Waiting(delay));
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
@@ -60,10 +54,7 @@ impl CommandRetries {
                         "only a command whose retry wait ended can have another attempt answered"
                     );
                 };
-                let doubled = previous
-                    .checked_mul(2)
-                    .assured("the reconnect ceiling's checked compile-time bound permits doubling");
-                delay = doubled.min(WEBSOCKET_MAX_RECONNECT_DELAY);
+                delay = backoff.after(previous);
                 entry.insert(RetryState::Waiting(delay));
             }
         }
@@ -112,13 +103,19 @@ impl CommandRetries {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pacing::ConsolePacing;
+
+    /// The retry backoff before any opening: 250 milliseconds, doubling to five seconds.
+    fn declared_backoff() -> Backoff {
+        ConsolePacing::default().retry()
+    }
 
     #[test]
     fn repeated_answers_grow_the_existing_delay_up_to_its_ceiling() {
         let mut retries = CommandRetries::default();
         let order = IssueOrder(1);
         for millis in [250, 500, 1000, 2000, 4000, 5000, 5000] {
-            let wait = retries.wait(order);
+            let wait = retries.wait(order, declared_backoff());
             assert_eq!(wait.order, order);
             assert_eq!(wait.delay, Duration::from_millis(millis));
             assert!(retries.is_waiting(order));
@@ -132,19 +129,22 @@ mod tests {
         let mut retries = CommandRetries::default();
         let first = IssueOrder(1);
         let second = IssueOrder(2);
-        retries.wait(first);
+        retries.wait(first, declared_backoff());
         retries.ready(first);
-        assert_eq!(retries.wait(first).delay, Duration::from_millis(500));
         assert_eq!(
-            retries.wait(second).delay,
-            WEBSOCKET_INITIAL_RECONNECT_DELAY
+            retries.wait(first, declared_backoff()).delay,
+            Duration::from_millis(500)
+        );
+        assert_eq!(
+            retries.wait(second, declared_backoff()).delay,
+            declared_backoff().first()
         );
         retries.finished(first);
         assert_eq!(retries.retries.len(), 1);
         assert!(retries.is_waiting(second));
         assert_eq!(
-            retries.wait(IssueOrder(3)).delay,
-            WEBSOCKET_INITIAL_RECONNECT_DELAY
+            retries.wait(IssueOrder(3), declared_backoff()).delay,
+            declared_backoff().first()
         );
         retries.clear();
         assert!(retries.retries.is_empty());
@@ -154,9 +154,12 @@ mod tests {
     fn replacement_connections_release_waits_and_retain_the_next_delay() {
         let mut retries = CommandRetries::default();
         let order = IssueOrder(1);
-        retries.wait(order);
+        retries.wait(order, declared_backoff());
         retries.connection_ended();
         assert!(!retries.is_waiting(order));
-        assert_eq!(retries.wait(order).delay, Duration::from_millis(500));
+        assert_eq!(
+            retries.wait(order, declared_backoff()).delay,
+            Duration::from_millis(500)
+        );
     }
 }

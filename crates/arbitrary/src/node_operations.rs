@@ -1,8 +1,8 @@
 //! Bounded operational capability values with every dependent setting resolved.
 //!
 //! Outside the layer order: test harness.
-//! - **Owns.** Complete current session, control-plane, client-link and trace export claim
-//!   generation.
+//! - **Owns.** Complete current session, control-plane, client-link, trace export and web console
+//!   claim generation.
 //! - **Depends on.** Vocabulary constructors and the deterministic entropy cursor.
 //! - **Must not know.** Transports, running queues or server composition.
 
@@ -70,6 +70,41 @@ impl Entropy<'_> {
         .assured("the generated ratio, cadences and a batch within its queue are in each domain")
     }
 
+    /// A web console wait: whole milliseconds from the browser timer's resolution through the
+    /// longest wait, both included.
+    fn web_console_wait(&mut self) -> Duration {
+        let shortest = u64::try_from(BROWSER_TIMER_RESOLUTION.as_millis())
+            .assured("a millisecond counted in milliseconds fits u64");
+        let longest = u64::try_from(LONGEST_WEB_CONSOLE_WAIT.as_millis())
+            .assured("a day counted in milliseconds fits u64");
+        Duration::from_millis(self.boundary_biased(shortest..=longest))
+    }
+
+    /// The web console's waits, a longest backoff at least each first wait, and a restore queue
+    /// the browser can count.
+    pub fn web_console_capabilities(&mut self) -> WebConsoleCapabilities {
+        let retry_backoff = self.web_console_wait();
+        let restoration_backoff = self.web_console_wait();
+        let floor = u64::try_from(retry_backoff.max(restoration_backoff).as_millis())
+            .assured("a first wait of at most a day counted in milliseconds fits u64");
+        let longest = u64::try_from(LONGEST_WEB_CONSOLE_WAIT.as_millis())
+            .assured("a day counted in milliseconds fits u64");
+        let retry_max_backoff = Duration::from_millis(self.boundary_biased(floor..=longest));
+        let frames = self.boundary_biased(1..=u64::from(WebConsoleRestoreFrameCapacity::MAXIMUM));
+        WebConsoleCapabilities::resolve(WebConsoleCapabilityValues {
+            request_timeout: Some(self.web_console_wait()),
+            connect_timeout: Some(self.web_console_wait()),
+            retry_backoff: Some(retry_backoff),
+            retry_max_backoff: Some(retry_max_backoff),
+            restoration_backoff: Some(restoration_backoff),
+            restore_frame_capacity: NonZeroU64::new(frames),
+        })
+        .assured(
+            "the generated waits are whole milliseconds within their bounds, the longest backoff \
+             is at least each first wait, and the browser can count the restore queue",
+        )
+    }
+
     pub fn node_operational_capabilities(&mut self) -> NodeOperationalCapabilities {
         let bounds = self.session_bounds();
         let queue_memory = bounds
@@ -124,6 +159,7 @@ impl Entropy<'_> {
             })
             .assured("the generated link capacities and cadences are positive and bounded"),
             traces: self.trace_export_capabilities(),
+            web_console: self.web_console_capabilities(),
         }
     }
 }
