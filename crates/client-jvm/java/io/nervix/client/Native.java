@@ -127,6 +127,7 @@ final class Native {
     static native void optionsCa(long handle, byte[] pem);
     static native void optionsSeeds(long handle, Object[] seeds);
     static native void optionsTimeout(long handle, int kind, double value);
+    static native void optionsWindow(long handle, int kind, long bytes);
     static native long cancelNew();
     static native long cancelDeadline(double value);
     static native void cancelTrigger(long handle);

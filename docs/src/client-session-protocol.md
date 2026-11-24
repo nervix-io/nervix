@@ -2848,5 +2848,10 @@ allow loses its connection with `ENHANCE_YOUR_CALM`. A console session's WebSock
 the declared write buffer before writing, and holds at most one more frame for a client that stops
 reading.
 A streaming response already established is not given a whole-session request deadline. A peer
-that stops acknowledging server pings is closed, releasing session-owned resources. These transport
-bounds introduce no session wire message and do not change command admission or recovery identity.
+that stops acknowledging server pings is closed, releasing session-owned resources. The Rust
+client pings in the other direction: while a call such as the session exchange is open, it sends an
+HTTP/2 ping once its `keepalive_interval` passes without call data or a ping answer arriving, and
+ends the connection as a transport failure when no answer arrives within its `keepalive_timeout` (30
+and 20 seconds by default), so a session that is only waiting for subscription or consumer data also
+notices a node that fell silent without closing the connection. These transport bounds introduce no
+session wire message and do not change command admission or recovery identity.

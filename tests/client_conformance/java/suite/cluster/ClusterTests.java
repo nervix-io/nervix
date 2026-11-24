@@ -111,7 +111,9 @@ public final class ClusterTests {
         String scheme = cluster.server.startsWith("https://") ? "https://" : "http://";
         String unreachable = scheme + "127.0.0.1:" + refused;
         // ANCHOR: seeds
-        try (var options = cluster.options().seeds(cluster.seeds); var cancel = deadline();
+        try (var options = cluster.options().seeds(cluster.seeds).keepaliveInterval(15).keepaliveTimeout(10)
+                    .streamWindowBytes(1024 * 1024).connectionWindowBytes(4 * 1024 * 1024);
+                var cancel = deadline();
                 var seeded = Nervix.Session.connect(unreachable, cluster.domain, options, cancel)) {
             completed(seeded, "LIST DOMAINS;");
         }

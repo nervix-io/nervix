@@ -29,6 +29,18 @@ def test_an_option_the_session_cannot_use_is_refused_before_anything_is_sent(
         nx.Session(server, retry_timeout=float("inf"))
     with pytest.raises(nx.InvalidArgumentError):
         nx.Session(server, backup_wait_timeout=-0.5)
+    with pytest.raises(nx.InvalidArgumentError) as keepalive:
+        nx.Session(server, keepalive_interval=float("nan"))
+    assert "keepalive_interval" in keepalive.value.message
+    with pytest.raises(nx.InvalidArgumentError):
+        nx.Session(server, keepalive_timeout=0.0)
+    for window_bytes in (0, -1, 1 << 32):
+        with pytest.raises(nx.InvalidArgumentError) as window:
+            nx.Session(server, stream_window_bytes=window_bytes)
+        assert "stream_window_bytes" in window.value.message
+    with pytest.raises(nx.InvalidArgumentError) as narrow:
+        nx.Session(server, connection_window_bytes=65_534)
+    assert "connection-window-bytes" in narrow.value.message
     with pytest.raises(nx.InvalidArgumentError):
         nx.Session(server, domain="not a domain")
     with pytest.raises(nx.InvalidArgumentError):
