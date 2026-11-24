@@ -2,8 +2,7 @@ Feature: A window processor reopens its windows while the bulk workers are full
   A window processor that starts reopens the windows its checkpoint holds before it takes any input.
   After a restart that checkpoint comes from storage, so reopening it decodes the window's rows on
   the node's bulk workers. When every bulk worker is busy and the bulk wait queue is full, the
-  reopen waits for a place there instead of being refused and tried again later, and the node counts
-  it among the jobs waiting for a place. The first place that frees goes to it, and the window then
+  reopen waits for a place there, and the node counts it among the jobs waiting for a place. The first place that frees goes to it, and the window then
   continues with the rows it held when the node stopped.
 
   Scenario Outline: A window processor that restarts while bulk execution on its node is saturated waits for a place and keeps its open window on <cluster_size> nodes
@@ -78,8 +77,6 @@ Feature: A window processor reopens its windows while the bulk workers are full
       """
       "samples":2,"total":50
       """
-    # The reopen waited for its place: the full bulk class refused none of its work.
-    And no node refused a bulk job while it was saturated
 
     Examples:
       | cluster_size |

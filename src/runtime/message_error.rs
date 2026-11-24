@@ -1075,8 +1075,8 @@ impl Runtime {
             .ack_timing
             .keep_alive_while_pending(
                 &message.acks,
-                execute_accepted_program_with_selection_in_context(
-                    run.executor.accepted_work(),
+                execute_program_with_selection_in_context(
+                    run.executor,
                     &program.compiled,
                     &batch,
                     &VmExecutionContext {

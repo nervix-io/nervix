@@ -77,14 +77,18 @@ async fn assert_round_trip(executor: &Executor, event: RuntimeErrorEvent) {
     )
     .await
     .assured("a bounded runtime error event fits the control body limit");
-    let decoded = wire::decode_rkyv::<ControlEnvelope>(
-        executor,
-        class.memory_class(),
-        class.cpu_class(),
-        bytes,
-    )
-    .await
-    .assured("the production encoder's control envelope decodes");
+    // A receiver decodes within room for the decoded value as large as the body, taken beside the
+    // charge the body already holds.
+    let length =
+        u64::try_from(bytes.len()).assured("a bounded runtime error event's length fits u64");
+    let decoding = executor
+        .reserve(class.memory_class(), length)
+        .await
+        .assured("the management class holds a bounded runtime error event's decoding");
+    let decoded =
+        wire::decode_rkyv_within::<ControlEnvelope>(executor, class.cpu_class(), bytes, decoding)
+            .await
+            .assured("the production encoder's control envelope decodes");
     let (decoded, charge) = decoded.into_parts();
     assert_eq!(decoded, control);
     drop(charge);

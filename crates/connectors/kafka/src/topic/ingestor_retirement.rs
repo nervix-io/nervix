@@ -38,11 +38,12 @@ impl NativeClient for KafkaConsumer {
 impl Retiring<KafkaConsumer> {
     /// Creates the consumer `config` describes, taking the charge of the job that will destroy it
     /// first.
-    pub(super) fn create(
+    pub(super) async fn create(
         config: &ClientConfig,
         executor: Executor,
     ) -> Result<Self, Report<KafkaTopicIngestorError>> {
         let retirement = RetirementCharge::reserve(executor)
+            .await
             .change_context(KafkaTopicIngestorError::RetirementAdmission)?;
         let driver = config
             .create_with_context(KafkaConsumerContext::default())

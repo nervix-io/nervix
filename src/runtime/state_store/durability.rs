@@ -223,9 +223,8 @@ impl RuntimeStateStore {
             .await
             .change_context(RuntimePersistenceError::StorageAdmission)?;
         self.executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 reservation,
                 move |_charge, _cancellation| {
                     let mut round = round;

@@ -24,7 +24,8 @@ pub(crate) struct IngestorInteractionMetrics {
     /// Acknowledgement outcomes, transport settlements, resumes, suspensions, unconfirmed stops
     /// and the transient-failure projection of the host's unit.
     pub(crate) acknowledgements: super::IngestorAcknowledgementMetrics,
-    /// Payloads refused because the extension workers had no room to unfold them.
+    /// Payloads the node could not unfold at all, because it is stopping or the unfolding needs a
+    /// charge larger than its whole memory class.
     pub(crate) unfolding_refused: IntCounter,
     /// Positions discarded after a reconnect because their broker redelivers them.
     pub(crate) transport_redeliveries: IntCounter,

@@ -2227,8 +2227,9 @@ impl PrometheusMetrics {
         let ingestor_unfolding_refused_total = IntCounterVec::new(
             Opts::new(
                 INGESTOR_UNFOLDING_REFUSED_TOTAL,
-                "Total unacknowledged source payloads an ingestor did not deliver because the \
-                 node's extension workers had no room to unfold them.",
+                "Total endpoint payloads an ingestor did not deliver because the node could not \
+                 unfold them at all: it is stopping, or the unfolding needs a charge larger than \
+                 its whole memory class.",
             )
             .namespace("nervix"),
             INGESTOR_QUIESCE_PROMETHEUS_LABELS,
@@ -4162,9 +4163,10 @@ impl RuntimeMetrics {
         metrics.series.rejected.inc_by(count);
     }
 
-    /// The count of `ingestor`'s unacknowledged payloads that `physical_node_id` did not deliver
-    /// because its extension workers had no room to unfold them. The series exists from the first
-    /// time an ingestor host of the ingestor asks for it.
+    /// The count of `ingestor`'s endpoint payloads that `physical_node_id` did not deliver because
+    /// it could not unfold them at all: it is stopping, or the unfolding needs a charge larger than
+    /// its whole memory class. The series exists from the first time an ingestor host of the
+    /// ingestor asks for it.
     pub(crate) fn ingestor_unfolding_refused(
         &self,
         domain: &DomainName,

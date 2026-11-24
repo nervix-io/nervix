@@ -39,8 +39,8 @@ const HEALTHY: &str = "healthy";
 const MANAGEMENT_SHARED_STREAMS: usize = 32;
 /// Jobs one hub worker class may hold waiting, small enough for one burst to fill it.
 const HUB_PENDING_JOBS: usize = 8;
-/// Burst requests beyond what one worker and its full wait queue admit.
-const REFUSED_JOBS: usize = 2;
+/// Burst requests beyond what one worker and its full wait queue hold, which wait for a place.
+const WAITING_JOBS: usize = 2;
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 /// Twice the default bulk receive window, so an unread stream stops at its window with as much
 /// again left to send.
@@ -1106,8 +1106,9 @@ impl HubHost {
             .record(HUB, "the healthy peer's pools served the hub and the peer");
     }
 
-    /// One burst fills the bulk worker's wait queue. The burst beyond it is refused at once and
-    /// its reservations are never taken, while a control job in the same pass starts at once.
+    /// One burst fills the bulk worker's wait queue. The burst beyond it waits for a place, each
+    /// request holding only its own charge, while a control job in the same pass starts at once;
+    /// every request of the burst is answered once the class drains.
     async fn saturate_bulk_execution(&mut self) {
         let before = self.observe();
         let mut single = Box::pin(self.transport.request(&self.healthy.node, BulkProbe));
@@ -1130,7 +1131,7 @@ impl HubHost {
             .checked_add(1)
             .assured("one worker beside the queue");
         let burst_size = admitted
-            .checked_add(REFUSED_JOBS)
+            .checked_add(WAITING_JOBS)
             .assured("the burst is small");
         let requests =
             (0..burst_size).map(|_| self.transport.request(&self.healthy.node, BulkProbe));
@@ -1142,27 +1143,23 @@ impl HubHost {
         let bulk = saturated.executor.bulk_cpu;
         assert_eq!(bulk.running, 1, "{saturated:?}");
         assert_eq!(bulk.pending, HUB_PENDING_JOBS, "{saturated:?}");
-        let refused = bulk
-            .refused
-            .checked_sub(before.executor.bulk_cpu.refused)
-            .assured("the refusal counter only grows");
         assert_eq!(
-            refused,
-            u64::try_from(REFUSED_JOBS).assured("the burst is small")
+            bulk.waiting, WAITING_JOBS,
+            "the burst beyond the full queue waits for a place: {saturated:?}"
         );
-        let admitted_charge = charge
-            .checked_mul(u64::try_from(admitted).assured("the burst is small"))
+        let burst_charge = charge
+            .checked_mul(u64::try_from(burst_size).assured("the burst is small"))
             .assured("the burst's charges are small");
         assert_eq!(
-            saturated.executor.bulk_memory.reserved_bytes, admitted_charge,
-            "a refused job holds no charge: {saturated:?}"
+            saturated.executor.bulk_memory.reserved_bytes, burst_charge,
+            "each request of the burst holds only its own charge: {saturated:?}"
         );
         assert_eq!(saturated.executor.control_cpu.running, 1, "{saturated:?}");
         assert_eq!(saturated.executor.control_cpu.pending, 0, "{saturated:?}");
         self.trace.record(
             HUB,
             format!(
-                "bulk worker busy with {HUB_PENDING_JOBS} queued and {REFUSED_JOBS} refused; \
+                "bulk worker busy with {HUB_PENDING_JOBS} queued and {WAITING_JOBS} waiting; \
                  control job started"
             ),
         );
@@ -1170,58 +1167,24 @@ impl HubHost {
         let (results, liveness) = tokio::join!(burst, control);
         let liveness = liveness.assured("control work runs beside a saturated bulk class");
         assert_eq!(liveness.peer, *self.transport.node_id());
-        // An admitted request runs further bulk jobs after its first encode, and each of them is
-        // admitted against the same queue the rest of the burst still fills. Every failure is
-        // therefore one refusal by that queue: the requests beyond it fail their first encode,
-        // and an admitted request fails at the later stage the full queue refused.
-        let mut answered = 0_usize;
-        let mut failed = 0_usize;
         for (index, result) in results.iter().enumerate() {
-            let Err(error) = result else {
-                answered = answered.checked_add(1).assured("the burst is small");
-                continue;
-            };
-            failed = failed.checked_add(1).assured("the burst is small");
-            let context = error.current_context();
-            if index < admitted {
-                assert!(
-                    matches!(context, RequestError::Transport { .. }),
-                    "admitted bulk request {index}: {error:?}"
-                );
-            } else {
-                assert!(
-                    matches!(context, RequestError::Encode { .. }),
-                    "bulk request {index} beyond the full queue: {error:?}"
+            if let Err(error) = result {
+                panic!(
+                    "bulk request {index} of the burst is answered once a place frees: {error:?}"
                 );
             }
         }
         let bulk_before = before.executor.bulk_memory.reserved_bytes;
-        let drained = self
-            .wait_until("the bulk class drained", |observation| {
-                let bulk = observation.executor.bulk_cpu;
-                bulk.running == 0
-                    && bulk.pending == 0
-                    && observation.executor.bulk_memory.reserved_bytes == bulk_before
-            })
-            .await;
-        let refused_total = drained
-            .executor
-            .bulk_cpu
-            .refused
-            .checked_sub(before.executor.bulk_cpu.refused)
-            .assured("the refusal counter only grows");
-        assert_eq!(
-            refused_total,
-            u64::try_from(failed).assured("the burst is small"),
-            "every failed bulk request was refused by the full queue exactly once"
-        );
-        assert!(answered > 0, "the admitted head of the burst is answered");
-        self.trace.record(
-            HUB,
-            format!(
-                "{answered} bulk requests answered, {failed} refused by the full queue; drained"
-            ),
-        );
+        self.wait_until("the bulk class drained", |observation| {
+            let bulk = observation.executor.bulk_cpu;
+            bulk.running == 0
+                && bulk.pending == 0
+                && bulk.waiting == 0
+                && observation.executor.bulk_memory.reserved_bytes == bulk_before
+        })
+        .await;
+        self.trace
+            .record(HUB, format!("{burst_size} bulk requests answered; drained"));
     }
 
     /// The stalled peer opens resource streams and never reads them. HTTP/2 flow control stops

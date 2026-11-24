@@ -313,10 +313,7 @@ impl RegroupedLifecycle {
         let entity = first.entity.clone();
         let schema = first.schema;
         let node = node.clone();
-        let charge = executor
-            .reserve(MemoryClass::Bulk, 1)
-            .await
-            .change_context(RestoredPartitionError::Admission)?;
+        let charge = executor.charge_nothing(MemoryClass::Bulk);
         executor
             .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                 let mut revision = 0_u64;

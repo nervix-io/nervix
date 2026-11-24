@@ -13,7 +13,7 @@
 )]
 
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
-use nervix_execution::{Executor, QueueAdmission};
+use nervix_execution::Executor;
 use nervix_models::{
     CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, JsonType, ParseAsType,
     ResolvedCodecWireFormat, SchemaField, WireSchemaField,
@@ -68,7 +68,6 @@ async fn refusal(codec: &Arc<CompiledCodec>, payload: &[u8]) -> Report<CodecErro
     let mut records = codec.schema().batch_builder(1);
     let decoded = decode_ingested_payload(
         &Executor::default(),
-        QueueAdmission::RefuseWhenFull,
         codec,
         payload,
         &mut decoder,

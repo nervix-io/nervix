@@ -98,49 +98,43 @@ impl NativeGeneration {
             .change_context(InferencerError::InitialExecution)?;
         let state = state.clone();
         executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_charge, cancellation| {
-                    let mut tensors = Vec::with_capacity(state.bindings.len());
-                    for (binding, initial) in state.bindings.iter().zip(initial) {
-                        cancellation
-                            .check()
-                            .change_context(InferencerError::Cancelled)?;
-                        let mut shape = Vec::with_capacity(binding.schema.dimensions.len());
-                        for axis in &binding.schema.dimensions {
-                            let InferencerTensorDimension::Fixed(size) = axis else {
-                                return Err(Report::new(InferencerError::Initial));
-                            };
-                            let size: usize = size.get().arch_into();
-                            shape.push(size);
-                        }
-                        let mut tensor =
-                            Tensor::<f32>::new(&ort::memory::Allocator::default(), shape)
-                                .change_context(InferencerError::Initial)?;
-                        let (_, target) = tensor
-                            .try_extract_tensor_mut::<f32>()
-                            .change_context(InferencerError::Initial)?;
-                        match initial {
-                            None => target.fill(0.0),
-                            Some(value) => {
-                                let values = binding
-                                    .schema
-                                    .tensor_from_runtime_value(&value)
-                                    .change_context(InferencerError::Initial)?
-                                    .values;
-                                if values.len() != target.len() {
-                                    return Err(Report::new(InferencerError::Initial));
-                                }
-                                target.copy_from_slice(&values);
-                            }
-                        }
-                        tensors.push(tensor.into_dyn());
+            .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
+                let mut tensors = Vec::with_capacity(state.bindings.len());
+                for (binding, initial) in state.bindings.iter().zip(initial) {
+                    cancellation
+                        .check()
+                        .change_context(InferencerError::Cancelled)?;
+                    let mut shape = Vec::with_capacity(binding.schema.dimensions.len());
+                    for axis in &binding.schema.dimensions {
+                        let InferencerTensorDimension::Fixed(size) = axis else {
+                            return Err(Report::new(InferencerError::Initial));
+                        };
+                        let size: usize = size.get().arch_into();
+                        shape.push(size);
                     }
-                    Ok(Self { tensors })
-                },
-            )
+                    let mut tensor = Tensor::<f32>::new(&ort::memory::Allocator::default(), shape)
+                        .change_context(InferencerError::Initial)?;
+                    let (_, target) = tensor
+                        .try_extract_tensor_mut::<f32>()
+                        .change_context(InferencerError::Initial)?;
+                    match initial {
+                        None => target.fill(0.0),
+                        Some(value) => {
+                            let values = binding
+                                .schema
+                                .tensor_from_runtime_value(&value)
+                                .change_context(InferencerError::Initial)?
+                                .values;
+                            if values.len() != target.len() {
+                                return Err(Report::new(InferencerError::Initial));
+                            }
+                            target.copy_from_slice(&values);
+                        }
+                    }
+                    tensors.push(tensor.into_dyn());
+                }
+                Ok(Self { tensors })
+            })
             .await
             .change_context(InferencerError::InitialExecution)?
     }

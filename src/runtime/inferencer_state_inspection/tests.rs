@@ -134,7 +134,7 @@ async fn read(
                 nervix_models::StateInspectionKeyCatalog::Unrequested,
                 after,
                 ProcessorStatePageBounds { rows, bytes },
-                memory,
+                GrowingCharge::new(memory),
                 cancellation,
             )
         })

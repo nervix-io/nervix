@@ -86,9 +86,8 @@ impl StagedSnapshotWriter {
             .assured("the validated bulk chunk fits the node address width");
         let mut quota = self._reservation;
         executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
                     cancellation
@@ -177,9 +176,8 @@ impl StagedArtifact {
             .await
             .change_context(SnapshotStagingError::Admission)?;
         executor
-            .run_storage_with(
+            .run_storage(
                 StorageClass::Filesystem,
-                nervix_execution::QueueAdmission::WaitForPlace,
                 charge,
                 move |charge, cancellation| {
                     cancellation
@@ -298,7 +296,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn staging_chunk_bulk_admission_refuses_a_queued_charge_without_waiting() {
+    async fn a_staging_chunk_is_written_without_waiting_behind_a_queued_charge() {
         use futures_util::FutureExt as _;
 
         let directory = tempfile::tempdir().assured("the staging directory opens");
@@ -319,19 +317,15 @@ mod tests {
         let waiting = executor.reserve(MemoryClass::Bulk, 8192);
         let mut waiting = std::pin::pin!(waiting);
         assert!(waiting.as_mut().now_or_never().is_none());
-        let result = writer.write_chunk(chunk).now_or_never();
-        assert!(
-            result.is_some(),
-            "staging must release a refused chunk instead of waiting behind a charge that needs it"
-        );
-        let error = result
-            .assured("the write returned without waiting")
-            .err()
-            .assured("the queued charge leaves no room for write admission");
-        assert!(error.contains::<nervix_execution::AdmissionError>());
+        // The write takes no charge of its own beside the chunk's, so it never waits behind the
+        // queued charge, which needs the room the chunk holds.
+        writer
+            .write_chunk(chunk)
+            .await
+            .assured("the chunk is written without waiting for room");
         let admitted = waiting
             .await
-            .assured("the refused write released its chunk");
+            .assured("the written chunk gave its charge back");
         drop(admitted);
         drop(held);
         assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
