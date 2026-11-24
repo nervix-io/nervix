@@ -16,17 +16,17 @@ use crate::{application::session_service::SessionServiceImpl, licensing::policy:
 
 #[derive(Debug, Clone, Copy)]
 enum LicensingNoticeCode {
-    TransitionStarted,
-    TransitionAcknowledged,
-    TransitionExtended,
+    Started,
+    Acknowledged,
+    Extended,
 }
 
 impl LicensingNoticeCode {
     fn as_str(self) -> &'static str {
         match self {
-            Self::TransitionStarted => "transition_started",
-            Self::TransitionAcknowledged => "transition_acknowledged",
-            Self::TransitionExtended => "transition_extended",
+            Self::Started => "transition_started",
+            Self::Acknowledged => "transition_acknowledged",
+            Self::Extended => "transition_extended",
         }
     }
 }
@@ -143,12 +143,12 @@ fn notice_code(
     }
     match previous {
         Some(previous) if current.acknowledged && !previous.acknowledged => {
-            Some(LicensingNoticeCode::TransitionAcknowledged)
+            Some(LicensingNoticeCode::Acknowledged)
         }
         Some(previous) if current.until > previous.until => {
-            Some(LicensingNoticeCode::TransitionExtended)
+            Some(LicensingNoticeCode::Extended)
         }
-        None => Some(LicensingNoticeCode::TransitionStarted),
+        None => Some(LicensingNoticeCode::Started),
         _ => None,
     }
 }
