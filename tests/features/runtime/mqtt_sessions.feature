@@ -142,7 +142,7 @@ Feature: MQTT sessions belong to their declared ingestor
       | 3            |
 
   @mqtt_session_ownership
-  @mqtt_source_retirement
+  @mqtt_source_retirement @deloxide_stress
   Scenario Outline: An altered MQTT topic whose shared session cannot be cleaned yet is retired by the replacement before it subscribes
     Given MQTT is running
     And a stallable MQTT endpoint is configured
@@ -202,7 +202,7 @@ Feature: MQTT sessions belong to their declared ingestor
       | 3            |
 
   @mqtt_session_ownership
-  @mqtt_source_retirement
+  @mqtt_source_retirement @deloxide_stress
   Scenario Outline: A stopped and started domain still retires the MQTT session its altered topic owed before the replacement subscribes
     Given MQTT is running
     And a stallable MQTT endpoint is configured
@@ -272,7 +272,7 @@ Feature: MQTT sessions belong to their declared ingestor
       | 3            |
 
   @mqtt_session_ownership
-  @mqtt_source_retirement
+  @mqtt_source_retirement @deloxide_stress
   Scenario: A relocated MQTT input retires the session its altered topic still owes before it runs on another node
     Given MQTT is running
     And a stallable MQTT endpoint is configured
