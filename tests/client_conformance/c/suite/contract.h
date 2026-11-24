@@ -1284,7 +1284,7 @@ static void test_inspection_retains_typed_state_after_its_outcome_is_released(vo
         suite_drop(license_outcome);
         uint64_t license_branches = 0, license_rows = 0, license_bytes = 0;
         REQUIRE(nx_inspection_counts(license_inspection, &license_branches, &license_rows, &license_bytes));
-        REQUIRE(license_branches == 0 && license_rows == 4 && license_bytes > 0);
+        REQUIRE(license_branches == 0 && license_rows == 2 && license_bytes > 0);
         const uint8_t *license_json = NULL;
         size_t license_json_len = 0;
         nx_inspection_json(license_inspection, &license_json, &license_json_len);

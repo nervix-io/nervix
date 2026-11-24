@@ -675,7 +675,7 @@ test-command-transaction-owners *args: build-deps
     cargo test --package nervix-server --lib application::command_execution::tests:: -- {{ quote(args) }}
     cargo test --package nervix-server --lib application::transaction::tests::process_command_rejects_domain_and_user_creation_inside_a_transaction -- --exact {{ quote(args) }}
 
-# Free-policy and quota checks use the native session client.
+# The licensing matrix, the free policy included, uses the native session client.
 test-licensing-free *args: build-deps build-plexus-format build-test-cli build-deadlock-report
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1607,7 +1607,7 @@ measure-web-console-debug-strings target_dir=(cargo_target_dir + "/web-console-d
 coverage-connector package output *args:
     cargo llvm-cov --no-clean --package {{ package }} --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
-# Measure the shared licensing protocol and quota vocabulary through the configured compiler cache.
+# Measure the shared licensing protocol and its vocabulary through the configured compiler cache.
 coverage-licensing-protocol output *args:
     cargo llvm-cov --no-clean --package nervix-licensing-protocol --package nervix-licensing-vocabulary --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 

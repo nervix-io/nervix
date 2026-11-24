@@ -130,10 +130,9 @@ page fields. A refusal has no counts or units; a successful empty page has zero 
 `json` preserves the complete typed envelope.
 
 `DESCRIBE LICENSE;` uses this envelope for cluster scope: `entity_kind` is `'LICENSE'`, while
-`domain` and `entity_name` are `nil`. Its unit's `summary`, `quotas`, `capabilities` and
-`transitions` sections describe the answering node's committed policy: one summary row, one row per
-cluster quota, one row per catalog capability, and one row per quota under a committed licensing
-transition. The command also works without selecting a domain.
+`domain` and `entity_name` are `nil`. Its unit's `summary`, `capabilities` and `transitions`
+sections describe the answering node's committed policy: one summary row, one row per catalog
+capability, and one row per condition under a committed licensing transition. The command also works without selecting a domain.
 
 `SHOW INFERENCER <name> STATE` uses the same inspection objects. Its `header` section
 identifies each returned branch publication and its persistence/replica progress; `tensor_1`,

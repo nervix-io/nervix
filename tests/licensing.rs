@@ -1,7 +1,7 @@
 //! Public observations of the cluster's licensing policy.
 //!
 //! Layer: test harness.
-//! - **Owns.** Assertions over the public licensing description and quota fixtures.
+//! - **Owns.** Assertions over the public licensing description and plan fixtures.
 //! - **Depends on.** Scenario sessions, cluster fixtures and public observations.
 //! - **Must not know.** Policy evaluation, stored records or admission implementation.
 
@@ -10,7 +10,6 @@
     nervix::layer(harness, reason = "owns the public licensing scenarios")
 )]
 
-mod transitions;
 
 use std::time::Duration;
 
@@ -89,16 +88,6 @@ async fn observe_activation_lease_refusal(world: &mut ScenarioWorld, node: Strin
     );
 }
 
-#[given(expr = "the free licensing quota {string} is limited to {int}")]
-fn limit_quota(world: &mut ScenarioWorld, condition: String, limit: u64) {
-    let name = match condition.as_str() {
-        "cluster.nodes" => nervix_server::licensing::QuotaName::ClusterNodes,
-        "cluster.domains" => nervix_server::licensing::QuotaName::ClusterDomains,
-        _ => panic!("the scenario names an undeclared cluster quota: {condition}"),
-    };
-    world.fault_injection.set_licensing_quota(name, limit);
-}
-
 #[then(expr = "node {string} eventually describes this license without a selected domain")]
 async fn observe_license(world: &mut ScenarioWorld, node: String, #[step] step: &Step) {
     let node = expand_placeholders(world, &node);
@@ -171,18 +160,15 @@ fn typed_scope(world: &mut ScenarioWorld) {
         panic!("the completed licensing observation is a page");
     };
     assert_eq!(page.unit_count, 1);
-    // One summary row, one row per cluster quota and one per catalog capability, no transition.
-    assert_eq!(page.counts.rows, 4);
+    // One summary row and one per catalog capability, no transition.
+    assert_eq!(page.counts.rows, 2);
     assert_eq!(page.counts.branches, 0);
     let section_names: Vec<&str> = page.units[0]
         .sections
         .iter()
         .map(|section| section.name.as_str())
         .collect();
-    assert_eq!(
-        section_names,
-        ["summary", "quotas", "capabilities", "transitions"]
-    );
+    assert_eq!(section_names, ["summary", "capabilities", "transitions"]);
     assert_eq!(page.units[0].unit, nervix_models::Unit::SINGLE);
     assert_eq!(page.units[0].origin.node.node_id(), &page.units[0].owner);
     for section in &page.units[0].sections {
@@ -267,23 +253,6 @@ fn free_metric_contract(body: &str) -> bool {
             != Some(if state == "free" { 1.0 } else { 0.0 })
         {
             return false;
-        }
-    }
-    for condition in ["cluster.nodes", "cluster.domains"] {
-        if sample(&format!(
-            "nervix_licensing_over_limit{{condition=\"{condition}\"}}"
-        )) != Some(0.0)
-        {
-            return false;
-        }
-        for state in ["within_grace", "over_limit", "lapsed", "stopped"] {
-            if sample(&format!(
-                "nervix_licensing_admissions_refused_total{{condition=\"{condition}\",state=\"\
-                 {state}\"}}"
-            )) != Some(0.0)
-            {
-                return false;
-            }
         }
     }
     for operation in [
@@ -924,7 +893,7 @@ async fn one_ephemeral_slot(world: &mut ScenarioWorld) {
             let mut plan = model.conditions();
             plan.operating.quotas.insert(
                 EPHEMERAL_ACTIVATIONS.to_owned(),
-                ConditionValue::Known(nervix_server::licensing::Quota::Bounded { value: 1 }),
+                ConditionValue::Known(nervix_licensing_protocol::conditions::Quota::Bounded { value: 1 }),
             );
             model.plan(plan);
         })
@@ -1418,16 +1387,6 @@ async fn one_active_after_transfer(world: &mut ScenarioWorld) {
     assert_eq!(active, 1);
 }
 
-#[when("the licensing service reduces the domain quota with a transition")]
-async fn reduce_domain_quota(world: &mut ScenarioWorld) {
-    world
-        .licensing_service
-        .as_ref()
-        .verified("fixture started")
-        .configure(|model| model.reduce_domain_quota_with_grace())
-        .await;
-}
-
 #[given(expr = "the licensing service enables the capability {string}")]
 async fn enable_capability(world: &mut ScenarioWorld, name: String) {
     use nervix_licensing_protocol::conditions::{Capability, ConditionValue};
@@ -1468,49 +1427,6 @@ async fn service_with_unknown_capability(world: &mut ScenarioWorld, name: String
         .verified("the fixture started its HTTPS licensing service")
         .configure(|model| model.sign_unknown_capability(name, Capability::Enabled))
         .await;
-}
-
-#[when(expr = "the licensing service sets the domain quota to {int} with {int} seconds of grace")]
-async fn set_domain_quota_with_grace(world: &mut ScenarioWorld, limit: u64, seconds: u64) {
-    use nervix_licensing_protocol::conditions::{
-        CLUSTER_DOMAINS, ConditionDuration, ConditionValue, QUOTA_GRACE, Quota,
-    };
-
-    world
-        .licensing_service
-        .as_ref()
-        .verified("the fixture started its HTTPS licensing service")
-        .configure(|model| {
-            let mut plan = model.conditions();
-            plan.usage.quotas.insert(
-                CLUSTER_DOMAINS.to_owned(),
-                ConditionValue::Known(Quota::Bounded { value: limit }),
-            );
-            plan.operating.durations.insert(
-                QUOTA_GRACE.to_owned(),
-                ConditionValue::Known(ConditionDuration::Bounded { seconds }),
-            );
-            model.plan(plan);
-        })
-        .await;
-}
-
-#[then("the released cluster retains a grant until its signed deadline")]
-async fn release_has_grant(world: &mut ScenarioWorld) {
-    let current = current_license(world).await;
-    assert_eq!(current.get("mode").map(String::as_str), Some("released"));
-    assert!(
-        current.contains_key("grants until"),
-        "release must retain the transition deadline: {current:?}"
-    );
-    let requests = world
-        .licensing_service
-        .as_ref()
-        .verified("fixture started")
-        .requests()
-        .await;
-    assert!(requests.iter().any(|request| matches!(request, nervix_licensing_protocol::requests::Request::Release { grants_until, .. }
-        if chrono::DateTime::parse_from_rfc3339(current.get("grants until").verified("typed grant deadline")).map(|time| time.with_timezone(&chrono::Utc) == *grants_until).unwrap_or(false))));
 }
 
 #[given("the licensing service has already processed the activation when it answers")]

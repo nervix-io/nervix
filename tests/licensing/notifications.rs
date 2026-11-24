@@ -281,7 +281,7 @@ async fn idle_reconnect(world: &mut ScenarioWorld) {
     .assured("the committed idle budget closes a silent response and obtains a fresh ticket");
 }
 
-#[when("the licensing service changes the domain quota to 12")]
+#[when("the licensing service changes the plan to enable licensing.dummy")]
 async fn change_plan(world: &mut ScenarioWorld) {
     let count = world
         .licensing_service
@@ -304,16 +304,16 @@ async fn change_plan(world: &mut ScenarioWorld) {
         .licensing_service
         .as_ref()
         .verified("fixture started")
-        .configure(update_domain_quota)
+        .configure(enable_dummy_capability)
         .await;
 }
 
-fn update_domain_quota(model: &mut Model) {
+fn enable_dummy_capability(model: &mut Model) {
     let mut plan = model.conditions();
-    plan.usage.quotas.insert(
-        "cluster.domains".to_owned(),
+    plan.usage.capabilities.insert(
+        nervix_licensing_protocol::conditions::LICENSING_DUMMY.to_owned(),
         nervix_licensing_protocol::conditions::ConditionValue::Known(
-            nervix_licensing_protocol::conditions::Quota::Bounded { value: 12 },
+            nervix_licensing_protocol::conditions::Capability::Enabled,
         ),
     );
     model.plan(plan);
@@ -364,15 +364,15 @@ async fn foreground_refusal(world: &mut ScenarioWorld) {
     .assured("the signed foreground refresh reaches the refusing HTTPS service");
 }
 
-#[when("the licensing service resumes with a domain quota of 12")]
-async fn resume_with_quota(world: &mut ScenarioWorld) {
+#[when("the licensing service resumes with a plan that enables licensing.dummy")]
+async fn resume_with_capability(world: &mut ScenarioWorld) {
     world
         .licensing_service
         .as_ref()
         .verified("fixture started")
         .configure(|model| {
             model.refuse(None);
-            update_domain_quota(model);
+            enable_dummy_capability(model);
         })
         .await;
 }
@@ -383,7 +383,7 @@ async fn refreshed(world: &mut ScenarioWorld) {
         loop {
             nervix_primitives::task::consume_budget().await;
             let current = current_license(world).await;
-            if current.get("quota cluster.domains").map(String::as_str) == Some("0 of 12") {
+            if current.get("capability licensing.dummy").map(String::as_str) == Some("enabled") {
                 assert_eq!(
                     current.get("verification").map(String::as_str),
                     Some("verified")

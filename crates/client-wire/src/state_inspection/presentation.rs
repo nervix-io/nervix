@@ -113,22 +113,7 @@ fn license_text(page: &StateInspectionPage) -> Result<String, Report<WireDecodeE
         for section in &unit.sections {
             for frame in &section.frames {
                 for row in frame.batch().rows() {
-                    if section.name == "quotas" {
-                        let condition = display_cell(row.get(0))?;
-                        let usage = display_cell(row.get(1))?;
-                        let limit = match row.get(2) {
-                            Some(CellView::String("unlimited")) => "unlimited".to_string(),
-                            Some(CellView::String("bounded")) => display_cell(row.get(3))?,
-                            _ => {
-                                return Err(Report::new(WireDecodeError::InvalidValue {
-                                    field: "StateInspection.quotas",
-                                    kind: "an explicit bounded or unlimited quota",
-                                }));
-                            }
-                        };
-                        writeln!(output, "quota {condition}: {usage} of {limit}")
-                            .assured("writing to a String succeeds");
-                    } else if section.name == "capabilities" {
+                    if section.name == "capabilities" {
                         let condition = display_cell(row.get(0))?;
                         let state = match (row.get(1), row.get(2)) {
                             (Some(CellView::String("enabled")), Some(CellView::Null)) => {

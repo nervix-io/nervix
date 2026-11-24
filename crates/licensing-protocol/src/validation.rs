@@ -12,9 +12,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    conditions::{
-        ActivationKind, CLUSTER_DOMAINS, CLUSTER_NODES, Catalog, ConditionShape, FREE_POLICY, Scope,
-    },
+    conditions::{ActivationKind, Catalog, ConditionShape, Scope},
     document::DocumentLimits,
     documents::{Activation, Decision, DecisionStatus, Transition},
     keys::KeyId,
@@ -284,22 +282,6 @@ impl Decision {
             match self.activation.ephemeral_expires_at {
                 Some(expiry) if self.issued_at >= expiry => {}
                 _ => return Err(Report::new(DecisionRejection::Content)),
-            }
-        } else if self.status != DecisionStatus::Active {
-            let free = FREE_POLICY.usage();
-            for name in [CLUSTER_NODES, CLUSTER_DOMAINS] {
-                let expected = free
-                    .quota(name)
-                    .change_context(DecisionRejection::Content)?;
-                if self
-                    .conditions
-                    .usage
-                    .quota(name)
-                    .change_context(DecisionRejection::Content)?
-                    != expected
-                {
-                    return Err(Report::new(DecisionRejection::Content));
-                }
             }
         }
         if let Some(expiry) = self.activation.ephemeral_expires_at

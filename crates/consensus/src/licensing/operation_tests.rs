@@ -6,10 +6,7 @@
 //! - **Must not know.** Network scheduling, application policy or physical clocks.
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_licensing_protocol::{
-    documents::{AffectedQuota, Transition, TransitionReason, TransitionTrigger},
-    test_fixture,
-};
+use nervix_licensing_protocol::test_fixture;
 use uuid::Uuid;
 
 use super::{verification_tests::SignedFixture, *};
@@ -724,7 +721,7 @@ fn release_commits_before_confirmation_and_keeps_its_signer_across_local_rotatio
 }
 
 #[test]
-fn release_does_not_keep_the_activation_offline_admission_gate() {
+fn a_release_awaits_its_confirmation_past_the_former_offline_deadline() {
     let mut fixture = SignedFixture::new();
     fixture.decision.timing.valid_until = Some(test_fixture::at(600));
     let mut state = activated(&fixture);
@@ -751,8 +748,6 @@ fn release_does_not_keep_the_activation_offline_admission_gate() {
         },
     );
     assert!(matches!(&record(&state).mode, LicensingMode::Released(release) if release.awaiting()));
-    super::admit_domain(&state, nervix_licensing_vocabulary::Quota::Unlimited, false)
-        .assured("the committed release admits new free-policy usage past the former deadline");
 }
 
 #[test]
@@ -839,121 +834,6 @@ fn admission_bindings_fence_late_release_and_rotation_commands() {
         })
     ));
     assert_eq!(state.cluster_identity.as_deref(), Some(&original));
-}
-
-#[test]
-fn release_confirmation_keeps_existing_grants_until_their_original_deadline() {
-    use nervix_licensing_protocol::conditions::{CLUSTER_DOMAINS, ConditionValue, Quota};
-    let fixture = SignedFixture::new();
-    let mut state = activated(&fixture);
-    let mut decision = fixture.decision.clone();
-    decision.decision_revision += 1;
-    decision.conditions.conditions_revision += 1;
-    decision.conditions.usage.quotas.insert(
-        CLUSTER_DOMAINS.to_owned(),
-        ConditionValue::Known(Quota::Bounded { value: 1 }),
-    );
-    let deadline = nervix_models::Timestamp::try_from(decision.issued_at)
-        .assured("fixture time")
-        .checked_add(std::time::Duration::from_secs(300))
-        .assured("bounded grace");
-    decision.transitions.push(Transition {
-        transition_id: test_fixture::id(501),
-        from_conditions_revision: fixture.decision.conditions.conditions_revision,
-        to_conditions_revision: decision.conditions.conditions_revision,
-        started_at: decision.issued_at,
-        deadline: deadline.into_datetime(),
-        trigger: TransitionTrigger::Decision {
-            decision_id: decision.decision_id,
-        },
-        reason: TransitionReason::PlanChanged,
-        affected: vec![AffectedQuota {
-            condition: CLUSTER_DOMAINS.to_owned(),
-            previous: Quota::Unlimited,
-            target: Quota::Bounded { value: 1 },
-            usage: 4,
-        }],
-    });
-    let received = fixture.received(&decision, &record(&state).trust);
-    applied(
-        &mut state,
-        ConsensusCommand::ApplyLicenseDecision {
-            decision: Box::new(received),
-            expected_revision: fixture.decision.decision_revision,
-        },
-    );
-    let binding = binding(&state);
-    let released_at = record(&state).licensing_time;
-    let request_id = test_fixture::id(502);
-    applied(
-        &mut state,
-        ConsensusCommand::ReleaseLicense {
-            reference: crate::cluster_identity::tests::reference(test_fixture::id(1)),
-            binding: Box::new(binding),
-            request_id,
-            released_at,
-        },
-    );
-    let mut confirmation = decision.clone();
-    confirmation.decision_id = test_fixture::id(503);
-    confirmation.decision_revision += 1;
-    confirmation.in_reply_to = request_id;
-    confirmation.status = nervix_licensing_protocol::documents::DecisionStatus::Released;
-    confirmation.conditions.conditions_revision += 1;
-    confirmation.conditions.usage = nervix_licensing_protocol::conditions::FREE_POLICY.usage();
-    let before_confirmation = state.licensing.clone();
-    let mut extended = confirmation.clone();
-    extended.transitions[0].deadline = deadline
-        .checked_add(std::time::Duration::from_secs(1))
-        .assured("fixture extension fits")
-        .into_datetime();
-    let received = fixture.received(&extended, &record(&state).trust);
-    let rejected = apply_consensus_command(
-        &mut state,
-        &ConsensusCommand::ConfirmRelease {
-            request_id,
-            decision: Some(Box::new(received)),
-        },
-    );
-    assert_eq!(
-        rejected.response,
-        ConsensusResponse::Conflict(crate::ConsensusConflict::LicenseDecision {
-            reason: LicenseDecisionError::Binding,
-        })
-    );
-    assert_eq!(state.licensing, before_confirmation);
-    let received = fixture.received(&confirmation, &record(&state).trust);
-    applied(
-        &mut state,
-        ConsensusCommand::ConfirmRelease {
-            request_id,
-            decision: Some(Box::new(received)),
-        },
-    );
-    let LicensingMode::Released(release) = &record(&state).mode else {
-        panic!("a grant outlives confirmation");
-    };
-    assert!(!release.awaiting());
-    assert_eq!(release.grants_until, Some(deadline));
-    assert_eq!(release.transitions.values(), decision.transitions);
-    let encoded = crate::durable_batch::DurableBatch::encode(record(&state), 65536)
-        .assured("bounded released record fits");
-    let restored: LicensingRecord =
-        crate::storage_decode(&encoded).assured("released record decodes");
-    assert_eq!(&restored, record(&state));
-    assert!(
-        restored
-            .verify(&fixture.identity.public(), &fixture.environment)
-            .verified("decision retained")
-            .is_ok()
-    );
-    applied(
-        &mut state,
-        ConsensusCommand::AdvanceLicensingTime {
-            observed_at: deadline,
-        },
-    );
-    assert!(matches!(record(&state).mode, LicensingMode::Free { .. }));
 }
 
 #[test]

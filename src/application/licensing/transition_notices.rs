@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use nervix_licensing_vocabulary::{Quota, QuotaName};
+use nervix_licensing_vocabulary::Quota;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::CancellationToken;
 use uuid::Uuid;
@@ -19,7 +19,6 @@ enum LicensingNoticeCode {
     TransitionStarted,
     TransitionAcknowledged,
     TransitionExtended,
-    OverLimit,
 }
 
 impl LicensingNoticeCode {
@@ -28,7 +27,6 @@ impl LicensingNoticeCode {
             Self::TransitionStarted => "transition_started",
             Self::TransitionAcknowledged => "transition_acknowledged",
             Self::TransitionExtended => "transition_extended",
-            Self::OverLimit => "over_limit",
         }
     }
 }
@@ -44,7 +42,6 @@ struct LicensingNoticeParameters {
     previous: Quota,
     target: Quota,
     affected_usage: u64,
-    current_usage: u64,
     deadline: Timestamp,
 }
 
@@ -54,17 +51,15 @@ impl std::fmt::Display for LicensingNotice {
         write!(
             formatter,
             "Nervix licensing: {}. Transition {} changed {} from {:?} to {:?}; affected usage {}, \
-             current usage {}, deadline {}. Existing usage is protected until the deadline; \
-             growth follows the target quota. After the deadline excess usage is reported as over \
-             limit; licensing removes nothing. Reduce usage, restore the plan, or contact the \
-             organization administrator.",
+             deadline {}. Existing usage is protected until the deadline; growth follows the \
+             target quota. Licensing removes nothing. Reduce usage, restore the plan, or contact \
+             the organization administrator.",
             self.code.as_str(),
             params.transition_id,
             params.condition,
             params.previous,
             params.target,
             params.affected_usage,
-            params.current_usage,
             params.deadline,
         )
     }
@@ -81,7 +76,6 @@ struct Observation {
 enum TransitionNoticeState {
     Active,
     Ended,
-    OverLimit,
 }
 
 pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: CancellationToken) {
@@ -95,22 +89,10 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
         if let Some(initialized) = &policy.snapshot.initialized {
             for (transition, until, acknowledged) in policy.transitions() {
                 for affected in transition.affected {
-                    let Some(name) = QuotaName::ALL
-                        .into_iter()
-                        .find(|name| name.as_str() == affected.condition)
-                    else {
-                        continue;
-                    };
-                    let usage = match name {
-                        QuotaName::ClusterNodes => policy.snapshot.usage.cluster_nodes,
-                        QuotaName::ClusterDomains => policy.snapshot.usage.cluster_domains,
-                    };
                     let state = if initialized.record.licensing_time < until {
                         TransitionNoticeState::Active
-                    } else if policy.effective_quota(name).admits(usage) {
-                        TransitionNoticeState::Ended
                     } else {
-                        TransitionNoticeState::OverLimit
+                        TransitionNoticeState::Ended
                     };
                     let observation = Observation {
                         until,
@@ -129,7 +111,6 @@ pub(in crate::application) async fn run(service: SessionServiceImpl, shutdown: C
                                 previous: affected.previous,
                                 target: affected.target,
                                 affected_usage: affected.usage,
-                                current_usage: usage,
                                 deadline: until,
                             },
                         };
@@ -157,10 +138,8 @@ fn notice_code(
     if previous == Some(&current) {
         return None;
     }
-    match current.state {
-        TransitionNoticeState::Ended => return None,
-        TransitionNoticeState::OverLimit => return Some(LicensingNoticeCode::OverLimit),
-        TransitionNoticeState::Active => {}
+    if current.state == TransitionNoticeState::Ended {
+        return None;
     }
     match previous {
         Some(previous) if current.acknowledged && !previous.acknowledged => {

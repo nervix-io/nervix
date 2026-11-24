@@ -175,7 +175,6 @@ mod join_supervision;
 mod leader_redirect;
 mod license_description;
 pub mod licensing;
-mod licensing_admission;
 mod membership_reconciliation;
 mod model_mutation;
 mod model_validation;
@@ -855,11 +854,7 @@ impl Application {
             consensus.verified("startup assigns this handle before it reaches this point");
         let interconnect =
             interconnect.verified("startup assigns this handle before it reaches this point");
-        let licensing = crate::licensing::PolicyHandle::new(
-            &consensus.observer(),
-            &runtime.metrics(),
-            fault_injection.clone(),
-        );
+        let licensing = crate::licensing::PolicyHandle::new(&consensus.observer());
         crate::licensing::metrics::register(
             &runtime.metrics(),
             licensing.clone(),
@@ -961,8 +956,6 @@ impl Application {
             .await;
         }));
         let (join_refusal_sender, join_refusal) = watch::channel(None);
-        let bootstrap_refusal_sender = join_refusal_sender.clone();
-        let bootstrap_refusal_coordinator = shutdown_coordinator.clone();
         if has_bootstrap_candidates {
             let supervision = JoinSupervision {
                 transport: interconnect.clone(),
@@ -1007,9 +1000,6 @@ impl Application {
                 startup_delay,
                 membership_interval,
                 parameter_seeds,
-                licensing: licensing.clone(),
-                refusals: bootstrap_refusal_sender,
-                coordinator: bootstrap_refusal_coordinator,
                 fault: fault_injection.clone(),
             },
         ));

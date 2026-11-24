@@ -136,8 +136,6 @@ impl ConditionDefinition {
     }
 }
 
-pub const CLUSTER_NODES: &str = nervix_licensing_vocabulary::QuotaName::ClusterNodes.as_str();
-pub const CLUSTER_DOMAINS: &str = nervix_licensing_vocabulary::QuotaName::ClusterDomains.as_str();
 pub const LICENSING_DUMMY: &str = nervix_licensing_vocabulary::CapabilityName::Dummy.as_str();
 pub const PERSISTENT_ACTIVATIONS: &str = "license.activations.persistent";
 pub const EPHEMERAL_ACTIVATIONS: &str = "license.activations.ephemeral";
@@ -154,22 +152,6 @@ pub const QUOTA_GRACE: &str = "transition.quota_reduction_grace";
 /// name nothing reads says so as its owner. A complete document lists every name but the
 /// capabilities: a capability a document leaves out is disabled.
 pub const CATALOG: &[ConditionDefinition] = &[
-    ConditionDefinition {
-        name: CLUSTER_NODES,
-        shape: ConditionShape::Quota {
-            scope: Scope::Cluster,
-            affects_existing: true,
-        },
-        owner: "membership admission; committed voters and learners",
-    },
-    ConditionDefinition {
-        name: CLUSTER_DOMAINS,
-        shape: ConditionShape::Quota {
-            scope: Scope::Cluster,
-            affects_existing: true,
-        },
-        owner: "domain admission; committed domain records",
-    },
     ConditionDefinition {
         name: LICENSING_DUMMY,
         shape: ConditionShape::Capability,
@@ -263,7 +245,7 @@ pub struct Catalog;
 
 impl Catalog {
     pub fn definition(name: &str) -> Option<ConditionDefinition> {
-        // Exactly twelve fixed protocol declarations, independent of graph/organization size.
+        // Exactly ten fixed protocol declarations, independent of graph/organization size.
         CATALOG.iter().find(|entry| entry.name == name).copied()
     }
 
@@ -438,8 +420,9 @@ impl OperatingConditions {
     }
 }
 
-/// A free cluster has no operating half, grants every current cluster quota without a limit and
-/// disables every capability.
+/// The free tier: a cluster without a license has no operating half and disables every capability.
+/// Licensing never limits base features, so it leaves every cluster quota the catalog declares
+/// unlimited; the current catalog declares none.
 pub const FREE_POLICY: FreePolicy = FreePolicy;
 
 #[derive(Clone, Copy, Debug)]
