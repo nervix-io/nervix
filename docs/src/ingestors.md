@@ -597,8 +597,8 @@ The node counts the payloads its ingestor consumed this way in
 `last decode rejection:`, the latest rejection on the node that runs the ingestor, or `-` before
 the first.
 
-A payload the node's extension workers have no room to unfold has not been judged by its codec, so
-it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
+A payload that waits for the node's extension workers to unfold it has not been judged by its
+codec, so it is not a decode rejection; see [When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 An endpoint ingestor in `MODE NO ACK` accepts a body its codec refuses and reports it the same way, including a body
 its quiesce buffer retained.
 
@@ -617,11 +617,13 @@ late, and it never drops what it was handed.
   [Quiesce Modes](#quiesce-modes).
 - A paced ingestor's poll waits the same way. Waiting delays the next poll, and the domain cadence
   coalesces the occurrences it missed into one poll at the newest due instant.
-- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint) answers an HTTP body 503 without
-  `Retry-After`, counts the refused request payload in `nervix_ingestor_unfolding_refused_total`, and
-  lets the sender send it again: an HTTP sender still holds its body and waits for the answer. A
-  WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for a place like
-  an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
+- An [endpoint ingestor](#http-endpoint-and-websockets-endpoint)'s HTTP body waits for a place too,
+  for as long as its request lasts: its sender still holds the body and waits for the answer, and a
+  sender that gives up the request gives up the place. Only a node that is stopping, or a body
+  whose unfolding needs a charge larger than its whole memory class, is answered 503 without
+  `Retry-After`, counted in `nervix_ingestor_unfolding_refused_total` and left for the sender to
+  send again. A WebSocket frame in `MODE NO ACK` has no answer its sender waits for, so it waits for
+  a place like an ingestor's payload, and its connection reads nothing further meanwhile. The frame counts as
   work its ingestor admitted, so a drain, an ownership handoff and a graceful stop wait for it, and
   it ends unprocessed only when its ingestor's intake ends.
 
@@ -3546,7 +3548,7 @@ CREATE HTTP ENDPOINT INGESTOR acknowledged
 | --- | --- | --- | --- |
 | 200 | `completed` | `none` | The payload's graph acknowledgement root completed under the declared error policies. |
 | 400 | `processing_failed` | `rejected` | The codec or local route construction refused the input. |
-| 503 | `not_admitted` | `busy` | The response window, pause buffer or execution capacity is full. |
+| 503 | `not_admitted` | `busy` | The response window or pause buffer is full, or the node could not unfold the payload at all: it is stopping, or the unfolding needs a charge larger than its whole memory class. A full extension class holds the payload back instead. |
 | 503 | `not_admitted` | `suspended` | Intake is quiesced, or the deadline or intake ended while the payload was still waiting to enter the graph. |
 | 503 | `processing_failed` | `rejected` | Downstream negatively acknowledged admitted work. |
 | 503 | `processing_failed` | `ack_timeout` | The absolute response deadline expired after admission. |
@@ -3573,9 +3575,10 @@ A codec refusal becomes a decode rejection consumed by `ON GENERAL ERROR`; it al
 WebSocket data frames receive no per-frame graph-completion reply in this mode; signaling replies
 still follow their protocol. Under `RESPOND AFTER RESUME`, an unacknowledged HTTP request waits
 until resume, it disconnects, or the intake ends. A request still waiting when the domain stops
-receives HTTP 503 and its body is discarded. If extension workers cannot unfold a fresh HTTP body,
-HTTP answers 503; a fresh WebSocket frame waits for a place, its connection reading nothing further
-meanwhile, and buffered payloads retain their place until workers can take them. See
+receives HTTP 503 and its body is discarded. A fresh HTTP body the extension workers cannot unfold
+yet waits for a place for as long as its request lasts, a fresh WebSocket frame waits for a place,
+its connection reading nothing further meanwhile, and buffered payloads retain their place until
+workers can take them. See
 [When The Extension Workers Are Full](#when-the-extension-workers-are-full) and
 [When The Codec Refuses A Payload](#when-the-codec-refuses-a-payload).
 

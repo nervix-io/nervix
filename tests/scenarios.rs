@@ -207,6 +207,7 @@ use crate::common::{
     },
     tcp_forwarder::TcpForwarders,
     unaccepted_address::UnacceptedAddress,
+    unit_placement::{ScheduledPlacement, described_owner, described_replicas},
 };
 
 mod backup;
@@ -655,6 +656,10 @@ struct ScenarioWorld {
     last_auth_attempts_elapsed: Option<Duration>,
     /// The node whose credentials worker and wait queue a scenario filled, until it releases them.
     saturated_credentials_node: Option<String>,
+    /// A client connection a scenario began without waiting for it: what the connection's status
+    /// command printed, or the error it ended with.
+    pending_client_connection:
+        Option<nervix_primitives::task::AbortOnDropHandle<Result<String, String>>>,
     broker_observer: Option<BrokerObserver>,
     /// The Kafka consumer group members a scenario runs beside Nervix's consumers, by group.
     external_kafka_members: BTreeMap<String, ExternalKafkaGroupMember>,
@@ -876,6 +881,10 @@ impl fmt::Debug for ScenarioWorld {
             .field(
                 "saturated_credentials_node",
                 &self.saturated_credentials_node,
+            )
+            .field(
+                "pending_client_connection",
+                &self.pending_client_connection.is_some(),
             )
             .field(
                 "last_cluster_operation_elapsed",
@@ -9803,16 +9812,17 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 "WASM reset placement status must succeed: {}",
                 outcome.message
             );
-            let placed = scheduled_node_placement_from_status(
+            let placed = ScheduledPlacement::from_status(
                 &outcome.message,
                 &world.domain,
                 "wasm_processor",
                 "counting_guest",
             )
-            .is_some_and(|(owner, replicas)| match placement {
-                WasmStateResetGraphPlacement::NodeOne => owner == "node-1",
+            .is_some_and(|scheduled| match placement {
+                WasmStateResetGraphPlacement::NodeOne => scheduled.owner == Some("node-1"),
                 WasmStateResetGraphPlacement::AwayFromNodeOne => {
-                    owner != "node-1" && !replicas.is_empty()
+                    scheduled.is_owned_by_node_other_than("node-1")
+                        && !scheduled.replicas.is_empty()
                 }
                 WasmStateResetGraphPlacement::Unconstrained => true,
             });
@@ -14477,49 +14487,6 @@ async fn when_accepted_work_class_released(world: &mut ScenarioWorld) {
                 .collect::<Vec<_>>()
         )
     });
-}
-
-#[then(
-    expr = "within {string} HTTP admission on node {string} host {string} path {string} refuses \
-            with retry-after"
-)]
-async fn then_http_admission_refuses_without_waiting(
-    world: &mut ScenarioWorld,
-    duration: String,
-    node: String,
-    host: String,
-    path: String,
-    #[step] step: &Step,
-) {
-    let uri = world
-        .cluster()
-        .http_uri(
-            &expand_placeholders(world, &node),
-            &expand_placeholders(world, &path),
-        )
-        .assured("the configured endpoint has a listener");
-    let request = reqwest::Client::new()
-        .post(uri)
-        .header("Host", expand_placeholders(world, &host))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(expand_placeholders(world, docstring(step)));
-    let response = nervix_primitives::time::timeout(
-        parse_duration_text(&duration).assured("the step duration is valid"),
-        request.send(),
-    )
-    .await
-    .assured("request admission answers while the worker remains held")
-    .assured("the HTTP listener answers");
-    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
-    let retry = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .assured("typed admission refusal supplies Retry-After")
-        .to_str()
-        .assured("Retry-After is ASCII")
-        .parse::<u64>()
-        .assured("Retry-After is a delay in seconds");
-    assert!(retry > 0);
 }
 
 /// The junction's first read of a message's dependency is slowed too, so a payload that reached
@@ -19284,6 +19251,23 @@ async fn then_background_command_request_redirects(world: &mut ScenarioWorld, no
     );
 }
 
+#[then(expr = "the background command request has not completed within {string}")]
+async fn then_background_command_request_has_not_completed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    let task = world
+        .background_command_result
+        .as_ref()
+        .verified("the preceding step started a background command request");
+    assert!(
+        !task.is_finished(),
+        "the background command request completed within {duration:?} while the node held it"
+    );
+}
+
 #[then("the background command request succeeds")]
 async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
     let task = world
@@ -22558,6 +22542,52 @@ async fn when_held_window_processor_branch_restore_is_released(
         .release_processor_branch_restore(&processor);
 }
 
+/// The window processor's next claim of a moved key stops once the key's holder released it and
+/// before the claiming unit installs its state, wherever that unit runs.
+#[when(expr = "the next partition install of window processor {string} is held")]
+async fn when_window_processor_partition_install_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .pause_processor_partition_install(processor);
+}
+
+#[then(
+    expr = "within {string} the partition install of window processor {string} reaches its hold"
+)]
+async fn then_window_processor_partition_install_reaches_its_hold(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let processor = window_processor_ref(world, &processor);
+    nervix_primitives::time::timeout(
+        duration,
+        world
+            .fault_injection
+            .wait_for_processor_partition_install(&processor),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the partition install of {processor:?} did not reach its hold within {duration:?}")
+    });
+}
+
+#[when(expr = "the held partition install of window processor {string} is released")]
+async fn when_held_window_processor_partition_install_is_released(
+    world: &mut ScenarioWorld,
+    processor: String,
+) {
+    let processor = window_processor_ref(world, &processor);
+    world
+        .fault_injection
+        .release_processor_partition_install(&processor);
+}
+
 /// Leave room for transport on the selected node while refusing larger decoding reservations.
 #[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
 async fn when_bulk_memory_on_node_keeps_only_bytes_free(
@@ -22576,7 +22606,7 @@ async fn when_bulk_memory_on_node_keeps_only_bytes_free(
 }
 
 /// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
-/// that is refused until the scenario releases the hold.
+/// that waits until the scenario releases the hold.
 #[when(expr = "bulk memory on every node keeps only {string} bytes free")]
 async fn when_bulk_memory_on_every_node_keeps_only_bytes_free(
     world: &mut ScenarioWorld,
@@ -22760,8 +22790,8 @@ async fn then_within_duration_describe_emitter_reports_metric_total(
 }
 
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
-/// password the leader is asked to verify is refused rather than queued. The leader is the node
-/// the scenario created its user through, so the user is already visible there.
+/// password the leader is asked to verify waits for a place. The leader is the node the scenario
+/// created its user through, so the user is already visible there.
 #[when("credential verification on the leader node is saturated")]
 async fn when_credential_verification_on_the_leader_node_is_saturated(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
@@ -22795,6 +22825,83 @@ async fn when_the_client_connects_to_the_saturated_node_as_user_with_password(
         .clone()
         .expect("an earlier step saturated credential verification on a node");
     connect_to_node_with_credentials(world, &node_id, username, password).await;
+}
+
+/// Begin connecting to the saturated node without waiting for the connection: its credentials
+/// wait for a place on the node's credentials worker.
+#[when(
+    expr = "the client begins connecting to the saturated node as user {string} with password \
+            {string}"
+)]
+async fn when_the_client_begins_connecting_to_the_saturated_node(
+    world: &mut ScenarioWorld,
+    username: String,
+    password: String,
+) {
+    let node_id = world
+        .saturated_credentials_node
+        .clone()
+        .expect("an earlier step saturated credential verification on a node");
+    let username = expand_placeholders(world, &username);
+    let password = expand_placeholders(world, &password);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node_id)
+        .expect("failed to resolve node gRPC URI");
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    options.username = Some(username);
+    options.password = Some(password);
+    let domain = client_domain(&world.domain);
+    let connection = nervix_primitives::task::spawn(async move {
+        let client = Client::connect_with_options(&grpc_uri, domain, options)
+            .await
+            .map_err(|error| format!("{error:#}"))?;
+        match client.execute("SHOW CLUSTER STATUS;".to_string()).await {
+            Ok(outcome) if outcome.succeeded() => Ok(outcome.message),
+            Ok(outcome) => Err(outcome.message),
+            Err(error) => Err(format!("{error:#}")),
+        }
+    });
+    world.pending_client_connection =
+        Some(nervix_primitives::task::AbortOnDropHandle::new(connection));
+}
+
+#[then(expr = "the pending client connection has not completed within {string}")]
+async fn then_the_pending_client_connection_has_not_completed_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    let connection = world
+        .pending_client_connection
+        .as_ref()
+        .expect("an earlier step began a client connection");
+    assert!(
+        !connection.is_finished(),
+        "the client connection completed within {duration:?} while the node held its credentials"
+    );
+}
+
+/// Wait for the pending connection, and record its status command's output or its error as a
+/// connection step does.
+#[then("the pending client connection completes")]
+async fn then_the_pending_client_connection_completes(world: &mut ScenarioWorld) {
+    let connection = world
+        .pending_client_connection
+        .take()
+        .expect("an earlier step began a client connection");
+    let result = nervix_primitives::time::timeout(Duration::from_secs(60), connection)
+        .await
+        .expect("the pending client connection completes once the node can verify it")
+        .expect("the pending client connection's task is joined");
+    world.last_command_error = None;
+    world.last_command_output = None;
+    match result {
+        Ok(output) => world.last_command_output = Some(output),
+        Err(error) => world.last_command_error = Some(error),
+    }
 }
 
 #[when("the saturated credential verification is released")]
@@ -23404,12 +23511,15 @@ async fn when_the_ingestor_logic_fixture_starts_with_output_schema_and_program(
                 .unwrap_or_else(|error| {
                     panic!("failed to inspect ingestor logic schedule: {error:#}")
                 });
-            if let Some((owner, _)) = scheduled_node_placement_from_status(
+            let scheduled = ScheduledPlacement::from_status(
                 &output,
                 &world.domain,
                 "ingestor",
                 "logic_ingestor",
-            ) {
+            );
+            if let Some(scheduled) = scheduled
+                && let Some(owner) = scheduled.owner
+            {
                 break owner.to_string();
             }
             last_output = Some(output);
@@ -27379,74 +27489,6 @@ async fn then_last_command_error_does_not_contain(world: &mut ScenarioWorld, #[s
     );
 }
 
-fn owner_from_describe_output(output: &str) -> Option<&str> {
-    output
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("owner: ").map(str::trim))
-}
-
-fn replica_nodes_from_describe_output(output: &str) -> Vec<&str> {
-    output
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("replicas: ").map(str::trim))
-        .map(|replicas| {
-            replicas
-                .split(',')
-                .map(str::trim)
-                .filter(|replica| !replica.is_empty() && *replica != "-")
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn scheduled_node_placement_from_status<'a>(
-    status: &'a str,
-    domain: &str,
-    kind: &str,
-    name: &str,
-) -> Option<(&'a str, Vec<&'a str>)> {
-    status.lines().map(str::trim).find_map(|line| {
-        let line = line.strip_prefix("- ")?;
-        let mut line_domain = None;
-        let mut line_kind = None;
-        let mut line_name = None;
-        let mut owner = None;
-        let mut replicas = None;
-
-        for field in line.split_whitespace() {
-            if let Some(value) = field.strip_prefix("domain=") {
-                line_domain = Some(value);
-            } else if let Some(value) = field.strip_prefix("kind=") {
-                line_kind = Some(value);
-            } else if let Some(value) = field.strip_prefix("name=") {
-                line_name = Some(value);
-            } else if let Some(value) = field.strip_prefix("owner=") {
-                owner = Some(value);
-            } else if let Some(value) = field.strip_prefix("replicas=") {
-                replicas = Some(value);
-            }
-        }
-
-        if line_domain == Some(domain) && line_kind == Some(kind) && line_name == Some(name) {
-            let replica_nodes = replicas
-                .filter(|value| *value != "-")
-                .map(|value| {
-                    value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|replica| !replica.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            owner.map(|owner| (owner, replica_nodes))
-        } else {
-            None
-        }
-    })
-}
-
 /// Every whitespace-separated field of the first `SHOW CLUSTER STATUS` schedule line naming the
 /// unit of `kind` `name` in `domain`.
 fn scheduled_node_status_fields<'a>(
@@ -27648,14 +27690,14 @@ async fn observe_healthy_peers(
                 "'{source}' dropped connected peer '{peer}' from gossip: {status}"
             );
             for placement in &world.saved_healthy_placements {
-                let current = scheduled_node_placement_from_status(
+                let current = ScheduledPlacement::from_status(
                     &status,
                     &world.domain,
                     &placement.kind,
                     &placement.name,
                 );
                 assert_eq!(
-                    current.map(|(owner, _)| owner),
+                    current.and_then(|current| current.owner),
                     Some(placement.owner.as_str()),
                     "'{source}' moved healthy work while another peer was unavailable: {status}"
                 );
@@ -27758,8 +27800,10 @@ async fn then_last_command_output_owner_is_saved_as_placeholder(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before saving its owner");
-    let owner = owner_from_describe_output(output)
-        .unwrap_or_else(|| panic!("last command output must contain an owner line, got: {output}"))
+    let owner = described_owner(output)
+        .unwrap_or_else(|| {
+            panic!("last command output must name the node that owns its unit, got: {output}")
+        })
         .to_string();
     world.placeholders.insert(placeholder, owner);
 }
@@ -27773,7 +27817,7 @@ async fn then_first_replica_in_last_command_output_is_saved_as_placeholder(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before saving its replica");
-    let replica = replica_nodes_from_describe_output(output)
+    let replica = described_replicas(output)
         .into_iter()
         .next()
         .unwrap_or_else(|| {
@@ -27799,7 +27843,7 @@ async fn then_last_cluster_status_scheduled_owner_is_saved_as_placeholder(
         .last_command_output
         .as_deref()
         .expect("a cluster status output must exist before saving its scheduled owner");
-    let (owner, _) = scheduled_node_placement_from_status(output, &world.domain, &kind, &name)
+    let placement = ScheduledPlacement::from_status(output, &world.domain, &kind, &name)
         .unwrap_or_else(|| {
             panic!(
                 "last command output must contain scheduled {kind} {name} placement for domain \
@@ -27807,11 +27851,12 @@ async fn then_last_cluster_status_scheduled_owner_is_saved_as_placeholder(
                 world.domain
             )
         });
-    assert_ne!(
-        owner, "-",
-        "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
-        world.domain
-    );
+    let Some(owner) = placement.owner else {
+        panic!(
+            "scheduled {kind} {name} in domain '{}' must have an owner, got: {output}",
+            world.domain
+        );
+    };
     world.placeholders.insert(placeholder, owner.to_string());
 }
 
@@ -27831,7 +27876,7 @@ async fn then_last_cluster_status_scheduled_first_replica_is_saved_as_placeholde
         .last_command_output
         .as_deref()
         .expect("a cluster status output must exist before saving its scheduled replica");
-    let (_, replicas) = scheduled_node_placement_from_status(output, &world.domain, &kind, &name)
+    let placement = ScheduledPlacement::from_status(output, &world.domain, &kind, &name)
         .unwrap_or_else(|| {
             panic!(
                 "last command output must contain scheduled {kind} {name} placement for domain \
@@ -27839,7 +27884,8 @@ async fn then_last_cluster_status_scheduled_first_replica_is_saved_as_placeholde
                 world.domain
             )
         });
-    let replica = replicas
+    let replica = placement
+        .replicas
         .into_iter()
         .next()
         .unwrap_or_else(|| panic!("scheduled {kind} {name} must contain at least one replica"));
@@ -27917,8 +27963,9 @@ async fn then_last_command_output_owner_equals_placeholder(
         .last_command_output
         .as_deref()
         .expect("a command output must exist before owner assertion");
-    let actual = owner_from_describe_output(output)
-        .unwrap_or_else(|| panic!("last command output must contain an owner line, got: {output}"));
+    let actual = described_owner(output).unwrap_or_else(|| {
+        panic!("last command output must name the node that owns its unit, got: {output}")
+    });
     assert_eq!(
         actual, expected,
         "expected owner placeholder '{placeholder}' to match last command output owner"
@@ -27937,7 +27984,7 @@ async fn when_these_plexus_commands_are_executed_on_non_hash_map_owner(
     let owner = world
         .last_command_output
         .as_deref()
-        .and_then(owner_from_describe_output)
+        .and_then(described_owner)
         .expect("last command output must be DESCRIBE HASH MAP output with an owner")
         .to_string();
     let node_id = world
@@ -27967,10 +28014,10 @@ async fn when_these_plexus_commands_are_executed_on_non_hash_map_holder(
         .last_command_output
         .as_deref()
         .expect("last command output must be DESCRIBE HASH MAP output");
-    let owner = owner_from_describe_output(output)
+    let owner = described_owner(output)
         .expect("last command output must be DESCRIBE HASH MAP output with an owner")
         .to_string();
-    let replicas = replica_nodes_from_describe_output(output)
+    let replicas = described_replicas(output)
         .into_iter()
         .map(str::to_string)
         .collect::<Vec<_>>();
@@ -28491,7 +28538,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_equals_
         {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if owner_from_describe_output(&output) == Some(expected.as_str()) {
+                if described_owner(&output) == Some(expected.as_str()) {
                     return;
                 }
             }
@@ -28540,9 +28587,7 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
         {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if owner_from_describe_output(&output)
-                    .is_some_and(|owner| owner != unexpected.as_str())
-                {
+                if described_owner(&output).is_some_and(|owner| owner != unexpected.as_str()) {
                     return;
                 }
             }
@@ -28550,8 +28595,8 @@ async fn then_within_duration_node_eventually_reports_deduplicator_owner_differe
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for deduplicator '{deduplicator}' owner to differ from \
-             '{unexpected}'. last output: {:?}, last error: {:?}",
+            "timed out waiting for a node other than '{unexpected}' to own deduplicator \
+             '{deduplicator}'. last output: {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
         );
@@ -28594,8 +28639,8 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_equals_pla
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|(owner, _)| owner == expected)
+                if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|scheduled| scheduled.owner == Some(expected.as_str()))
                 {
                     return;
                 }
@@ -28644,13 +28689,13 @@ async fn then_for_duration_node_keeps_reporting_scheduled_owner_equal_to_placeho
                 )
             });
         world.last_command_output = Some(output.clone());
-        let owner = scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-            .map(|(owner, _)| owner.to_string())
+        let scheduled = ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
             .unwrap_or_else(|| {
                 panic!("scheduled {kind} {name} must remain in the schedule, got: {output}")
             });
         assert_eq!(
-            owner, expected,
+            scheduled.owner,
+            Some(expected.as_str()),
             "scheduled {kind} {name} must keep owner '{expected}', got: {output}"
         );
         observation.pause(Duration::from_millis(250)).await;
@@ -28684,16 +28729,16 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner_different_
         nervix_primitives::task::consume_budget().await;
         assert!(
             !placement.has_passed(),
-            "timed out waiting for scheduled {kind} {name} owner to differ from '{unexpected}'. \
-             last output: {:?}, last error: {:?}",
+            "timed out waiting for a node other than '{unexpected}' to own scheduled {kind} \
+             {name}. last output: {:?}, last error: {:?}",
             world.last_command_output,
             world.last_command_error
         );
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|(owner, _)| owner != unexpected)
+                if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|scheduled| scheduled.is_owned_by_node_other_than(&unexpected))
                 {
                     return;
                 }
@@ -28737,8 +28782,8 @@ async fn then_within_duration_node_eventually_reports_scheduled_owner(
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                if scheduled_node_placement_from_status(&output, &world.domain, &kind, &name)
-                    .is_some_and(|(owner, _)| owner == expected)
+                if ScheduledPlacement::from_status(&output, &world.domain, &kind, &name)
+                    .is_some_and(|scheduled| scheduled.owner == Some(expected.as_str()))
                 {
                     return;
                 }
@@ -28829,11 +28874,10 @@ async fn then_within_duration_node_eventually_reports_scheduled_replicas_without
         match world.cluster().status_text(&node_id, placement).await {
             Ok(output) => {
                 world.last_command_output = Some(output.clone());
-                let placed =
-                    scheduled_node_placement_from_status(&output, &world.domain, &kind, &name);
-                if let Some((_, replicas)) = placed
-                    && !replicas.is_empty()
-                    && !replicas.contains(&replaced.as_str())
+                let placed = ScheduledPlacement::from_status(&output, &world.domain, &kind, &name);
+                if let Some(scheduled) = placed
+                    && !scheduled.replicas.is_empty()
+                    && !scheduled.replicas.contains(&replaced.as_str())
                 {
                     return;
                 }

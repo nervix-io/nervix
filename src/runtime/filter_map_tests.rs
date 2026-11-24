@@ -205,7 +205,6 @@ async fn accepted_work_route_keeps_every_row_while_the_data_class_is_full() {
             ))
         );
     }
-    assert_eq!(executor.snapshot().data_cpu.refused, 0);
 }
 
 #[test]
@@ -1345,8 +1344,8 @@ async fn large_vm_batches_preserve_results_through_public_vm_api() {
     let input = vm_input_from_test_rows(&records, &program.program.input_schema)
         .expect("VM input batch should build");
 
-    let output = execute_accepted_program_with_selection_in_context(
-        Executor::default().accepted_work(),
+    let output = execute_program_with_selection_in_context(
+        &Executor::default(),
         &program.program,
         &input,
         &VmExecutionContext {

@@ -50,6 +50,7 @@ Feature: Durable signed licensing state
       mode: activated
       policy: degraded
       warning: decision_unverifiable
+      rejection: licensing decision was rejected: the decision envelope or signing authorization is invalid
       capability licensing.dummy: disabled
       """
     When the licensing service becomes reachable

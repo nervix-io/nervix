@@ -380,8 +380,8 @@ Feature: Declared public listener bounds
       | 1            |
       | 3            |
 
-  Scenario Outline: Retained HTTP input growth is refused without losing its response on <cluster_size> nodes
-    Given node-1 starts with execution-intake-memory-bytes = 4MiB
+  Scenario Outline: Retained HTTP input growth waits for room another request holds and completes once it frees on <cluster_size> nodes
+    Given node-1 starts with execution-intake-memory-bytes = 5MiB
     And node-1 starts with http-body-bytes = 1MiB
     And node-1 starts with http-body-timeout = 120s
     And node-1 starts with listener-idle-timeout = 120s
@@ -403,18 +403,18 @@ Feature: Declared public listener bounds
       START;
       """
     Then within "30s" node "node-1" eventually reports describe ingestor "intake_ingestor" as "ready: true"
-    And node "node-1" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 4194304
+    And node "node-1" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 5242880
       """
       nervix_execution_memory_capacity_bytes{class="intake"}
       """
-    And node "node-1" refuses retained HTTP input growth for host "bounded-{{test_id}}.example.com" with status 503
+    And node "node-1" holds retained HTTP input growth for host "bounded-{{test_id}}.example.com" until other input frees room
     When http payload is posted to node "node-1" with host "bounded-{{test_id}}.example.com" path "/ingest"
       """
-      {"value":"after-capacity-refusal"}
+      {"value":"after-capacity-wait"}
       """
     Then the relay subscription receives a payload
       """
-      "value":"after-capacity-refusal"
+      "value":"after-capacity-wait"
       """
 
     Examples:

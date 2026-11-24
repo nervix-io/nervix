@@ -4373,18 +4373,18 @@ charges them to the node's bulk memory class, which holds 32 MiB. It reads the s
 in groups, each the run of consecutive staged batches the class can hold together, whichever
 staging files hold them. Before it reads a group it charges every Arrow IPC byte of the group's
 staged batches, and once their rows are in data files it returns the charge before it reads the
-next group; the data files of every group are appended in the one catalog commit. It takes a charge only when the class has room for it now rather than waiting in
-the class's queue, where a commit's charge would take every byte the class frees and hold the
-node's other bulk work behind it. When the class has no room, the commit keeps its staged rows and
-their acknowledgements, `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the bulk memory
-class for <bytes> staged bytes` as the emitter's transient error, and the emitter retries the
-commit on its declared retry policy. A staged batch holds one input carrier's mapped rows, or one
-bounded segment of them when `BATCH` is declared. Without `BATCH` it can be larger than the class
-when a route on the same node flushes batches above 32 MiB.
-Such a batch is read alone once the whole class is free, charged with the whole class: that is every
-byte of it the class can account for, and it leaves no room for other bulk work beside the read.
-Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole bulk memory class of
-<capacity> bytes for a staged batch of <bytes> bytes`, and the emitter retries the commit as before.
+next group; the data files of every group are appended in the one catalog commit. When the class has
+no room for a group's charge now, the commit waits for it in the class's queue, holding nothing of
+the class: the previous group's charge ended with its data files. It keeps its staged rows and their
+acknowledgements while it waits, and `DESCRIBE EMITTER` shows `Iceberg commit waits for room in the
+bulk memory class for <bytes> staged bytes` as the emitter's transient status until the charge is
+granted. A staged batch holds one input carrier's mapped rows, or one bounded segment of them when
+`BATCH` is declared. Without `BATCH` it can be larger than the class when a route on the same node
+flushes batches above 32 MiB. Such a batch is read alone once the whole class is free, charged with
+the whole class: that is every byte of it the class can account for, and it leaves no room for other
+bulk work beside the read. Until then `DESCRIBE EMITTER` shows `Iceberg commit waits for the whole
+bulk memory class of <capacity> bytes for a staged batch of <bytes> bytes`. Only a class closed
+because the node stops fails the commit, which the emitter retries on its declared retry policy.
 
 #### Iceberg data files
 

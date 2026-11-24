@@ -129,8 +129,15 @@ pub enum LicenseDecisionError {
     Bounds,
     #[error("licensing trust documents do not verify")]
     Trust,
-    #[error("licensing decision was rejected: {reason}")]
-    Rejected { reason: DecisionRejection },
+    /// The message names only the rejection. The protocol's reason is the frame beneath it: the
+    /// frame validation reported, or, for a value kept without its report (the stored
+    /// verification and the consensus conflict), the frame `Report::new` records from this
+    /// variant's source.
+    #[error("licensing decision was rejected")]
+    Rejected {
+        #[source]
+        reason: DecisionRejection,
+    },
     #[error("licensing decision does not match its independent stored binding")]
     Binding,
     #[error("licensing decision metadata disagrees with its signed content")]
@@ -159,6 +166,9 @@ pub struct VerifiedLicenseDecision {
 pub type LicenseVerification = Result<VerifiedLicenseDecision, LicenseDecisionError>;
 
 impl LicenseDecisionError {
+    /// The rejection over the protocol's reason and everything validation reported beneath it.
+    /// The value carries the typed reason as well, because the stored verification and the
+    /// consensus conflict keep only the value, not this report.
     fn from_rejection(report: Report<DecisionRejection>) -> Report<Self> {
         let reason = *report.current_context();
         report.change_context(Self::Rejected { reason })

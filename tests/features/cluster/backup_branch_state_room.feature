@@ -1,6 +1,7 @@
-Feature: Deduplicator and window restore conversions refused for room
-  A restoring node that has no room for one unit of a deduplicator or window conversion converts
-  that unit again instead of failing the restore.
+Feature: Deduplicator and window restore conversions held back by a full node
+  A restoring node whose bulk execution is saturated holds a deduplicator or window conversion back
+  until it frees, for longer than the node's restore admission wait, which bounds only a full
+  staging quota, and the restore completes instead of failing.
 
   Background:
     Given these Plexus commands are saved as placeholder "branch_state_models"
@@ -56,8 +57,11 @@ Feature: Deduplicator and window restore conversions refused for room
       START;
       """
 
-  Scenario Outline: A deduplicator keyspace the restoring node refuses for room is converted again and resumes exactly on <cluster_size> nodes
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+  Scenario Outline: A deduplicator keyspace converted while the restoring node's bulk execution is saturated waits and resumes exactly on <cluster_size> nodes
+    Given restored-1 starts with control-plane-restore-admission-wait = 1s
+    And restored-2 starts with control-plane-restore-admission-wait = 1s
+    And restored-3 starts with control-plane-restore-admission-wait = 1s
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -85,9 +89,9 @@ Feature: Deduplicator and window restore conversions refused for room
       key={"tenant":"alpha"} | "transaction_id":"txn-3"
       """
     Then the current leader node is saved as placeholder "leader"
-    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "refused-keyspace.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "held-keyspace.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    When the CLI describes backup archive "refused-keyspace.nvxb" as json
+    When the CLI describes backup archive "held-keyspace.nvxb" as json
     Then the described backup has exactly 2 "deduplicator" state sections
     And the described backup has exactly 0 "window_processor" state sections
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
@@ -95,14 +99,13 @@ Feature: Deduplicator and window restore conversions refused for room
     Given the restore coordinator uses remote placement in a multi-node cluster
     And restoring domain "{{domain}}" pauses before it converts its first deduplicator or window state
     And command finalization on node "{{leader}}" pauses before its outcome is recorded
-    When restore "DOMAIN {{domain}} RESUME" of backup archive "refused-keyspace.nvxb" is streamed to node "{{leader}}" under execution reference "refused_keyspace" in the background with outcome recovery
+    When restore "DOMAIN {{domain}} RESUME" of backup archive "held-keyspace.nvxb" is streamed to node "{{leader}}" under execution reference "held_keyspace" in the background with outcome recovery
     Then the restore of domain "{{domain}}" pauses before it converts its first deduplicator or window state
     When bulk execution on node "{{leader}}" is saturated
     And the paused restore conversion of domain "{{domain}}" is released
-    Then within "60s" node "{{leader}}" observability metric "nervix_execution_job_rejections_total" with labels eventually reaches at least 10
-      """
-      class="bulk_cpu"
-      """
+    # The conversion waits for a place for longer than the node's one-second restore admission
+    # wait, which bounds only a full staging quota: a full queue holds it back and never ends it.
+    And physical time passes for "3s"
     When bulk execution on node "{{leader}}" is released
     Then the background restore's outcome is held on node "{{leader}}" before it is recorded
     When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
@@ -154,8 +157,11 @@ Feature: Deduplicator and window restore conversions refused for room
       | 1            | 0             | executed       |
       | 3            | 1             | recovered      |
 
-  Scenario Outline: A window the restoring node refuses for room is converted again and resumes exactly on <cluster_size> nodes
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+  Scenario Outline: A window converted while the restoring node's bulk execution is saturated waits and resumes exactly on <cluster_size> nodes
+    Given restored-1 starts with control-plane-restore-admission-wait = 1s
+    And restored-2 starts with control-plane-restore-admission-wait = 1s
+    And restored-3 starts with control-plane-restore-admission-wait = 1s
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -186,9 +192,9 @@ Feature: Deduplicator and window restore conversions refused for room
       key={"tenant":"beta"} | "samples":2 | "total":100 | "first_latency":20 | "last_latency":80 | "latency_p0":25.0
       """
     Then the current leader node is saved as placeholder "leader"
-    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "refused-window.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "held-window.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    When the CLI describes backup archive "refused-window.nvxb" as json
+    When the CLI describes backup archive "held-window.nvxb" as json
     Then the described backup has exactly 0 "deduplicator" state sections
     And the described backup has exactly 2 "window_processor" state sections
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
@@ -196,14 +202,13 @@ Feature: Deduplicator and window restore conversions refused for room
     Given the restore coordinator uses remote placement in a multi-node cluster
     And restoring domain "{{domain}}" pauses before it converts its first deduplicator or window state
     And command finalization on node "{{leader}}" pauses before its outcome is recorded
-    When restore "DOMAIN {{domain}} RESUME" of backup archive "refused-window.nvxb" is streamed to node "{{leader}}" under execution reference "refused_window" in the background with outcome recovery
+    When restore "DOMAIN {{domain}} RESUME" of backup archive "held-window.nvxb" is streamed to node "{{leader}}" under execution reference "held_window" in the background with outcome recovery
     Then the restore of domain "{{domain}}" pauses before it converts its first deduplicator or window state
     When bulk execution on node "{{leader}}" is saturated
     And the paused restore conversion of domain "{{domain}}" is released
-    Then within "60s" node "{{leader}}" observability metric "nervix_execution_job_rejections_total" with labels eventually reaches at least 10
-      """
-      class="bulk_cpu"
-      """
+    # The conversion waits for a place for longer than the node's one-second restore admission
+    # wait, which bounds only a full staging quota: a full queue holds it back and never ends it.
+    And physical time passes for "3s"
     When bulk execution on node "{{leader}}" is released
     Then the background restore's outcome is held on node "{{leader}}" before it is recorded
     When restore coordinator "{{leader}}" yields leadership in a multi-node cluster

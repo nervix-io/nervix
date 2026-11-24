@@ -174,7 +174,9 @@ impl SessionServiceImpl {
         } else {
             facts.push(("warning", "decision_unverifiable".to_owned()));
             if let Some(Err(reason)) = &initialized.verification {
-                facts.push(("rejection", reason.to_string()));
+                // The stored outcome keeps only the error value. Its report records what the
+                // value names as its source, such as a rejection's reason, as the frame beneath.
+                facts.push(("rejection", format!("{:#}", Report::new(*reason))));
             }
         }
         facts.push((

@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use nervix_execution::{Cancellation, CpuClass, MemoryClass, Reservation};
+use nervix_execution::{Cancellation, CpuClass, GrowingCharge, MemoryClass, Reservation};
 use nervix_models::{ClusterNodeIncarnation, ClusterNodeName, ResolvedParametrizerPartitions};
 
 use super::*;
@@ -29,7 +29,7 @@ pub(in crate::application::observation) struct PartitionInspection {
         )
     )]
     owners: BTreeMap<BranchKeyFingerprint, InspectionKeyOwner>,
-    memory: Reservation,
+    memory: GrowingCharge,
     max_bytes: u64,
 }
 
@@ -40,20 +40,19 @@ struct InspectionKeyOwner {
 }
 
 impl PartitionInspection {
+    /// An empty census under `memory`, which it grows as catalogs arrive, up to `max_bytes`.
     pub(in crate::application::observation) fn new(
         partitions: ResolvedParametrizerPartitions,
-        executor: &nervix_execution::Executor,
+        memory: Reservation,
         max_bytes: u64,
-    ) -> Result<Self, StateInspectionRejection> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             partitions,
             catalogs: BTreeMap::new(),
             owners: BTreeMap::new(),
-            memory: executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?,
+            memory: GrowingCharge::new(memory),
             max_bytes,
-        })
+        }
     }
 
     pub(in crate::application::observation) fn filter(
@@ -72,7 +71,7 @@ impl PartitionInspection {
             excluded: self.exclusions(unit)?,
         })
     }
-    fn reserve(&mut self, keys: usize) -> Result<(), StateInspectionRejection> {
+    fn reserve(&mut self, keys: usize) -> Result<InspectionGrowth, StateInspectionRejection> {
         // Charge catalog storage, the keyed owner index, the request's exclusion copy and tree
         // allocation overhead before retaining a catalog. Sparse trees can allocate a whole node
         // for one entry; overcharge those nodes as well as the four simultaneous representations.
@@ -93,24 +92,26 @@ impl PartitionInspection {
             .map_err(|error| inspection_refusal(error, StateInspectionRejection::ReplyTooLarge))?;
         let total = self
             .memory
-            .bytes()
+            .required()
             .checked_add(bytes)
             .ok_or(StateInspectionRejection::ReplyTooLarge)?;
         if total > self.max_bytes {
             return Err(StateInspectionRejection::ReplyTooLarge);
         }
-        self.memory
-            .grow_to(total)
-            .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))
+        grow_inspection(&mut self.memory, bytes)
     }
 
+    /// Record one unit's catalog. A bulk class without room for it records nothing and reports
+    /// the charge the census needs, which its owner starts again under.
     pub(in crate::application::observation) fn record(
         &mut self,
         unit: Unit,
         catalog: nervix_models::StateInspectionKeyCatalog,
         cancellation: &Cancellation,
-    ) -> Result<(), StateInspectionRejection> {
-        self.reserve(catalog.len())?;
+    ) -> Result<InspectionGrowth, StateInspectionRejection> {
+        if let InspectionGrowth::Short { needed } = self.reserve(catalog.len())? {
+            return Ok(InspectionGrowth::Short { needed });
+        }
         for key in catalog.fingerprints() {
             cancellation
                 .check()
@@ -159,7 +160,7 @@ impl PartitionInspection {
             }
         }
         self.catalogs.insert(unit, catalog);
-        Ok(())
+        Ok(InspectionGrowth::Grown)
     }
 
     pub(super) fn exclusions(
@@ -208,71 +209,88 @@ impl SessionServiceImpl {
             return Ok(None);
         };
         let executor = self.inner.runtime.inspection_executor();
-        let memory = executor
-            .try_reserve(MemoryClass::Bulk, 1)
-            .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
-        let mut inspection = PartitionInspection {
-            partitions,
-            catalogs: BTreeMap::new(),
-            owners: BTreeMap::new(),
-            memory,
-            max_bytes: u64::try_from(plan.limits.transfer_bytes())
-                .assured("session byte limits fit u64"),
-        };
-        for unit in plan.layout.node.units.keys() {
+        let max_bytes =
+            u64::try_from(plan.limits.transfer_bytes()).assured("session byte limits fit u64");
+        // A census that outgrows what its class has room for gives back everything it holds and
+        // starts again under the charge it needs, so it never waits while holding part of it.
+        let mut charge = 1;
+        'census: loop {
             nervix_primitives::task::consume_budget().await;
-            let owner = inspection_owner(
-                &plan.layout.node,
-                *unit,
-                self.inner.consensus.local_node_id(),
-            )?;
-            let incarnation = incarnations
-                .get(&owner)
-                .copied()
-                .ok_or(StateInspectionRejection::OwnerUnavailable)?;
-            let page = self
-                .processor_unit_page(
-                    ReadProcessorStatePage {
-                        domain: plan.domain.clone(),
-                        processor: plan.processor.clone(),
-                        unit: *unit,
-                        control_revision: plan.control_revision,
-                        schema: plan.layout.node.schema_fingerprint,
-                        selection: plan.selection,
-                        partition_exclusions: Some(BTreeSet::new()),
-                        after: None,
-                        max_rows: 0,
-                        max_bytes: 0,
-                        target: ClusterNodeIdentity::new(owner, incarnation),
-                    },
-                    plan,
-                )
-                .await?;
-            let catalog = page.descriptor.partition_catalog;
-            if !catalog.is_requested() {
-                return Err(StateInspectionRejection::NotReady);
-            }
-            let count = u64::try_from(catalog.len()).assured("an admitted catalog fits u64");
-            if count != page.descriptor.counts.branches {
-                return Err(StateInspectionRejection::NotReady);
-            }
-            let admission = executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
-            let unit = *unit;
-            inspection = executor
-                .run_cpu(CpuClass::Bulk, admission, move |_charge, cancellation| {
-                    inspection.record(unit, catalog, cancellation)?;
-                    Ok::<_, StateInspectionRejection>(inspection)
-                })
+            let memory = executor
+                .reserve(MemoryClass::Bulk, charge)
                 .await
-                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))??;
+                .map_err(|error| inspection_refusal(error, StateInspectionRejection::NotReady))?;
+            let mut inspection = PartitionInspection::new(partitions, memory, max_bytes);
+            for unit in plan.layout.node.units.keys() {
+                nervix_primitives::task::consume_budget().await;
+                let owner = inspection_owner(
+                    &plan.layout.node,
+                    *unit,
+                    self.inner.consensus.local_node_id(),
+                )?;
+                let incarnation = incarnations
+                    .get(&owner)
+                    .copied()
+                    .ok_or(StateInspectionRejection::OwnerUnavailable)?;
+                let page = self
+                    .processor_unit_page(
+                        ReadProcessorStatePage {
+                            domain: plan.domain.clone(),
+                            processor: plan.processor.clone(),
+                            unit: *unit,
+                            control_revision: plan.control_revision,
+                            schema: plan.layout.node.schema_fingerprint,
+                            selection: plan.selection,
+                            partition_exclusions: Some(BTreeSet::new()),
+                            after: None,
+                            max_rows: 0,
+                            max_bytes: 0,
+                            target: ClusterNodeIdentity::new(owner, incarnation),
+                        },
+                        plan,
+                    )
+                    .await?;
+                let catalog = page.descriptor.partition_catalog;
+                if !catalog.is_requested() {
+                    return Err(StateInspectionRejection::NotReady);
+                }
+                let count = u64::try_from(catalog.len()).assured("an admitted catalog fits u64");
+                if count != page.descriptor.counts.branches {
+                    return Err(StateInspectionRejection::NotReady);
+                }
+                let unit = *unit;
+                let recorded = executor
+                    .run_cpu(
+                        CpuClass::Bulk,
+                        executor.charge_nothing(MemoryClass::Bulk),
+                        move |_charge, cancellation| {
+                            let growth = inspection.record(unit, catalog, cancellation)?;
+                            Ok::<_, StateInspectionRejection>(RecordedCensus { inspection, growth })
+                        },
+                    )
+                    .await
+                    .map_err(|error| {
+                        inspection_refusal(error, StateInspectionRejection::NotReady)
+                    })??;
+                inspection = recorded.inspection;
+                if let InspectionGrowth::Short { needed } = recorded.growth {
+                    drop(inspection);
+                    charge = needed;
+                    continue 'census;
+                }
+            }
+            if inspection.owners.values().any(|owner| owner.ambiguous) {
+                return Err(StateInspectionRejection::NotReady);
+            }
+            return Ok(Some(inspection));
         }
-        if inspection.owners.values().any(|owner| owner.ambiguous) {
-            return Err(StateInspectionRejection::NotReady);
-        }
-        Ok(Some(inspection))
     }
+}
+
+/// A census after one unit's catalog: grown to hold it, or short of the room it needs.
+pub(in crate::application::observation) struct RecordedCensus {
+    pub(in crate::application::observation) inspection: PartitionInspection,
+    pub(in crate::application::observation) growth: InspectionGrowth,
 }
 
 #[cfg(test)]
@@ -296,9 +314,11 @@ mod tests {
             ),
             catalogs: BTreeMap::new(),
             owners: BTreeMap::new(),
-            memory: executor
-                .try_reserve(MemoryClass::Bulk, 1)
-                .assured("bounded fixture admission"),
+            memory: GrowingCharge::new(
+                executor
+                    .try_reserve(MemoryClass::Bulk, 1)
+                    .assured("bounded fixture admission"),
+            ),
             max_bytes,
         }
     }
@@ -424,10 +444,11 @@ mod tests {
                 ResolvedParametrizerPartitions::Inherited(
                     NonZeroU16::new(4).assured("four is positive"),
                 ),
-                &executor,
+                executor
+                    .try_reserve(MemoryClass::Bulk, 1)
+                    .assured("the empty bulk class admits the census"),
                 1_048_576,
-            )
-            .assured("the bounded census is admitted");
+            );
             let origins = [(7, 1, 3), (13, 2, 1), (10, 3, 2)].map(|(partition, epoch, unit)| {
                 nervix_models::InheritedPartitionOrigin {
                     partition: nervix_models::ExternalPartition::new(partition),

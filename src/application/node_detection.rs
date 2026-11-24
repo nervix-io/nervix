@@ -122,12 +122,7 @@ impl HostDetection {
             .await
             .change_context(ProbeError::Execution { probe })?;
         executor
-            .run_cpu_with(
-                CpuClass::Bulk,
-                nervix_execution::QueueAdmission::WaitForPlace,
-                reservation,
-                move |_, _| detect(),
-            )
+            .run_cpu(CpuClass::Bulk, reservation, move |_, _| detect())
             .await
             .change_context(ProbeError::Execution { probe })
     }
@@ -238,7 +233,6 @@ mod tests {
     async fn probes_the_bulk_workers_cannot_take_now_wait_for_a_place_and_run() {
         let executor = single_worker_executor();
         let filled = FilledCpuClass::fill(&executor, CpuClass::Bulk).await;
-        let before = executor.snapshot().cpu_class(CpuClass::Bulk);
         let mut detection =
             Box::pin(NodeDetection::Host.detect(&executor, Duration::from_secs(60)));
         let first_poll = poll_fn(|context| Poll::Ready(detection.as_mut().poll(context))).await;
@@ -272,9 +266,5 @@ mod tests {
                 "the {probe} probe runs once a place frees: {properties:?}"
             );
         }
-        assert_eq!(
-            executor.snapshot().cpu_class(CpuClass::Bulk).refused,
-            before.refused
-        );
     }
 }

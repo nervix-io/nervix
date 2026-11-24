@@ -338,7 +338,6 @@ impl InferenceSession {
             .await
             .change_context(InferencerError::LoadExecution)?;
         let bound = executor
-            .accepted_work()
             .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
                 BoundSession::load(&path, &definition, cancellation)
             })
@@ -546,7 +545,6 @@ impl InferenceSession {
             .await
             .change_context(InferencerError::RunExecution)?;
         let admitted = executor
-            .accepted_work()
             .prepare_cpu(CpuClass::Extension, charge)
             .await
             .change_context(InferencerError::RunExecution)?;

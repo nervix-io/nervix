@@ -1110,10 +1110,10 @@ not disable verification or silently fall back when unavailable.
 The server composition root extends the existing changed-model binding boundary before standalone
 mutation or transaction commit. It renders mount templates using the resource resolver and checks
 the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
-Request preflight refuses inspection when command memory or the filesystem wait queue is full.
-Applying a model step under an accepted transaction or restore instead waits for those existing
-capacities with `QueueAdmission::WaitForPlace`; lack of room has not judged the configuration.
-The service task's existing shutdown cancellation ends the wait. A charge larger than the whole
+A full command memory class or filesystem wait queue holds the inspection back, during request
+preflight exactly as when a model step applies under an accepted transaction or restore; lack of
+room has not judged the configuration. The service task's existing shutdown cancellation ends the
+wait. A charge larger than the whole
 class or a closed executor still fails inspection, and no uncharged config copy is made while waiting.
 Rendered values also pass the WebSockets configuration owner, which holds a schema-valid
 WebSockets client to an endpoint without a fragment or user information, counts within their ranges
@@ -3918,8 +3918,10 @@ Broker read results and scheduled polls are observed once through the host's typ
 `IngestorReadOutcome`. The host counts returned raw payloads and bytes before decoding and only
 times paced polls; internal buffer replay is not another transport read. Neither observation
 changes delivery, cancellation, acknowledgement, error reporting or retry policy. An
-extension-worker unfolding refusal is counted only for an endpoint request whose sender is answered
-that the node is busy; an ingestor's payload waits for admission instead, which is not a refusal. The request path records each endpoint request or frame
+extension-worker unfolding refusal is counted only for an endpoint request the node could not
+unfold at all, because it is stopping or the unfolding needs a charge larger than its whole memory
+class; every other payload, endpoint bodies included, waits for a place, which is not a refusal.
+The request path records each endpoint request or frame
 once for every ingestor bound to its route, through retained children of that ingestor's unit,
 from the typed outcome that ingestor reached. A route that refuses a request before reading it
 records each ingestor's refusal there, and a request it admits is recorded at dispatch alone.
@@ -4048,8 +4050,9 @@ the address's failure and the parser's error, both at the ingestor's start and i
 emitter's configuration diagnostic.
 
 The endpoint ingestor also reports the full ingest-group dispatch or flush chain in its runtime event
-and log. A refusal to admit unfolding remains retryable and its diagnostic retains the executor
-cause without treating the payload as decoded or rejected.
+and log. A refusal to admit unfolding, which only a stopping node or an unfolding larger than its
+whole memory class leaves, keeps the executor cause in its diagnostic without treating the payload
+as decoded or rejected.
 
 Paced ingestor resume and poll status, ingestor suspend and close events, and cadence failures render
 the full report supplied by their owner. Kafka partition-watch failures similarly name the ingestor
