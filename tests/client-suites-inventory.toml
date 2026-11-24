@@ -453,6 +453,11 @@ tier = "boundary"
 
 [[test]]
 host = "java"
+identity = "io.nervix.client.ArgumentTests#receiveWindowsOutsideTheirBoundsAreTypedArguments"
+tier = "boundary"
+
+[[test]]
+host = "java"
 identity = "io.nervix.client.BoundaryTests#cancellation"
 tier = "boundary"
 

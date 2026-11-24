@@ -65,6 +65,7 @@ uuid = { workspace = true, features = ["v7"] }
 [dev-dependencies]
 bolero = { workspace = true }
 flatbuffers = { workspace = true }
+h2 = { workspace = true }
 nervix-model-harness = { workspace = true }
 nervix-test-environment = { workspace = true }
 serde = { workspace = true }

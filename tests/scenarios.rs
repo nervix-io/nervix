@@ -10545,6 +10545,23 @@ async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String
         .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
 }
 
+/// Stalls the TCP forwarder at `address`: it refuses new connections, and every connection it
+/// carries stays open but passes no further byte either way. A client connected through it sees
+/// its node fall silent without the connection closing, as after a network cut or a frozen host.
+#[when(expr = "the TCP forwarder at {string} stalls its connections")]
+async fn when_the_tcp_forwarder_stalls(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .assured("the scenario names a TCP forwarder address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .verified("the scenario started TCP forwarders")
+        .stall(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stall: {error}"));
+}
+
 /// Stops the TCP forwarder at `address` and starts it again `seconds` later. Every session through
 /// it ends when it stops, and no client can open another through it until it starts again.
 #[when(expr = "the TCP forwarder at {string} stays stopped for {int} seconds and then restarts")]

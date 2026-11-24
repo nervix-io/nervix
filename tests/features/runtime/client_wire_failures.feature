@@ -1197,6 +1197,74 @@ Feature: Client wire failure regressions
       | 1            |
       | 3            |
 
+  # The node falls silent without closing the connection, as after a network cut. No request is
+  # waiting and the request timeout is far away, so only the client's HTTP/2 keepalive, on by
+  # default (a ping after 30 s without hearing from the node, answered within 20 s), can notice it.
+  # Reopening starts at the new session's live edge, so the second post waits for the restoration.
+  @client_wire_subscription_restore @client_wire_keepalive
+  Scenario Outline: A native client notices a node that falls silent on its connection and restores its subscription on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wire_record (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE WIRE JSON SCHEMA wire_record_json MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE WIRE JSON CODEC wire_record_codec
+        FROM WIRE SCHEMA wire_record_json
+        TO SCHEMA wire_record;
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE PARAMETRIZER by_tenant SCHEMA tenant_key TTL 5m;
+      CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
+      CREATE VHOST edge client-wire-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT wire_ingress ON edge PATH '/records';
+      CREATE HTTP ENDPOINT INGESTOR wire_ingestor
+        FROM wire_ingress MODE ACK MAX 8 ACK TIMEOUT 30s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING wire_record_codec
+        TO wire_records INHERIT ALL
+        BRANCHED BY by_tenant SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given the gRPC endpoint of node "{{leader}}" is forwarded from fixture address "127.0.0.1"
+    And client "subscriber" is connected to "{{forwarded_grpc}}" with request timeout "10m"
+    When client "subscriber" executes these Plexus commands
+      """
+      CREATE SUBSCRIPTION wire_seen TO wire_records;
+      """
+    And one http payload is posted with a completed graph acknowledgement to node "{{leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"acme","sequence":1}
+      """
+    Then within "10s" client "subscriber" receives a subscription payload
+      """
+      key={"tenant":"acme"} payload={"sequence":1,"tenant":"acme"}
+      """
+    When the TCP forwarder at "127.0.0.1" stalls its connections
+    Then within "120s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" restores subscription "wire_seen" and receives one subscription row from one acknowledged http post to node "{{leader}}" host "client-wire-{{test_id}}.example.com" path "/records"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the last relay subscription payload contains
+      """
+      key={"tenant":"beta"}
+      payload={"sequence":2,"tenant":"beta"}
+      """
+    And client "subscriber" subscription "wire_seen" is active
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_subscription_restore
   Scenario Outline: A native client deletes a subscription its lost session held and opens the name again
     Given a <cluster_size> node nervix cluster is started

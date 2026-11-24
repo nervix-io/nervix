@@ -103,8 +103,23 @@ typedef enum nx_timeout_kind {
     NX_TIMEOUT_CONNECT = 1,
     NX_TIMEOUT_REQUEST = 2,
     NX_TIMEOUT_RETRY = 3,
-    NX_TIMEOUT_BACKUP_WAIT = 4
+    NX_TIMEOUT_BACKUP_WAIT = 4,
+    /* How long a connection with a call open may go without hearing from the node before the
+       session pings it; 30 seconds by default. */
+    NX_TIMEOUT_KEEPALIVE_INTERVAL = 5,
+    /* How long that ping may go unanswered before the connection is lost and recovered; 20
+       seconds by default. */
+    NX_TIMEOUT_KEEPALIVE_TIMEOUT = 6
 } nx_timeout_kind;
+
+/* The HTTP/2 receive windows: how many bytes the node may send before the session reads them. */
+typedef enum nx_window_kind {
+    /* Of one call: 2 MiB by default, 1 through 2147483647 bytes. */
+    NX_WINDOW_STREAM = 1,
+    /* Of all calls on one connection together: 5 MiB by default, 65535 through 2147483647
+       bytes. */
+    NX_WINDOW_CONNECTION = 2
+} nx_window_kind;
 
 /* What kind of failure an `nx_error` reports. */
 typedef enum nx_error_kind {
@@ -528,6 +543,9 @@ nx_error *nx_connect_options_add_seed(nx_connect_options *options, const uint8_t
 /* Milliseconds; each deadline must be from 1 millisecond through 24 hours. Invalid values are
    rejected when the session connects. */
 nx_error *nx_connect_options_timeout(nx_connect_options *options, int32_t kind, uint64_t millis);
+/* Bytes; zero and a value above UINT32_MAX are rejected at once, and a window outside its
+   nx_window_kind bounds when the session connects. */
+nx_error *nx_connect_options_window(nx_connect_options *options, int32_t kind, uint64_t bytes);
 
 /* Opens a session on `server`, an http or https URI of a node's session endpoint. `domain` may
    be NULL for no selected domain. `options` is required and is read as a snapshot; the host must
