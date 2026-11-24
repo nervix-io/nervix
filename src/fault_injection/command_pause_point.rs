@@ -92,6 +92,7 @@ pub(super) enum CommandPausePoint {
     MaterializedRowRelease(DomainNodeRef),
     MaterializedRowTake(DomainNodeRef),
     MaterializedCheckpointSeal(DomainNodeRef),
+    OwnershipHandoffCommit(DomainName),
     OwnershipHandoffActivation(DomainName),
     GracefulDrain(ClusterNodeName),
     TransactionCommit {

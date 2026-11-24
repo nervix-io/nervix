@@ -917,6 +917,7 @@ impl Application {
                 properties,
                 node_tags,
             ),
+            fault_injection.clone(),
             shutdown.clone(),
         ));
         let scheduler_delay_shutdown = shutdown.clone();
