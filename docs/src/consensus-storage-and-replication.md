@@ -385,11 +385,8 @@ other candidate outside the membership and logs why once while the reason holds:
 the candidate has published no record the leader can read, and at `warn` with the voter and the
 mismatch when it cannot run beside a voter. It refuses the run of a voter that cannot run beside an
 older voter's run the same way, without changing the membership. A run outside the membership that
-the leader refused stays outside, with the verdict it received, for as long as gossip shows it: a
-run that cannot run beside a voter even once no live voter would refuse it, and a run refused for
-the cluster's node quota even once the quota would admit a newcomer;
-[Licensing Admission Refusals](errors-and-diagnostics.md#licensing-admission-refusals) describes
-the quota refusal.
+the leader refused stays outside, with the verdict it received, for as long as gossip shows it,
+even once no live voter would refuse it. Licensing never refuses a run: it limits no base feature.
 [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes the verdicts the leader
 publishes and what a refused node does. Each membership reconciliation gives a blocking learner
 catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
@@ -568,10 +565,10 @@ Transaction commit plans and step effects hold no lifecycle step.
 
 The current emitter Models carry explicit key expressions, source-partition routing and
 expression-only SQS FIFO groups. The dedicated database owns exactly four current keyspaces:
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_giveup_logs`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_giveup_meta`,
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_giveup_state`, and
-`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_giveup_snapshots`. Opening it validates the complete
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_logs`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_meta`,
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_state`, and
+`raft_parametrizer_endpoint_pause_domain_resource_user_labels_node_rules_label_edits_traces_volume_working_memory_duration_watermarks_rebuildreasons_node_settings_lifecycle_listeners_open_files_wasmlimits_shutdown_web_console_free_tier_giveup_snapshots`. Opening it validates the complete
 keyspace namespace before reading any records. The committed cluster-parameter record
 stores ordered typed TLS cipher suites and key-exchange groups. Recovery validates their complete
 pair before returning the record. The parameters also carry the coherent remote acknowledgement
@@ -608,7 +605,7 @@ committed node records under record-family tag `C`, each with the revision that 
 incarnation-bound capacity claim, including transport, DNS, database (each database's open-file limit included), consensus, engine, connector
 host, membership, runtime, shutdown, operational (trace export and web console pacing included) and listener capacities, its detected properties and its tags. The boxed node record
 announcement keeps unrelated command variants within the inline payload-size bound. Its state metadata
-requires the current `ClusterState` encoding, 58. The state carries the endpoint pause response
+requires the current `ClusterState` encoding, 59. The state carries the endpoint pause response
 choice, domain, resource and user labels, placement node rules, the label edit an administrative label command records, the cluster identity reference, committed cluster
 parameters, the durable restore installation gate and the unit-keyed committed
 schedule in which a relay of a partitioned branch is scheduled as one unit per partition.
@@ -897,18 +894,14 @@ so replay after a later activation cannot release that newer binding. The former
 offline deadline no longer gates admission under the free policy. The current consensus namespaces identify
 these complete shapes; another stored shape requires recreation.
 
-An observer captures public identity, licensing record, applied revision and `UsageSnapshot` from
-one committed state. Node usage is the number of committed voters and learners, and domain usage
-is the number of committed domain records. These facts require no per-node usage report. A node's
-single policy publisher derives an immutable value from that observation and publishes it through
-the execution-primitive publication boundary. Consumers read that one value without acquiring a
-policy lock or recomputing permissions.
+An observer captures public identity, licensing record and applied revision from one committed
+state. A node's single policy publisher derives an immutable value from that observation and
+publishes it through the execution-primitive publication boundary. Consumers read that one value
+without acquiring a policy lock or recomputing permissions.
 
-Domain creation includes the captured quota constraint in its durable effect and authoritative
-write. Apply checks the actual committed domain count before inserting a new record; restore's
-domain insertion does the same. Existing records do not spend another slot. Membership admission
-checks the node quota under its existing serialization before adding a member. The shipped free
-policy leaves both quotas unlimited.
+Licensing limits no base feature, so domain creation, restore's domain insertion and membership
+changes capture no quota and are never refused by licensing. The catalog declares no cluster quota,
+so the cluster measures no usage that impact assessment could protect.
 
 ## Cluster Parameter Publication
 

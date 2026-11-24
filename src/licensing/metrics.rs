@@ -14,7 +14,6 @@ use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_consensus::Observer;
 use nervix_licensing_protocol::requests::Operation;
-use nervix_licensing_vocabulary::QuotaName;
 use prometheus::{
     core::{Collector, Desc},
     proto::{Counter, Gauge, LabelPair, Metric, MetricFamily, MetricType},
@@ -33,7 +32,7 @@ const STATES: [&str; 8] = [
     "releasing",
     "degraded",
 ];
-const FAMILIES: [(&str, &str, &[&str]); 8] = [
+const FAMILIES: [(&str, &str, &[&str]); 7] = [
     (
         "nervix_licensing_state",
         "Current published licensing state.",
@@ -68,11 +67,6 @@ const FAMILIES: [(&str, &str, &[&str]); 8] = [
         "nervix_licensing_transitions_active",
         "Committed licensing transitions with a future deadline.",
         &[],
-    ),
-    (
-        "nervix_licensing_over_limit",
-        "Whether committed usage exceeds its effective quota after grace.",
-        &["condition"],
     ),
 ];
 
@@ -258,23 +252,6 @@ fn families(
     let active_transitions = policy.active_transition_count();
     sample(&mut transitions, &[], active_transitions.approx_into());
     output.push(transitions);
-    let mut over = family(7, MetricType::GAUGE);
-    for name in QuotaName::ALL {
-        let used = match name {
-            QuotaName::ClusterNodes => policy.snapshot.usage.cluster_nodes,
-            QuotaName::ClusterDomains => policy.snapshot.usage.cluster_domains,
-        };
-        sample(
-            &mut over,
-            &[("condition", name.as_str())],
-            if policy.effective_quota(name).admits(used) {
-                0.0
-            } else {
-                1.0
-            },
-        );
-    }
-    output.push(over);
     output
 }
 
@@ -288,10 +265,6 @@ mod tests {
             crate::licensing::policy::evaluate_policy(nervix_consensus::LicensingSnapshot {
                 initialized: None,
                 revision: None,
-                usage: nervix_licensing_protocol::impact::UsageSnapshot {
-                    cluster_nodes: 0,
-                    cluster_domains: 0,
-                },
             });
         let follower = families(&policy, false, None);
         for name in [
