@@ -163,7 +163,7 @@ it. When it does not, the node exits with status `1`, reporting
 `the startup preflight refused this node` above one of these causes:
 
 ```text
-the execution memory budgets of 229.25MiB exceed node memory 32MiB
+the execution memory budgets of 229.27MiB exceed node memory 32MiB
 memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB
 ```
 

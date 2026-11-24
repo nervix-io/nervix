@@ -1025,7 +1025,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `the execution memory budgets of 229.25MiB exceed node memory 32MiB`, for the executor pools alone, or `memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB`, for the complete total |
+| Memory budgets | `the execution memory budgets of 229.27MiB exceed node memory 32MiB`, for the executor pools alone, or `memory-limit (500MiB) cannot hold the node's memory budgets of 507.16MiB`, for the complete total |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
