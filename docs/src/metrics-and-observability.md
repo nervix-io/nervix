@@ -257,11 +257,10 @@ for retention and admission semantics.
 
 ## Licensing Metrics
 
-The `nervix_licensing_` families expose the published policy and process-local admission events.
+The `nervix_licensing_` families expose the published policy and the leader's licensing requests.
 Label values come from fixed declarations, with every applicable labelled child initialized to
 zero. Replicated gauges describe the exporting node's applied state; use the leader's values for
-a cluster total. Sum refusal-counter rates across nodes as leadership moves. A process restart
-resets its counters.
+a cluster total. A process restart resets its counters.
 
 | Suffix | Kind and labels | Free policy |
 | --- | --- | --- |
@@ -272,27 +271,19 @@ resets its counters.
 | `requests_total` | Counter, `operation` and `outcome` | On the leader, every operation/outcome pair starts at 0. |
 | `stream_connected` | Gauge | On the leader, 0. |
 | `transitions_active` | Gauge | Number of committed transitions whose effective deadline is after committed licensing time, including pending acknowledgements; 0 in free mode. |
-| `over_limit` | Gauge, catalog `condition` | Every cluster quota starts at 0. |
-| `admissions_refused_total` | Counter, catalog `condition` and refusal `state` | Every cluster quota/refusal-state pair starts at 0. |
 
 Request operations are `activation.create`, `activation.refresh`, `activation.release`,
 `activation.rotate_key` and `events.subscribe`. Outcomes are `committed`, `rejected_by_cluster`,
-`refused_by_service`, `unreachable` and `timeout`. Refusal states are `within_grace`, `over_limit`,
-`lapsed` and `stopped`. A leader counts a refused newcomer run once: it keeps that run's verdict
-without judging it again while gossip still shows it. Connectivity and request families are
-leader-local. Free mode supplies no decision or deadline and makes no licensing request. The
-shipped unlimited quotas produce no
-admission refusals. An activated record supplies its committed revision and existing signed
-deadlines. Deadline ticks change the state gauge without rewriting those deadlines.
+`refused_by_service`, `unreachable` and `timeout`. Connectivity and request families are
+leader-local. Free mode supplies no decision or deadline and makes no licensing request. Licensing
+limits no base feature, so no family counts nodes or domains. An activated record supplies its
+committed revision and existing signed deadlines. Deadline ticks change the state gauge without rewriting those deadlines.
 Released mode keeps its decision revision, reports `releasing` and exposes `next_grant` until the
 last grant ends. Confirmation and local key rotation never extend those deadlines.
 Activated mode also exposes `next_grant`. An unacknowledged grant uses the earlier of its committed
 grace deadline and the original introducing decision's offline deadline. A refresh cannot renew
 that bound. A signed acknowledgement replaces the grant; an administrator extension can move its
-deadline. `over_limit` remains 0 while active grants protect the committed usage and becomes 1
-when their allowance expires with usage still above the target. `within_grace` refusal counters
-count growth denied by the target while recovery remains permitted within the existing allowance.
-No metric or licensing deadline removes existing domains or cluster members.
+deadline. No metric or licensing deadline removes existing domains or cluster members.
 An invalid or unverifiable response increments `rejected_by_cluster`; typed service refusals increment
 `refused_by_service`, and failed transport attempts record `unreachable` or `timeout`. A request is
 `committed` after its verified decision applies. Counters describe attempts on this process and

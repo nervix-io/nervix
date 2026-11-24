@@ -180,7 +180,6 @@ pub struct Model {
     held_response: Option<ResponseGate>,
     refusal: Option<ProblemKind>,
     license_key: Secret,
-    transition_usage: Option<nervix_licensing_protocol::impact::UsageSnapshot>,
 }
 
 pub(crate) fn id() -> Uuid {
@@ -252,7 +251,6 @@ impl Model {
             held_response: None,
             refusal: None,
             license_key: Secret::new("NVXK-TESTABCD-fixture-secret".to_owned()),
-            transition_usage: None,
         })
     }
 
@@ -669,33 +667,6 @@ impl Model {
             .assured("fixture revisions are bounded");
         let previous = held.decision.conditions.clone();
         let mut decision = self.decision(binding, common.request_id, revision, Some(&previous));
-        if let Some(usage) = self.transition_usage {
-            use nervix_licensing_protocol::impact::*;
-            decision.transitions = held.decision.transitions.clone();
-            decision.transitions.extend(
-                assess_impact(
-                    EffectiveUsage {
-                        conditions: &held.decision.conditions.usage,
-                        transitions: &held.decision.transitions,
-                    },
-                    ImpactTarget::Usage(&decision.conditions.usage),
-                    usage,
-                    TransitionPolicy::from_operating(&decision.conditions.operating)
-                        .assured("validated fixture grace"),
-                    ImpactContext {
-                        from_conditions_revision: held.decision.conditions.conditions_revision,
-                        to_conditions_revision: decision.conditions.conditions_revision,
-                        started_at: self.now,
-                        trigger: TransitionTrigger::Decision {
-                            decision_id: decision.decision_id,
-                        },
-                        reason: TransitionReason::PlanChanged,
-                    },
-                    limits().bytes,
-                )
-                .assured("bounded transition assessment"),
-            );
-        }
         if held.decision.status != DecisionStatus::Active {
             decision.status = held.decision.status;
             decision.conditions = held.decision.conditions.clone();
@@ -929,12 +900,6 @@ fn empty_conditions() -> Conditions {
 fn default_plan() -> Conditions {
     let mut plan = empty_conditions();
     plan.usage = FREE_POLICY.usage();
-    for (name, value) in [(CLUSTER_NODES, 16), (CLUSTER_DOMAINS, 64)] {
-        plan.usage.quotas.insert(
-            name.to_owned(),
-            ConditionValue::Known(Quota::Bounded { value }),
-        );
-    }
     for name in [PERSISTENT_ACTIVATIONS, EPHEMERAL_ACTIVATIONS] {
         plan.operating.quotas.insert(
             name.to_owned(),

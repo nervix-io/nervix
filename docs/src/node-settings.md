@@ -315,8 +315,8 @@ describes the headroom it needs.
 
 A node keeps every peer it is given. Every member must reach every other member for consensus,
 health and relay delivery, so a node keeps a dial target, its connections and a relay owner for
-every peer, however many there are; the cluster's size is bounded by the licensing node quota, where
-the license sets one, and by the operator. Connections follow the peers: each peer gets the fixed
+every peer, however many there are; the operator decides the cluster's size, which licensing never
+limits. Connections follow the peers: each peer gets the fixed
 [pool layout](interconnect.md#listener-and-peer-topology) of six connections in each direction, the five
 preconnected connections and the on-demand bulk connection, and at most
 `interconnect-concurrent-handshakes` connections are in setup at once. One health round probes
@@ -667,12 +667,11 @@ explains why a fresh cluster restored from an archive keeps its own UUID and key
 
 ## Cluster Licensing
 
-A cluster starts with the embedded free policy. Its current quotas, `cluster.nodes` and
-`cluster.domains`, are unlimited, and its one capability, `licensing.dummy`, is disabled. Node usage
-counts committed voters and learners; domain usage
-counts committed domain records, including stopped domains. Returning members and updates to an
-existing domain do not consume another slot. Free mode contacts no licensing service, including
-after restart.
+A cluster starts with the embedded free policy, which disables every capability; the catalog's one
+capability, `licensing.dummy`, is disabled. Licensing never limits base features: it refuses no
+node join, domain creation or restore, so a cluster has only the limits it has without a license.
+Free mode contacts no licensing service, including after restart. [Licensing](licensing.md)
+describes what a license adds and how to obtain one.
 
 ```plexus
 ACTIVATE LICENSE PERSISTENT WITH KEY 'NVXK-ABCDEFG2-your-secret';
@@ -752,11 +751,11 @@ that chain is refused without replacing the committed decision.
 Licensing time is committed and monotone. The leader proposes physical observations at deadline
 crossings independently of its refresh attempt. The derived refresh state is `licensed fresh`,
 `licensed due`, or `licensed overdue`; a bounded `valid_until` crossing becomes `lapsed freeze`.
-An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running
-and refuses new domain and member usage. Existing domain lifecycle commands and backups remain
-available. A later verified decision can clear the lapse. A newcomer refused during the freeze
-stops, and the leader keeps refusing that run after the lapse clears, for as long as gossip still
-shows it; the node joins under the cleared policy when it starts again.
+An outage moves no signed deadline, and restart resets none. Freeze keeps existing work running and
+keeps each capability permitted only for its existing uses; it limits no base feature, so it
+refuses no domain or member. No current capability tracks its uses, so today a freeze refuses
+nothing. Existing domain lifecycle commands and backups remain available. A later verified decision
+can clear the lapse.
 
 The licensed leader holds one authenticated outbound event stream. Each connection obtains a
 fresh challenge and single-use signed stream ticket; credentials stay out of the URL. The initial
@@ -791,8 +790,8 @@ While the gate is closed:
 
 - `DESCRIBE LICENSE` reports `policy: stopped` and
   `processing: stopped by licensing: ephemeral activation expired at <instant>`.
-- Admission refuses all new usage with state `stopped`, `CREATE DOMAIN` and the domains a restore
-  would create included. The cluster never falls back to the free policy.
+- The cluster never falls back to the free policy. Licensing refuses no domain creation, restore or
+  node join; a domain created while the gate is closed stays stopped.
 - The leader stops every running domain through the ordinary graceful stop, which preserves its
   persisted runtime state: intake ends at once and the work in motion finishes. The licensing
   stop's request is forced a fixed 60 seconds after the expiry in committed licensing time
@@ -817,8 +816,7 @@ ephemeral activation expired, because the service released its capacity at that 
 stay stopped until an operator starts them.
 
 Every node answers `DESCRIBE LICENSE` without selecting a domain or redirecting to the leader.
-It reports the mode, policy, public identity, committed time, processing state, quotas and
-capabilities. An activation adds its binding, public credential identifier, decision and conditions
+It reports the mode, policy, public identity, committed time, processing state and capabilities. An activation adds its binding, public credential identifier, decision and conditions
 revisions, verification, signed deadlines, license facts and refresh state.
 
 A capability is a feature a license switches on. The typed `capabilities` section lists every
@@ -838,32 +836,26 @@ A degraded inspection also renders its typed decision-verification rejection.
 The command carries the same observation in a typed cluster-license state-inspection envelope
 with one unit and shared Row sections, so applications need not parse display text.
 
-A signed reduction below existing usage starts a committed grace period at receipt. The target
-quota governs new usage immediately. During grace, a replacement may restore usage up to the
+A signed reduction of a cluster quota below existing usage starts a committed grace period at
+receipt. The current catalog declares no cluster quota, so no grace period starts until a
+capability's own limit brings one; licensing never limits nodes or domains. The target quota governs
+new usage immediately. During grace, a replacement may restore usage up to the
 allowance held when the reduction arrived; it cannot expand that allowance. Refresh, restart and
 leader transfer preserve the transition's identity, start and deadline. The next refresh reports
 the committed transition, and a service-signed acknowledgement replaces its copy. Only that
 acknowledgement or a signed administrator extension can move a deadline later. Before acknowledgement,
 the signed offline deadline also bounds the temporary permission.
 The typed `transitions` section exposes each identity, condition, original and target values,
-usage at start, start time, signed deadline, effective deadline, acknowledgement and current quota
-state. `issued_at` and `received_at` are independent typed decision timestamps; `transitions_active`
-counts committed grants that remain active. A member replacement must have belonged to the
-membership when its grant started. A domain restore can recover slots up to the same original
-allowance. Creating another domain or introducing a new member follows the target quota.
+usage at start, start time, signed deadline, effective deadline and acknowledgement. `issued_at`
+and `received_at` are independent typed decision timestamps; `transitions_active` counts committed
+grants that remain active.
 
 An improvement applies immediately and ends grants it makes unnecessary. At a term-end tick or
 release, Nervix targets the embedded free policy and assesses any reduction using the signed grace
-in force. The current free policy has unlimited quotas, so returning to it does not create a quota
-reduction. Expired ephemeral activations retain their firm stop and receive no grace. When a grant
-ends with usage still above its target, inspection, metrics and a Warning notice report the excess;
-licensing itself drops no domain, removes no member and tears down no existing work.
-
-Admission evaluates a coherent committed observation. Domain planning captures its quota, and
-committed creation checks current usage and lapse before adding a domain. Membership admission
-checks before adding a learner or voter. A typed refusal never removes an existing domain or
-member. [Licensing Metrics](metrics-and-observability.md#licensing-metrics) owns the matching series
-and [notices](client-session-protocol.md#what-a-session-is-told) describe asynchronous warnings.
+in force. Expired ephemeral activations retain their firm stop and receive no grace. Licensing
+itself drops no domain, removes no member and tears down no existing work.
+[Licensing Metrics](metrics-and-observability.md#licensing-metrics) owns the licensing series and
+[notices](client-session-protocol.md#what-a-session-is-told) describe asynchronous warnings.
 
 ## The Prerequisite List Is Closed
 

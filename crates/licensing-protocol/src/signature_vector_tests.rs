@@ -168,7 +168,7 @@ impl VectorKeys {
                         ConditionValue::Known(Capability::Enabled),
                     )]),
                     quotas: BTreeMap::from([(
-                        "cluster.nodes".to_owned(),
+                        "vectors.quota".to_owned(),
                         ConditionValue::Known(Quota::Bounded { value: 5 }),
                     )]),
                 },
@@ -212,7 +212,7 @@ impl VectorKeys {
                 },
                 reason: TransitionReason::PlanChanged,
                 affected: vec![AffectedQuota {
-                    condition: "cluster.nodes".to_owned(),
+                    condition: "vectors.quota".to_owned(),
                     previous: Quota::Unlimited,
                     target: Quota::Bounded { value: 5 },
                     usage: 7,
