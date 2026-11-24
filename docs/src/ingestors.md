@@ -1957,8 +1957,10 @@ keep the subscription. Replacing the ingestor with `ALTER PULSAR TOPIC INGESTOR`
 `SET FROM ...` or by an operation such as `SET TOPIC` or `SET SUBSCRIPTION`, removes the preceding
 owned subscription after its consumers stop and before the replacement starts, unless the
 replacement reads the same subscription of the same qualified topic at the same resolved broker
-address. Client names, route, codec, delivery-mode, subscription type and instance-count changes
-do not change that identity. Short topics use their client's namespace, so a short name and its
+address. The node removes it only once the change can no longer be undone there: an alteration that
+fails on a node keeps the preceding ingestor reading the subscription, with its backlog. Client
+names, route, codec, delivery-mode, subscription type and instance-count changes do not change that
+identity. Short topics use their client's namespace, so a short name and its
 fully qualified spelling identify the same topic. Broker addresses compare their URL scheme,
 host and effective port; an omitted port means 6650 for `pulsar` and 6651 for `pulsar+ssl`.
 Different configured host names are distinct addresses even if DNS resolves them alike.
@@ -2396,7 +2398,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Position class | broker_redelivered |
 | Acknowledgement confirmation | written |
 | Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: set by max_packet_size, 10240 bytes when omitted; when full, drops and counts what does not fit<br>ACK-mode QoS 1/2 outcomes in the packet-ordered read-ahead queue: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus node setting mqtt-read-ahead-headroom up to 65,535; when full, holds back what fills it<br>ACK-mode QoS 0 outcomes alongside the reserved acknowledged capacity in the same packet-ordered read-ahead queue: set by node setting `--mqtt-read-ahead-headroom`; when full, drops and counts what does not fit<br>NO ACK outcomes in the packet-ordered read-ahead queue: set by node setting `--mqtt-read-ahead-headroom`; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE, PUBACK and PUBREC requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>retire a refused or downgraded subscription before retrying: driver default, 5 s<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>retire a refused or downgraded subscription, or a session its preceding input left with another subscription, before subscribing: driver default, 5 s<br>ordinary and oversized-discard acknowledgements written to the connection: client key `keep_alive_ms`; one interval of it, or of the broker's Server Keep Alive; 60 s when omitted<br>a silent connection: client key `keep_alive_ms`; two intervals of it, pinging after the first, or of the broker's Server Keep Alive; 60 s when omitted |
 | Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound.<br>ACK-mode QoS 0 overflow is counted immediately and never consumes an acknowledged outcome's reserved capacity. An oversized QoS 0 publish refused here counts as overflow only. NO ACK retains backpressure. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
@@ -2606,6 +2608,16 @@ clean up the preceding endpoint does not prevent moving to a reachable new endpo
 whose broker, identity, filter, session mode and QoS still match are retained, including across
 an instance-count change. Changing a filter discards the retired filter's broker queue.
 Ordinary `STOP`, reconnect and ownership transfer retain persistent broker sessions.
+
+A node retires the preceding sessions only once the change can no longer be undone there. An
+alteration that fails on a node keeps the preceding ingestor running there on its sessions, with
+what the broker queued in them meanwhile. An alteration that keeps the broker and client identity
+but changes the topic or QoS of a persistent session applies even when that session cannot be
+cleaned while it applies: the replacement retires the session itself before it first subscribes,
+once the broker answers, so it never reads what the broker queued for the preceding filter. Until it
+has, that retirement outlives a `STOP` and `START` of the domain, and a relocation, drain or other
+move that keeps the session retires it on the node it leaves first, waiting for the broker as a
+node that has not prepared the move does.
 
 `SUSPEND` is valid only with `SESSION PERSISTENT` at `QOS 1` or `QOS 2`. CREATE refuses any other
 pairing with `MQTT ON QUIESCE SUSPEND requires SESSION PERSISTENT and QOS 1 or 2`, underlining

@@ -539,6 +539,21 @@ impl Runtime {
                         *unit,
                     );
                 }
+                #[cfg(feature = "testing")]
+                if !previous_local_units.is_subset(&desired_local_units) {
+                    self.hold_or_fail_entity_swap(domain, entity, Some(local_node_id))
+                        .await?;
+                }
+                // An instance that leaves this node while it still owes its MQTT session a
+                // retirement here has that session retired before it goes, while the swap can
+                // still fail and hold the move.
+                Box::pin(self.settle_released_mqtt_session_retirements(
+                    domain,
+                    &IngestorName::from(&entity.identifier),
+                    revision,
+                    Some(local_node_id),
+                ))
+                .await?;
             }
 
             self.activate_prepared_forced_ownership_recovery_state(
@@ -1081,6 +1096,17 @@ impl Runtime {
                 }));
             }
         };
+        // Nothing of the swap can fail any more, so the inputs it replaced give up what they kept
+        // at their brokers, before the revision publishes and its ingestors start.
+        Box::pin(self.retire_swapped_ingestor_inputs(
+            domain,
+            installed.as_deref(),
+            &revision,
+            entities,
+            local_node_id,
+            &mut retiring_ingestors,
+        ))
+        .await;
         let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id {

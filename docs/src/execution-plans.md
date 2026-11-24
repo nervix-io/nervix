@@ -440,6 +440,17 @@ fail. Every stored state goes before any state held in memory, so a deletion tha
 the previous execution's state in memory, and a processor unit whose state is deleted starts its
 replacement only after the deletion.
 
+What an ingestor's input keeps at its broker is retired on the same terms. When a swap replaces an
+MQTT or Pulsar ingestor whose replacement no longer uses the preceding broker session or owned
+subscription, it stops the ingestor's units and, while it can still be undone, only prepares a
+replacement session at a broker session the preceding input never connected. It retires the
+preceding sessions and the owned subscription once nothing else of the swap can fail, before the
+revision publishes and the replacement starts. A failed swap therefore starts the previous ingestor
+again on what it left at its broker, with what the broker kept for it meanwhile. A retirement an MQTT
+replacement instance still owes its shared session outlives the domain execution on its node. A
+swap or rebuild that would let that instance run elsewhere under the same session and subscription
+retires the session first, while the change can still fail, and its failure fails the change there.
+
 The swap then fails. The node keeps the previous revision as the one it applied, records the
 failure and its reason in its [application progress](./command-completion.md#application-progress),
 and reconciliation applies the committed revision again on its retry cadence. When a failed attempt
@@ -519,9 +530,10 @@ Transport headers remain connector-owned and enter a relay only when copied into
 fields.
 
 An input that owns external session state is retired from its previous typed plan after its ingestor
-tasks stop. `IngestorStartPlan` decides whether the ingestor changed, independently of codec or route
-changes. Runtime installation snapshots locally owned retiring inputs before withdrawing the
-installed revision, and the composition root dispatches retirement. Passive revisions retain the
+tasks stop, and in an entity swap only once nothing else of the swap can fail. `IngestorStartPlan`
+decides whether the ingestor changed, independently of codec or route changes. Runtime installation
+snapshots locally owned retiring inputs before withdrawing the installed revision, and the
+composition root dispatches retirement. Passive revisions retain the
 same plans, so removing an ingestor after `STOP` can still release its MQTT sessions. The MQTT
 host prepares its rendered client configurations, connector plan and resource mounts once
 per logical declaration on a node. Unit starts clone that immutable plan with their own read-ahead
