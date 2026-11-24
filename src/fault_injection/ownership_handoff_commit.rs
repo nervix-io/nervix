@@ -9,11 +9,19 @@
 //!   identities.
 //! - **Must not know.** Plexus syntax, handoff planning or reconciliation policy.
 
+use ahash::RandomState;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{ClusterNodeName, DomainName};
-use nervix_primitives::sync::watch;
+use nervix_primitives::{collections::DashMap, sync::watch};
 
 use super::{CommandPausePoint, FaultInjection};
+
+/// Each node a scenario observes, with what its ownership-handoff preparation reconciliations did
+/// since the scenario began observing it.
+#[derive(Debug, Default)]
+pub(super) struct ObservedReconciliationsByNode(
+    DashMap<ClusterNodeName, watch::Sender<ObservedOwnershipHandoffReconciliations>, RandomState>,
+);
 
 impl FaultInjection {
     /// Holds the coordinator of the next planned handoff in `domain`, once, after every
@@ -43,6 +51,7 @@ impl FaultInjection {
         let (observed, _) = watch::channel(ObservedOwnershipHandoffReconciliations::default());
         self.inner
             .ownership_handoff_reconciliations
+            .0
             .insert(node, observed);
     }
 
@@ -53,7 +62,7 @@ impl FaultInjection {
         node: &ClusterNodeName,
         discarded: u64,
     ) {
-        let Some(observed) = self.inner.ownership_handoff_reconciliations.get(node) else {
+        let Some(observed) = self.inner.ownership_handoff_reconciliations.0.get(node) else {
             return;
         };
         observed.send_modify(|observed| {
@@ -78,6 +87,7 @@ impl FaultInjection {
             let reconciliations = self
                 .inner
                 .ownership_handoff_reconciliations
+                .0
                 .get(node)
                 .assured("a scenario waits only for the reconciliations of a node it observes");
             reconciliations.subscribe()
