@@ -1437,6 +1437,11 @@ has to move to grow takes its current size, the growth reserve and two guards. S
 reservation, guard and growth reserve do not replace a processor's declared `MAX FUEL`,
 `MAX MEMORY` or `MAX TABLE ELEMENTS`.
 
+The WebAssembly proposals a guest may use are a fixed part of the guest contract, never a setting:
+every node enables exactly the set [WASM Processor Guests](wasm-processor-guests.md#webassembly-features)
+lists, and keeps relaxed SIMD at the node's native results, whatever its Wasmtime version enables by
+default.
+
 `--udf-watchdog` is checked when a Roto UDF call returns: a call that took longer fails its whole
 batch, and each node judges the calls it runs by its own value. It cannot interrupt native code
 that never returns; [User-Defined Functions](udfs.md#nulls-errors-and-volatility) states what an

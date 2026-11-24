@@ -11450,6 +11450,43 @@ fn two_objects_wasm_fixture(objects: &str) -> Vec<u8> {
         "tables" => "(memory (export \"memory\") 1) (table 1 funcref) (table 1 funcref)",
         other => panic!("unsupported defined objects '{other}'"),
     };
+    every_host_export_wasm_fixture(declarations)
+}
+
+#[given(
+    regex = r#"^node "([^"]+)" has a WASM fixture whose memory (is shared between threads|has one-byte pages) in resource directory "([^"]+)"$"#
+)]
+async fn given_node_has_refused_memory_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    memory: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        refused_memory_wasm_fixture(&memory),
+    )
+    .await;
+}
+
+/// A guest that implements every export the host requires around the one linear memory it
+/// exports, declared with a WebAssembly proposal the guest contract refuses: a memory shared
+/// between threads needs the threads proposal, and one of 64 KiB in one-byte pages needs the
+/// custom page sizes proposal.
+fn refused_memory_wasm_fixture(memory: &str) -> Vec<u8> {
+    let declaration = match memory {
+        "is shared between threads" => "(memory (export \"memory\") 1 1 shared)",
+        "has one-byte pages" => "(memory (export \"memory\") 65536 (pagesize 1))",
+        other => panic!("unsupported refused memory '{other}'"),
+    };
+    every_host_export_wasm_fixture(declaration)
+}
+
+/// A guest that implements every export the host requires beside `declarations`, which define
+/// its linear memory, exported as `memory`, and whatever else the fixture needs.
+fn every_host_export_wasm_fixture(declarations: &str) -> Vec<u8> {
     format!(
         r#"(module
       {declarations}

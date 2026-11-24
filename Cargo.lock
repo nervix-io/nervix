@@ -8618,6 +8618,7 @@ dependencies = [
  "strum 0.26.3",
  "thiserror 2.0.21",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]
