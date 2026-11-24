@@ -2384,9 +2384,12 @@ client sees at each ending and what it recovers.
 
 **Graceful stop.** When a node begins to stop, it closes admission on its session gRPC and console
 listeners and ends the sessions they carry. Every request a session had not yet admitted is decided
-cancelled before admission and never begins an effect. Work that was admitted keeps running and no
-reply follows for it: a transaction commit continues, and the node waits for it until its shutdown
-deadline. Subscriptions and domain clock attachments stop with their session. Every session, native
+cancelled before admission and never begins an effect. Work that was admitted keeps running only
+until the node turns off, and no reply follows for it from that node: a command, a transaction
+commit or a restore then ends there, its replicated progress survives, and the leader that follows,
+or the node after its restart, continues it. A command whose node stops is never answered with a
+refusal of its own about the stop. Subscriptions and domain clock attachments stop with their
+session. Every session, native
 or console, receives `SessionEnding` with reason `ServerShuttingDown` after the control frames it
 had already queued; a native session's call then ends with status `OK`, and a console session's
 WebSocket with a normal close. An upload, a restore or a download call on the native listener ends

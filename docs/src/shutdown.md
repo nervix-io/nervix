@@ -353,9 +353,12 @@ is turning off, and it takes part in no service work any more. It logs `this nod
 stopped taking part in service work` with how many such tasks were still running, and each of them
 ends at its next await: a transaction commit, a command, a restore or a resource upload's recovery,
 and the coordination the node runs for the cluster, such as acting as leader for another stopping
-node. Their replicated progress survives, and the recovery that completes a stopped node's work
-resumes each from its recorded step, after a restart or by the leader that follows, so a cancelled
-commit's transaction reaches `COMMITTED` after the node restarts. A leader that is turning off
+node. The node waits for every one of them to end before it begins its save, so none of them sees a
+later step of the stop and none records an outcome of its own about the node stopping. Their
+replicated progress survives, and the recovery that completes a stopped node's work resumes each
+from its recorded step, after a restart or by the leader that follows, so a cancelled commit's
+transaction reaches `COMMITTED` after the node restarts, and a `START` that waited for a node its
+node rules admit goes on waiting on the leader that follows. A leader that is turning off
 answers another stopping node's request to move its units as a node that does not lead, so that
 node asks the leader that follows, within its own shutdown timeout.
 
@@ -1112,9 +1115,9 @@ expire branch state mid-handoff. Nothing about shutdown merges branches or moves
 Terminal teardown begins once the moves end, whatever they came to.
 
 It stops the node's background tasks, giving each at most the configured cooperative task-stop
-grace, and waits for the service work the node ended when it began turning off to reach its next
-await. An installation of the committed state that one of those tasks, or a request handler, had
-begun is not cut short with it: it runs in a task of the runtime admission that holds the node's
+grace; the service work the node ended when it began turning off has already ended before the save.
+An installation of the committed state that one of those tasks, a service task or a request handler
+had begun is not cut short with it: it runs in a task of the runtime admission that holds the node's
 installation turn. Terminal teardown takes that turn and keeps it before it stops the runtime, so it
 first waits for the installation still under way and no other begins afterwards
 ([Installation And Publication](./execution-plans.md#installation-and-publication)). It then stops

@@ -928,9 +928,10 @@ and console listeners and closes the client connections they had accepted. Closi
 cancels the requests it carries, such as a session stream or a resource upload that is waiting for
 its client, so no client can delay the save or the process exit. Once its listeners have closed,
 the node is turning off and takes part in no service work: a transaction commit or other command
-still running ends at its next await, and the recovery that completes a stopped node's work resumes
-it, after a restart or by the leader that follows. A leader that is turning off answers another
-stopping node's request to move its units as a node that does not lead.
+still running ends at its next await, the node waits for each to end before it saves, and the
+recovery that completes a stopped node's work resumes it, after a restart or by the leader that
+follows. A leader that is turning off answers another stopping node's request to move its units as a
+node that does not lead.
 
 The node then saves what it holds. It stops new intake on all of its ingestors, whatever their
 `ON QUIESCE` mode, and its generators stop producing, and every domain it runs reads as stopping
@@ -965,8 +966,8 @@ cleanup from the leader over the cluster interconnect, authenticated by its node
 than by a user credential; see [Topology Cases](./shutdown.md#topology-cases).
 
 Terminal teardown begins once the moves end. It gives each background task at most two seconds to
-stop, waits for the service work the node ended to reach its next await, and finally stops the
-runtime, consensus, cluster membership, and the interconnect and releases the node's storage.
+stop, and finally stops the runtime, consensus, cluster membership, and the interconnect and
+releases the node's storage.
 
 `DROP NODE` records the stopped process incarnation before removing its Raft membership. It reads
 the newest identity from both live gossip and the failure detector's dead process identities, so a

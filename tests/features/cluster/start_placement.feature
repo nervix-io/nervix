@@ -4,8 +4,9 @@ Feature: START placement when the cluster changes under it
   looks again once the cluster may have changed when the destination has just restarted and is not
   ready to take the unit yet, when the cluster changes after the move began, and when the cluster
   refuses to record the moved schedule because it changed after START checked it. A START that
-  waits answers with a redirect when its node stops leading, and with a refusal when its node shuts
-  down.
+  waits answers with a redirect when its node stops leading. When its node shuts down instead, it
+  sends no answer: the leader that follows continues it like any command in progress, and the
+  statement repeated under the same execution reference learns its outcome.
 
   Scenario: START looks again after a destination that has just restarted could not take the unit, then moves it with its state
     Given runtime replication is configured with replica count 0 and snapshot interval "1h"
@@ -413,7 +414,7 @@ Feature: START placement when the cluster changes under it
       {"tenant":"beta","transaction_id":"txn-1"}
       """
 
-  Scenario: START that waits for an admitted node answers with a refusal when its node shuts down
+  Scenario: START that waits for an admitted node continues on the leader that follows when its node shuts down, and starts the domain once a node is admitted
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -424,10 +425,25 @@ Feature: START placement when the cluster changes under it
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING );
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
+        transaction_id string
+      );
+      CREATE WIRE JSON CODEC transaction_codec
+        FROM WIRE SCHEMA transaction_wire
+        TO SCHEMA transaction;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE PARAMETRIZER by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
       CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE VHOST edge continued-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/continued';
+      CREATE HTTP ENDPOINT INGESTOR ingestor_txns
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING transaction_codec
+        TO inbound INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR dedup_txns FROM inbound
         DEDUPLICATE ON input.transaction_id MAX TIME 10m
         BRANCHED BY by_tenant
@@ -436,27 +452,42 @@ Feature: START placement when the cluster changes under it
       """
     Then within "10s" node "{{leader}}" eventually reports scheduled "deduplicator" "dedup_txns" with "waiting_for=mars_dedup"
     Given START placement on node "{{leader}}" pauses at its wait boundary
-    When this Plexus command request with execution reference "refused-start" begins executing in the background on the leader node
+    When this Plexus command request with execution reference "continued-start" begins executing in the background on the leader node
       """
       START;
       """
     Then START placement on node "{{leader}}" reaches its wait boundary
     When START placement on node "{{leader}}" leaves its wait boundary
-    And node "{{leader}}" is stopped
-    And node "{{leader}}" is started
-    And this Plexus command request with execution reference "refused-start" is executed on the leader node
+    And node "{{leader}}" is stopped while timing shutdown
+    Then the last cluster operation completes within "20s"
+    And node "{{leader}}" reports that its last shutdown finished cleanly
+    And the background command request ends without an answer
+    When node "{{leader}}" is started
+    Then the current leader node is saved as placeholder "successor"
+    And a node other than placeholders "leader" and "successor" is saved as placeholder "mars_node"
+    When this Plexus command request with execution reference "continued-start" begins executing in the background on the leader node
       """
       START;
       """
-    Then the last command error contains
-      """
-      START of domain '{{domain}}' stopped waiting for its node rules because the node is shutting down
-      """
+    And node "{{mars_node}}" is stopped
+    Given {{mars_node}} starts with node-tags = zone=mars
+    When node "{{mars_node}}" is started
+    Then the background command request succeeds
+    And within "10s" node "{{successor}}" eventually reports scheduled "deduplicator" "dedup_txns" owner "{{mars_node}}"
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE DOMAIN;
+      CREATE SUBSCRIPTION deduped_seen TO deduped;
       """
-    Then the last command output contains
+    And http payload is posted to node "{{successor}}" with host "continued-{{test_id}}.example.com" path "/continued"
       """
-      status: stopped
+      {"tenant":"acme","transaction_id":"txn-1"}
+      """
+    And http payload is posted to node "{{successor}}" with host "continued-{{test_id}}.example.com" path "/continued"
+      """
+      {"tenant":"beta","transaction_id":"txn-1"}
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      {"tenant":"acme","transaction_id":"txn-1"}
+      {"tenant":"beta","transaction_id":"txn-1"}
       """
