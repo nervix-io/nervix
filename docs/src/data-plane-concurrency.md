@@ -81,8 +81,17 @@ installers a single winner, replacement, teardown, and observers.
 
 MQTT input retirement is a cold lifecycle path. It snapshots locally owned typed entrypoint
 plans from the installed execution, releases the registry guard, stops the ingestor tasks, and
-then performs network cleanup and replacement preparation. Each connection has one mutable
-owner; simultaneous attempts are bounded by the declared ingestor instance count. Matching session
+then performs replacement preparation and network cleanup; an entity swap cleans the preceding
+sessions only once nothing else of it can fail. Each connection has one mutable
+owner; simultaneous attempts are bounded by the declared ingestor instance count. The
+`MqttSessionRetirement` a replacement instance carries is one flag on its own allocation: the
+instance completes it from its own task once subscribed, and the host completes it before any
+instance starts, or reads it when it starts the unit's next instance or settles it before a move,
+after the previous instance's task ended. It publishes nothing else, so its relaxed loads and stores
+make no ordering claim. The node keeps the flags in `RuntimeInner::mqtt_session_retirements`, one
+entry per domain and ingestor, which only schedule application writes and which a unit start reads
+once; no record, batch or acknowledgement path reaches it, and no guard is held across a
+retirement's connection. Matching session
 identities keep their broker state across instance-count changes. The public drop, topic-change
 and unavailable-endpoint scenarios are registered for active, order and stressed lifecycle
 diagnostics. MQTT sockets, asynchronous waits and concurrent-map internals remain outside the

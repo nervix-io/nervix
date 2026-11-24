@@ -3733,6 +3733,66 @@ scenario = "An MQTT input moves away from an unavailable endpoint without retain
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Shared MQTT session retirement after the entity swap can no longer be undone, and the replacement's own retirement before its first subscription while the endpoint is unavailable. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "scenario.mqtt-shared-session-fallback"
+invariant = "An alteration that keeps the MQTT client id applies while the shared session cannot be cleaned, and the replacement retires that session before its first subscription, so it never delivers the preceding topic's queued message, on one and three nodes."
+invocation = "scenarios"
+scenario = "An altered MQTT topic whose shared session cannot be cleaned yet is retired by the replacement before it subscribes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: shared MQTT session retirement after the entity swap can no longer be undone, and the replacement's own retirement before its first subscription while the endpoint is unavailable. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "stress.mqtt-shared-session-fallback"
+invariant = "An alteration that keeps the MQTT client id applies while the shared session cannot be cleaned, and the replacement retires that session before its first subscription, so it never delivers the preceding topic's queued message, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "An altered MQTT topic whose shared session cannot be cleaned yet is retired by the replacement before it subscribes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "An owed MQTT session retirement kept in node runtime state across a domain STOP, START and the rebuild that settles it. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "scenario.mqtt-retirement-across-stop-start"
+invariant = "A session retirement an altered MQTT topic still owes survives STOP and START, and the restarted replacement retires the shared session before it subscribes, on one and three nodes."
+invocation = "scenarios"
+scenario = "A stopped and started domain still retires the MQTT session its altered topic owed before the replacement subscribes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: an owed MQTT session retirement kept in node runtime state across a domain STOP, START and the rebuild that settles it. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 2
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "stress.mqtt-retirement-across-stop-start"
+invariant = "A session retirement an altered MQTT topic still owes survives STOP and START, and the restarted replacement retires the shared session before it subscribes, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A stopped and started domain still retires the MQTT session its altered topic owed before the replacement subscribes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "A reassigned MQTT ingestor that still owes a session retirement settles it on the node it leaves, during schedule application and before the swap can no longer be undone. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 1
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "scenario.mqtt-retirement-before-relocation"
+invariant = "RELOCATE of an MQTT input that still owes a session retirement retires the shared session on the node it leaves before the input runs on its destination, on three nodes."
+invocation = "scenarios"
+scenario = "A relocated MQTT input retires the session its altered topic still owes before it runs on another node"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: a reassigned MQTT ingestor that still owes a session retirement settles it on the node it leaves, during schedule application and before the swap can no longer be undone. Broker I/O, async waits and concurrent registry reads are outside tracked-lock detection."
+examples = 1
+feature = "tests/features/runtime/mqtt_sessions.feature"
+id = "stress.mqtt-retirement-before-relocation"
+invariant = "RELOCATE of an MQTT input that still owes a session retirement retires the shared session on the node it leaves before the input runs on its destination, on three nodes."
+invocation = "stress-scenarios"
+scenario = "A relocated MQTT input retires the session its altered topic still owes before it runs on another node"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "The ingestor loop's failed read, its resume on the declared retry policy and the consumer it opens again, with no driver retry between a lost broker and the host. Broker I/O, TLS and async waits are outside tracked-lock detection."
 examples = 2
 feature = "tests/features/runtime/pulsar_client_authentication.feature"
@@ -5099,6 +5159,12 @@ workloads = [
   "stress.mqtt-session-drop",
   "stress.mqtt-topic-replacement",
   "stress.mqtt-endpoint-replacement",
+  "scenario.mqtt-shared-session-fallback",
+  "scenario.mqtt-retirement-across-stop-start",
+  "scenario.mqtt-retirement-before-relocation",
+  "stress.mqtt-shared-session-fallback",
+  "stress.mqtt-retirement-across-stop-start",
+  "stress.mqtt-retirement-before-relocation",
   "scenario.pulsar-subscription-drop",
   "stress.pulsar-subscription-drop",
   "scenario.pulsar-subscription-replacement",
