@@ -87,7 +87,6 @@ impl Fixture {
         let put = fixture.apply(&ConsensusCommand::PutDomain {
             domain: Box::new(running),
             mutation: None,
-            domain_quota: nervix_licensing_vocabulary::Quota::Unlimited,
         });
         assert_eq!(put.response, ConsensusResponse::Applied);
         let enforce = Some(WaitLimit::Enforce {

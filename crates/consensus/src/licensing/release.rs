@@ -6,7 +6,6 @@
 //! - **Must not know.** HTTP, physical clocks, retry cadence or graph execution.
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::ResultExt as _;
 use nervix_licensing_protocol::{
     conditions::FREE_POLICY,
     document::DocumentLimits,
@@ -270,7 +269,7 @@ impl LicensingRecord {
                         transitions: &transitions,
                     },
                     ImpactTarget::Usage(&FREE_POLICY.usage()),
-                    usage,
+                    &usage,
                     policy,
                     ImpactContext {
                         from_conditions_revision: activation.decision.conditions_revision,
@@ -421,12 +420,9 @@ pub(super) fn apply(
                 request_id: *request_id,
                 released_at: *released_at,
             },
-            UsageSnapshot {
-                cluster_nodes: u64::try_from(state.last_membership.membership().nodes().count())
-                    .assured("materialized membership fits u64"),
-                cluster_domains: u64::try_from(state.domains.len())
-                    .assured("materialized domains fit u64"),
-            },
+            // Licensing limits no base feature and the catalog declares no cluster quota, so the
+            // cluster measures no usage a grace period could protect.
+            UsageSnapshot::default(),
             &state.licensing_environment,
         ),
         ConsensusCommand::ConfirmRelease {

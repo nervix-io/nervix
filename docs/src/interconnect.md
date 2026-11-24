@@ -513,15 +513,16 @@ answer arrived.
 
 ## Wire Contract And Payloads
 
-The current contract includes the free licensing singleton in snapshots, captured domain quotas in
-creation and restore commands, and typed quota refusals in membership verdicts. These shapes advance
-the same fingerprint as every other consensus and prerequisite shape.
+The current contract includes the free licensing singleton in snapshots. Licensing limits no base
+feature, so creation and restore commands capture no domain quota, membership verdicts carry no
+quota refusal and committed grace periods protect no member names. These shapes advance the same
+fingerprint as every other consensus and prerequisite shape.
 
 The current fingerprint also fences signed licensing activation and decision commands, retained trust documents, committed licensing time and transaction refusals projected without executable Models. These consensus request and snapshot shapes share the contract with emitter instance identities.
 
 It also fences the licensing stop gate: the stop cause a `StopDomain` command carries and a domain
-record retains, the typed `LicensingStop` refusal of a change that would run a domain, the start of
-a domain included, and the `stopped` admission refusal state. It fences the domain start a `START`
+record retains, and the typed `LicensingStop` refusal of a change that would run a domain, the start
+of a domain included. It fences the domain start a `START`
 command commits on its own, with the start revision its execution records, and transaction commit
 plans and step effects that carry no lifecycle step.
 

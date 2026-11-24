@@ -123,9 +123,9 @@ handle with a typed deleter.
 
 `SHOW RELAY <relay> MATERIALIZED STATE` returns its typed result with the command's outcome.
 `DESCRIBE LICENSE;` uses the same result for cluster scope. Its JSON has
-`"scope": "cluster_license"`, and its `summary`, `quotas`, `capabilities` and `transitions` sections
-hold one summary row, one row per cluster quota, one row per catalog capability, and one row per
-quota under a committed licensing transition.
+`"scope": "cluster_license"`, and its `summary`, `capabilities` and `transitions` sections hold one
+summary row, one row per catalog capability, and one row per condition under a committed licensing
+transition.
 `nx_outcome_inspection` retains that result as an `nx_inspection` you own: it outlives the outcome
 and is released with `nx_inspection_free`. `nx_inspection_counts` reads the branches, rows and bytes
 of the complete selected cut, and returns false for a refused read, whose outcome is a failed

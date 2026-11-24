@@ -985,10 +985,10 @@ module Probe
     raise 'typed cluster node preview' unless nodes.is_a?(NX::NodeInspection) && nodes.names == ['node-1'] && nodes.json.include?('"architecture":')
     report('INSPECTION nodes names=node-1')
     license = session.native.execute(session.native.prepare('DESCRIBE LICENSE;')).state_inspection
-    unless license.domain.nil? && license.entity_name.nil? && license.entity_kind == 'LICENSE' && license.counts.rows == 4 && license.counts.branches.zero?
+    unless license.domain.nil? && license.entity_name.nil? && license.entity_kind == 'LICENSE' && license.counts.rows == 2 && license.counts.branches.zero?
       raise 'typed cluster licensing observation'
     end
-    report('INSPECTION license rows=4')
+    report('INSPECTION license rows=2')
     execution = session.native.prepare('SHOW RELAY events MATERIALIZED STATE FOR UNBRANCHED LIMIT 1 FORMAT JSON;')
     outcome = session.native.execute(execution)
     inspection = outcome.state_inspection

@@ -22,6 +22,7 @@
   - [Cargo Install From GitHub](./installation-cargo.md)
   - [Docker](./installation-docker.md)
   - [Kubernetes Operator](./installation-kubernetes.md)
+- [Licensing](./licensing.md)
 - [Client Tools](./client-tools.md)
   - [Command Line Client](./client-tools-cli.md)
     - [nervix-cli Reference](./nervix-cli-reference.md)
