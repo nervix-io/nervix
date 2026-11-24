@@ -280,6 +280,15 @@ impl SessionServiceImpl {
             Ok(handoff) => handoff,
             Err(error) => return Ok(StartPlacementMove::Deferred(error.change_context(moving()))),
         };
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_start_placement_if_armed(
+                self.inner.consensus.local_node_id(),
+                domain,
+                crate::fault_injection::StartPlacementBoundary::Moving,
+            )
+            .await;
         let validated = match self.validate_domain_planning_inputs(inputs).await {
             Ok(()) => planning.validate_eligibility(self).await,
             Err(error) => Err(error),
@@ -291,6 +300,15 @@ impl SessionServiceImpl {
             }
             return Ok(StartPlacementMove::Deferred(error.change_context(moving())));
         }
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_start_placement_if_armed(
+                self.inner.consensus.local_node_id(),
+                domain,
+                crate::fault_injection::StartPlacementBoundary::Publishing,
+            )
+            .await;
         let lease = self.inner.consensus.current_domain_mutation(domain).await;
         if let Err(error) = self
             .inner

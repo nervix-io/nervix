@@ -455,7 +455,7 @@ async fn runtime_shutdown_ends_an_entity_gate_lease_held_past_its_stop() {
         Some(IngestorQuiesceCause::OwnershipHandoff)
     );
 
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
 
     assert!(
         !runtime.entity_gate_operation_is_held(&coordination),
@@ -518,7 +518,7 @@ async fn runtime_shutdown_ends_an_engagement_still_waiting_for_its_relays() {
         nervix_primitives::task::yield_now().await;
     }
 
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
 
     let outcome = request
         .await
@@ -545,7 +545,7 @@ async fn a_stopped_runtime_refuses_a_new_entity_gate_engagement() {
     let runtime = Runtime::default();
     let domain = domain("default");
     let coordination = coordination("leader-a", 13, 1);
-    runtime.shutdown(runtime.domain_drain_timeout()).await;
+    runtime.shutdown().await;
 
     let Err(refusal) = runtime
         .engage_entity_gate_operation(

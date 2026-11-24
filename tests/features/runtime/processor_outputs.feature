@@ -135,19 +135,24 @@ Feature: Processor output routing
       CREATE SUBSCRIPTION delayed_events_subscription TO delayed_events;
       START;
       """
+    # A route's flush bounds its hold from above only. A node that applies a newer runtime revision
+    # during the hold, as every node does after the failover a loaded host can cause, flushes the
+    # domain and sends the delayed row early, which is correct. What each node applied before the
+    # post tells that apart from a route that did not hold its row.
+    And the runtime revision each node applied is recorded
     And http payload is posted to node "node-1" with host "output-flush-{{test_id}}.example.com" path "/events"
       """
       {"id":"event-1"}
       """
     # Both bounds count from the post. An immediate route that waited for the delayed route's 40 s
     # flush would miss the 30 s budget, which leaves relay delivery between three nodes room on a
-    # loaded runner. The delayed row cannot arrive within that budget, so neither step depends on
-    # the order in which the two rows arrive.
+    # loaded runner. A forced flush can send the delayed row first, so a row one step reads past is
+    # judged by the other step from when it was read.
     Then the relay subscription receives a payload within "30s" after it was published
       """
       "id":"event-1","route":"immediate"
       """
-    And the relay subscription receives a payload no sooner than "40s" after it was published
+    And the relay subscription receives a payload no sooner than "40s" after it was published, unless a node applied a newer runtime revision
       """
       "id":"event-1","route":"delayed"
       """
@@ -156,6 +161,92 @@ Feature: Processor output routing
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: A forced recovery during the hold sends the delayed output's row early, which its lower bound accepts, when <failure>
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-1"
+    # The junction, its input relay and its delayed output's relay run on node-1, which stays live.
+    # Its immediate output's relay runs on node-3, and node-1 is cordoned, so the recovery that moves
+    # that relay off node-3 places it on node-2: node-1 only applies a change to a unit it does not
+    # run, and still flushes the domain when it applies it.
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA routed_event (
+        id STRING,
+        route STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA routed_event_wire MODE STRICT (
+        id string,
+        route string OPTIONAL
+      );
+      CREATE WIRE JSON CODEC routed_event_codec
+        FROM WIRE SCHEMA routed_event_wire
+        TO SCHEMA routed_event;
+      CREATE RELAY incoming_events SCHEMA routed_event UNBRANCHED;
+      CREATE RELAY immediate_events SCHEMA routed_event UNBRANCHED;
+      CREATE RELAY delayed_events SCHEMA routed_event UNBRANCHED;
+      CREATE VHOST edge output-recovery-{{test_id}}.example.com;
+      CREATE HTTP ENDPOINT ingress ON edge PATH '/events';
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB RESPOND IMMEDIATE DECODE USING routed_event_codec
+        TO incoming_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION route_events
+        FROM incoming_events
+        UNBRANCHED
+        TO immediate_events
+          INHERIT ALL
+          SET route = "immediate"
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        TO delayed_events
+          INHERIT ALL
+          SET route = "delayed"
+          FLUSH EACH 40s MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION immediate_events_subscription TO immediate_events;
+      CREATE SUBSCRIPTION delayed_events_subscription TO delayed_events;
+      START;
+      RELOCATE RELAY incoming_events ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION route_events ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY delayed_events ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY immediate_events ONTO NODE node-3 IGNORE PREFERENCES;
+      CORDON NODE node-1;
+      """
+    Then node "node-1" eventually reports status containing "kind=relay name=immediate_events owner=node-3"
+    And node "node-1" eventually reports status containing "kind=junction name=route_events owner=node-1"
+    And node "node-1" eventually reports status containing "kind=relay name=delayed_events owner=node-1"
+    When the runtime revision each node applied is recorded
+    And http payload is posted to node "node-1" with host "output-recovery-{{test_id}}.example.com" path "/events"
+      """
+      {"id":"event-1"}
+      """
+    Then the relay subscription receives a payload within "30s" after it was published
+      """
+      "id":"event-1","route":"immediate"
+      """
+    When <fault>
+    # Node-1 applies the recovery as a newer runtime revision and flushes the delayed row then, long
+    # before its route's 40 s cadence. The step reads the row as it arrives, so it measures how soon
+    # the row came.
+    Then the relay subscription receives a payload no sooner than "40s" after it was published, unless a node applied a newer runtime revision
+      """
+      "id":"event-1","route":"delayed"
+      """
+    And within "30s" node "node-1" eventually reports status containing "kind=relay name=immediate_events owner=node-2"
+
+    Examples:
+      | failure                          | fault                                                              |
+      | its owner stops answering node-1 | application health probes from node "node-1" to node "node-3" fail |
+      | its owner stops                  | node "node-3" is stopped                                           |
 
   Scenario Outline: Ingestor output routes filter input before fan-out
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

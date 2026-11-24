@@ -127,11 +127,14 @@ Feature: Route-local value construction
       CREATE SUBSCRIPTION header_calculation_errors_subscription TO header_calculation_errors;
       START;
       """
-    When http payload is posted to node "node-1" with host "header-error-{{test_id}}.example.com" path "/calculations" and header "route" value "error-route-header"
+    # The error route's flush bounds its hold from above only: a node that applies a newer runtime
+    # revision during the hold, as every node does after a failover, flushes the route early.
+    When the runtime revision each node applied is recorded
+    And http payload is posted to node "node-1" with host "header-error-{{test_id}}.example.com" path "/calculations" and header "route" value "error-route-header"
       """
       {"id":"header-division-by-zero","numerator":10,"denominator":0}
       """
-    Then the relay subscription receives a payload no sooner than "3s" after it was published
+    Then the relay subscription receives a payload no sooner than "3s" after it was published, unless a node applied a newer runtime revision
       """
       "input_id":"header-division-by-zero","operation":"set","source_route":"error-route-header"
       """

@@ -1448,8 +1448,8 @@ fn branch_preserving_processors_accept_unbranched() {
          TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { \"score\" DENSE TENSOR<F32>[1] } \
          UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
         "CREATE WASM PROCESSOR filter_even FROM raw USING RESOURCE wasm_filter VERSION 1 FILE \
-         'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB UNBRANCHED TO \
-         projected ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;",
+         'processors/filter_even.wasm' MAX FUEL 1000000000 MAX MEMORY 64MiB MAX TABLE ELEMENTS \
+         4096 UNBRANCHED TO projected ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;",
     ] {
         parse_statement(statement).unwrap_or_else(|error| {
             panic!("statement should parse: {statement}\n{error:?}");
@@ -1788,12 +1788,13 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
                 FILE "processor.wasm"
                 MAX FUEL 1000000
                 MAX MEMORY 64MiB
+                MAX TABLE ELEMENTS 4096
                 UNBRANCHED
                 TO normalized_events ON MESSAGE ERROR LOG
                 ON GLOBAL ERROR LOG;
         "#,
         None,
-        &["MAX FUEL 1000000\n  MAX MEMORY 64MiB"]
+        &["MAX FUEL 1000000\n  MAX MEMORY 64MiB\n  MAX TABLE ELEMENTS 4096"]
     )]
 #[case::junction(
         r#"

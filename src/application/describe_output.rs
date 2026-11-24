@@ -1268,6 +1268,10 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         format!("max fuel: {}", processor.limits.max_fuel),
         format!("max memory: {} bytes", processor.limits.max_memory_bytes),
         format!(
+            "max table elements: {}",
+            processor.limits.max_table_elements
+        ),
+        format!(
             "rejected state policy: {}",
             processor.rejected_state_policy.as_ref()
         ),

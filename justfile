@@ -635,6 +635,14 @@ test-outward-tls-policy *args: build-deps build-plexus-format build-test-cli bui
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input tests/features/cluster/outward_tls_policy.feature {{ quote(args) }}
 
+# Exercise the WASM engine settings and guest limits through their server owners: the command
+# line, DESCRIBE CLUSTER, DESCRIBE WASM PROCESSOR, the registry's archived Models and the runtime.
+test-wasm-engine-owners *args: build-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --features testing --lib -- application::cli:: application::cluster_description application::describe_output registry::storage runtime::runtime_settings runtime::wasm {{ args }}
+
 # Exercise TLS seeds and their command-line round trip through the production settings owner.
 test-outward-tls-seeds *args: build-deps
     #!/usr/bin/env bash
@@ -688,6 +696,25 @@ test-licensing-expiry *args: build-deps build-plexus-format build-test-cli build
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/ephemeral_expiry{,}.feature") }} {{ quote(args) }}
+
+# One- and three-node clusters activate the production smoke-test account against
+# licensing.nervix.io and show licensing.dummy enabled. NERVIX_LICENSING_SMOKE_KEY holds the
+# account's license key, which no step prints; ordinary runs exclude the scenarios by their tag.
+test-licensing-production-smoke *args: licensing-smoke-key build-deps build-plexus-format build-test-cli build-deadlock-report
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-scenarios --test scenarios -- --input {{ quote(justfile_directory() / "tests/features/licensing/production_smoke{,}.feature") }} --tags @production_licensing {{ quote(args) }}
+
+# Refuse to build anything for the production smoke test without the account's license key.
+[private]
+licensing-smoke-key:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -z "${NERVIX_LICENSING_SMOKE_KEY:-}" ]]; then
+        echo "NERVIX_LICENSING_SMOKE_KEY must hold the production smoke-test account's license key" >&2
+        exit 1
+    fi
 
 # DESCRIBE LICENSE lists every catalog capability; a license can enable licensing.dummy.
 test-licensing-capabilities *args: build-deps build-plexus-format build-test-cli build-deadlock-report

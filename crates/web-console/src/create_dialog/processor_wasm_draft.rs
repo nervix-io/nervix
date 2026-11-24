@@ -3,8 +3,9 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Browser editing of a WASM processor's guest binding, the text of its `MAX FUEL`
-//!   and `MAX MEMORY` limits, its `ON REJECTED STATE` and `ON GLOBAL ERROR` choices, the
+//! - **Owns.** Browser editing of a WASM processor's guest binding, the text of its `MAX FUEL`,
+//!   `MAX MEMORY` and `MAX TABLE ELEMENTS` limits, its `ON REJECTED STATE` and `ON GLOBAL ERROR`
+//!   choices, the
 //!   consequence each rejected-state policy has under the guest-state contract, and their
 //!   conversion to the WASM processor Model.
 //! - **Depends on.** Typed WASM vocabulary, the shared processor binding draft, and the number
@@ -34,6 +35,9 @@ pub(super) struct WasmDraft {
     pub(super) max_fuel: String,
     /// The `MAX MEMORY` text, a positive byte size.
     pub(super) max_memory: String,
+    /// The `MAX TABLE ELEMENTS` text, a whole number of table slots; zero for a guest without a
+    /// table.
+    pub(super) max_table_elements: String,
     /// `PRESERVE` unless the operator opts in to a reset, as the language assumes when the clause
     /// is left out.
     pub(super) rejected_state: WasmRejectedStatePolicy,
@@ -61,11 +65,20 @@ impl WasmDraft {
             ProcessorDraftError::MaxMemory,
             ProcessorDraftError::MaxMemoryZero,
         )?;
+        let max_table_elements = match self.max_table_elements.trim().parse::<u64>() {
+            Ok(elements) => elements,
+            Err(cause) => {
+                return Err(
+                    Report::new(cause).change_context(ProcessorDraftError::MaxTableElements)
+                );
+            }
+        };
         Ok(WasmParts {
             binding,
             limits: WasmProcessorLimits {
                 max_fuel,
                 max_memory_bytes,
+                max_table_elements,
             },
         })
     }
@@ -151,9 +164,21 @@ mod tests {
         draft.max_memory = "0B".into();
         assert_eq!(refusal(&draft), ProcessorDraftError::MaxMemoryZero);
         draft.max_memory = "64MiB".into();
+        assert_eq!(refusal(&draft), ProcessorDraftError::MaxTableElements);
+        draft.max_table_elements = "-1".into();
+        assert_eq!(refusal(&draft), ProcessorDraftError::MaxTableElements);
+        draft.max_table_elements = "1_024".into();
+        assert_eq!(refusal(&draft), ProcessorDraftError::MaxTableElements);
+        draft.max_table_elements = " 0 ".into();
+        let parts = draft
+            .build()
+            .assured("zero table elements is a guest without a table");
+        assert_eq!(parts.limits.max_table_elements, 0);
+        draft.max_table_elements = "4096".into();
         let parts = draft.build().assured("the binding and limits are complete");
         assert_eq!(parts.limits.max_fuel.get(), 1_000_000_000);
         assert_eq!(parts.limits.max_memory_bytes.get(), 64 * 1024 * 1024);
+        assert_eq!(parts.limits.max_table_elements, 4096);
         assert_eq!(parts.binding.version, RequestedResourceVersion::Number(3));
         assert_eq!(parts.binding.file, "processors/filter_even.wasm");
     }

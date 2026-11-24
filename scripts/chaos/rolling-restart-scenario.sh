@@ -315,7 +315,7 @@ restart_one_node() {
         --dry-run --log-level info \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=node \
-        stop --time 60 --limit 1 "${container_name}" \
+        stop --time 720 --limit 1 "${container_name}" \
         >"${round_dir}/pumba-dry-run.txt" 2>&1
     [[ "$(grep -Fc 'msg="stopping container"' "${round_dir}/pumba-dry-run.txt")" -eq 1 ]] \
         && grep -Fq "dryrun=true id=${container_id}" "${round_dir}/pumba-dry-run.txt" \
@@ -332,20 +332,20 @@ restart_one_node() {
         --arg run_id "${run_id}" \
         --arg stopped_at "${stopped_at}" \
         --arg observed_leader "${observed_leader}" \
-        --argjson grace_seconds 60 \
+        --argjson grace_seconds 720 \
         --argjson source_offset "${source_before}" \
         --argjson output_offset "${output_before}" \
-        '{pumba_image_id:$image, command:["pumba","--label","io.nervix.chaos.run="+$run_id,"--label","io.nervix.chaos.role=node","stop","--time","60","--limit","1",$target], target:$target, container_id:$container_id, stopped_at:$stopped_at, observed_leader:$observed_leader, grace_seconds:$grace_seconds, source_offset_before:$source_offset, output_offset_before:$output_offset}' \
+        '{pumba_image_id:$image, command:["pumba","--label","io.nervix.chaos.run="+$run_id,"--label","io.nervix.chaos.role=node","stop","--time","720","--limit","1",$target], target:$target, container_id:$container_id, stopped_at:$stopped_at, observed_leader:$observed_leader, grace_seconds:$grace_seconds, source_offset_before:$source_offset, output_offset_before:$output_offset}' \
         >"${round_dir}/fault-command.json"
 
-    run_bounded 75 docker run --rm \
+    run_bounded 735 docker run --rm \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=fault \
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=node \
-        stop --time 60 --limit 1 "${container_name}" \
+        stop --time 720 --limit 1 "${container_name}" \
         >"${round_dir}/pumba.txt" 2>&1
     local stop_completed_at stop_completed_ms
     stop_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -358,7 +358,7 @@ restart_one_node() {
     "${script_dir}/verify-restart-evidence.sh" stopped "${run_id}" "${project_name}" \
         "${target}" "${image_id}" "${round_dir}/before.json" "${round_dir}/stopped.json" \
         "${round_dir}/shutdown.log"
-    grep -E 'shutdown (admission|drain-support|terminal-teardown) phase finished' \
+    grep -E 'shutdown (admission|save|move|terminal-teardown) phase finished' \
         "${round_dir}/shutdown.log" >"${round_dir}/phase-outcomes.txt"
     if [[ "${node_count}" == "3" ]]; then
         # The other two nodes were settled, uncordoned voters when the stop began, so the stopped
@@ -366,7 +366,7 @@ restart_one_node() {
         # to fail over.
         if ! "${script_dir}/verify-drain-evidence.sh" "${target}" "${round_dir}/shutdown.log"; then
             failure_category=product
-            rolling_fail "${target} did not complete its graceful drain while a live replacement node existed"
+            rolling_fail "${target} did not move all of its units while a live replacement node existed"
         fi
     fi
     check_support_containers

@@ -287,10 +287,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .memory_pressure
             .settings()
             .change_context(AppError::InvalidMemoryPressureConfig)?;
-        let shutdown = args
-            .shutdown
-            .settings()
-            .change_context(AppError::InvalidShutdownTimeouts)?;
+        let shutdown = args.shutdown.settings();
         let membership = args
             .membership
             .settings()

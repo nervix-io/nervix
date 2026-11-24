@@ -389,16 +389,11 @@ impl TransportSettings {
         }
     }
 
-    pub fn options(
-        &self,
-        peer_receive: Option<super::PeerReceiveSettings>,
-        drain_timeout: Option<Duration>,
-    ) -> TransportOptions {
+    /// The transport's options. Its drain at shutdown waits for the requests still in flight for
+    /// at most the request timeout, the bound each of those requests already has.
+    pub fn options(&self, peer_receive: Option<super::PeerReceiveSettings>) -> TransportOptions {
         let request_timeout = *self.request_timeout.value();
-        let shutdown_drain_timeout = match drain_timeout {
-            Some(bound) => bound.min(request_timeout),
-            None => request_timeout,
-        };
+        let shutdown_drain_timeout = request_timeout;
         TransportOptions {
             accept_retry_delay: Setting::<crate::AcceptRetryDelay>::resolve(None, &())
                 .assured("the declared accept-retry default is positive and clock-representable"),

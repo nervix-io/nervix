@@ -135,7 +135,7 @@ render_description() {
              (if $node.claim == "awaiting" then "  capabilities: awaiting committed claim"
               elif ($node.claim | tostring | startswith("retained:"))
               then "  capabilities: awaiting this incarnation; retained \($name)#\($node.claim | tostring | ltrimstr("retained:"))"
-              else "  capabilities: committed \($name)#\($node.incarnation) cpu-count=4 memory-bytes=8589934592 \(bounds($node.claim)) vm-inline-row-limit=1024 vm-regex-search-cache-bytes=2097152 wasm-stack-bytes=524288 wasm-parallel-compilation=false connector-retry-multiplier=2 delivery-capacity=8192 drain-timeout=40s shutdown-timeout=50s task-grace-period=2s listeners=ListenerBounds { max_connections: 1024 } membership-round=1s"
+              else "  capabilities: committed \($name)#\($node.incarnation) cpu-count=4 memory-bytes=8589934592 \(bounds($node.claim)) vm-inline-row-limit=1024 vm-regex-search-cache-bytes=2097152 wasm-stack-bytes=524288 wasm-parallel-compilation=false connector-retry-multiplier=2 delivery-capacity=8192 shutdown-timeout=50s task-grace-period=2s listeners=ListenerBounds { max_connections: 1024 } membership-round=1s"
               end),
              (if $node.claim == "awaiting" or ($node.claim | tostring | startswith("retained:")) then empty
               else "  interconnect: handshakes=32 queue=1024 stream-window=65536 connection-window=262144 setup=5s request=10s progress=5s backoff=200ms max-backoff=5s jitter-permille=0",
