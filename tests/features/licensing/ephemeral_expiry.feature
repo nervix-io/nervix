@@ -257,6 +257,9 @@ Feature: Ephemeral activation expiry and the licensing stop gate
     Then the background restore stream's outcome is "completed" as "executed"
     And the restore stream's report shows every step applied
     And the restore stream's outcome message contains "restored domains are stopped by licensing: ephemeral activation expired at"
+    When the CLI restores "domain {{domain}} --as {{domain}}_stopped_copy" from "resumable.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded, restoring domain "{{domain}}_stopped_copy" with 0 resource versions and 0 models
+    And node "<observer>" eventually reports status containing "{{domain}}_stopped_copy status=Stopped"
     Given the active domain is "{{domain}}_copy"
     When these Plexus commands are executed on node "<observer>"
       """
@@ -269,17 +272,6 @@ Feature: Ephemeral activation expiry and the licensing stop gate
       """
     When the CLI restores "domain {{domain}} --as {{domain}}_again --resume" from "resumable.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "RESUME cannot run the restored domains: licensing stopped processing: ephemeral activation expired at {{expired_at}}"
-    When the CLI restores "domain {{domain}} --as {{domain}}_stopped_copy" from "resumable.nvxb" on node "{{leader}}" reporting JSON
-    Then the CLI restore succeeded, restoring domain "{{domain}}_stopped_copy" with 0 resource versions and 0 models
-    Given the active domain is "{{domain}}_stopped_copy"
-    When these Plexus commands are executed on node "<observer>"
-      """
-      DESCRIBE DOMAIN;
-      """
-    Then the last command output contains
-      """
-      status: stopped
-      """
 
     Examples:
       | cluster_size | observer |

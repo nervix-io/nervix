@@ -306,6 +306,9 @@ Feature: Domain-paced branch buffering
       CREATE SUBSCRIPTION observed_subscription TO observed;
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
+    # A collection bounds its hold from above only: a node that applies a newer runtime revision
+    # during the hold, as every node does after a failover, flushes the collection early.
+    And the runtime revision each node applied is recorded
     And http payloads are posted concurrently to host "collect-buffering-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":1,"path":"collect"}
@@ -314,7 +317,7 @@ Feature: Domain-paced branch buffering
     # Each collection holds its branch for one physical second at this rate, and the lower bound
     # measures that hold. The upper bound only has to outlast the hold and relay delivery between
     # three nodes on a loaded runner; a row left to the one-hour flush would never arrive.
-    Then within "10s" the relay subscription receives payloads no sooner than "300ms" after they were published
+    Then within "10s" the relay subscription receives payloads no sooner than "300ms" after they were published, unless a node applied a newer runtime revision
       """
       {"path":"collect","sequence":1,"tenant":"alpha"}
       {"path":"collect","sequence":1,"tenant":"beta"}

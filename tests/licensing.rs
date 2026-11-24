@@ -10,7 +10,6 @@
     nervix::layer(harness, reason = "owns the public licensing scenarios")
 )]
 
-
 use std::time::Duration;
 
 use cucumber::{gherkin::Step, given, then, when};
@@ -893,7 +892,9 @@ async fn one_ephemeral_slot(world: &mut ScenarioWorld) {
             let mut plan = model.conditions();
             plan.operating.quotas.insert(
                 EPHEMERAL_ACTIVATIONS.to_owned(),
-                ConditionValue::Known(nervix_licensing_protocol::conditions::Quota::Bounded { value: 1 }),
+                ConditionValue::Known(nervix_licensing_protocol::conditions::Quota::Bounded {
+                    value: 1,
+                }),
             );
             model.plan(plan);
         })

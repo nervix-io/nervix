@@ -355,7 +355,8 @@ Each node also has these container settings:
 - `init: true`
 - `restart: "no"`: no automatic restart, so every restart is the controller's own explicit
   `docker start`
-- `stop_grace_period: 60s`
+- `stop_grace_period: 720s`: the node's ten-minute default shutdown timeout and two more minutes for
+  its save and teardown, so Docker does not kill a node partway through a normal shutdown
 - the `local` log driver, with two files of 2 MiB
 - one named volume at `/var/lib/nervix`
 - `RUST_LOG=nervix=info`
@@ -669,15 +670,18 @@ every kind of exit, including `--keep` and an interrupted run.
 
 ### Process Faults
 
-- **Graceful stop.** Pumba's `stop --time 60` gives a 60-second grace, longer than the product's
-  default 50-second shutdown deadline. The proof has three parts:
-  - The stop must produce Docker exit code 0 and the completed shutdown-phase log lines.
+- **Graceful stop.** Pumba's `stop --time 720` gives a 720-second grace, the product's default
+  ten-minute shutdown timeout and two more minutes for the save and the teardown. The proof has
+  three parts:
+  - The stop must produce Docker exit code 0 and the completed shutdown-phase log lines, with no
+    `outcome=Disrupted`.
   - When every other node is a settled, uncordoned voter, the stopped node has a live
-    replacement. Its log must then report `shutdown drain-support phase finished
-    outcome=Completed`: it handed its scheduled work to the others through the leader before it
-    exited, the leader included. A drain that was refused, failed, abandoned or never answered is
-    a product finding, because the work would then fail over as after a crash.
-  - A one-node drain has no replacement and completes in place.
+    replacement. Its log must then report `shutdown move phase finished outcome=Moved`: it handed
+    every unit to the others through the leader before it exited, the leader included. A move that
+    was refused, failed, never answered or not finished within the shutdown timeout is a product
+    finding, because the unit would stay saved on the stopped node until it restarts.
+  - A one-node stop has no replacement: it saves what it holds and reports
+    `outcome=NowhereToMove`.
 - **Crash.** Pumba's `kill --signal SIGKILL`. The recording must hold a signal-9 kill event and a
   die event with exit code 137, and the container must stay stopped for the whole declared
   outage.
@@ -2552,7 +2556,11 @@ just chaos run domain-time --image nervix:debian --nodes 1 --fault cluster-resta
   and closed.
 - One independent observer per node, a container of the image under test, follows the domain's
   clock through that node's session route with the packaged CLI's `domain-clock`. It stamps every
-  line with the host's clock and attaches again when its follow ends.
+  line with the host's clock and attaches again when its follow ends. Its client keepalive interval
+  is one day, the longest client deadline. The verdict attributes every tick to the node the
+  observer follows, and with the default 30 s interval and 20 s timeout a pause longer than about
+  50 s would end the session, after which the client attaches the clock again through another node
+  it knows.
 
 **The faults.** `--fault` selects the fault, and a voter fault runs one round per voter in node
 order:

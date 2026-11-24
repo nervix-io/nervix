@@ -5,6 +5,4 @@
 //! - **Depends on.** Vocabulary setting definitions.
 //! - **Must not know.** Command-line parsing or shutdown task execution.
 
-pub use nervix_models::{
-    DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout, TaskGracePeriod,
-};
+pub use nervix_models::{ShutdownSettings, ShutdownTimeout, TaskGracePeriod};

@@ -108,7 +108,11 @@ fn decision_rules_refuse_protocol_service_binding_revision_timing_and_content() 
         DecisionRejection::Timing { .. }
     ));
     decision = original.clone();
-    decision.conditions.operating.durations.remove(REFRESH_INTERVAL);
+    decision
+        .conditions
+        .operating
+        .durations
+        .remove(REFRESH_INTERVAL);
     assert!(matches!(
         validate(&fixture, &decision, &original.activation, None)
             .err()

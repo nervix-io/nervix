@@ -343,23 +343,17 @@ fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
     values
         .validate_runtime_budget(&node, crate::ShutdownSettings::default().capabilities())
         .assured("default lifecycle policy fits");
-    for (drain_timeout, shutdown_timeout) in [
-        (Duration::from_secs(29), Duration::from_secs(50)),
-        (Duration::from_secs(50), Duration::from_secs(29)),
-    ] {
-        assert!(
-            values
-                .validate_runtime_budget(
-                    &node,
-                    crate::ShutdownCapabilities {
-                        drain_timeout,
-                        shutdown_timeout,
-                        task_grace_period: Duration::from_secs(2),
-                    }
-                )
-                .is_err()
-        );
-    }
+    assert!(
+        values
+            .validate_runtime_budget(
+                &node,
+                crate::ShutdownCapabilities {
+                    shutdown_timeout: Duration::from_secs(29),
+                    task_grace_period: Duration::from_secs(2),
+                }
+            )
+            .is_err()
+    );
     let updates =
         ClusterParameterUpdates::try_from(vec![ClusterParameterChange::EntityGateDeadline(
             Duration::from_secs(40),
@@ -372,8 +366,7 @@ fn lifecycle_policy_fits_each_local_shutdown_budget_independently() {
         .validate_runtime_budget(
             &node,
             crate::ShutdownCapabilities {
-                drain_timeout: Duration::from_secs(45),
-                shutdown_timeout: Duration::from_secs(50),
+                shutdown_timeout: Duration::from_secs(40),
                 task_grace_period: Duration::from_secs(2),
             },
         )

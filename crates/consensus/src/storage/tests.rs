@@ -531,6 +531,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
             limits: WasmProcessorLimits {
                 max_fuel: NonZeroU64::MIN,
                 max_memory_bytes: NonZeroU64::MIN,
+                max_table_elements: 4_096,
             },
             global_error_policy: GeneralErrorPolicy::Log,
             rejected_state_policy: Default::default(),

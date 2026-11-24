@@ -245,7 +245,7 @@ pub struct Catalog;
 
 impl Catalog {
     pub fn definition(name: &str) -> Option<ConditionDefinition> {
-        // Exactly ten fixed protocol declarations, independent of graph/organization size.
+        // Exactly eleven fixed protocol declarations, independent of graph/organization size.
         CATALOG.iter().find(|entry| entry.name == name).copied()
     }
 

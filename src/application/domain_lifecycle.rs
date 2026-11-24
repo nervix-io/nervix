@@ -841,12 +841,7 @@ impl SessionServiceImpl {
             clock: None,
             stop: None,
         };
-        match self
-            .inner
-            .consensus
-            .put_domain(state, None)
-            .await
-        {
+        match self.inner.consensus.put_domain(state, None).await {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(

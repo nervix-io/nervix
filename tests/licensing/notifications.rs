@@ -383,7 +383,11 @@ async fn refreshed(world: &mut ScenarioWorld) {
         loop {
             nervix_primitives::task::consume_budget().await;
             let current = current_license(world).await;
-            if current.get("capability licensing.dummy").map(String::as_str) == Some("enabled") {
+            if current
+                .get("capability licensing.dummy")
+                .map(String::as_str)
+                == Some("enabled")
+            {
                 assert_eq!(
                     current.get("verification").map(String::as_str),
                     Some("verified")

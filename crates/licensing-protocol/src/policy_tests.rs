@@ -13,9 +13,10 @@ pub fn usage(first: Quota, second: Quota) -> UsageConditions {
     usage
         .quotas
         .insert(FIXTURE_QUOTA.to_owned(), ConditionValue::Known(first));
-    usage
-        .quotas
-        .insert(SECOND_FIXTURE_QUOTA.to_owned(), ConditionValue::Known(second));
+    usage.quotas.insert(
+        SECOND_FIXTURE_QUOTA.to_owned(),
+        ConditionValue::Known(second),
+    );
     usage
 }
 
